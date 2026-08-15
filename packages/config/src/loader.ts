@@ -50,7 +50,22 @@ const RUN_KEYS = [
   "workspace_mode",
   "default_timeout_seconds",
   "workflow_deadline_seconds",
-  "controller_lease_seconds"
+  "controller_lease_seconds",
+  "resource_budget"
+] as const;
+const RESOURCE_BUDGET_KEYS = [
+  "max_cost_usd",
+  "unpriced_token_usd_per_million",
+  "max_total_tokens",
+  "max_requests",
+  "max_turns",
+  "max_context_bytes",
+  "max_output_bytes",
+  "max_attempt_tokens",
+  "max_attempt_requests",
+  "max_attempt_turns",
+  "max_attempt_context_bytes",
+  "max_attempt_output_bytes"
 ] as const;
 const EXECUTION_KEYS = ["mode", "provider", "retention_days", "resources", "nodes", "providers"] as const;
 const EXECUTION_RESOURCE_KEYS = ["cpu", "memory_mib", "timeout_seconds"] as const;
@@ -259,6 +274,41 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
     readEnum(run, "workspace_mode", ["run", "workspace_mode"], diagnostics, normalizeWorkspaceMode, (value) => {
       runConfig.workspaceMode = value;
     });
+    const resourceBudget = readConfigTable(run, "resource_budget", RESOURCE_BUDGET_KEYS, diagnostics, [
+      "run",
+      "resource_budget"
+    ]);
+    if (resourceBudget) {
+      runConfig.resourceBudget = {};
+      readNumber(resourceBudget, "max_cost_usd", ["run", "resource_budget", "max_cost_usd"], diagnostics, (value) => {
+        runConfig.resourceBudget!.maxCostUsd = value;
+      });
+      readNumber(
+        resourceBudget,
+        "unpriced_token_usd_per_million",
+        ["run", "resource_budget", "unpriced_token_usd_per_million"],
+        diagnostics,
+        (value) => {
+          runConfig.resourceBudget!.unpricedTokenUsdPerMillion = value;
+        }
+      );
+      for (const [key, property] of [
+        ["max_total_tokens", "maxTotalTokens"],
+        ["max_requests", "maxRequests"],
+        ["max_turns", "maxTurns"],
+        ["max_context_bytes", "maxContextBytes"],
+        ["max_output_bytes", "maxOutputBytes"],
+        ["max_attempt_tokens", "maxAttemptTokens"],
+        ["max_attempt_requests", "maxAttemptRequests"],
+        ["max_attempt_turns", "maxAttemptTurns"],
+        ["max_attempt_context_bytes", "maxAttemptContextBytes"],
+        ["max_attempt_output_bytes", "maxAttemptOutputBytes"]
+      ] as const) {
+        readInteger(resourceBudget, key, ["run", "resource_budget", key], diagnostics, (value) => {
+          runConfig.resourceBudget![property] = value;
+        });
+      }
+    }
   }
 
   const execution = readConfigTable(root, "execution", EXECUTION_KEYS, diagnostics);

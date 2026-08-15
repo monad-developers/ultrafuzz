@@ -546,6 +546,15 @@ models are priced from the pinned first-party DeepSeek entry. Either family
 stays listed in `pricing_catalog.unresolved_models` when its first-party entry
 is absent rather than borrowing a same-named rate from another provider.
 
+Live catalog retrieval defaults to `https://models.dev/api.json`. A configured
+catalog must use HTTPS with no credentials, query, fragment, redirect, or
+local/private/metadata destination. DNS answers are classified and pinned to
+the TLS request, the request deadline covers DNS and body streaming, and the
+response is cancelled as soon as it exceeds 25 MiB. Set
+`ULTRAFUZZ_PRICING_CATALOG_URL=disabled` to use unpriced accounting; a positive
+`ULTRAFUZZ_PRICING_TIMEOUT_MS` overrides the default five-second deadline and
+is capped at 60 seconds.
+
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.
 

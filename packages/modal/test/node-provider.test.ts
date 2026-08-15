@@ -2008,6 +2008,149 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("publishes cloud resource exhaustion before surfacing a failed worker", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined);
+    const evidence = {
+      schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+      ultrafuzz_run_id: fixture.input.run_id,
+      workflow_run_id: "ultrafuzz-cloud-budget",
+      resource: "requests",
+      scope: "run",
+      limit: 0,
+      observed: 1,
+      task_id: fixture.input.task_id,
+      recorded_at: "2026-08-15T00:00:00.000Z"
+    };
+    const defaultReadBytes = sandbox.filesystem.readBytes;
+    sandbox.filesystem.readBytes = vi.fn(async (remote: string) =>
+      remote.endsWith("/resource-budget-exhausted.json")
+        ? Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8")
+        : await defaultReadBytes(remote)
+    );
+    sandbox.exec = vi.fn(async () => ({
+      stdout: { readText: vi.fn(async () => "") },
+      stderr: {
+        readBytes: vi.fn(async () =>
+          Buffer.from(
+            `${JSON.stringify({
+              schema_version: "ultrafuzz.modal.node-worker-error.v1",
+              message: "cloud worker phase run-workflow failed with code 1",
+              phase: "run-workflow",
+              command: "smithers",
+              exit_code: 1
+            })}\n`,
+            "utf8"
+          )
+        )
+      },
+      wait: vi.fn(async () => 1)
+    })) as never;
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ created: sandbox })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/run-workflow/u);
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(fixture.root, fixture.input.run_root, "resource-budget-exhausted.json"), "utf8")
+        )
+      ).toEqual(evidence);
+      expect(sandbox.filesystem.readBytes).toHaveBeenCalledWith(
+        expect.stringMatching(/\/workspace\/\.ultrafuzz\/runs\/run-one\/resource-budget-exhausted\.json$/u)
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("recovers cloud resource exhaustion when reconnecting without a worker handle", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined);
+    const evidence = {
+      schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+      ultrafuzz_run_id: fixture.input.run_id,
+      workflow_run_id: "ultrafuzz-cloud-budget-recovered",
+      resource: "output_bytes",
+      scope: "attempt",
+      limit: 10,
+      observed: 11,
+      task_id: fixture.input.task_id,
+      recorded_at: "2026-08-15T00:00:00.000Z"
+    };
+    const defaultReadBytes = sandbox.filesystem.readBytes;
+    sandbox.filesystem.readBytes = vi.fn(async (remote: string) =>
+      remote.endsWith("/resource-budget-exhausted.json")
+        ? Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8")
+        : await defaultReadBytes(remote)
+    );
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/resource budget exhausted/u);
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(fixture.root, fixture.input.run_root, "resource-budget-exhausted.json"), "utf8")
+        )
+      ).toEqual(evidence);
+      expect(sandbox.exec).not.toHaveBeenCalled();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects identity-mismatched cloud resource exhaustion without publishing it", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined);
+    const evidence = {
+      schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+      ultrafuzz_run_id: fixture.input.run_id,
+      workflow_run_id: "ultrafuzz-cloud-budget-mismatched",
+      resource: "requests",
+      scope: "attempt",
+      limit: 1,
+      observed: 2,
+      task_id: `${fixture.input.task_id}-other`,
+      recorded_at: "2026-08-15T00:00:00.000Z"
+    };
+    const defaultReadBytes = sandbox.filesystem.readBytes;
+    sandbox.filesystem.readBytes = vi.fn(async (remote: string) =>
+      remote.endsWith("/resource-budget-exhausted.json")
+        ? Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8")
+        : await defaultReadBytes(remote)
+    );
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    const hostEvidencePath = path.join(fixture.root, fixture.input.run_root, "resource-budget-exhausted.json");
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/cloud resource budget evidence is invalid/u);
+      expect(fs.existsSync(hostEvidencePath)).toBe(false);
+      expect(sandbox.exec).not.toHaveBeenCalled();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it.each([
     {
       name: "duplicate keys",

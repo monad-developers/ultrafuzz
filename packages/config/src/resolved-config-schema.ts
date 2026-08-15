@@ -4,7 +4,7 @@ import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import { MAX_TIMEOUT_SECONDS } from "./constants.js";
 import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
 
-export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:3" as const;
+export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:4" as const;
 export const RESOLVED_CONFIG_SCHEMA_FILENAME = "resolved-config.schema.json" as const;
 
 const NON_WHITESPACE_PATTERN = /.*\S.*/u;
@@ -26,6 +26,7 @@ const environmentVariableNameSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATT
 const projectLocalPathSchema = z.string().regex(PROJECT_LOCAL_PATH_PATTERN);
 const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
 const positiveIntegerSchema = z.number().int().positive();
+const positiveFiniteNumberSchema = z.number().positive().max(Number.MAX_SAFE_INTEGER);
 const nonNegativeIntegerSchema = z.number().int().nonnegative();
 const dynamicStrategiesEnumeratorSchema = z.union([nonNegativeIntegerSchema, z.literal("unlimited")]);
 const sha256DigestSchema = z.string().regex(SHA256_DIGEST_PATTERN);
@@ -270,7 +271,23 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         workspaceMode: z.literal("git-worktree"),
         defaultTimeoutSeconds: timeoutSecondsSchema,
         workflowDeadlineSeconds: timeoutSecondsSchema,
-        controllerLeaseSeconds: timeoutSecondsSchema
+        controllerLeaseSeconds: timeoutSecondsSchema,
+        resourceBudget: z
+          .object({
+            maxCostUsd: positiveFiniteNumberSchema,
+            unpricedTokenUsdPerMillion: positiveFiniteNumberSchema,
+            maxTotalTokens: positiveIntegerSchema,
+            maxRequests: positiveIntegerSchema,
+            maxTurns: positiveIntegerSchema,
+            maxContextBytes: positiveIntegerSchema,
+            maxOutputBytes: positiveIntegerSchema,
+            maxAttemptTokens: positiveIntegerSchema,
+            maxAttemptRequests: positiveIntegerSchema,
+            maxAttemptTurns: positiveIntegerSchema,
+            maxAttemptContextBytes: positiveIntegerSchema,
+            maxAttemptOutputBytes: positiveIntegerSchema
+          })
+          .strict()
       })
       .strict(),
     execution: executionConfigSchema,

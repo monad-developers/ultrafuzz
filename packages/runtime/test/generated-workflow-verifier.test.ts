@@ -20,6 +20,7 @@ import {
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
+  prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
@@ -111,6 +112,48 @@ test("generated workflow input is an exact current-only envelope with bounded JS
   assert.match(template, /const inputSchema = z\n {2}\.strictObject\(\{/u);
 });
 
+test("generated prompt sources reject one byte over before reading or concatenating", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-prompt-budget-"));
+  try {
+    const promptPath = path.join(root, "prompt.md");
+    fs.writeFileSync(promptPath, "12345", "utf8");
+    let reads = 0;
+    const exhaustions: unknown[][] = [];
+    const harness = loadPromptBudgetHarness({
+      onRead: () => (reads += 1),
+      onExhaustion: (details) => {
+        exhaustions.push(details);
+        return new Error("ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED");
+      }
+    });
+    const task = {
+      prompt: "",
+      promptPath,
+      artifactDir: root,
+      sourceProjectRoot: process.cwd(),
+      resourceBudget: { maxAttemptContextBytes: 5 }
+    };
+
+    assert.equal(harness.promptForTask(task), "12345");
+    assert.equal(reads, 1);
+    assert.equal(harness.boundedFullTaskPrompt(task, ["12", "345"]), "12345");
+
+    fs.writeFileSync(promptPath, "123456", "utf8");
+    assert.throws(() => harness.promptForTask(task), /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED/u);
+    assert.equal(reads, 1, "oversized prompt must fail before its bounded reader is called");
+    assert.throws(() => harness.boundedFullTaskPrompt(task, ["123", "456"]), /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED/u);
+    assert.deepEqual(
+      exhaustions.map((details) => details.slice(1)),
+      [
+        ["context_bytes", "attempt", 5, 6],
+        ["context_bytes", "attempt", 5, 6]
+      ]
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the workflow runner can project the generated workflow input into its input table", async () => {
   // The runner tables this schema by walking `shape` while it creates the
   // workflow, so a shapeless schema such as a union fails preflight on every
@@ -126,7 +169,11 @@ test("the workflow runner can project the generated workflow input into its inpu
 });
 
 function loadArtifactAwareAgent(
-  options: { onReset?: () => void } = {}
+  options: {
+    onReset?: () => void;
+    onBudgetEvidence?: (filePath: string, contents: string) => void;
+    persistedBudgetStates?: Map<string, string>;
+  } = {}
 ): (
   task: unknown,
   chainIndex: number,
@@ -134,13 +181,14 @@ function loadArtifactAwareAgent(
   agent: { generate(args: unknown): Promise<unknown> }
 ) => { generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function artifactAwareAgent");
+  const helperStart = source.indexOf("type BudgetCounter");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
+  const persistedBudgetStates = options.persistedBudgetStates ?? new Map<string, string>();
   return new Function(
     "resetTaskArtifactsForRetry",
     "authoritativeFinalReportCoverageArgs",
@@ -149,6 +197,15 @@ function loadArtifactAwareAgent(
     "finalReportAgentExecution",
     "declaredFinalReportOutputPair",
     "smithersTaskAgentId",
+    "writeFileDurable",
+    "prepareSafeFilePath",
+    "createHash",
+    "mkdirSync",
+    "realpathSync",
+    "readdirSync",
+    "readRegularFileSnapshot",
+    "parseStrictJsonBytes",
+    "path",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onReset?.(),
@@ -157,8 +214,65 @@ function loadArtifactAwareAgent(
     () => undefined,
     () => ({ planned_chain: [], failed_attempts: [], producer: {} }),
     () => undefined,
-    () => "ultrafuzz-agent:test"
+    () => "ultrafuzz-agent:test",
+    (filePath: string, contents: string) => {
+      if (path.basename(filePath) === "resource-budget-exhausted.json") {
+        options.onBudgetEvidence?.(filePath, contents);
+      } else {
+        persistedBudgetStates.set(filePath, contents);
+      }
+    },
+    prepareSafeFilePath,
+    createHash,
+    () => undefined,
+    (filePath: string) => filePath,
+    (directory: string) =>
+      [...persistedBudgetStates.keys()]
+        .filter((filePath) => path.dirname(filePath) === directory)
+        .map((filePath) => path.basename(filePath)),
+    (filePath: string, maxBytes: number) => {
+      const contents = persistedBudgetStates.get(filePath);
+      if (contents === undefined) throw new Error(`missing persisted budget state ${filePath}`);
+      const bytes = Buffer.from(contents, "utf8");
+      if (bytes.length > maxBytes) throw new Error("persisted budget state exceeds test read bound");
+      return bytes;
+    },
+    parseStrictJsonBytes,
+    path
   ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+function loadPromptBudgetHarness(options: { onExhaustion?: (details: unknown[]) => Error; onRead?: () => void } = {}): {
+  promptForTask: (task: unknown, inputTask?: { prompt?: string; prompt_path?: string }) => string;
+  boundedFullTaskPrompt: (task: unknown, parts: readonly string[]) => string;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function boundedPromptText");
+  const helperEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "resourceBudgetExhaustionError",
+    "readRegularFileSnapshot",
+    "lstatSync",
+    "mirroredArtifactDir",
+    "path",
+    `${helper}; return { promptForTask, boundedFullTaskPrompt };`
+  )(
+    (...details: unknown[]) => options.onExhaustion?.(details) ?? new Error("resource budget exhausted"),
+    (filePath: string, maxBytes: number) => {
+      options.onRead?.();
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) throw new Error("bounded read rejected");
+      return fs.readFileSync(filePath);
+    },
+    fs.lstatSync,
+    (task: { artifactDir: string }) => task.artifactDir,
+    path
+  ) as ReturnType<typeof loadPromptBudgetHarness>;
 }
 
 function loadFinalReportAgentExecution(): (
@@ -4754,6 +4868,279 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
   assert.equal(calls[2]?.prompt, undefined);
 });
 
+test("generated agent boundary enforces exact and over run/attempt ceilings", async () => {
+  let durableEvidence: Record<string, unknown> | undefined;
+  const artifactAwareAgent = loadArtifactAwareAgent({
+    onBudgetEvidence: (_filePath, contents) => {
+      durableEvidence = JSON.parse(contents) as Record<string, unknown>;
+    }
+  });
+  const prompt = "bounded prompt";
+  const exactContextBytes = Buffer.byteLength(prompt, "utf8");
+  const resourceBudget = {
+    maxCostUsd: 1,
+    maxTotalTokens: 100,
+    maxRequests: 1,
+    maxTurns: 1,
+    maxContextBytes: exactContextBytes,
+    maxOutputBytes: 2,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: 1,
+    maxAttemptTurns: 1,
+    maxAttemptContextBytes: exactContextBytes,
+    maxAttemptOutputBytes: 2
+  };
+  let boundedArgs: Record<string, unknown> | undefined;
+  const wrapped = artifactAwareAgent(
+    {
+      id: "node:budget-boundary",
+      smithersRunId: "ultrafuzz-generated-budget-boundary",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget,
+      metadata: { run: { ultrafuzzRunId: "generated-budget-boundary" } }
+    },
+    0,
+    prompt,
+    {
+      async generate(args: unknown): Promise<unknown> {
+        boundedArgs = args as Record<string, unknown>;
+        await (boundedArgs.onEvent as (event: unknown) => Promise<void>)({
+          type: "action",
+          phase: "started",
+          action: { kind: "turn" }
+        });
+        return "ok";
+      }
+    }
+  );
+
+  assert.equal(await wrapped.generate({ prompt, taskContext: { attempt: 1 } }), "ok");
+  assert.equal(boundedArgs?.maxOutputBytes, 2);
+  assert.equal((boundedArgs?.abortSignal as AbortSignal).aborted, false);
+  await assert.rejects(
+    () => wrapped.generate({ prompt, taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+  );
+  assert.equal((boundedArgs?.abortSignal as AbortSignal).aborted, true);
+  assert.equal(durableEvidence?.schema_version, "ultrafuzz.resource-budget-exhaustion.v1");
+  assert.equal(durableEvidence?.resource, "requests");
+  assert.equal(durableEvidence?.scope, "run");
+  assert.equal(durableEvidence?.limit, 1);
+  assert.equal(durableEvidence?.observed, 2);
+});
+
+test("generated agent boundary counts only normalized adapter turns", async () => {
+  const artifactAwareAgent = loadArtifactAwareAgent();
+  const nonTurns = [
+    { type: "started", engine: "codex" },
+    { type: "action", phase: "started", entryType: "thought", action: { kind: "command", title: "tool" } },
+    { type: "action", phase: "completed", entryType: "thought", action: { kind: "warning", title: "stderr" } },
+    { type: "completed", ok: true }
+  ];
+  const wrapped = artifactAwareAgent(
+    {
+      id: "node:budget-turn",
+      smithersRunId: "ultrafuzz-generated-budget-turn",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: {
+        maxCostUsd: 1,
+        maxTotalTokens: 100,
+        maxRequests: 10,
+        maxTurns: 1,
+        maxContextBytes: 10_000,
+        maxOutputBytes: 10_000,
+        maxAttemptTokens: 100,
+        maxAttemptRequests: 10,
+        maxAttemptTurns: 1,
+        maxAttemptContextBytes: 10_000,
+        maxAttemptOutputBytes: 10_000
+      },
+      metadata: { run: { ultrafuzzRunId: "generated-budget-turn" } }
+    },
+    0,
+    "prompt",
+    {
+      async generate(args: unknown): Promise<unknown> {
+        const onEvent = (args as { onEvent: (event: unknown) => Promise<void> }).onEvent;
+        for (const event of nonTurns) await onEvent(event);
+        await onEvent({ type: "action", phase: "started", entryType: "thought", action: { kind: "turn" } });
+        for (const event of nonTurns) await onEvent(event);
+        await onEvent({
+          type: "action",
+          phase: "updated",
+          entryType: "message",
+          action: { kind: "note", title: "assistant" }
+        });
+        return "unreachable";
+      }
+    }
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"turns"/u
+  );
+});
+
+test("generated agent boundary charges each adapter-internal provider retry", async () => {
+  const artifactAwareAgent = loadArtifactAwareAgent();
+  let providerCalls = 0;
+  const wrapped = artifactAwareAgent(
+    {
+      id: "node:budget-provider-retry",
+      smithersRunId: "ultrafuzz-generated-budget-provider-retry",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: {
+        maxCostUsd: 1,
+        maxTotalTokens: 100,
+        maxRequests: 1,
+        maxTurns: 10,
+        maxContextBytes: 10_000,
+        maxOutputBytes: 10_000,
+        maxAttemptTokens: 100,
+        maxAttemptRequests: 1,
+        maxAttemptTurns: 10,
+        maxAttemptContextBytes: 10_000,
+        maxAttemptOutputBytes: 10_000
+      },
+      metadata: { run: { ultrafuzzRunId: "generated-budget-provider-retry" } }
+    },
+    0,
+    "prompt",
+    {
+      async generate(args: unknown): Promise<unknown> {
+        providerCalls += 1;
+        (args as { onProviderRetry: () => void }).onProviderRetry();
+        providerCalls += 1;
+        return "unreachable";
+      }
+    }
+  );
+
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+  );
+  assert.equal(providerCalls, 1, "budget exhaustion must stop the retry before its provider invocation");
+});
+
+test("generated agent boundary aborts incrementally on stdout and stderr bytes", async () => {
+  const artifactAwareAgent = loadArtifactAwareAgent();
+  let abortSignal: AbortSignal | undefined;
+  const relayed: string[] = [];
+  const wrapped = artifactAwareAgent(
+    {
+      id: "node:budget-stream",
+      smithersRunId: "ultrafuzz-generated-budget-stream",
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget: {
+        maxCostUsd: 1,
+        maxTotalTokens: 100,
+        maxRequests: 10,
+        maxTurns: 10,
+        maxContextBytes: 10_000,
+        maxOutputBytes: 3,
+        maxAttemptTokens: 100,
+        maxAttemptRequests: 10,
+        maxAttemptTurns: 10,
+        maxAttemptContextBytes: 10_000,
+        maxAttemptOutputBytes: 3
+      },
+      metadata: { run: { ultrafuzzRunId: "generated-budget-stream" } }
+    },
+    0,
+    "prompt",
+    {
+      async generate(args: unknown): Promise<unknown> {
+        const bounded = args as {
+          abortSignal: AbortSignal;
+          onStdout: (text: string) => void;
+          onStderr: (text: string) => void;
+        };
+        abortSignal = bounded.abortSignal;
+        bounded.onStdout("ab");
+        bounded.onStderr("c");
+        bounded.onStdout("d");
+        return "ignored";
+      }
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      wrapped.generate({
+        prompt: "prompt",
+        taskContext: { attempt: 1 },
+        onStdout: (text: string) => relayed.push(`stdout:${text}`),
+        onStderr: (text: string) => relayed.push(`stderr:${text}`)
+      }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"output_bytes"/u
+  );
+  assert.equal(abortSignal?.aborted, true);
+  assert.deepEqual(relayed, ["stdout:ab", "stderr:c"]);
+});
+
+test("generated agent boundary restores durable aggregate counters after a process restart", async () => {
+  const persistedBudgetStates = new Map<string, string>();
+  const resourceBudget = {
+    maxCostUsd: 1,
+    maxTotalTokens: 100,
+    maxRequests: 1,
+    maxTurns: 10,
+    maxContextBytes: 10_000,
+    maxOutputBytes: 10_000,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: 10,
+    maxAttemptTurns: 10,
+    maxAttemptContextBytes: 10_000,
+    maxAttemptOutputBytes: 10_000
+  };
+  const task = (id: string) => ({
+    id,
+    smithersRunId: "ultrafuzz-generated-budget-restart",
+    runRoot: ".",
+    agentChain: [{}],
+    resourceBudget,
+    resourceBudgetPartitioned: false,
+    metadata: { run: { ultrafuzzRunId: "generated-budget-restart" } }
+  });
+
+  const beforeRestart = loadArtifactAwareAgent({ persistedBudgetStates });
+  const first = beforeRestart(task("node:first"), 0, "prompt", {
+    async generate(): Promise<unknown> {
+      return "";
+    }
+  });
+  assert.equal(await first.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "");
+  assert.equal(persistedBudgetStates.size, 1);
+
+  let invokedAfterRestart = false;
+  let durableEvidence: Record<string, unknown> | undefined;
+  const afterRestart = loadArtifactAwareAgent({
+    persistedBudgetStates,
+    onBudgetEvidence: (_filePath, contents) => {
+      durableEvidence = JSON.parse(contents) as Record<string, unknown>;
+    }
+  });
+  const second = afterRestart(task("node:second"), 0, "prompt", {
+    async generate(): Promise<unknown> {
+      invokedAfterRestart = true;
+      return "unreachable";
+    }
+  });
+  await assert.rejects(
+    () => second.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+  );
+  assert.equal(invokedAfterRestart, false);
+  assert.equal(durableEvidence?.limit, 1);
+  assert.equal(durableEvidence?.observed, 2);
+});
+
 test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
   const promptWithCoverage = loadPromptWithAuthoritativeFinalReportCoverage();
   const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
@@ -5000,13 +5387,18 @@ test("generated retries do not inspect or inject previous failure text", () => {
     source.indexOf("function artifactAwareAgent"),
     source.indexOf("function isStrictlyInsideDirectory")
   );
+  const retryStart = agent.indexOf("const retryArgs =");
+  const retryEnd = agent.indexOf("let observedSelections", retryStart);
+  assert.ok(retryStart >= 0 && retryEnd > retryStart, agent);
+  const retry = agent.slice(retryStart, retryEnd);
   assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
-  assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
+  assert.doesNotMatch(agent, /previousFailure|error\.message|String\(error\)/u);
+  assert.doesNotMatch(retry, /\b(?:catch|error)\b/u);
   assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
   assert.match(agent, /lastHeartbeat: undefined/u);
-  assert.match(agent, /messages: _priorMessages/u);
+  assert.match(agent, /delete freshArgs\.messages/u);
   assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
 });
 

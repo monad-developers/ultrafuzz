@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "ultrafuzz.resolved-config.v3",
+  "schemaVersion": "ultrafuzz.resolved-config.v4",
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
@@ -46,7 +46,21 @@
     "workspaceMode": "git-worktree",
     "defaultTimeoutSeconds": 1800,
     "workflowDeadlineSeconds": 86400,
-    "controllerLeaseSeconds": 30
+    "controllerLeaseSeconds": 30,
+    "resourceBudget": {
+      "maxCostUsd": 1000,
+      "unpricedTokenUsdPerMillion": 1000,
+      "maxTotalTokens": 100000000,
+      "maxRequests": 10000,
+      "maxTurns": 100000,
+      "maxContextBytes": 1073741824,
+      "maxOutputBytes": 1073741824,
+      "maxAttemptTokens": 10000000,
+      "maxAttemptRequests": 100,
+      "maxAttemptTurns": 1000,
+      "maxAttemptContextBytes": 67108864,
+      "maxAttemptOutputBytes": 67108864
+    }
   },
   "execution": {
     "mode": "local",

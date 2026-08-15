@@ -135,11 +135,33 @@ export class KimiCode029Agent extends SmithersKimiAgent {
 
   override createOutputInterpreter(): KimiOutputInterpreter {
     const base = super.createOutputInterpreter();
+    let assistantTurnIndex = 0;
     return {
       ...base,
       onStdoutLine: (line) => {
         this.captureKimiSession(line);
-        return base.onStdoutLine?.(line) ?? [];
+        const events = base.onStdoutLine?.(line) ?? [];
+        const assistantText = kimiAssistantTextFromJsonLine(line);
+        if (assistantText === undefined) return events;
+        assistantTurnIndex += 1;
+        return [
+          ...events,
+          {
+            type: "action" as const,
+            engine: this.cliEngine,
+            phase: "updated" as const,
+            entryType: "message" as const,
+            action: {
+              id: `kimi-assistant-${assistantTurnIndex}`,
+              kind: "note" as const,
+              title: "assistant",
+              detail: {}
+            },
+            message: assistantText,
+            ok: true,
+            level: "info" as const
+          }
+        ];
       },
       onStderrLine: (line) => {
         this.captureKimiSession(line);
@@ -1454,6 +1476,19 @@ function sessionIdFromJsonLine(line: string): string | undefined {
   const sessionId = validSessionId(value.session_id);
   if (sessionId === undefined) throw new Error("Kimi session.resume_hint session_id is invalid");
   return sessionId;
+}
+
+function kimiAssistantTextFromJsonLine(line: string): string | undefined {
+  const first = firstNonJsonWhitespace(line);
+  if (first === undefined || first !== "{") return undefined;
+  const value = parseStrictJson(line, {
+    maxBytes: KIMI_WIRE_MAX_LINE_BYTES,
+    maxDepth: KIMI_JSON_MAX_DEPTH,
+    maxItems: KIMI_JSON_MAX_ITEMS,
+    maxProperties: KIMI_JSON_MAX_PROPERTIES
+  });
+  if (!isRecord(value) || value.role !== "assistant" || typeof value.content !== "string") return undefined;
+  return value.content.length === 0 ? undefined : value.content;
 }
 
 function firstNonJsonWhitespace(value: string): string | undefined {

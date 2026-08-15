@@ -31,6 +31,7 @@ import {
   type PromptMetadataLayer,
   type ResolveConfigInput,
   type ResolvedConfig,
+  type RunConfigInput,
   type RuntimeConfigOverrides
 } from "./types.js";
 
@@ -144,6 +145,20 @@ export function serializeResolvedConfigToml(
     default_timeout_seconds: omitProfileSettings ? undefined : clone.run.defaultTimeoutSeconds,
     workflow_deadline_seconds: omitProfileSettings ? undefined : clone.run.workflowDeadlineSeconds,
     controller_lease_seconds: clone.run.controllerLeaseSeconds
+  });
+  pushTable(lines, tableName(["run", "resource_budget"]), {
+    max_cost_usd: clone.run.resourceBudget.maxCostUsd,
+    unpriced_token_usd_per_million: clone.run.resourceBudget.unpricedTokenUsdPerMillion,
+    max_total_tokens: clone.run.resourceBudget.maxTotalTokens,
+    max_requests: clone.run.resourceBudget.maxRequests,
+    max_turns: clone.run.resourceBudget.maxTurns,
+    max_context_bytes: clone.run.resourceBudget.maxContextBytes,
+    max_output_bytes: clone.run.resourceBudget.maxOutputBytes,
+    max_attempt_tokens: clone.run.resourceBudget.maxAttemptTokens,
+    max_attempt_requests: clone.run.resourceBudget.maxAttemptRequests,
+    max_attempt_turns: clone.run.resourceBudget.maxAttemptTurns,
+    max_attempt_context_bytes: clone.run.resourceBudget.maxAttemptContextBytes,
+    max_attempt_output_bytes: clone.run.resourceBudget.maxAttemptOutputBytes
   });
   pushTable(lines, "execution", {
     mode: clone.execution.mode,
@@ -644,8 +659,10 @@ function applyRuntimeOverrides(
   syncDefaultModelProfile(config);
 }
 
-function applyRunConfig(target: ResolvedConfig["run"], source: Partial<ResolvedConfig["run"]>): void {
-  Object.assign(target, definedOnly(source));
+function applyRunConfig(target: ResolvedConfig["run"], source: RunConfigInput): void {
+  const { resourceBudget, ...run } = source;
+  Object.assign(target, definedOnly(run));
+  if (resourceBudget !== undefined) Object.assign(target.resourceBudget, definedOnly(resourceBudget));
 }
 
 function applyPermissionConfig(target: PermissionConfig, source: Partial<PermissionConfig>): void {
@@ -904,6 +921,32 @@ function configPathSegment(segment: string): string {
       return "workflow_deadline_seconds";
     case "controllerLeaseSeconds":
       return "controller_lease_seconds";
+    case "resourceBudget":
+      return "resource_budget";
+    case "maxCostUsd":
+      return "max_cost_usd";
+    case "unpricedTokenUsdPerMillion":
+      return "unpriced_token_usd_per_million";
+    case "maxTotalTokens":
+      return "max_total_tokens";
+    case "maxRequests":
+      return "max_requests";
+    case "maxTurns":
+      return "max_turns";
+    case "maxContextBytes":
+      return "max_context_bytes";
+    case "maxOutputBytes":
+      return "max_output_bytes";
+    case "maxAttemptTokens":
+      return "max_attempt_tokens";
+    case "maxAttemptRequests":
+      return "max_attempt_requests";
+    case "maxAttemptTurns":
+      return "max_attempt_turns";
+    case "maxAttemptContextBytes":
+      return "max_attempt_context_bytes";
+    case "maxAttemptOutputBytes":
+      return "max_attempt_output_bytes";
     case "workspaceMode":
       return "workspace_mode";
     case "retentionDays":

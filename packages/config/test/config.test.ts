@@ -80,6 +80,20 @@ describe("config loading and resolution", () => {
     expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
+    expect(resolved.value.run.resourceBudget).toEqual({
+      maxCostUsd: 1000,
+      unpricedTokenUsdPerMillion: 1000,
+      maxTotalTokens: 100_000_000,
+      maxRequests: 10_000,
+      maxTurns: 100_000,
+      maxContextBytes: 1_073_741_824,
+      maxOutputBytes: 1_073_741_824,
+      maxAttemptTokens: 10_000_000,
+      maxAttemptRequests: 100,
+      maxAttemptTurns: 1000,
+      maxAttemptContextBytes: 67_108_864,
+      maxAttemptOutputBytes: 67_108_864
+    });
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
@@ -96,6 +110,59 @@ describe("config loading and resolution", () => {
       nodes: {},
       providers: {}
     });
+  });
+
+  it("parses, resolves, and serializes explicit resource ceilings", () => {
+    const parsed = parseProjectConfigToml(`
+[run.resource_budget]
+max_cost_usd = 1.25
+unpriced_token_usd_per_million = 99
+max_total_tokens = 1000
+max_requests = 10
+max_turns = 20
+max_context_bytes = 3000
+max_output_bytes = 4000
+max_attempt_tokens = 500
+max_attempt_requests = 5
+max_attempt_turns = 6
+max_attempt_context_bytes = 700
+max_attempt_output_bytes = 800
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.run.resourceBudget).toEqual({
+      maxCostUsd: 1.25,
+      unpricedTokenUsdPerMillion: 99,
+      maxTotalTokens: 1000,
+      maxRequests: 10,
+      maxTurns: 20,
+      maxContextBytes: 3000,
+      maxOutputBytes: 4000,
+      maxAttemptTokens: 500,
+      maxAttemptRequests: 5,
+      maxAttemptTurns: 6,
+      maxAttemptContextBytes: 700,
+      maxAttemptOutputBytes: 800
+    });
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain("[run.resource_budget]");
+  });
+
+  it("rejects non-positive resource ceilings with the canonical config path", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: { run: { resourceBudget: { maxCostUsd: 0 } } }
+    });
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_POSITIVE_INTEGER_INVALID",
+        path: ["run", "resource_budget", "max_cost_usd"]
+      })
+    );
   });
 
   it("resolves an error-agnostic retry policy through explicit model profile IDs", () => {

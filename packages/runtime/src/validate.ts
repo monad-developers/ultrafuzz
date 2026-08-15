@@ -39,7 +39,7 @@ export async function validateProject(input: ValidateProjectInput) {
   const posture: Partial<PolicyPosture> = {};
 
   posture.config = postureFromDiagnostics("config", "resolved typed configuration", configDiagnosticsList);
-  const promptCheck = validatePrompts(projectRoot);
+  const promptCheck = validatePrompts(projectRoot, resolved.config?.run.resourceBudget.maxAttemptContextBytes);
   posture.prompts = promptCheck.posture;
 
   let topologySummary: ValidateProjectResult["topology"];
@@ -182,7 +182,10 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
   };
 }
 
-function validatePrompts(projectRoot: string): {
+function validatePrompts(
+  projectRoot: string,
+  maxProjectPromptBytes?: number
+): {
   posture: PostureItem;
   summary?: ValidateProjectResult["prompts"];
 } {
@@ -201,7 +204,7 @@ function validatePrompts(projectRoot: string): {
     };
   }
   try {
-    const catalog = loadPromptCatalog({ projectRoot });
+    const catalog = loadPromptCatalog({ projectRoot, maxProjectPromptBytes });
     return {
       posture: postureFromDiagnostics("prompts", "project prompt catalog loads and variables are strict", []),
       summary: {

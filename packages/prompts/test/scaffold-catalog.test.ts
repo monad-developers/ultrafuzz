@@ -75,6 +75,25 @@ describe("prompt scaffold and catalog", () => {
     expect(entry?.body).toContain("Local");
   });
 
+  it("accepts project prompts exactly at the configured byte limit and rejects one byte over", () => {
+    const project = tempProject();
+    const promptDir = path.join(project, ".ultrafuzz", "prompts");
+    const promptPath = path.join(promptDir, "bounded-project.md");
+    mkdirSync(promptDir, { recursive: true });
+    const prefix = "---\nid: bounded-project\n---\n";
+    const exact = `${prefix}${"x".repeat(32)}`;
+    const maxProjectPromptBytes = Buffer.byteLength(exact, "utf8");
+    writeFileSync(promptPath, exact, "utf8");
+
+    const catalog = loadPromptCatalog({ projectRoot: project, maxProjectPromptBytes });
+    expect(catalog.entries.get("bounded-project")?.markdown).toBe(exact);
+
+    writeFileSync(promptPath, `${exact}x`, "utf8");
+    expect(() => loadPromptCatalog({ projectRoot: project, maxProjectPromptBytes })).toThrow(
+      `file exceeds the ${maxProjectPromptBytes}-byte limit`
+    );
+  });
+
   it("discovers built-in prompt filenames from the prompt filesystem", () => {
     const discovered = builtInPromptRelativePaths();
 

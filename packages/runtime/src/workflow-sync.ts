@@ -74,14 +74,18 @@ import {
   type UsageLedgerEntry,
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
+import { type ResourceBudgetConfig } from "@ultrafuzz/config";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { parseExecutionResolvedConfigJsonBytes } from "./resolved-config-compat.js";
 import {
   modelPricingSnapshot,
   pricingForContext,
   resolveLiveModelPricing,
   type ModelPricing,
-  type PricingCatalogMetadata
+  type PricingCatalogFetch,
+  type PricingCatalogMetadata,
+  type PricingHostnameLookup
 } from "./model-pricing.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import {
@@ -178,6 +182,24 @@ interface AccountingSummary {
   unpriced_event_count: number;
   models: string[];
   agents: string[];
+}
+
+interface ResourceBudgetExhaustion {
+  resource:
+    | "cost_usd"
+    | "total_tokens"
+    | "requests"
+    | "turns"
+    | "context_bytes"
+    | "output_bytes"
+    | "attempt_tokens"
+    | "attempt_requests";
+  scope: "run" | "attempt";
+  limit: number;
+  observed: number;
+  node_id?: string;
+  iteration?: number;
+  attempt?: number;
 }
 
 interface AccountingSegment extends AccountingSummary {
@@ -339,6 +361,9 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  /** Trusted network seams used by hermetic embedders and tests. */
+  pricingFetch?: PricingCatalogFetch;
+  pricingLookupHostname?: PricingHostnameLookup;
   /**
    * Observational callers may retain the last coherent local snapshot when a
    * Smithers event stream is malformed. Mutation-capable synchronization stays
@@ -430,6 +455,7 @@ export async function synchronizeLinkedWorkflowRun(
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }
+  const resourceBudget = sealedResourceBudget(evidence.verifiedControl.executionFiles);
   const loaded = loadSynchronizationInputs({
     graph: evidence.verifiedControl.contents.graph,
     tasks: evidence.verifiedControl.contents.tasks
@@ -625,7 +651,8 @@ export async function synchronizeLinkedWorkflowRun(
     events: tokenEvents,
     attemptEvents: events,
     control,
-    env: input.env ?? process.env
+    env: input.env ?? process.env,
+    resourceBudget
   });
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
@@ -636,11 +663,28 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
   }
 
-  const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
-    evidenceComplete,
-    recoveredAggregateAuthorized,
-    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
-  });
+  const resourceBudgetExhausted =
+    readGeneratedResourceBudgetExhaustion(layout) ?? accountingResult.resourceBudgetExhaustion;
+  if (resourceBudgetExhausted !== undefined) {
+    try {
+      await requestSmithersCancel({
+        smithersRunId: evidence.smithersRunId,
+        projectRoot,
+        env: linkedWorkflowExecutionEnvironment(evidence, input.env)
+      });
+    } catch (error) {
+      diagnostics.push(smithersDiagnostic(error, "WORKFLOW_RESOURCE_BUDGET_CANCEL_FAILED"));
+    }
+  }
+
+  const finalStatus =
+    resourceBudgetExhausted === undefined
+      ? finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
+          evidenceComplete,
+          recoveredAggregateAuthorized,
+          recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
+        })
+      : "canceled";
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
   const runStatusChanged = previousRunStatus !== finalStatus;
@@ -747,7 +791,8 @@ export async function synchronizeLinkedWorkflowRun(
     syncResult.changed ||
     accountingResult.changed ||
     workflowControl.transitioned ||
-    deadlineApplied
+    deadlineApplied ||
+    resourceBudgetExhausted !== undefined
   ) {
     const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
     if (preEventWriteBudgetDiagnostic !== undefined) {
@@ -768,7 +813,8 @@ export async function synchronizeLinkedWorkflowRun(
         synced_nodes: syncResult.syncedNodes,
         accounting_available: accountingResult.available,
         recovery_due: workflowControl.recoveryDue,
-        deadline_exceeded: deadlineApplied
+        deadline_exceeded: deadlineApplied,
+        ...(resourceBudgetExhausted === undefined ? {} : { resource_budget_exhausted: resourceBudgetExhausted })
       },
       forbiddenSecretValues
     });
@@ -1168,10 +1214,12 @@ async function synchronizeWorkflowAccounting(input: {
   attemptEvents: WorkflowEvent[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
+  resourceBudget: ResourceBudgetConfig;
 }): Promise<{
   changed: boolean;
   available: boolean;
   budgetDiagnostic?: RuntimeDiagnostic;
+  resourceBudgetExhaustion?: ResourceBudgetExhaustion;
 }> {
   const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
   if (metadata.workflow?.run_id !== input.workflowRunId) {
@@ -1221,6 +1269,8 @@ async function synchronizeWorkflowAccounting(input: {
           models: missingModels,
           env: input.env,
           signal: input.control.signal,
+          fetchImpl: input.control.pricingFetch,
+          lookupHostname: input.control.pricingLookupHostname,
           timeoutMs:
             input.control.deadlineMs === undefined
               ? undefined
@@ -1256,6 +1306,13 @@ async function synchronizeWorkflowAccounting(input: {
     [...sourceSummaries, ...accountingSegments],
     sourceAccounting?.sourceRunIds ?? []
   );
+  const resourceBudgetExhaustion = exhaustedAccountingBudget({
+    budget: input.resourceBudget,
+    cumulative,
+    entries: preparedUsage.entries,
+    modelPricing: resolvedPricing,
+    cacheReadRatio
+  });
   const lastUsageEvent = preparedUsage.entries.at(-1)!;
   const nextComparable: Omit<RunMetadataAccounting, "updated_at"> = {
     schema_version: ACCOUNTING_SCHEMA_VERSION,
@@ -1287,7 +1344,11 @@ async function synchronizeWorkflowAccounting(input: {
   assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
 
   if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
-    return { changed: false, available: true };
+    return {
+      changed: false,
+      available: true,
+      ...(resourceBudgetExhaustion === undefined ? {} : { resourceBudgetExhaustion })
+    };
   }
 
   const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
@@ -1307,7 +1368,161 @@ async function synchronizeWorkflowAccounting(input: {
   if (accountingChanged) {
     writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
   }
-  return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+  return {
+    changed: accountingChanged || preparedUsage.pendingEntries.length > 0,
+    available: true,
+    ...(resourceBudgetExhaustion === undefined ? {} : { resourceBudgetExhaustion })
+  };
+}
+
+function exhaustedAccountingBudget(input: {
+  budget: ResourceBudgetConfig;
+  cumulative: AccountingSummary;
+  entries: readonly UsageLedgerEntry[];
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio: number | undefined;
+}): ResourceBudgetExhaustion | undefined {
+  if (input.cumulative.total_tokens > input.budget.maxTotalTokens) {
+    return {
+      resource: "total_tokens",
+      scope: "run",
+      limit: input.budget.maxTotalTokens,
+      observed: input.cumulative.total_tokens
+    };
+  }
+  const observedCostUsd =
+    input.cumulative.pricing_complete && input.cumulative.estimated_spend_usd !== undefined
+      ? input.cumulative.estimated_spend_usd
+      : (input.cumulative.total_tokens / 1_000_000) * input.budget.unpricedTokenUsdPerMillion;
+  if (observedCostUsd > input.budget.maxCostUsd) {
+    return {
+      resource: "cost_usd",
+      scope: "run",
+      limit: input.budget.maxCostUsd,
+      observed: observedCostUsd
+    };
+  }
+  if (input.cumulative.event_count > input.budget.maxRequests) {
+    return {
+      resource: "requests",
+      scope: "run",
+      limit: input.budget.maxRequests,
+      observed: input.cumulative.event_count
+    };
+  }
+
+  const attempts = new Map<string, UsageLedgerEntry[]>();
+  for (const entry of input.entries) {
+    const key = JSON.stringify([entry.node_id, entry.iteration, entry.attempt]);
+    const group = attempts.get(key) ?? [];
+    group.push(entry);
+    attempts.set(key, group);
+  }
+  for (const group of attempts.values()) {
+    const first = group[0]!;
+    const summary = accountingFromWorkflowEvents(
+      workflowEventsFromUsageLedger(group),
+      input.modelPricing,
+      input.cacheReadRatio
+    );
+    const totalTokens = summary?.total_tokens ?? 0;
+    if (totalTokens > input.budget.maxAttemptTokens) {
+      return {
+        resource: "attempt_tokens",
+        scope: "attempt",
+        limit: input.budget.maxAttemptTokens,
+        observed: totalTokens,
+        node_id: first.node_id,
+        iteration: first.iteration,
+        attempt: first.attempt
+      };
+    }
+    if (group.length > input.budget.maxAttemptRequests) {
+      return {
+        resource: "attempt_requests",
+        scope: "attempt",
+        limit: input.budget.maxAttemptRequests,
+        observed: group.length,
+        node_id: first.node_id,
+        iteration: first.iteration,
+        attempt: first.attempt
+      };
+    }
+  }
+  return undefined;
+}
+
+function sealedResourceBudget(
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[]
+): ResourceBudgetConfig {
+  const resolvedConfig = executionFiles.find((file) => file.snapshotPath === "controls/resolved-config.json");
+  if (resolvedConfig === undefined) {
+    throw new Error("sealed workflow execution snapshot is missing its resolved configuration");
+  }
+  return parseExecutionResolvedConfigJsonBytes(resolvedConfig.contents).run.resourceBudget;
+}
+
+const RESOURCE_BUDGET_EVIDENCE_FILE = "resource-budget-exhausted.json";
+const RESOURCE_BUDGET_NAMES = new Set<ResourceBudgetExhaustion["resource"]>([
+  "cost_usd",
+  "total_tokens",
+  "requests",
+  "turns",
+  "context_bytes",
+  "output_bytes",
+  "attempt_tokens",
+  "attempt_requests"
+]);
+
+function readGeneratedResourceBudgetExhaustion(layout: RunLayout): ResourceBudgetExhaustion | undefined {
+  const evidencePath = safeResolveInside(layout.root, RESOURCE_BUDGET_EVIDENCE_FILE, "resource budget evidence");
+  if (!fs.existsSync(evidencePath)) return undefined;
+  const value = parseStrictJsonBytes(readRegularFileSnapshot(evidencePath, 64 * 1024));
+  if (!isRecord(value)) throw new Error("resource budget evidence must be an object");
+  const allowedKeys = new Set([
+    "schema_version",
+    "ultrafuzz_run_id",
+    "workflow_run_id",
+    "resource",
+    "scope",
+    "limit",
+    "observed",
+    "task_id",
+    "recorded_at"
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new Error("resource budget evidence contains an unknown field");
+  }
+  if (
+    value.schema_version !== "ultrafuzz.resource-budget-exhaustion.v1" ||
+    value.ultrafuzz_run_id !== layout.runId ||
+    typeof value.workflow_run_id !== "string" ||
+    value.workflow_run_id.length === 0 ||
+    typeof value.resource !== "string" ||
+    !RESOURCE_BUDGET_NAMES.has(value.resource as ResourceBudgetExhaustion["resource"]) ||
+    (value.scope !== "run" && value.scope !== "attempt") ||
+    typeof value.limit !== "number" ||
+    !Number.isFinite(value.limit) ||
+    value.limit < 0 ||
+    value.limit > Number.MAX_SAFE_INTEGER ||
+    typeof value.observed !== "number" ||
+    !Number.isFinite(value.observed) ||
+    value.observed <= value.limit ||
+    value.observed > Number.MAX_SAFE_INTEGER ||
+    typeof value.task_id !== "string" ||
+    value.task_id.length === 0 ||
+    typeof value.recorded_at !== "string" ||
+    !Number.isFinite(Date.parse(value.recorded_at))
+  ) {
+    throw new Error("resource budget evidence is invalid");
+  }
+  return {
+    resource: value.resource as ResourceBudgetExhaustion["resource"],
+    scope: value.scope,
+    limit: value.limit,
+    observed: value.observed,
+    node_id: value.task_id
+  };
 }
 
 function accountingFromWorkflowEvents(

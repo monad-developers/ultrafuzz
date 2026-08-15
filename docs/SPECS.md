@@ -119,6 +119,9 @@ A compatible config MUST support:
 - `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
   `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
+- `[run.resource_budget] max_cost_usd`,
+  `unpriced_token_usd_per_million`, run-wide token/request/turn/context/output
+  ceilings, and the corresponding per-attempt ceilings
 - `[models] default` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
 - `[retry] same_agent_attempts` plus an optional ordered `agents` list of model

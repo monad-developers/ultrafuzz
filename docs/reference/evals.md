@@ -313,6 +313,11 @@ validator before their retained, non-transforming Zod parsers run. Cohort
 identity joins and the pinned lane policy remain explicit named semantic gates.
 Lane trial counts are required authored fields—omitting
 `trials_per_variant` is invalid and never supplies a default.
+The expanded target × variant × trial matrix has an absolute 100,000-row
+ceiling. Planning rejects a larger product with overflow-safe division before
+target resolution, row allocation, iteration, or artifact writes; each
+individual dimension is capped at the same value in both JSON Schema and the
+runtime schema.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
 Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It selects
 the CLI-packaged `smoke` audit profile instead of filtering the production

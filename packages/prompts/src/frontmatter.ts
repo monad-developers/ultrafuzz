@@ -26,6 +26,7 @@ export type PromptErrorCode =
   | "invalid-artifact-reference"
   | "invalid-frontmatter"
   | "invalid-prompt-path"
+  | "invalid-prompt-size-limit"
   | "invalid-render-input"
   | "invalid-rename"
   | "missing-template-variable"

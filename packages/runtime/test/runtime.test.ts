@@ -24,6 +24,7 @@ import {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   createEventRecord,
   layoutForRunRoot,
+  readRunState,
   replayEvents,
   VALIDATOR_BUILD_IDENTITY,
   type RunState,
@@ -31,7 +32,11 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, serializeResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import {
+  createDefaultResolvedConfig,
+  parseResolvedConfigJsonBytes,
+  serializeResolvedConfigJsonBytes
+} from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -51,6 +56,7 @@ import {
   smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
+import { parseExecutionResolvedConfigJsonBytes } from "../src/resolved-config-compat.js";
 
 import {
   forkRun as runtimeForkRun,
@@ -65,7 +71,7 @@ import {
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
-  syncRun,
+  syncRun as runtimeSyncRun,
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
@@ -114,6 +120,16 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+}
+
+function serializedWorkflowTaskSpecs(workflowSource: string): Array<Record<string, unknown>> {
+  const prefix = "const serializedTaskSpecs = ";
+  const start = workflowSource.indexOf(prefix);
+  assert.ok(start >= 0, "generated workflow omits serialized task specs");
+  const valueStart = start + prefix.length;
+  const end = workflowSource.indexOf(" as const;", valueStart);
+  assert.ok(end > valueStart, "generated workflow task specs are not a const JSON value");
+  return JSON.parse(workflowSource.slice(valueStart, end)) as Array<Record<string, unknown>>;
 }
 
 function validatorPreflightResponse(): Record<string, unknown> {
@@ -181,6 +197,27 @@ async function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnTyp
   return runtimeStartRun({ ...prepared, reviewAcknowledgement: expected });
 }
 
+const testPricingCatalogs = new Map<string, string>();
+let testPricingCatalogSequence = 0;
+
+const testPricingFetch: typeof fetch = async (input, _init) => {
+  const url = input instanceof Request ? input.url : String(input);
+  const catalog = testPricingCatalogs.get(url);
+  if (catalog === undefined) throw new Error(`unexpected pricing catalog URL in test: ${url}`);
+  return new Response(catalog, { headers: { "content-type": "application/json" } });
+};
+
+function syncRun(
+  input: Parameters<typeof runtimeSyncRun>[0],
+  control: NonNullable<Parameters<typeof runtimeSyncRun>[1]> = {}
+): ReturnType<typeof runtimeSyncRun> {
+  return runtimeSyncRun(input, {
+    ...control,
+    pricingFetch: testPricingFetch,
+    pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }]
+  });
+}
+
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
   return runtimeResumeRun(withFakeCliEntrypoint(input));
 }
@@ -229,6 +266,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command?: string;
       args: string[];
+      outputFile?: string;
       env?: Record<string, string>;
       stdin?: string;
       outputFormat?: string;
@@ -291,6 +329,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command?: string;
         args: string[];
+        outputFile?: string;
         env?: Record<string, string>;
         stdin?: string;
         outputFormat?: string;
@@ -311,6 +350,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       args: string[];
+      outputFile?: string;
       env?: Record<string, string>;
       cleanup?: () => Promise<void>;
     }>;
@@ -361,6 +401,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         args: string[];
+        outputFile?: string;
         env?: Record<string, string>;
         cleanup?: () => Promise<void>;
       }>;
@@ -1220,7 +1261,9 @@ function fakeLifecycleSmithersEnv(
 }
 
 function pricingCatalogDataUrl(catalog: unknown): string {
-  return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
+  const url = `https://pricing.test/catalog-${testPricingCatalogSequence++}.json`;
+  testPricingCatalogs.set(url, JSON.stringify(catalog));
+  return url;
 }
 
 type TestSmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
@@ -1523,6 +1566,17 @@ function commitProjectForLaunchReview(project: string, message: string): string 
     { cwd: project }
   );
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8" }).trim();
+}
+
+function configureResourceBudget(project: string, values: Record<string, number>): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  let config = fs.readFileSync(configPath, "utf8");
+  for (const [key, value] of Object.entries(values)) {
+    const pattern = new RegExp(`^${key} = [^\\n]+$`, "mu");
+    assert.match(config, pattern);
+    config = config.replace(pattern, `${key} = ${value}`);
+  }
+  fs.writeFileSync(configPath, config, "utf8");
 }
 
 async function compileInvariantCampaignBudgetFixture(input: {
@@ -2361,6 +2415,8 @@ test(
     const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
 
     const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
+    assert.equal(fresh.args.includes("--output-last-message"), false);
+    assert.equal(fresh.outputFile, undefined);
     const firstAddDir = fresh.args.indexOf("--add-dir");
     assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
       "--add-dir",
@@ -2377,6 +2433,8 @@ test(
       options: { resumeSession: "session-123" }
     });
     assert.equal(resumed.args.includes("--add-dir"), false);
+    assert.equal(resumed.args.includes("--output-last-message"), false);
+    assert.equal(resumed.outputFile, undefined);
     await resumed.cleanup?.();
   }
 );
@@ -2728,8 +2786,12 @@ test(
     try {
       const retryEvents: Record<string, unknown>[] = [];
       let retryStderr = "";
+      let providerRetries = 0;
       const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
         prompt: "Retry fixture",
+        onProviderRetry: () => {
+          providerRetries += 1;
+        },
         onEvent: (event) => {
           retryEvents.push(event);
           return Promise.reject(new Error("fixture callback rejection"));
@@ -2740,6 +2802,7 @@ test(
       });
       assert.equal(result.text, "OK");
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(providerRetries, 1, "each actual invocation after the first must reach the accounting hook");
       assert.match(retryStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
       assert.doesNotMatch(JSON.stringify(retryEvents), /fixture-1/u);
       assert.match(JSON.stringify(retryEvents), /fixture-2/u);
@@ -4283,6 +4346,21 @@ test(
 
     const hintAgent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
     const hintInterpreter = hintAgent.createOutputInterpreter();
+    const assistantEvents = hintInterpreter.onStdoutLine?.(
+      JSON.stringify({ role: "assistant", content: "bounded assistant turn" })
+    ) as Array<{ type?: string; phase?: string; entryType?: string; action?: { kind?: string; title?: string } }>;
+    assert.equal(
+      assistantEvents.filter(
+        (event) =>
+          event.type === "action" &&
+          event.phase === "updated" &&
+          event.entryType === "message" &&
+          event.action?.kind === "note" &&
+          event.action.title === "assistant"
+      ).length,
+      1,
+      "a pure Kimi assistant response must expose one normalized turn event"
+    );
     const session = "00000000-0000-0000-0000-000000000301";
     assert.throws(
       () =>
@@ -5884,6 +5962,28 @@ test("plan renders prompt variables against attempt artifact directories for mod
   assert.ok(signalText.includes(path.join(setupDeepDir, "setup", "project-discovery.md")), signalText);
 });
 
+test("sealed resolved-config v3 receives only the v4 default resource budget", () => {
+  const current = createDefaultResolvedConfig();
+  const { resourceBudget: _resourceBudget, ...legacyRun } = current.run;
+  const legacy = {
+    ...current,
+    schemaVersion: "ultrafuzz.resolved-config.v3",
+    run: legacyRun
+  };
+  const bytes = Buffer.from(`${JSON.stringify(legacy)}\n`, "utf8");
+
+  assert.throws(() => parseResolvedConfigJsonBytes(bytes), /resolved-config:4/u);
+  const migrated = parseExecutionResolvedConfigJsonBytes(bytes);
+  assert.equal(migrated.schemaVersion, "ultrafuzz.resolved-config.v4");
+  assert.deepEqual(migrated.run.resourceBudget, current.run.resourceBudget);
+
+  const malformed = Buffer.from(
+    `${JSON.stringify({ ...legacy, run: { ...legacyRun, maxParallelAgents: "invalid" } })}\n`,
+    "utf8"
+  );
+  assert.throws(() => parseExecutionResolvedConfigJsonBytes(malformed), /resolved-config:4/u);
+});
+
 test("compileSmithersWorkflow gates native dependencies on deterministic artifact verification", async () => {
   const project = tempProject();
   writeFanoutProject(project);
@@ -5902,7 +6002,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 
   const resolvedConfigBytes = fs.readFileSync(compiled.resolvedConfigPath);
   assert.deepEqual(resolvedConfigBytes, serializeResolvedConfigJsonBytes(plan.value!.resolved_config));
-  assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v3");
+  assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v4");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.equal(compiled.pinnedSubmodules, undefined);
@@ -5986,6 +6086,9 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       }
     }
   };
+  for (const field of ["maxTotalTokens", "maxRequests", "maxTurns", "maxContextBytes", "maxOutputBytes"] as const) {
+    plan.value!.resolved_config.run.resourceBudget[field] = 1;
+  }
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
@@ -6006,6 +6109,30 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   });
   assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY"]);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const serializedTasks = serializedWorkflowTaskSpecs(workflowSource) as Array<{
+    resourceBudgetPartitioned?: boolean;
+    resourceBudget?: Record<string, number>;
+  }>;
+  assert.equal(serializedTasks.length, compiled.tasks.length);
+  assert.ok(serializedTasks.every((task) => task.resourceBudgetPartitioned === true));
+  assert.ok(
+    serializedTasks.some((task) => task.resourceBudget?.maxRequests === 0),
+    "a positive run ceiling smaller than the cloud task count must have explicit zero-allocation partitions"
+  );
+  for (const field of ["maxTotalTokens", "maxRequests", "maxTurns", "maxContextBytes", "maxOutputBytes"] as const) {
+    assert.equal(
+      serializedTasks.reduce((total, task) => total + (task.resourceBudget?.[field] ?? Number.NaN), 0),
+      plan.value!.resolved_config.run.resourceBudget[field],
+      `${field} partitions must sum exactly to the configured run ceiling`
+    );
+  }
+  assert.ok(
+    Math.abs(
+      serializedTasks.reduce((total, task) => total + (task.resourceBudget?.maxCostUsd ?? Number.NaN), 0) -
+        plan.value!.resolved_config.run.resourceBudget.maxCostUsd
+    ) < 1e-9,
+    "cloud cost partitions must sum to the configured run ceiling"
+  );
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
   assert.match(
@@ -10752,6 +10879,160 @@ test("syncRun counts cache-only usage when aggregate input is explicitly zero", 
   assert.equal(metadata.accounting?.current?.usage_complete, true);
   assert.equal(metadata.accounting?.current?.pricing_complete, true);
   assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.000012);
+});
+
+test("syncRun preserves exact resource boundaries and durably cancels token/cost exhaustion", async () => {
+  const scenarios = [
+    {
+      runId: "resource-budget-exact",
+      budget: { max_total_tokens: 16 },
+      inputTokens: 11,
+      outputTokens: 5,
+      pricingDisabled: false,
+      expectedResource: undefined
+    },
+    {
+      runId: "resource-budget-token-over",
+      budget: { max_total_tokens: 15 },
+      inputTokens: 11,
+      outputTokens: 5,
+      pricingDisabled: false,
+      expectedResource: "total_tokens"
+    },
+    {
+      runId: "resource-budget-cost-over",
+      budget: { max_cost_usd: 0.5 },
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      pricingDisabled: false,
+      expectedResource: "cost_usd"
+    },
+    {
+      runId: "resource-budget-unpriced-cost-over",
+      budget: { max_cost_usd: 0.5, unpriced_token_usd_per_million: 1 },
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      pricingDisabled: true,
+      expectedResource: "cost_usd"
+    }
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    configureResourceBudget(project, scenario.budget);
+    const workflowRunId = `ultrafuzz-${scenario.runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        {
+          type: "TokenUsageReported",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          extra: {
+            iteration: 0,
+            inputTokens: scenario.inputTokens,
+            outputTokens: scenario.outputTokens,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            model: "gpt-budget",
+            agent: "codex"
+          }
+        },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    env.ULTRAFUZZ_PRICING_CATALOG_URL = scenario.pricingDisabled
+      ? "disabled"
+      : pricingCatalogDataUrl({
+          openai: { models: { "gpt-budget": { cost: { input: 1, output: 1 } } } }
+        });
+    const run = await startRun({ projectRoot: project, runId: scenario.runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+    const sync = await syncRun({ projectRoot: project, runId: scenario.runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    const layout = layoutForRunRoot(run.value!.run_root);
+    const budgetEvidence = replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((event) => event.event_type === "workflow-synced")
+      .at(-1)?.payload.resource_budget_exhausted;
+    const commandLog = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+    if (scenario.expectedResource === undefined) {
+      // This compact fixture deliberately omits the invariant-ledger producer
+      // required by the full topology, so its terminal semantic gate may fail.
+      // The resource-boundary assertion is that the exact limit never turns
+      // that independent outcome into a budget cancellation.
+      assert.notEqual(readRunState(layout).status, "canceled");
+      assert.equal(budgetEvidence, undefined);
+      assert.doesNotMatch(commandLog, /^cancel /mu);
+    } else {
+      assert.equal(readRunState(layout).status, "canceled");
+      assert.equal(budgetEvidence?.resource, scenario.expectedResource);
+      assert.equal(budgetEvidence?.scope, "run");
+      assert.ok(Number(budgetEvidence?.observed) > Number(budgetEvidence?.limit));
+      assert.match(commandLog, /^cancel /mu);
+    }
+  }
+});
+
+test("syncRun projects generated exhaustion, including zero cloud allocations, into typed evidence", async () => {
+  for (const { resource, limit } of [
+    { resource: "turns", limit: 10 },
+    { resource: "context_bytes", limit: 10 },
+    { resource: "output_bytes", limit: 10 },
+    { resource: "requests", limit: 0 }
+  ] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `generated-${resource.replace("_", "-")}-budget`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [{ type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    fs.writeFileSync(
+      path.join(run.value!.run_root, "resource-budget-exhausted.json"),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.resource-budget-exhaustion.v1",
+        ultrafuzz_run_id: runId,
+        workflow_run_id: workflowRunId,
+        resource,
+        scope: "attempt",
+        limit,
+        observed: limit + 1,
+        task_id: "node:project-discovery",
+        recorded_at: "2026-08-15T00:00:00.000Z"
+      })}\n`,
+      "utf8"
+    );
+
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    const layout = layoutForRunRoot(run.value!.run_root);
+    assert.equal(readRunState(layout).status, "canceled");
+    const evidence = replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((event) => event.event_type === "workflow-synced")
+      .at(-1)?.payload.resource_budget_exhausted;
+    assert.equal(evidence?.resource, resource);
+    assert.equal(evidence?.scope, "attempt");
+    assert.equal(evidence?.limit, limit);
+    assert.equal(evidence?.observed, limit + 1);
+  }
 });
 
 test("syncRun uses durable event sequence for the current accounting segment", async () => {

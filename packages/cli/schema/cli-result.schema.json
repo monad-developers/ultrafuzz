@@ -251,30 +251,30 @@
             "execution_mode"
           ],
           "properties": {
-            "schema_version": { "const": "ultrafuzz.resolved-config.v3" },
+            "schema_version": { "const": "ultrafuzz.resolved-config.v4" },
             "audit_profile": {
-              "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileId"
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileId"
             },
             "audit_profile_catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "audit_profile_topology_path": {
-              "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath"
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath"
             },
             "audit_profile_effective_settings": {
-              "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettings"
+              "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettings"
             },
             "audit_profile_setting_origins": {
               "type": "object",
               "propertyNames": {
-                "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingName"
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingName"
               },
               "additionalProperties": {
-                "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingOrigin"
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingOrigin"
               }
             },
             "audit_profile_overridden_settings": {
               "type": "array",
               "items": {
-                "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingName"
+                "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingName"
               },
               "uniqueItems": true
             },
@@ -1783,7 +1783,7 @@
         "overridden_settings"
       ],
       "properties": {
-        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileId" },
+        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileId" },
         "description": { "type": "string", "minLength": 1 },
         "intended_use": { "type": "string", "minLength": 1 },
         "default": { "type": "boolean" },
@@ -1792,7 +1792,7 @@
         "declared_topology_path": {
           "oneOf": [
             { "type": "null" },
-            { "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath" }
+            { "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath" }
           ]
         },
         "effective_topology_path": { "type": "string", "minLength": 1 },
@@ -1801,24 +1801,24 @@
         },
         "topology_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "profile_settings": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettings"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettings"
         },
         "effective_settings": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettings"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettings"
         },
         "setting_origins": {
           "type": "object",
           "propertyNames": {
-            "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingName"
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingName"
           },
           "additionalProperties": {
-            "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingOrigin"
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingOrigin"
           }
         },
         "overridden_settings": {
           "type": "array",
           "items": {
-            "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileSettingName"
+            "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileSettingName"
           },
           "uniqueItems": true
         }
@@ -1829,12 +1829,12 @@
       "additionalProperties": false,
       "required": ["id", "description", "intended_use", "default"],
       "properties": {
-        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileId" },
+        "id": { "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileId" },
         "description": { "type": "string", "minLength": 1 },
         "intended_use": { "type": "string", "minLength": 1 },
         "default": { "type": "boolean" },
         "topology_path": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath"
         },
         "topology_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
@@ -1847,7 +1847,7 @@
         "schema_version": { "const": 2 },
         "catalog_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "default_profile": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/auditProfileId"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/auditProfileId"
         },
         "profiles": {
           "type": "array",
@@ -1863,7 +1863,7 @@
         "id": { "type": "string", "minLength": 1 },
         "description": { "type": "string", "minLength": 1 },
         "topology_path": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath"
         },
         "logical_nodes": { "$ref": "#/$defs/positiveInteger" },
         "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
@@ -1888,7 +1888,7 @@
         "id": { "type": "string", "minLength": 1 },
         "description": { "type": "string", "minLength": 1 },
         "topology_path": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath"
         },
         "logical_nodes": { "$ref": "#/$defs/positiveInteger" },
         "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -1902,7 +1902,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "source_path": {
-          "$ref": "urn:ultrafuzz:schema:config:resolved-config:3#/$defs/packagedTopologyPath"
+          "$ref": "urn:ultrafuzz:schema:config:resolved-config:4#/$defs/packagedTopologyPath"
         },
         "destination_path": { "type": "string", "minLength": 1 },
         "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

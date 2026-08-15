@@ -32,6 +32,20 @@ default_timeout_seconds = 1800
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 
+[run.resource_budget]
+max_cost_usd = 1000
+unpriced_token_usd_per_million = 1000
+max_total_tokens = 100000000
+max_requests = 10000
+max_turns = 100000
+max_context_bytes = 1073741824
+max_output_bytes = 1073741824
+max_attempt_tokens = 10000000
+max_attempt_requests = 100
+max_attempt_turns = 1000
+max_attempt_context_bytes = 67108864
+max_attempt_output_bytes = 67108864
+
 [execution]
 mode = "local"
 retention_days = 30
@@ -125,6 +139,7 @@ empty path components, and dot components fail validation.
 | `default_timeout_seconds`   | integer | Default node timeout in seconds.                                            |
 | `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
+| `resource_budget`           | table   | Required positive run-wide and per-attempt resource ceilings.               |
 
 Other workspace modes are outside the product contract.
 Successful runs remove their generated workspaces by default. Setting
@@ -146,6 +161,16 @@ atomic claim before taking over expired ownership, so completed work is not
 resubmitted. The workflow deadline is separate from per-node timeouts and is
 checked whenever run state is synchronized by status, inspect, reporting, or
 eval watchers.
+
+`[run.resource_budget]` is a closed table of positive hard ceilings. Run-wide
+limits cover estimated spend, total tokens, provider requests, normalized
+agent turns, submitted context bytes, and emitted output bytes. The
+`max_attempt_*` fields independently bound one attempt. Exact limits are
+allowed; the first increment beyond a limit aborts the active work, cancels the
+workflow, and records typed exhaustion evidence. When catalog pricing is
+missing or incomplete, `unpriced_token_usd_per_million` supplies the
+operator-owned conservative cost basis. In cloud execution, run-wide limits
+are partitioned across rows so their shares sum to the configured ceiling.
 
 ## Execution
 
@@ -349,11 +374,14 @@ optional `[retry]` table does not invalidate existing project files. The
 redacted operator-facing resolved config is persisted for each run as
 `config.resolved.toml`, with restore metadata in `config.redactions.json`. The
 unredacted workflow control contract is serialized once as camelCase JSON,
-identified as `ultrafuzz.resolved-config.v3`, validated against
-`urn:ultrafuzz:schema:config:resolved-config:3`, and published
+identified as `ultrafuzz.resolved-config.v4`, validated against
+`urn:ultrafuzz:schema:config:resolved-config:4`, and published
 byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
-execution snapshot. Sealed readers run the same strict parser and schema; they
-do not use historical fallbacks. That JSON document carries the audit-profile
+execution snapshot. New sealed readers run the same strict parser and schema.
+Lifecycle and synchronization of an already-sealed v3 run use one narrow
+execution-only migration: add the v4 default resource budget, change the
+version literal, and validate the entire transformed document as v4. No other
+historical shape or invalid v3 field is repaired. That JSON document carries the audit-profile
 resolution — catalog schema version, catalog digest, declared topology path,
 profile settings, effective settings, per-setting origins, and overridden
 settings — as typed fields of the same closed contract.

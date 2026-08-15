@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "694bfb866468a09209296041ce404933927d4ddeaa5b44b4ae0b57ba71f58843";
-const EXPECTED_BUNDLE_SHA256 = "71f90f2b5f4c21ec45dba4a4afa1efcb5d521ed36a2747727b466f32ea9f7dda";
+const EXPECTED_SCHEMA_SHA256 = "57c7af2a9320aae9c17c66acb33eccbc2dd77dce713384c27840ece2ea644936";
+const EXPECTED_BUNDLE_SHA256 = "bbbcbb675e2eff156c1a4a5481a07d86d96777a0456199bc4f740657c68d5119";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -250,8 +250,8 @@ describe("resolved config JSON contract", () => {
       readFixture("resolved-config.valid.json")
         .toString("utf8")
         .replace(
-          '"schemaVersion": "ultrafuzz.resolved-config.v3",',
-          '"schemaVersion": "ultrafuzz.resolved-config.v3",\n  "schemaVersion": "ultrafuzz.resolved-config.v3",'
+          '"schemaVersion": "ultrafuzz.resolved-config.v4",',
+          '"schemaVersion": "ultrafuzz.resolved-config.v4",\n  "schemaVersion": "ultrafuzz.resolved-config.v4",'
         ),
       "utf8"
     );

@@ -19,7 +19,9 @@ import {
   INVARIANT_PINNED_SOURCE_REF,
   invariantPinnedSourceRefExists,
   materializePromptSchemas,
-  publishFileDurableExclusive
+  parseStrictJsonBytes,
+  publishFileDurableExclusive,
+  writeFileDurable
 } from "@ultrafuzz/artifacts";
 import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
 import {
@@ -56,6 +58,18 @@ const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
 const COMMAND_PROBE_TIMEOUT_MS = 60_000;
+const RESOURCE_BUDGET_EVIDENCE_FILE = "resource-budget-exhausted.json";
+const MAX_RESOURCE_BUDGET_EVIDENCE_BYTES = 64 * 1024;
+const RESOURCE_BUDGET_NAMES = new Set([
+  "cost_usd",
+  "total_tokens",
+  "requests",
+  "turns",
+  "context_bytes",
+  "output_bytes",
+  "attempt_tokens",
+  "attempt_requests"
+]);
 
 const MODAL_COMMAND_PROBE_SOURCE = String.raw`
 const fs = require("node:fs");
@@ -321,7 +335,9 @@ async function runModalNodeSandbox(
         const exitCode = await waitForProcess(processHandle.wait(), request.signal, sandbox, executionDeadline);
         const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
         if (exitCode !== 0) {
-          throw new Error(formatWorkerExitMessage(exitCode, stdoutText, stderrText));
+          const failureMessage = formatWorkerExitMessage(exitCode, stdoutText, stderrText);
+          await publishModalResourceBudgetExhaustion(sandbox, request, input);
+          throw new Error(failureMessage);
         }
       } else {
         request.heartbeat({
@@ -740,6 +756,9 @@ async function waitForModalNodeResult(
     }
     const result = await readModalNodeResult(sandbox, request, input);
     if (result !== undefined) return result;
+    if (await publishModalResourceBudgetExhaustion(sandbox, request, input)) {
+      throw new Error("cloud node resource budget exhausted before result publication");
+    }
     const exitCode = await sandbox.poll();
     if (exitCode !== null) {
       throw new Error(`cloud node sandbox stopped before publication with code ${exitCode}`);
@@ -943,6 +962,83 @@ function remoteAttemptRoot(runId: string, sandboxId: string, executionGeneration
     REMOTE_DATA_ROOT,
     boundedIdentity(runId),
     boundedIdentity(`${sandboxId}:${executionGeneration}`)
+  );
+}
+
+async function publishModalResourceBudgetExhaustion(
+  sandbox: Sandbox,
+  request: NodeSandboxProviderRequest,
+  input: ModalNodeSandboxInput
+): Promise<boolean> {
+  const remoteEvidencePath = path.posix.join(
+    remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation),
+    "workspace",
+    input.run_root,
+    RESOURCE_BUDGET_EVIDENCE_FILE
+  );
+  let bytes: Uint8Array;
+  try {
+    bytes = await sandbox.filesystem.readBytes(remoteEvidencePath);
+  } catch (error) {
+    if (error instanceof SandboxFilesystemNotFoundError) return false;
+    throw error;
+  }
+  if (bytes.byteLength > MAX_RESOURCE_BUDGET_EVIDENCE_BYTES) {
+    throw new Error("cloud resource budget evidence exceeds its byte limit");
+  }
+  const value = parseStrictJsonBytes(Buffer.from(bytes), {
+    maxBytes: MAX_RESOURCE_BUDGET_EVIDENCE_BYTES,
+    maxDepth: 4,
+    maxItems: 32,
+    maxProperties: 32
+  });
+  if (!isCloudResourceBudgetExhaustion(value, input)) {
+    throw new Error("cloud resource budget evidence is invalid");
+  }
+  const runRoot = checkedPath(request.rootDir, input.run_root, "run root");
+  writeFileDurable(path.join(runRoot, RESOURCE_BUDGET_EVIDENCE_FILE), `${JSON.stringify(value, null, 2)}\n`);
+  return true;
+}
+
+function isCloudResourceBudgetExhaustion(
+  value: unknown,
+  input: ModalNodeSandboxInput
+): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "schema_version",
+    "ultrafuzz_run_id",
+    "workflow_run_id",
+    "resource",
+    "scope",
+    "limit",
+    "observed",
+    "task_id",
+    "recorded_at"
+  ]);
+  return (
+    Object.keys(record).length === allowedKeys.size &&
+    Object.keys(record).every((key) => allowedKeys.has(key)) &&
+    record.schema_version === "ultrafuzz.resource-budget-exhaustion.v1" &&
+    record.ultrafuzz_run_id === input.run_id &&
+    typeof record.workflow_run_id === "string" &&
+    record.workflow_run_id.length > 0 &&
+    record.workflow_run_id.length <= 4_096 &&
+    typeof record.resource === "string" &&
+    RESOURCE_BUDGET_NAMES.has(record.resource) &&
+    (record.scope === "run" || record.scope === "attempt") &&
+    typeof record.limit === "number" &&
+    Number.isFinite(record.limit) &&
+    record.limit >= 0 &&
+    record.limit <= Number.MAX_SAFE_INTEGER &&
+    typeof record.observed === "number" &&
+    Number.isFinite(record.observed) &&
+    record.observed > record.limit &&
+    record.observed <= Number.MAX_SAFE_INTEGER &&
+    record.task_id === input.task_id &&
+    typeof record.recorded_at === "string" &&
+    Number.isFinite(Date.parse(record.recorded_at))
   );
 }
 

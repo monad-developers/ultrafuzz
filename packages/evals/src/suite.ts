@@ -32,6 +32,8 @@ export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60;
 export const DEFAULT_ARTIFACT_INCLUDE = ["report.md", "report.json"];
 export const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 5_000_000;
 export const DEFAULT_RECALL_THRESHOLD = 0.7;
+/** Absolute upper bound for target x variant x trial expansion. */
+export const MAX_EVAL_MATRIX_ROWS = 100_000;
 
 export const EVAL_WORKFLOW_INPUT_RESERVED_KEYS = [
   "benchmark_execution",
@@ -56,6 +58,7 @@ const heldOutPath = nonEmptyString.refine((value) => {
 
 const reservedWorkflowInputKeys = new Set<string>(EVAL_WORKFLOW_INPUT_RESERVED_KEYS);
 const positiveInteger = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const evalDimensionCount = positiveInteger.max(MAX_EVAL_MATRIX_ROWS);
 const nonNegativeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const unitMetric = z.number().min(0).max(1);
 const uniqueNonEmptyStrings = z.array(nonEmptyString).refine((values) => new Set(values).size === values.length, {
@@ -200,12 +203,12 @@ export const evalSuiteInputSchema = z.strictObject({
   model_profiles: z
     .record(nonEmptyString, modelProfileSchema)
     .refine((value) => Object.keys(value).length > 0, { message: "model profiles cannot be empty" }),
-  targets: z.array(targetSchema).min(1),
-  variants: z.array(variantSchema).min(1),
+  targets: z.array(targetSchema).min(1).max(MAX_EVAL_MATRIX_ROWS),
+  variants: z.array(variantSchema).min(1).max(MAX_EVAL_MATRIX_ROWS),
   run: z.strictObject({
     runner_model_profile: nonEmptyString,
     judge_model_profile: nonEmptyString,
-    trials_per_variant: positiveInteger,
+    trials_per_variant: evalDimensionCount,
     max_parallel_targets: positiveInteger.optional(),
     max_parallel_runs: positiveInteger.optional()
   }),
@@ -401,6 +404,7 @@ function normalizeReporting(
 export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   const projectRoot = path.resolve(input.projectRoot);
   const loaded = loadEvalSuite({ projectRoot, suitePath: input.suitePath });
+  assertEvalMatrixWithinLimit(loaded.suite);
   const suite = applyPathOverrides(loaded.suite, input);
   validateSuiteIds(suite);
   validateModelProfiles(suite);
@@ -462,6 +466,48 @@ export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
     suite,
     matrix
   };
+}
+
+/**
+ * Reject an oversized eval matrix without multiplying attacker-controlled
+ * dimensions. This must run before resolving any target or variant paths.
+ */
+export function assertEvalMatrixWithinLimit(suite: Pick<EvalSuiteSpec, "targets" | "variants" | "run">): number {
+  const targetCount = suite.targets.length;
+  const variantCount = suite.variants.length;
+  const trialCount = suite.run.trials_per_variant;
+  const details = {
+    targetCount,
+    variantCount,
+    trialCount,
+    maxRows: MAX_EVAL_MATRIX_ROWS
+  };
+
+  if (
+    !Number.isSafeInteger(targetCount) ||
+    targetCount < 1 ||
+    !Number.isSafeInteger(variantCount) ||
+    variantCount < 1 ||
+    !Number.isSafeInteger(trialCount) ||
+    trialCount < 1 ||
+    targetCount > Math.floor(MAX_EVAL_MATRIX_ROWS / variantCount)
+  ) {
+    throw new EvalError(
+      "EVAL_MATRIX_LIMIT_EXCEEDED",
+      `eval matrix exceeds the ${MAX_EVAL_MATRIX_ROWS}-row limit`,
+      details
+    );
+  }
+
+  const targetVariantCount = targetCount * variantCount;
+  if (targetVariantCount > Math.floor(MAX_EVAL_MATRIX_ROWS / trialCount)) {
+    throw new EvalError(
+      "EVAL_MATRIX_LIMIT_EXCEEDED",
+      `eval matrix exceeds the ${MAX_EVAL_MATRIX_ROWS}-row limit`,
+      details
+    );
+  }
+  return targetVariantCount * trialCount;
 }
 
 /**

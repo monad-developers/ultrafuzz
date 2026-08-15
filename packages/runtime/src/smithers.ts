@@ -4180,8 +4180,9 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
+  const partitionsRunBudget = compiled.tasks.some((task) => task.execution.mode === "cloud");
   const taskSpecs = JSON.stringify(
-    compiled.tasks.map((task) => ({
+    compiled.tasks.map((task, taskIndex) => ({
       id: task.smithersNodeId,
       smithersRunId: compiled.smithersRunId,
       preparationId: task.preparationSmithersNodeId,
@@ -4223,6 +4224,10 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
         backoff: task.retryPolicy.backoff,
         initialDelayMs: task.retryPolicy.initialDelayMs
       },
+      resourceBudget: partitionsRunBudget
+        ? partitionRunResourceBudget(config.run.resourceBudget, taskIndex, compiled.tasks.length)
+        : config.run.resourceBudget,
+      resourceBudgetPartitioned: partitionsRunBudget,
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
@@ -4243,6 +4248,33 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
     )
   });
+}
+
+function partitionRunResourceBudget(
+  budget: ResolvedConfig["run"]["resourceBudget"],
+  partitionIndex: number,
+  partitionCount: number
+): ResolvedConfig["run"]["resourceBudget"] {
+  if (
+    !Number.isSafeInteger(partitionIndex) ||
+    !Number.isSafeInteger(partitionCount) ||
+    partitionIndex < 0 ||
+    partitionCount < 1 ||
+    partitionIndex >= partitionCount
+  ) {
+    throw new Error("resource budget partition is invalid");
+  }
+  const integerShare = (value: number): number =>
+    Math.floor(value / partitionCount) + (partitionIndex < value % partitionCount ? 1 : 0);
+  return {
+    ...budget,
+    maxCostUsd: budget.maxCostUsd / partitionCount,
+    maxTotalTokens: integerShare(budget.maxTotalTokens),
+    maxRequests: integerShare(budget.maxRequests),
+    maxTurns: integerShare(budget.maxTurns),
+    maxContextBytes: integerShare(budget.maxContextBytes),
+    maxOutputBytes: integerShare(budget.maxOutputBytes)
+  };
 }
 
 function executionMetadata(projectRoot: string, task: CompiledSmithersTask): SmithersTaskMetadata {

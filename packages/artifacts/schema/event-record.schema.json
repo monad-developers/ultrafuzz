@@ -991,6 +991,47 @@
         },
         "deadline_exceeded": {
           "type": "boolean"
+        },
+        "resource_budget_exhausted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource", "scope", "limit", "observed"],
+          "properties": {
+            "resource": {
+              "enum": [
+                "cost_usd",
+                "total_tokens",
+                "requests",
+                "turns",
+                "context_bytes",
+                "output_bytes",
+                "attempt_tokens",
+                "attempt_requests"
+              ]
+            },
+            "scope": {
+              "enum": ["run", "attempt"]
+            },
+            "limit": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "observed": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "node_id": {
+              "$ref": "#/$defs/nonEmptyString"
+            },
+            "iteration": {
+              "$ref": "#/$defs/nonNegativeSafeInteger"
+            },
+            "attempt": {
+              "$ref": "#/$defs/nonNegativeSafeInteger"
+            }
+          }
         }
       }
     },
