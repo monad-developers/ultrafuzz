@@ -12915,6 +12915,21 @@ test("retry recovery remains stable across repeated syncs and records durable pr
   assert.equal(diagnosis.value?.workflow_status, "failed");
   assert.equal(diagnosis.value?.summary, "Run is finished, nothing is blocked.");
   assert.deepEqual(diagnosis.value?.blockers, []);
+
+  const laterLifecycle = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    env
+  });
+  assert.equal(laterLifecycle.ok, true, JSON.stringify(laterLifecycle.diagnostics));
+  const afterLaterLifecycle = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(afterLaterLifecycle.ok, true, JSON.stringify(afterLaterLifecycle.diagnostics));
+  assert.equal(afterLaterLifecycle.value?.status, "failed");
+  assert.ok(
+    afterLaterLifecycle.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
+    JSON.stringify(afterLaterLifecycle.diagnostics)
+  );
 });
 
 test("retry recovery cannot authorize a stale failed aggregate from a different workflow link", async () => {
@@ -12976,6 +12991,109 @@ test("retry recovery cannot authorize a stale failed aggregate from a different 
   assert.equal(
     replayEvents(layoutForRunRoot(run.value!.run_root)).records.some((event) => event.event_type === "run-recovered"),
     false
+  );
+
+  const unknownInspect = workflowInspect({
+    workflowRunId,
+    status: "failed",
+    state: "unknown" as TestSmithersRunState,
+    error: { message: "workflow aggregate has no recognized state" },
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(unknownInspect, null, 2)}\n`, "utf8");
+  const unknown = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_INSPECT_INVALID"));
+  assert.equal((JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState).status, "failed");
+
+  const forgedRecovery = state.provenance!.recovery!;
+  const withoutRecovery = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  delete withoutRecovery.provenance!.recovery;
+  fs.writeFileSync(statePath, `${JSON.stringify(withoutRecovery, null, 2)}\n`, "utf8");
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const forgedEvent = createEventRecord(layout, {
+    eventType: "run-recovered",
+    status: "succeeded",
+    payload: {
+      recovery_id: forgedRecovery.recovery_id,
+      prior_status: "failed",
+      failed_nodes: forgedRecovery.failed_nodes
+    }
+  });
+  fs.appendFileSync(layout.eventsPath, `${JSON.stringify(forgedEvent)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
+  const forgedBackfill = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(forgedBackfill.ok, true, JSON.stringify(forgedBackfill.diagnostics));
+  assert.equal(forgedBackfill.value?.status, "failed");
+  const afterForgedBackfill = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(afterForgedBackfill.provenance?.recovery, undefined);
+});
+
+test("an unrelated replacement link cannot retarget a pending retry recovery", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const workflowRunId = "ultrafuzz-recovery-unrelated-link";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: ""
+  });
+  const run = await startRun({ projectRoot: project, runId: "recovery-unrelated-link", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    force: true,
+    retryFailed: true,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const pending = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  const sourceRecoveryLinkId = pending.provenance?.recovery?.workflow_link_id;
+  assert.ok(sourceRecoveryLinkId);
+
+  const targetWorkflowRunId = `${workflowRunId}-fork`;
+  env.SMITHERS_FAKE_FORKED_RUN_ID = targetWorkflowRunId;
+  const forked = await forkRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    forkFrame: 0,
+    env
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  const replaced = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(replaced.provenance?.workflow.runId, targetWorkflowRunId);
+  assert.equal(replaced.provenance?.recovery?.workflow_link_id, sourceRecoveryLinkId);
+  assert.notEqual(replaced.provenance?.workflow.linkId, sourceRecoveryLinkId);
+
+  const targetInspect = workflowInspect({
+    workflowRunId: targetWorkflowRunId,
+    status: "failed",
+    state: "failed",
+    error: { message: "unrelated replacement failed" },
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(targetInspect, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_EVENTS!,
+    workflowEvents(targetWorkflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
+    "utf8"
+  );
+  const sync = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(
+    sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
+    JSON.stringify(sync.diagnostics)
   );
 });
 

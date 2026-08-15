@@ -1046,11 +1046,17 @@
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["node_id", "failure_category"],
+            "required": ["node_id", "workflow_task_id", "failed_attempt", "failure_category"],
             "additionalProperties": false,
             "properties": {
               "node_id": {
                 "$ref": "#/$defs/nonEmptyString"
+              },
+              "workflow_task_id": {
+                "$ref": "#/$defs/nonEmptyString"
+              },
+              "failed_attempt": {
+                "$ref": "#/$defs/nonNegativeSafeInteger"
               },
               "failure_category": {
                 "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
@@ -1422,6 +1428,9 @@
         },
         "workflow_link_id": {
           "$ref": "#/$defs/workflowLinkId"
+        },
+        "retry_failed": {
+          "const": true
         }
       }
     },
@@ -1458,6 +1467,9 @@
         },
         "controller_invoked_at": {
           "$ref": "#/$defs/timestamp"
+        },
+        "retry_failed": {
+          "const": true
         }
       }
     },
@@ -1490,6 +1502,9 @@
         },
         "controller_invoked_at": {
           "$ref": "#/$defs/timestamp"
+        },
+        "retry_failed": {
+          "const": true
         },
         "reset_node": {
           "$ref": "#/$defs/nonEmptyString"

@@ -63,7 +63,6 @@ import {
   type NodeState,
   type NodeStatus,
   type RunLayout,
-  type RunRecoveryProvenance,
   type RunMetadataAccounting,
   type RunMetadataDocument,
   type RunStatus,
@@ -551,14 +550,17 @@ export async function synchronizeLinkedWorkflowRun(
     throw error;
   }
   diagnostics.push(...syncResult.diagnostics);
-  backfillCompletedRecoveryProvenance(
+  const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
+  const recoveredAggregateAuthorized = recoveryAuthorizesFailedAggregate({
     layout,
-    evidence,
+    state: readRunState(layout),
     inspect,
-    syncResult.nodeStatuses,
-    syncResult.syncedNodes,
-    loaded.tasks.length
-  );
+    nodeStatuses: syncResult.nodeStatuses,
+    evidenceComplete,
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId,
+    controlGeneration: evidence.controlGeneration
+  });
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
       code: "WORKFLOW_TASK_EVIDENCE_MISSING",
@@ -576,13 +578,11 @@ export async function synchronizeLinkedWorkflowRun(
     Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
   );
   for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
-  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses, {
-    recovery: readRunState(layout).provenance?.recovery,
-    workflowRunId: evidence.smithersRunId,
-    workflowLinkId: evidence.workflowLinkId,
-    controlGeneration: evidence.controlGeneration,
-    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
-  });
+  const unattributedFailure = unattributedTerminalWorkflowFailure(
+    inspect,
+    attributionStatuses,
+    recoveredAggregateAuthorized
+  );
   if (unattributedFailure !== undefined) {
     diagnostics.push(unattributedFailure);
   }
@@ -610,11 +610,8 @@ export async function synchronizeLinkedWorkflowRun(
   }
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
-    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length,
-    recovery: readRunState(layout).provenance?.recovery,
-    workflowRunId: evidence.smithersRunId,
-    workflowLinkId: evidence.workflowLinkId,
-    controlGeneration: evidence.controlGeneration
+    evidenceComplete,
+    recoveredAggregateAuthorized
   });
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
@@ -768,81 +765,103 @@ export async function synchronizeLinkedWorkflowRun(
   };
 }
 
-function backfillCompletedRecoveryProvenance(
-  layout: RunLayout,
-  evidence: { smithersRunId: string; workflowLinkId: string; controlGeneration: string },
-  inspect: WorkflowInspect,
-  nodeStatuses: Map<string, NodeStatus>,
-  syncedNodes: number,
-  taskCount: number
-): void {
-  if (inspect.runState !== "failed" || syncedNodes < taskCount || nodeStatuses.size === 0) return;
-  if (![...nodeStatuses.values()].every((status) => status === "succeeded" || status === "reused-from-prior-run"))
-    return;
-  const state = readRunState(layout);
-  if (state.provenance?.recovery !== undefined) return;
-
-  const records = replayEvents(layout).records;
-  const recovered = [...records].reverse().find((record) => record.event_type === "run-recovered");
-  if (recovered === undefined) return;
-  const recoveryPayload = recovered.payload as {
-    recovery_id?: unknown;
-    prior_status?: unknown;
-    failed_nodes?: unknown;
-  };
+function recoveryAuthorizesFailedAggregate(input: {
+  layout: RunLayout;
+  state: ReturnType<typeof readRunState>;
+  inspect: WorkflowInspect;
+  nodeStatuses: Map<string, NodeStatus>;
+  evidenceComplete: boolean;
+  workflowRunId: string;
+  workflowLinkId: string;
+  controlGeneration: string;
+}): boolean {
+  const recovery = input.state.provenance?.recovery;
+  const statuses = [...input.nodeStatuses.values()];
   if (
-    typeof recoveryPayload.recovery_id !== "string" ||
-    recoveryPayload.prior_status !== "failed" ||
-    !Array.isArray(recoveryPayload.failed_nodes) ||
-    recoveryPayload.failed_nodes.length === 0
-  )
-    return;
+    input.inspect.runState !== "failed" ||
+    recovery?.prior_status !== "failed" ||
+    recovery.workflow_run_id !== input.workflowRunId ||
+    recovery.workflow_link_id !== input.workflowLinkId ||
+    recovery.control_generation !== input.controlGeneration ||
+    !input.evidenceComplete ||
+    statuses.length === 0 ||
+    !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
+  ) {
+    return false;
+  }
 
-  // A recovery event predates the active link, or a later fork/replay has
-  // replaced it, so it cannot safely authorize this workflow's failure.
-  const recoveryIndex = records.indexOf(recovered);
-  const links = records
-    .map((record, index) => ({ record, index }))
-    .filter(({ record, index }) => record.event_type === "workflow-link-recorded" && index < recoveryIndex);
-  const link = links.at(-1)?.record;
-  const linkPayload = link?.payload as { workflow_run_id?: unknown; workflow_link_id?: unknown } | undefined;
-  if (
-    linkPayload === undefined ||
-    linkPayload.workflow_run_id !== evidence.smithersRunId ||
-    linkPayload.workflow_link_id !== evidence.workflowLinkId
-  )
-    return;
-  if (records.some((record, index) => record.event_type === "workflow-link-recorded" && index > recoveryIndex)) return;
-
-  const failedNodes = recoveryPayload.failed_nodes.filter(
-    (
-      node
-    ): node is {
-      node_id: string;
-      failure_category: RunRecoveryProvenance["failed_nodes"][number]["failure_category"];
-    } =>
-      typeof node === "object" &&
-      node !== null &&
-      typeof (node as Record<string, unknown>).node_id === "string" &&
-      typeof (node as Record<string, unknown>).failure_category === "string"
-  );
-  if (failedNodes.length !== recoveryPayload.failed_nodes.length) return;
-  writeRunState(layout, {
-    ...state,
-    provenance: {
-      ...state.provenance!,
-      recovery: {
-        recovery_id: recoveryPayload.recovery_id,
-        recovered: true,
-        recovered_at: recovered.timestamp,
-        prior_status: "failed",
-        failed_nodes: failedNodes,
-        workflow_run_id: evidence.smithersRunId,
-        workflow_link_id: evidence.workflowLinkId,
-        control_generation: evidence.controlGeneration
-      }
+  for (const failedNode of recovery.failed_nodes) {
+    const node = input.state.nodes[failedNode.node_id];
+    const workflow = recordField(node?.provenance, "workflow");
+    if (
+      node === undefined ||
+      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
+      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
+      (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt
+    ) {
+      return false;
     }
-  });
+  }
+
+  const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
+  const uniqueRecord = (eventId: string) => {
+    const matches = records
+      .map((record, index) => ({ record, index }))
+      .filter(({ record }) => record.event_id === eventId);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  const invocation = uniqueRecord(recovery.controller_invocation_id);
+  const result = uniqueRecord(recovery.lifecycle_result_event_id);
+  const submission = uniqueRecord(recovery.lifecycle_submission_event_id);
+  if (
+    invocation === undefined ||
+    result === undefined ||
+    submission === undefined ||
+    !(invocation.index < result.index && result.index < submission.index) ||
+    invocation.record.timestamp !== recovery.controller_invoked_at ||
+    result.record.timestamp !== recovery.lifecycle_result_at ||
+    submission.record.timestamp !== recovery.lifecycle_submitted_at
+  ) {
+    return false;
+  }
+
+  const invocationPayload = invocation.record.payload as Record<string, unknown>;
+  const resultPayload = result.record.payload as Record<string, unknown>;
+  const submissionPayload = submission.record.payload as Record<string, unknown>;
+  if (
+    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
+    invocationPayload.action !== "resume" ||
+    invocationPayload.retry_failed !== true ||
+    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
+    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
+    invocationPayload.control_generation !== recovery.control_generation ||
+    result.record.event_type !== "workflow-lifecycle-result" ||
+    resultPayload.action !== "resume" ||
+    resultPayload.retry_failed !== true ||
+    resultPayload.source_workflow_run_id !== recovery.source_workflow_run_id ||
+    resultPayload.source_workflow_link_id !== recovery.source_workflow_link_id ||
+    resultPayload.workflow_run_id !== recovery.workflow_run_id ||
+    resultPayload.control_generation !== recovery.control_generation ||
+    resultPayload.controller_invocation_id !== recovery.controller_invocation_id ||
+    resultPayload.controller_invoked_at !== recovery.controller_invoked_at ||
+    submission.record.event_type !== "workflow-lifecycle-submitted" ||
+    submissionPayload.action !== "resume" ||
+    submissionPayload.retry_failed !== true ||
+    submissionPayload.workflow_run_id !== recovery.workflow_run_id ||
+    submissionPayload.workflow_link_id !== recovery.workflow_link_id ||
+    submissionPayload.control_generation !== recovery.control_generation ||
+    submissionPayload.controller_invocation_id !== recovery.controller_invocation_id ||
+    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at
+  ) {
+    return false;
+  }
+
+  // A completed recovery remains stable across read-only synchronization, but
+  // any later lifecycle action consumes its authority. A new retry-failed
+  // action must establish a new exact recovery disposition of its own.
+  return !records.some(
+    (record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking"
+  );
 }
 
 function synchronizationBudgetDiagnostic(
@@ -3952,10 +3971,7 @@ function finalRunStatus(
   currentStatus: RunStatus,
   options: {
     evidenceComplete: boolean;
-    recovery?: RunRecoveryProvenance;
-    workflowRunId?: string;
-    workflowLinkId?: string;
-    controlGeneration?: string;
+    recoveredAggregateAuthorized?: boolean;
   } = { evidenceComplete: true }
 ): RunStatus {
   const statuses = [...nodeStatuses.values()];
@@ -3982,16 +3998,7 @@ function finalRunStatus(
   }
   if (
     inspect.exhaustedLoops.length > 0 ||
-    (workflowStatus === "failed" &&
-      !(
-        options.recovery?.prior_status === "failed" &&
-        options.recovery.workflow_run_id === options.workflowRunId &&
-        options.recovery.workflow_link_id === options.workflowLinkId &&
-        options.recovery.control_generation === options.controlGeneration &&
-        options.evidenceComplete &&
-        statuses.length > 0 &&
-        statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
-      )) ||
+    (workflowStatus === "failed" && options.recoveredAggregateAuthorized !== true) ||
     statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -4009,13 +4016,7 @@ function finalRunStatus(
       ? "succeeded"
       : "failed";
   }
-  if (
-    options.recovery?.prior_status === "failed" &&
-    options.evidenceComplete &&
-    statuses.length > 0 &&
-    statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
-  )
-    return "succeeded";
+  if (workflowStatus === "failed" && options.recoveredAggregateAuthorized === true) return "succeeded";
   return currentStatus;
 }
 
@@ -4027,13 +4028,7 @@ function finalRunStatus(
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
-  options: {
-    evidenceComplete: boolean;
-    recovery?: RunRecoveryProvenance;
-    workflowRunId?: string;
-    workflowLinkId?: string;
-    controlGeneration?: string;
-  }
+  recoveredAggregateAuthorized: boolean
 ): UnattributedWorkflowFailureDiagnostic | undefined {
   const workflowState = inspect.runState;
   if (workflowState !== "failed") {
@@ -4043,15 +4038,7 @@ function unattributedTerminalWorkflowFailure(
   if (statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
     return undefined;
   }
-  if (
-    options.recovery?.prior_status === "failed" &&
-    options.recovery.workflow_run_id === options.workflowRunId &&
-    options.recovery.workflow_link_id === options.workflowLinkId &&
-    options.recovery.control_generation === options.controlGeneration &&
-    options.evidenceComplete &&
-    statuses.length > 0 &&
-    statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run")
-  ) {
+  if (recoveredAggregateAuthorized) {
     return undefined;
   }
   const failedWorkflowTasks = inspect.failedWorkflowTaskIds;

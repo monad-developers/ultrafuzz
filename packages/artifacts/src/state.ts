@@ -172,10 +172,23 @@ export interface RunRecoveryProvenance {
   recovered: boolean;
   recovered_at?: string;
   prior_status: "failed";
-  failed_nodes: Array<{ node_id: string; failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number] }>;
+  failed_nodes: Array<{
+    node_id: string;
+    workflow_task_id: string;
+    failed_attempt: number;
+    failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  }>;
+  source_workflow_run_id: string;
+  source_workflow_link_id: string;
   workflow_run_id: string;
   workflow_link_id: string;
   control_generation: string;
+  controller_invocation_id: string;
+  controller_invoked_at: string;
+  lifecycle_result_event_id: string;
+  lifecycle_result_at: string;
+  lifecycle_submission_event_id: string;
+  lifecycle_submitted_at: string;
 }
 
 export interface TaskNodeWorkflowProvenance {

@@ -1969,10 +1969,25 @@ test("run-state v5 JSON Schema and Zod agree on every closed provenance variant"
     recovered: true,
     recovered_at: "2026-08-15T00:00:00.000Z",
     prior_status: "failed",
-    failed_nodes: [{ node_id: "node-1", failure_category: "agent-failure" }],
+    failed_nodes: [
+      {
+        node_id: "node-1",
+        workflow_task_id: "node:node-1",
+        failed_attempt: 1,
+        failure_category: "agent-failure"
+      }
+    ],
+    source_workflow_run_id: "workflow-1",
+    source_workflow_link_id: "00000000-0000-4000-8000-000000000001",
     workflow_run_id: "workflow-1",
     workflow_link_id: "00000000-0000-4000-8000-000000000001",
-    control_generation: "c".repeat(64)
+    control_generation: "c".repeat(64),
+    controller_invocation_id: "evt-111111111111111111111111",
+    controller_invoked_at: "2026-08-15T00:00:00.000Z",
+    lifecycle_result_event_id: "evt-222222222222222222222222",
+    lifecycle_result_at: "2026-08-15T00:00:01.000Z",
+    lifecycle_submission_event_id: "evt-333333333333333333333333",
+    lifecycle_submitted_at: "2026-08-15T00:00:02.000Z"
   };
   const cases: Array<{ label: string; value: unknown; expected: boolean }> = [
     {

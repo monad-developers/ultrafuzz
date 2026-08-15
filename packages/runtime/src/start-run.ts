@@ -440,47 +440,63 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     const stateBeforeLifecycle = readRunState(evidence.layout);
+    let recoveryCandidate:
+      | {
+          failedNodes: RunRecoveryProvenance["failed_nodes"];
+          sourceWorkflowRunId: string;
+          sourceWorkflowLinkId: string;
+        }
+      | undefined;
     if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
-      const failedNodes = Object.values(stateBeforeLifecycle.nodes)
-        .filter((node) => node.status === "failed" || node.status === "timed-out")
-        .map((node) => {
-          const provenance = node.provenance as Record<string, unknown> | undefined;
-          const failure = provenance?.failure as Record<string, unknown> | undefined;
-          const category = failure?.category;
-          const failureCategory: RunRecoveryProvenance["failed_nodes"][number]["failure_category"] =
-            category === "dependency-cascade"
-              ? "dependency-cascade"
-              : category === "artifact-contract"
-                ? "artifact-contract"
-                : category === "provider-interruption" || node.status === "timed-out"
-                  ? "provider-interruption"
-                  : "agent-failure";
-          return { node_id: node.node_id, failure_category: failureCategory };
-        });
-      if (failedNodes.length > 0) {
-        const priorRecovery = stateBeforeLifecycle.provenance?.recovery;
-        const recoveryHistory = [
-          ...(stateBeforeLifecycle.provenance?.recovery_history ?? []),
-          ...(priorRecovery === undefined ? [] : [priorRecovery])
-        ];
-        writeRunState(evidence.layout, {
-          ...stateBeforeLifecycle,
-          provenance: {
-            ...stateBeforeLifecycle.provenance!,
-            recovery_history: recoveryHistory,
-            recovery: {
-              recovery_id: crypto.randomUUID(),
-              recovered: false,
-              prior_status: "failed",
-              failed_nodes: failedNodes,
-              workflow_run_id: evidence.smithersRunId,
-              workflow_link_id: evidence.workflowLinkId,
-              control_generation: evidence.controlGeneration
-            }
-          }
+      const failedNodes: RunRecoveryProvenance["failed_nodes"] = [];
+      let completeAttemptAuthority = true;
+      for (const node of Object.values(stateBeforeLifecycle.nodes).filter(
+        (candidate) => candidate.status === "failed" || candidate.status === "timed-out"
+      )) {
+        const provenance = node.provenance as Record<string, unknown> | undefined;
+        const workflow = provenance?.workflow as Record<string, unknown> | undefined;
+        const workflowTaskId = workflow?.task_id;
+        const failedAttempt = workflow?.attempt;
+        if (
+          typeof workflowTaskId !== "string" ||
+          workflowTaskId.length === 0 ||
+          typeof failedAttempt !== "number" ||
+          !Number.isSafeInteger(failedAttempt) ||
+          failedAttempt < 0
+        ) {
+          // A multi-attempt concrete node is only a projection over its
+          // authoritative task attempts. Any other missing task/attempt
+          // identity makes this recovery fail closed.
+          if (Array.isArray(workflow?.aggregate_attempt_statuses)) continue;
+          completeAttemptAuthority = false;
+          break;
+        }
+        const failure = provenance?.failure as Record<string, unknown> | undefined;
+        const category = failure?.category;
+        const failureCategory: RunRecoveryProvenance["failed_nodes"][number]["failure_category"] =
+          category === "dependency-cascade"
+            ? "dependency-cascade"
+            : category === "artifact-contract"
+              ? "artifact-contract"
+              : category === "provider-interruption" || node.status === "timed-out"
+                ? "provider-interruption"
+                : "agent-failure";
+        failedNodes.push({
+          node_id: node.node_id,
+          workflow_task_id: workflowTaskId,
+          failed_attempt: failedAttempt,
+          failure_category: failureCategory
         });
       }
+      if (completeAttemptAuthority && failedNodes.length > 0) {
+        recoveryCandidate = {
+          failedNodes,
+          sourceWorkflowRunId: evidence.smithersRunId,
+          sourceWorkflowLinkId: evidence.workflowLinkId
+        };
+      }
     }
+    const retryFailedLifecycle = action === "resume" && input.retryFailed === true;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: sealedConfig,
@@ -501,7 +517,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         action,
         workflow_run_id: evidence.smithersRunId,
         control_generation: evidence.controlGeneration,
-        workflow_link_id: evidence.workflowLinkId
+        workflow_link_id: evidence.workflowLinkId,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {})
       }
     });
     const lifecycleResult = await runSmithersLifecycleCommand({
@@ -543,7 +560,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         workflow_run_id: workflowRunId,
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
-        controller_invoked_at: controllerInvocation.timestamp
+        controller_invoked_at: controllerInvocation.timestamp,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {})
       }
     });
     const linkedWorkflow = await updateLinkedWorkflowRunId(evidence.layout, workflowRunId, {
@@ -575,7 +593,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       writeRunState(evidence.layout, state);
     }
     updateRunStatus(evidence.layout, "running", submittedAt);
-    appendEvent(evidence.layout, {
+    const lifecycleSubmissionEvent = appendEvent(evidence.layout, {
       eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",
       status: "running",
       payload: {
@@ -585,10 +603,42 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
         controller_invoked_at: controllerInvocation.timestamp,
+        ...(retryFailedLifecycle ? { retry_failed: true } : {}),
         ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
+    if (recoveryCandidate !== undefined && !lifecycleResult.alreadyRunning) {
+      const state = readRunState(evidence.layout);
+      const priorRecovery = state.provenance?.recovery;
+      writeRunState(evidence.layout, {
+        ...state,
+        provenance: {
+          ...state.provenance!,
+          recovery_history: [
+            ...(state.provenance?.recovery_history ?? []),
+            ...(priorRecovery === undefined ? [] : [priorRecovery])
+          ],
+          recovery: {
+            recovery_id: crypto.randomUUID(),
+            recovered: false,
+            prior_status: "failed",
+            failed_nodes: recoveryCandidate.failedNodes,
+            source_workflow_run_id: recoveryCandidate.sourceWorkflowRunId,
+            source_workflow_link_id: recoveryCandidate.sourceWorkflowLinkId,
+            workflow_run_id: workflowRunId,
+            workflow_link_id: linkedWorkflow.link_id,
+            control_generation: evidence.controlGeneration,
+            controller_invocation_id: controllerInvocation.event_id,
+            controller_invoked_at: controllerInvocation.timestamp,
+            lifecycle_result_event_id: lifecycleResultEvent.event_id,
+            lifecycle_result_at: lifecycleResultEvent.timestamp,
+            lifecycle_submission_event_id: lifecycleSubmissionEvent.event_id,
+            lifecycle_submitted_at: lifecycleSubmissionEvent.timestamp
+          }
+        }
+      });
+    }
     return runtimeResult(true, {
       run_id: input.runId,
       workflow_run_id: workflowRunId,
@@ -1156,17 +1206,7 @@ function writeLinkedWorkflowBinding(
       runId: link.workflow_run_id,
       controlGeneration: link.control_generation,
       linkId: link.link_id
-    },
-    ...(existingProvenance.recovery === undefined || existingProvenance.recovery.recovered
-      ? {}
-      : {
-          recovery: {
-            ...existingProvenance.recovery,
-            workflow_run_id: link.workflow_run_id,
-            workflow_link_id: link.link_id,
-            control_generation: link.control_generation
-          }
-        })
+    }
   };
   writeRunState(layout, state);
 }

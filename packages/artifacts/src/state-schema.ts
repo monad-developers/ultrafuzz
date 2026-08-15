@@ -53,11 +53,26 @@ const runRecoveryProvenanceSchema = z
     recovered_at: canonicalTimestampSchema.optional(),
     prior_status: z.literal("failed"),
     failed_nodes: z
-      .array(z.strictObject({ node_id: nonEmptyString, failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES) }))
+      .array(
+        z.strictObject({
+          node_id: nonEmptyString,
+          workflow_task_id: nonEmptyString,
+          failed_attempt: nonNegativeInteger,
+          failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES)
+        })
+      )
       .min(1),
+    source_workflow_run_id: nonEmptyString,
+    source_workflow_link_id: canonicalUuidSchema,
     workflow_run_id: nonEmptyString,
     workflow_link_id: canonicalUuidSchema,
-    control_generation: sha256
+    control_generation: sha256,
+    controller_invocation_id: nonEmptyString,
+    controller_invoked_at: canonicalTimestampSchema,
+    lifecycle_result_event_id: nonEmptyString,
+    lifecycle_result_at: canonicalTimestampSchema,
+    lifecycle_submission_event_id: nonEmptyString,
+    lifecycle_submitted_at: canonicalTimestampSchema
   })
   .superRefine((value, context) => {
     if (value.recovered && value.recovered_at === undefined) {
@@ -480,9 +495,17 @@ export const runStateJsonSchema = {
         "recovered",
         "prior_status",
         "failed_nodes",
+        "source_workflow_run_id",
+        "source_workflow_link_id",
         "workflow_run_id",
         "workflow_link_id",
-        "control_generation"
+        "control_generation",
+        "controller_invocation_id",
+        "controller_invoked_at",
+        "lifecycle_result_event_id",
+        "lifecycle_result_at",
+        "lifecycle_submission_event_id",
+        "lifecycle_submitted_at"
       ],
       additionalProperties: false,
       properties: {
@@ -495,17 +518,27 @@ export const runStateJsonSchema = {
           minItems: 1,
           items: {
             type: "object",
-            required: ["node_id", "failure_category"],
+            required: ["node_id", "workflow_task_id", "failed_attempt", "failure_category"],
             additionalProperties: false,
             properties: {
               node_id: { type: "string", minLength: 1 },
+              workflow_task_id: { type: "string", minLength: 1 },
+              failed_attempt: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
               failure_category: { enum: NODE_PROVENANCE_FAILURE_CATEGORIES }
             }
           }
         },
+        source_workflow_run_id: { type: "string", minLength: 1 },
+        source_workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
         workflow_run_id: { type: "string", minLength: 1 },
         workflow_link_id: { $ref: "#/$defs/runWorkflowProvenance/properties/linkId" },
-        control_generation: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" }
+        control_generation: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" },
+        controller_invocation_id: { type: "string", minLength: 1 },
+        controller_invoked_at: { $ref: "#/properties/created_at" },
+        lifecycle_result_event_id: { type: "string", minLength: 1 },
+        lifecycle_result_at: { $ref: "#/properties/created_at" },
+        lifecycle_submission_event_id: { type: "string", minLength: 1 },
+        lifecycle_submitted_at: { $ref: "#/properties/created_at" }
       },
       allOf: [
         {

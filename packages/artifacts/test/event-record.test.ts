@@ -63,7 +63,14 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
     event("run-recovered", "succeeded", {
       recovery_id: LINK_ID,
       prior_status: "failed",
-      failed_nodes: [{ node_id: "node-1", failure_category: "agent-failure" }]
+      failed_nodes: [
+        {
+          node_id: "node-1",
+          workflow_task_id: "node:node-1",
+          failed_attempt: 1,
+          failure_category: "agent-failure"
+        }
+      ]
     }),
     event("workflow-deadline-exceeded", "timed-out", {
       workflow_run_id: "workflow-1",
