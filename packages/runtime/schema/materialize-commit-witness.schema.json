@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:materialize-commit-witness:1",
+  "title": "Ultrafuzz materialization durable commit witness",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "witness_id",
+    "audit_id",
+    "intent_id",
+    "run_id",
+    "committed_at",
+    "commit_nonce",
+    "commit_witness_device",
+    "commit_witness_inode",
+    "intent_sha256",
+    "completion_sha256",
+    "copies_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.materialize.commit-witness.v1" },
+    "witness_id": { "type": "string", "format": "uuid" },
+    "audit_id": { "type": "string", "format": "uuid" },
+    "intent_id": { "type": "string", "format": "uuid" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "committed_at": { "type": "string", "format": "date-time" },
+    "commit_nonce": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "commit_witness_device": { "type": "string", "pattern": "^[0-9]+$" },
+    "commit_witness_inode": { "type": "string", "pattern": "^[0-9]+$" },
+    "intent_sha256": { "$ref": "#/$defs/sha256" },
+    "completion_sha256": { "$ref": "#/$defs/sha256" },
+    "copies_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}
