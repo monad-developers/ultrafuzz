@@ -13,7 +13,6 @@ import {
   readRunMetadataDocument,
   safeResolveInside,
   sha256Bytes,
-  validateSafeId,
   validateSafeIdOrThrow,
   type StrictJsonlCodec,
   type StrictJsonlSnapshot
