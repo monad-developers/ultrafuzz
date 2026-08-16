@@ -562,8 +562,18 @@ submission, repository mutation, or patch application.
 verification of the authenticated JSON/Markdown pair, agent-produced model
 consensus, executable-reproduction evidence (which the command does not replay),
 and durable human acceptance. Human acceptance is reported only when a current
-materialization audit signoff binds the exact final-report digest; schema-valid
-or quorum-supported model output is never labelled human-approved.
+materialization audit signoff binds the exact final-report digest, the
+completion exactly matches its durable write-ahead intent, and every selected
+destination is still the singly linked mode-0600 regular file with the recorded
+bounded size and SHA-256. All selected destination descriptors remain held
+through the set-wide digest and content-generation fence. Those set-wide checks
+are sequential point-in-time observations, not an atomic filesystem snapshot.
+The external signature authorizes the exact bytes observed when `report` runs;
+mutable project-owned evidence does not independently prove which process wrote
+those bytes or establish their chronology. Audit-only, intent-only,
+missing-witness, invalid-witness, missing-destination, and
+tampered-destination evidence is never labelled human-approved; neither is
+schema-valid or quorum-supported model output.
 
 ## Materialization
 
@@ -619,6 +629,76 @@ Materialization writes an audit record to:
 ```text
 .ultrafuzz/materialize-audit.jsonl
 ```
+
+For a non-dry-run operation, the exact selection is first appended and
+synchronized as a versioned write-ahead intent under:
+
+```text
+.ultrafuzz/materialize-intent.jsonl
+```
+
+Only an operation that reaches the completion-audit boundary enters
+`materialize-audit.jsonl`; the intent ID and completed audit ID are the same
+UUID. The intent records each selected destination, byte length, and reviewed
+digest as a bounded recovery manifest of intended paths and expected bytes.
+Overwriting is rejected: portable Node APIs cannot
+compare-and-swap an exact destination inode while unrestricted same-user agents
+can race pathnames. Agent YOLO mode otherwise remains unchanged.
+
+Before exposing the intent, the runtime reserves
+`.ultrafuzz/materialize-commits/<intent-id>.json` with exclusive, no-follow,
+mode-0600 creation and retains its descriptor. The intent and completion bind a
+fresh nonce commitment plus the reserved file's device and inode. A matching
+completion audit is not committed by itself. Only after the completion audit,
+intent, complete destination set, and all content-generation fences are current
+does the runtime write, synchronize, and prove a canonical commit witness
+through that original descriptor. The witness reveals the nonce and binds the
+exact intent, completion, and copy-set digests. Missing, empty, partial,
+noncanonical, replaced, or otherwise invalid witness evidence fails the
+current-state commit gate. Because all lifecycle evidence is project-owned,
+witness validity does not prove that the materialize API returned success or
+prevent same-UID post-failure reconstruction.
+
+Final destinations are published directly through held parent-directory
+descriptors with exclusive, no-follow mode-0600 creation. Once an exclusive
+open succeeds, the runtime retains that file descriptor even if a later write,
+synchronization, digest check, completion-audit append, or commit-witness write
+fails. It does not rename, delete, truncate, or roll back a final destination.
+Instead, failures report bounded descriptor-anchored identity, path, size,
+mode, and digest evidence for explicit operator recovery. If a current file has
+grown beyond its reviewed size, recovery records the size mismatch without
+reading or hashing its contents. This is forensic evidence from held
+descriptors, not a guarantee that a same-UID process cannot rename or unlink a
+pathname, make an inode lexically unreachable, or mutate project-owned bytes.
+
+Both journals are appended through one held `O_APPEND` descriptor. Existing
+history is parsed before the write, preexisting IDs are rejected even when the
+record is byte-for-byte identical, and success requires exact
+`prior bytes + payload` reconciliation after file and parent synchronization.
+If the write call throws after the exact append reached the held inode, the
+runtime accepts it only after the same full strict parse, identity,
+content-generation, file-sync, and parent-sync proof and emits a reconciled
+warning. Partial, absent, extra, or otherwise unverifiable bytes remain a hard
+failure. The exact intent inode stays held from its postcheck through
+publication and commit. Its current path, bytes, and generation, the exact audit
+inode, and every destination's bytes and generation are rechecked before the
+commit witness is written. These are sequentially fenced observations rather
+than an atomic multi-file snapshot. Non-dry-run transactions are limited to 128
+copies and 64 MiB. Across all intents without a matching exact completion and
+valid commit witness, selected bytes are limited to 64 MiB and copy entries to
+1,024; invalid or empty witness reservations also consume bounded reservation
+capacity. Capacity is checked before and after the durable intent so concurrent
+appends fail closed before destination publication.
+
+An intent without a matching completed audit and valid commit witness identifies
+an operation that was rejected, interrupted, or requires recovery while
+retaining its exact selected paths and reviewed digests. A close failure after
+the exact commit witness has been proven is reported as a warning rather than
+turning a committed operation into an API failure. The existing
+`ultrafuzz.materialize.audit.v1` record remains a completion record; commit
+status is established by the separate witness contract. Historical v1
+completion records without witness bindings remain readable for compatibility,
+but they cannot satisfy the current-state commit or human-acceptance gates.
 
 ## Cleanup
 

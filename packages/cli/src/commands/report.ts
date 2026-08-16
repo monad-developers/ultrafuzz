@@ -1,20 +1,37 @@
+import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { Args, Command } from "@oclif/core";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
+  DEFAULT_STRICT_JSONL_MAX_BYTES,
   layoutForRunRoot,
+  parseStrictJsonBytes,
+  parseStrictJsonlBytes,
   readRunMetadataDocument,
-  validateSafeIdOrThrow
+  safeResolveInside,
+  sha256Bytes,
+  validateSafeId,
+  validateSafeIdOrThrow,
+  type StrictJsonlCodec,
+  type StrictJsonlSnapshot
 } from "@ultrafuzz/artifacts";
 import {
   DATA_GOVERNANCE_POLICY_ENV,
+  MAX_MATERIALIZE_COMMIT_WITNESS_BYTES,
   loadOperatorAuthenticatedMaterializeReviewAuthorities,
+  materializeCommitWitnessMatches,
+  materializeAuditCodec,
+  materializeIntentCodec,
+  parseMaterializeCommitWitness,
   recordedMaterializeReviewSignoffRequest,
-  readMaterializeAuditJournal,
   runsRootForProject,
   verifyRecordedMaterializeReviewSignoff,
+  type MaterializeAuditRecord,
+  type MaterializeCommitWitness,
+  type MaterializeIntentRecord,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
 
@@ -29,6 +46,33 @@ interface ExpectedAccounting {
   estimated_spend?: string;
   partial_pricing?: boolean;
 }
+
+interface OpenedReportAssuranceDirectory {
+  descriptor: number;
+  projectRoot: string;
+  lexicalPath: string;
+  accessPath: string;
+  identity: fs.BigIntStats;
+}
+
+interface StableReportAssuranceSnapshot {
+  bytes: Buffer;
+  generation: fs.BigIntStats;
+}
+
+interface OpenedAcceptedMaterializeDestination {
+  descriptor: number;
+  directory: OpenedReportAssuranceDirectory;
+  accessPath: string;
+  destination: string;
+  expectedSize: number;
+  expectedSha256: string;
+  identity: fs.BigIntStats;
+  verifiedGeneration?: fs.BigIntStats;
+}
+
+const MAX_ACCEPTED_MATERIALIZE_COPIES = 128;
+const MAX_ACCEPTED_MATERIALIZE_BYTES = 64 * 1024 * 1024;
 
 export default class Report extends Command {
   static override summary = "Show the agent-written final report for a run";
@@ -86,7 +130,16 @@ function reportAssuranceDiagnostics(
   let invalidSignoff = false;
   try {
     const layout = layoutForRunRoot(runRoot, runId);
-    const audit = readMaterializeAuditJournal(path.join(projectRoot, ".ultrafuzz", "materialize-audit.jsonl"));
+    const audit = readAnchoredReportAssuranceJournal(
+      projectRoot,
+      path.join(projectRoot, ".ultrafuzz", "materialize-audit.jsonl"),
+      materializeAuditCodec
+    );
+    const intents = readAnchoredReportAssuranceJournal(
+      projectRoot,
+      path.join(projectRoot, ".ultrafuzz", "materialize-intent.jsonl"),
+      materializeIntentCodec
+    );
     const candidates = audit.records.filter(
       (record) =>
         record.run_id === runId &&
@@ -116,6 +169,7 @@ function reportAssuranceDiagnostics(
     for (const record of candidates) {
       if (authorities.length === 0) break;
       try {
+        assertAcceptedMaterializeLifecycle(projectRoot, record, intents.records);
         const expected = recordedMaterializeReviewSignoffRequest({
           projectRoot,
           layout,
@@ -187,7 +241,7 @@ function reportAssuranceDiagnostics(
             {
               code: "REPORT_ASSURANCE_SIGNOFF_INVALID",
               message:
-                "a materialization audit claimed human acceptance but failed authority, binding, digest, or signature verification",
+                "a materialization audit claimed human acceptance but failed intent, current-destination, authority, binding, digest, or signature verification",
               severity: "warning" as const,
               source: "report"
             }
@@ -195,6 +249,516 @@ function reportAssuranceDiagnostics(
         : [])
     ]
   };
+}
+
+function assertAcceptedMaterializeLifecycle(
+  projectRoot: string,
+  completion: MaterializeAuditRecord,
+  intents: readonly MaterializeIntentRecord[]
+): void {
+  const intent = intents.find((record) => record.intent_id === completion.audit_id);
+  if (intent === undefined) {
+    throw new Error(`materialize completion ${completion.audit_id} has no matching durable intent`);
+  }
+  const witness = readAnchoredReportAssuranceCommitWitness(projectRoot, completion.audit_id);
+  if (!materializeCommitWitnessMatches(witness, intent, completion)) {
+    throw new Error(`materialize completion ${completion.audit_id} has no exact durable commit witness`);
+  }
+  const expectedCompletion = {
+    run_id: intent.run_id,
+    timestamp: intent.timestamp,
+    operation: intent.operation,
+    mode: intent.mode,
+    unstaged: intent.unstaged,
+    confirmed: intent.confirmed,
+    allow_overwrite: intent.allow_overwrite,
+    commit_nonce_sha256: intent.commit_nonce_sha256,
+    commit_witness_device: intent.commit_witness_device,
+    commit_witness_inode: intent.commit_witness_inode,
+    copies: intent.copies,
+    patches: intent.patches
+  };
+  const actualCompletion = {
+    run_id: completion.run_id,
+    timestamp: completion.timestamp,
+    operation: completion.operation,
+    mode: completion.mode,
+    unstaged: completion.unstaged,
+    confirmed: completion.confirmed,
+    allow_overwrite: completion.allow_overwrite,
+    commit_nonce_sha256: completion.commit_nonce_sha256,
+    commit_witness_device: completion.commit_witness_device,
+    commit_witness_inode: completion.commit_witness_inode,
+    copies: completion.copies,
+    patches: completion.patches
+  };
+  if (!isDeepStrictEqual(actualCompletion, expectedCompletion)) {
+    throw new Error(`materialize completion ${completion.audit_id} does not exactly match its durable intent`);
+  }
+  if (completion.allow_overwrite || completion.copies.length === 0) {
+    throw new Error("accepted materialization evidence must be a non-empty create-only copy transaction");
+  }
+  if (completion.copies.length > MAX_ACCEPTED_MATERIALIZE_COPIES) {
+    throw new Error(`accepted materialization exceeds ${MAX_ACCEPTED_MATERIALIZE_COPIES} copies`);
+  }
+  const aggregateBytes = completion.copies.reduce((total, copy) => total + BigInt(copy.size_bytes), 0n);
+  if (aggregateBytes > BigInt(MAX_ACCEPTED_MATERIALIZE_BYTES)) {
+    throw new Error(`accepted materialization exceeds ${MAX_ACCEPTED_MATERIALIZE_BYTES} bytes`);
+  }
+
+  const destinations = new Set<string>();
+  const selectedDestinations: Array<{
+    destination: string;
+    expectedSize: number;
+    expectedSha256: string;
+  }> = [];
+  for (const copy of completion.copies) {
+    const destination = safeResolveInside(projectRoot, copy.destination, "accepted materialize destination");
+    const relative = path.relative(projectRoot, destination).split(path.sep).join("/");
+    if (
+      relative === ".git" ||
+      relative.startsWith(".git/") ||
+      relative === ".ultrafuzz" ||
+      relative.startsWith(".ultrafuzz/")
+    ) {
+      throw new Error(`accepted materialize destination is a protected product path: ${copy.destination}`);
+    }
+    if (destinations.has(destination)) {
+      throw new Error(`accepted materialize destination resolves more than once: ${copy.destination}`);
+    }
+    destinations.add(destination);
+    selectedDestinations.push({
+      destination,
+      expectedSize: copy.size_bytes,
+      expectedSha256: copy.sha256
+    });
+  }
+  assertCurrentAcceptedMaterializeDestinations(projectRoot, selectedDestinations);
+}
+
+function readAnchoredReportAssuranceCommitWitness(projectRoot: string, auditId: string): MaterializeCommitWitness {
+  const directory = openReportAssuranceDirectory(
+    projectRoot,
+    path.join(projectRoot, ".ultrafuzz", "materialize-commits")
+  );
+  const accessPath = path.join(directory.accessPath, `${auditId}.json`);
+  let descriptor: number | undefined;
+  let result: MaterializeCommitWitness | undefined;
+  let failure: unknown;
+  try {
+    descriptor = fs.openSync(accessPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const initial = assertAnchoredReportAssuranceFile(descriptor, accessPath, "materialize commit witness");
+    if (initial.size > BigInt(MAX_MATERIALIZE_COMMIT_WITNESS_BYTES) || (initial.mode & 0o7777n) !== 0o600n) {
+      throw new Error("materialize commit witness exceeds its byte bound or is not mode 0600");
+    }
+    const captured = captureStableReportAssuranceDescriptor(
+      descriptor,
+      MAX_MATERIALIZE_COMMIT_WITNESS_BYTES,
+      "materialize commit witness"
+    );
+    const parsed = parseMaterializeCommitWitness(
+      parseStrictJsonBytes(captured.bytes, {
+        maxBytes: MAX_MATERIALIZE_COMMIT_WITNESS_BYTES,
+        maxDepth: 8,
+        maxItems: 16,
+        maxProperties: 32
+      })
+    );
+    if (
+      initial.dev.toString() !== parsed.commit_witness_device ||
+      initial.ino.toString() !== parsed.commit_witness_inode
+    ) {
+      throw new Error("materialize commit witness content does not bind its held inode identity");
+    }
+    if (!captured.bytes.equals(Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8"))) {
+      throw new Error("materialize commit witness is not canonical JSON with one trailing newline");
+    }
+    assertAnchoredReportAssuranceFile(descriptor, accessPath, "materialize commit witness", initial);
+    assertReportAssuranceDirectoryCurrent(directory);
+    assertAnchoredReportAssuranceFileGeneration(
+      descriptor,
+      accessPath,
+      "materialize commit witness",
+      captured.generation
+    );
+    assertReportAssuranceDirectoryCurrent(directory);
+    result = parsed;
+  } catch (error) {
+    failure = error;
+  }
+  if (descriptor !== undefined) {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      failure = aggregateReportAssuranceFailure(failure, error, "failed to close materialize commit witness");
+    }
+  }
+  try {
+    closeReportAssuranceDirectory(directory);
+  } catch (error) {
+    failure = aggregateReportAssuranceFailure(failure, error, "failed to close materialize commit witness directory");
+  }
+  if (failure !== undefined) throw failure;
+  if (result === undefined) throw new Error("materialize commit witness produced no anchored assurance snapshot");
+  return result;
+}
+
+function assertCurrentAcceptedMaterializeDestinations(
+  projectRoot: string,
+  selected: ReadonlyArray<{ destination: string; expectedSize: number; expectedSha256: string }>
+): void {
+  const opened: OpenedAcceptedMaterializeDestination[] = [];
+  let failure: unknown;
+  try {
+    for (const destination of selected) {
+      opened.push(openAcceptedMaterializeDestination(projectRoot, destination));
+    }
+    for (const destination of opened) verifyAcceptedMaterializeDestination(destination);
+    for (const destination of opened) assertAcceptedMaterializeDestinationGeneration(destination);
+  } catch (error) {
+    failure = error;
+  }
+  for (const destination of opened) {
+    if (destination.descriptor >= 0) {
+      const descriptor = destination.descriptor;
+      destination.descriptor = -1;
+      try {
+        fs.closeSync(descriptor);
+      } catch (error) {
+        failure = aggregateReportAssuranceFailure(failure, error, "failed to close accepted destination");
+      }
+    }
+  }
+  for (const destination of opened) {
+    try {
+      closeReportAssuranceDirectory(destination.directory);
+    } catch (error) {
+      failure = aggregateReportAssuranceFailure(failure, error, "failed to close accepted destination directory");
+    }
+  }
+  if (failure !== undefined) throw failure;
+}
+
+function openAcceptedMaterializeDestination(
+  projectRoot: string,
+  selected: { destination: string; expectedSize: number; expectedSha256: string }
+): OpenedAcceptedMaterializeDestination {
+  const { destination, expectedSize, expectedSha256 } = selected;
+  const directory = openReportAssuranceDirectory(projectRoot, path.dirname(destination));
+  const accessPath = path.join(directory.accessPath, path.basename(destination));
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(accessPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const identity = assertAnchoredReportAssuranceFile(descriptor, accessPath, "accepted materialize destination");
+    if (identity.size !== BigInt(expectedSize) || (identity.mode & 0o7777n) !== 0o600n) {
+      throw new Error("accepted materialize destination size or mode differs from the completed operation");
+    }
+    assertReportAssuranceDirectoryCurrent(directory);
+    return { descriptor, directory, accessPath, destination, expectedSize, expectedSha256, identity };
+  } catch (error) {
+    let failure: unknown = error;
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch (closeError) {
+        failure = aggregateReportAssuranceFailure(failure, closeError, "failed to close accepted destination");
+      }
+    }
+    try {
+      closeReportAssuranceDirectory(directory);
+    } catch (closeError) {
+      failure = aggregateReportAssuranceFailure(failure, closeError, "failed to close accepted destination directory");
+    }
+    throw failure;
+  }
+}
+
+function verifyAcceptedMaterializeDestination(destination: OpenedAcceptedMaterializeDestination): void {
+  const captured = captureStableReportAssuranceDescriptor(
+    destination.descriptor,
+    MAX_ACCEPTED_MATERIALIZE_BYTES,
+    "accepted materialize destination"
+  );
+  if (!sameReportAssuranceFileGeneration(destination.identity, captured.generation)) {
+    throw new Error("accepted materialize destination changed before its exact-byte proof completed");
+  }
+  if (sha256Bytes(captured.bytes) !== destination.expectedSha256) {
+    throw new Error("accepted materialize destination digest differs from the completed operation");
+  }
+  assertReportAssuranceDirectoryCurrent(destination.directory);
+  const final = assertAnchoredReportAssuranceFileGeneration(
+    destination.descriptor,
+    destination.accessPath,
+    "accepted materialize destination",
+    captured.generation
+  );
+  if (final.size !== BigInt(destination.expectedSize) || (final.mode & 0o7777n) !== 0o600n) {
+    throw new Error("accepted materialize destination changed while assurance was verified");
+  }
+  assertReportAssuranceDirectoryCurrent(destination.directory);
+  destination.verifiedGeneration = final;
+}
+
+function assertAcceptedMaterializeDestinationGeneration(destination: OpenedAcceptedMaterializeDestination): void {
+  if (destination.verifiedGeneration === undefined) {
+    throw new Error("accepted materialize destination has no exact-byte generation proof");
+  }
+  assertReportAssuranceDirectoryCurrent(destination.directory);
+  assertAnchoredReportAssuranceFileGeneration(
+    destination.descriptor,
+    destination.accessPath,
+    "accepted materialize destination",
+    destination.verifiedGeneration
+  );
+  assertReportAssuranceDirectoryCurrent(destination.directory);
+}
+
+function readAnchoredReportAssuranceJournal<RecordType>(
+  projectRoot: string,
+  journalPath: string,
+  codec: StrictJsonlCodec<RecordType>
+): StrictJsonlSnapshot<RecordType> {
+  const directory = openReportAssuranceDirectory(projectRoot, path.dirname(journalPath));
+  const accessPath = path.join(directory.accessPath, path.basename(journalPath));
+  let descriptor: number | undefined;
+  let result: StrictJsonlSnapshot<RecordType> | undefined;
+  let failure: unknown;
+  try {
+    try {
+      descriptor = fs.openSync(accessPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    } catch (error) {
+      if (!isReportNodeError(error) || error.code !== "ENOENT") throw error;
+      assertReportAssuranceDirectoryCurrent(directory);
+      try {
+        fs.lstatSync(accessPath);
+      } catch (absenceError) {
+        if (!isReportNodeError(absenceError) || absenceError.code !== "ENOENT") throw absenceError;
+        assertReportAssuranceDirectoryCurrent(directory);
+        result = { records: [], byteLength: 0, exists: false };
+      }
+    }
+    if (descriptor !== undefined) {
+      const initial = assertAnchoredReportAssuranceFile(descriptor, accessPath, codec.label);
+      const captured = captureStableReportAssuranceDescriptor(
+        descriptor,
+        codec.maxBytes ?? DEFAULT_STRICT_JSONL_MAX_BYTES,
+        codec.label
+      );
+      result = parseStrictJsonlBytes(captured.bytes, codec);
+      assertAnchoredReportAssuranceFile(descriptor, accessPath, codec.label, initial);
+      assertReportAssuranceDirectoryCurrent(directory);
+      assertAnchoredReportAssuranceFileGeneration(descriptor, accessPath, codec.label, captured.generation);
+      assertReportAssuranceDirectoryCurrent(directory);
+    }
+  } catch (error) {
+    failure = error;
+  }
+  if (descriptor !== undefined) {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      failure = aggregateReportAssuranceFailure(failure, error, `failed to close ${codec.label}`);
+    }
+  }
+  try {
+    closeReportAssuranceDirectory(directory);
+  } catch (error) {
+    failure = aggregateReportAssuranceFailure(failure, error, `failed to close ${codec.label} directory`);
+  }
+  if (failure !== undefined) throw failure;
+  if (result === undefined) throw new Error(`${codec.label} produced no anchored assurance snapshot`);
+  return result;
+}
+
+function openReportAssuranceDirectory(projectRoot: string, targetDirectory: string): OpenedReportAssuranceDirectory {
+  const relative = path.relative(projectRoot, targetDirectory);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("report assurance directory escapes the project root");
+  }
+  let current = openVerifiedReportAssuranceDirectory(projectRoot, projectRoot, "report assurance project root");
+  try {
+    for (const component of relative === "" ? [] : relative.split(path.sep)) {
+      assertReportAssuranceDirectoryCurrent(current);
+      const child = openVerifiedReportAssuranceDirectory(
+        projectRoot,
+        path.join(current.lexicalPath, component),
+        "report assurance directory",
+        path.join(current.accessPath, component)
+      );
+      try {
+        assertReportAssuranceDirectoryCurrent(current);
+        assertReportAssuranceDirectoryCurrent(child);
+        closeReportAssuranceDirectory(current);
+      } catch (error) {
+        closeReportAssuranceDirectory(child);
+        throw error;
+      }
+      current = child;
+    }
+    return current;
+  } catch (error) {
+    closeReportAssuranceDirectory(current);
+    throw error;
+  }
+}
+
+function openVerifiedReportAssuranceDirectory(
+  projectRoot: string,
+  lexicalPath: string,
+  label: string,
+  openPath = lexicalPath
+): OpenedReportAssuranceDirectory {
+  assertNoSymlinkComponents(projectRoot, lexicalPath, label);
+  const descriptor = fs.openSync(openPath, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    const identity = fs.fstatSync(descriptor, { bigint: true });
+    if (!identity.isDirectory()) throw new Error(`${label} is not a physical directory`);
+    const accessPath = reportAssuranceDirectoryDescriptorPath(descriptor, identity);
+    const opened = { descriptor, projectRoot, lexicalPath, accessPath, identity };
+    assertReportAssuranceDirectoryCurrent(opened);
+    return opened;
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
+  }
+}
+
+function reportAssuranceDirectoryDescriptorPath(descriptor: number, identity: fs.BigIntStats): string {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      const accessed = fs.statSync(candidate, { bigint: true });
+      if (accessed.isDirectory() && accessed.dev === identity.dev && accessed.ino === identity.ino) return candidate;
+    } catch {
+      // Continue to the next descriptor filesystem.
+    }
+  }
+  throw new Error("report assurance directory has no verifiable descriptor path");
+}
+
+function assertReportAssuranceDirectoryCurrent(opened: OpenedReportAssuranceDirectory): void {
+  assertNoSymlinkComponents(opened.projectRoot, opened.lexicalPath, "report assurance directory");
+  const descriptor = fs.fstatSync(opened.descriptor, { bigint: true });
+  const lexical = fs.lstatSync(opened.lexicalPath, { bigint: true });
+  const accessed = fs.statSync(opened.accessPath, { bigint: true });
+  if (
+    !descriptor.isDirectory() ||
+    !lexical.isDirectory() ||
+    !accessed.isDirectory() ||
+    descriptor.dev !== opened.identity.dev ||
+    descriptor.ino !== opened.identity.ino ||
+    lexical.dev !== opened.identity.dev ||
+    lexical.ino !== opened.identity.ino ||
+    accessed.dev !== opened.identity.dev ||
+    accessed.ino !== opened.identity.ino
+  ) {
+    throw new Error("report assurance directory changed while it was held");
+  }
+}
+
+function assertAnchoredReportAssuranceFile(
+  descriptor: number,
+  accessPath: string,
+  label: string,
+  expected?: fs.BigIntStats
+): fs.BigIntStats {
+  const opened = fs.fstatSync(descriptor, { bigint: true });
+  const named = fs.lstatSync(accessPath, { bigint: true });
+  if (
+    !opened.isFile() ||
+    !named.isFile() ||
+    opened.nlink !== 1n ||
+    named.nlink !== 1n ||
+    opened.dev !== named.dev ||
+    opened.ino !== named.ino ||
+    (expected !== undefined && (opened.dev !== expected.dev || opened.ino !== expected.ino))
+  ) {
+    throw new Error(`${label} is not the exact singly linked held regular file`);
+  }
+  return opened;
+}
+
+function assertAnchoredReportAssuranceFileGeneration(
+  descriptor: number,
+  accessPath: string,
+  label: string,
+  expected: fs.BigIntStats
+): fs.BigIntStats {
+  const opened = fs.fstatSync(descriptor, { bigint: true });
+  const named = fs.lstatSync(accessPath, { bigint: true });
+  if (
+    !opened.isFile() ||
+    !named.isFile() ||
+    opened.dev !== named.dev ||
+    opened.ino !== named.ino ||
+    !sameReportAssuranceFileGeneration(opened, expected) ||
+    !sameReportAssuranceFileGeneration(named, expected)
+  ) {
+    throw new Error(`${label} content generation changed after its exact-byte proof`);
+  }
+  return opened;
+}
+
+function sameReportAssuranceFileGeneration(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.nlink === right.nlink &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function captureStableReportAssuranceDescriptor(
+  descriptor: number,
+  maxBytes: number,
+  label: string
+): StableReportAssuranceSnapshot {
+  const before = fs.fstatSync(descriptor, { bigint: true });
+  if (!before.isFile() || before.nlink !== 1n || before.size > BigInt(maxBytes)) {
+    throw new Error(`${label} exceeds its bounded regular-file contract`);
+  }
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  for (;;) {
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - offset));
+    const read = fs.readSync(descriptor, chunk, 0, chunk.length, offset);
+    if (read === 0) break;
+    offset += read;
+    if (offset > maxBytes) throw new Error(`${label} exceeds the ${maxBytes}-byte limit`);
+    chunks.push(chunk.subarray(0, read));
+  }
+  const after = fs.fstatSync(descriptor, { bigint: true });
+  if (
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.nlink !== after.nlink ||
+    before.mode !== after.mode ||
+    before.size !== after.size ||
+    before.mtimeNs !== after.mtimeNs ||
+    before.ctimeNs !== after.ctimeNs ||
+    after.size !== BigInt(offset)
+  ) {
+    throw new Error(`${label} changed while it was captured`);
+  }
+  return { bytes: Buffer.concat(chunks, offset), generation: after };
+}
+
+function closeReportAssuranceDirectory(opened: OpenedReportAssuranceDirectory): void {
+  if (opened.descriptor < 0) return;
+  const descriptor = opened.descriptor;
+  opened.descriptor = -1;
+  fs.closeSync(descriptor);
+}
+
+function aggregateReportAssuranceFailure(primary: unknown, secondary: unknown, message: string): unknown {
+  if (primary === undefined) return secondary;
+  return new AggregateError([primary, secondary], message, { cause: secondary });
+}
+
+function isReportNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function reportAccountingDiagnostics(runRoot: string, report: ValidatedReportSnapshot): RuntimeDiagnostic[] {
