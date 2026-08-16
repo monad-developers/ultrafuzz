@@ -116,6 +116,8 @@ export async function startRun(input: StartRunInput) {
       resolvedConfig,
       expandedGraph,
       launchReviewDigest,
+      launchReviewManifest,
+      launchReviewSummary,
       controllerSource,
       targetCommit
     }) => {
@@ -127,7 +129,13 @@ export async function startRun(input: StartRunInput) {
         targetCommit
       );
       if (reviewDiagnostics.length > 0) return reviewDiagnostics;
-      await input.verifyLaunchPlan?.({ resolvedConfig, expandedGraph });
+      await input.verifyLaunchPlan?.({
+        resolvedConfig,
+        expandedGraph,
+        launchReviewDigest,
+        launchReviewManifest,
+        launchReviewSummary
+      });
       const credentialDiagnostics = credentialEnvironmentPolicyDiagnostics(resolvedConfig);
       if (credentialDiagnostics.length > 0) return credentialDiagnostics;
       return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);

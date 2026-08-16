@@ -225,6 +225,9 @@ export interface StartRunInput extends PlanRunInput {
   verifyLaunchPlan?: (plan: {
     resolvedConfig: Readonly<ResolvedConfig>;
     expandedGraph: Readonly<ExpandedGraph>;
+    launchReviewDigest: string;
+    launchReviewManifest: Readonly<LaunchReviewManifest>;
+    launchReviewSummary: Readonly<LaunchReviewPlanSummary>;
   }) => void | Promise<void>;
   /** Execution-provider probe override for embedders and isolated tests. */
   requiredCommandProbe?: (

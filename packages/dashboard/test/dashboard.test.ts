@@ -1625,10 +1625,7 @@ async function assertGenericUnexpectedError(
   assert.doesNotMatch(String(error.error), diagnosticPattern);
 }
 
-async function waitForDashboardCommand(
-  handle: DashboardTestHandle,
-  jobId: string
-): Promise<Record<string, unknown>> {
+async function waitForDashboardCommand(handle: DashboardTestHandle, jobId: string): Promise<Record<string, unknown>> {
   const deadline = Date.now() + 60_000;
   for (;;) {
     const response = await dashboardFetch(handle, `/api/commands/${encodeURIComponent(jobId)}`);

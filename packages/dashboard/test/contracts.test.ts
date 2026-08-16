@@ -170,6 +170,23 @@ test("dashboard exposes only the bounded operator-defined JSON extension point",
       sameAgentAttempts: 2,
       expandedAttempts: 12
     },
+    reviewRequired: true,
+    review: {
+      schema_version: "ultrafuzz.launch-review.v1",
+      config_fingerprint: "a".repeat(64),
+      prompt_digest: "b".repeat(64),
+      topology_digest: "c".repeat(64),
+      reference_catalog_digest: null,
+      reference_expectations_digest: null,
+      target_commit: null,
+      controller_source_digest: "e".repeat(64),
+      controller_source_stock: true,
+      controller_source_overrides: [],
+      project_prompt_overrides: [],
+      runtime_overrides: {},
+      operator_prompt_digest: null,
+      workflow_input_digest: null
+    },
     confirmationDigest: "d".repeat(64)
   };
   assert.doesNotThrow(() => assertDashboardHttpDocument(launchPreview, "launchPreviewResponse", "launch preview"));

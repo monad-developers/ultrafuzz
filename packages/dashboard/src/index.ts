@@ -64,6 +64,7 @@ import {
   previewRunLaunchReview,
   verifySealedTaskManifestSnapshot,
   type LaunchReviewManifest,
+  type LaunchReviewPlanSummary,
   type PlanRunInput,
   type RuntimeResult,
   type VerifiedNodeOutputSnapshot,
@@ -71,9 +72,7 @@ import {
 } from "@ultrafuzz/runtime";
 import { isSensitiveKeyName, redactSecretsInText } from "@ultrafuzz/security";
 import {
-  canonicalJson,
   expandTopology,
-  fingerprintGraph,
   FINISH_NODE_ID,
   loadTopology,
   resolveTopologyPath,
@@ -1408,22 +1407,12 @@ class DashboardApp {
     if (!preview.ok || preview.value === undefined) {
       throw new HttpError(400, diagnosticsMessage(preview.diagnostics));
     }
-    const { configured_budget: budget } = preview.value.summary;
-    return {
-      target: preview.value.summary.target,
-      providers: [...preview.value.summary.providers],
-      configuredBudget: {
-        maxParallelAgents: budget.max_parallel_agents,
-        maxParallelNodes: budget.max_parallel_nodes,
-        defaultTimeoutSeconds: budget.default_timeout_seconds,
-        workflowDeadlineSeconds: budget.workflow_deadline_seconds,
-        sameAgentAttempts: budget.same_agent_attempts,
-        expandedAttempts: budget.expanded_attempts
-      },
-      reviewRequired: preview.value.review_required,
-      review: preview.value.manifest,
-      confirmationDigest: preview.value.launch_review_digest
-    };
+    return this.dashboardLaunchPreview({
+      launchReviewDigest: preview.value.launch_review_digest,
+      launchReviewManifest: preview.value.manifest,
+      launchReviewSummary: preview.value.summary,
+      reviewRequired: preview.value.review_required
+    });
   }
 
   private async validateRunLaunchConfirmation(body: JsonObject): Promise<void> {
@@ -1448,6 +1437,59 @@ class DashboardApp {
       ...(this.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: this.ultrafuzzCliEntrypoint }),
       env: this.env
     };
+  }
+
+  private dashboardLaunchPreview(input: {
+    launchReviewDigest: string;
+    launchReviewManifest: LaunchReviewManifest;
+    launchReviewSummary: LaunchReviewPlanSummary;
+    reviewRequired: boolean;
+  }): DashboardLaunchPreview {
+    const budget = input.launchReviewSummary.configured_budget;
+    return {
+      target: input.launchReviewSummary.target,
+      providers: [...input.launchReviewSummary.providers],
+      configuredBudget: {
+        maxParallelAgents: budget.max_parallel_agents,
+        maxParallelNodes: budget.max_parallel_nodes,
+        defaultTimeoutSeconds: budget.default_timeout_seconds,
+        workflowDeadlineSeconds: budget.workflow_deadline_seconds,
+        sameAgentAttempts: budget.same_agent_attempts,
+        expandedAttempts: budget.expanded_attempts
+      },
+      reviewRequired: input.reviewRequired,
+      review: input.launchReviewManifest,
+      confirmationDigest: input.launchReviewDigest
+    };
+  }
+
+  private validatePlannedRunLaunchConfirmation(
+    body: JsonObject,
+    plan: {
+      launchReviewDigest: string;
+      launchReviewManifest: LaunchReviewManifest;
+      launchReviewSummary: LaunchReviewPlanSummary;
+    }
+  ): void {
+    const suppliedDigest = optionalStringField(body, "confirmationDigest");
+    if (body.confirmed !== true || suppliedDigest === undefined) {
+      throw new HttpError(400, "run requires explicit pre-launch confirmation");
+    }
+    if (!constantTimeEqual(suppliedDigest, plan.launchReviewDigest)) {
+      throw new HttpError(409, "run launch confirmation is stale and does not match the execution snapshot");
+    }
+    preflightDashboardAudit(this.projectRoot);
+    const preview = this.dashboardLaunchPreview({
+      ...plan,
+      reviewRequired: true
+    });
+    appendAudit(this.projectRoot, {
+      kind: "run-launch",
+      target: preview.target,
+      providers: preview.providers,
+      configured_budget: launchBudgetAudit(preview.configuredBudget),
+      confirmation_digest: preview.confirmationDigest
+    });
   }
 
   async recordCspViolation(body: JsonObject): Promise<JsonObject> {
@@ -1542,7 +1584,13 @@ class DashboardApp {
       case "run":
         result = await startRun({
           ...this.runLaunchInput(body),
-          reviewAcknowledgement: optionalStringField(body, "confirmationDigest")
+          reviewAcknowledgement: optionalStringField(body, "confirmationDigest"),
+          verifyLaunchPlan: ({ launchReviewDigest, launchReviewManifest, launchReviewSummary }) =>
+            this.validatePlannedRunLaunchConfirmation(body, {
+              launchReviewDigest,
+              launchReviewManifest,
+              launchReviewSummary
+            })
         });
         if (isRuntimeOk(result) && result.value && isRecord(result.value) && typeof result.value.run_id === "string") {
           this.currentRunId = result.value.run_id;
@@ -1627,52 +1675,6 @@ class DashboardApp {
       throw new HttpError(400, "this command requires a persisted run");
     }
     return validateSafeIdOrThrow(runId, "run ID");
-  }
-
-  async launchPreview(body: JsonObject): Promise<DashboardLaunchPreview> {
-    const preview = await previewRunLaunchReview(this.runLaunchInput(body));
-    if (!preview.ok || preview.value === undefined) {
-      throw new HttpError(400, diagnosticsMessage(preview.diagnostics));
-    }
-    const { configured_budget: budget } = preview.value.summary;
-    return {
-      target: preview.value.summary.target,
-      providers: [...preview.value.summary.providers],
-      configuredBudget: {
-        maxParallelAgents: budget.max_parallel_agents,
-        maxParallelNodes: budget.max_parallel_nodes,
-        defaultTimeoutSeconds: budget.default_timeout_seconds,
-        workflowDeadlineSeconds: budget.workflow_deadline_seconds,
-        sameAgentAttempts: budget.same_agent_attempts,
-        expandedAttempts: budget.expanded_attempts
-      },
-      reviewRequired: preview.value.review_required,
-      review: preview.value.manifest,
-      confirmationDigest: preview.value.launch_review_digest
-    };
-  }
-
-  private async validateRunLaunchConfirmation(body: JsonObject): Promise<void> {
-    if (body.confirmed !== true) throw new HttpError(400, "run requires explicit pre-launch confirmation");
-    const suppliedDigest = optionalStringField(body, "confirmationDigest");
-    const preview = await this.launchPreview(body);
-    if (suppliedDigest === undefined || !constantTimeEqual(suppliedDigest, preview.confirmationDigest)) {
-      throw new HttpError(409, "run launch confirmation is missing or stale for the comprehensive launch review");
-    }
-  }
-
-  private runLaunchInput(body: JsonObject): PlanRunInput {
-    return {
-      projectRoot: this.projectRoot,
-      runId: optionalStringField(body, "runId"),
-      prompt: optionalStringField(body, "prompt"),
-      agent: optionalStringField(body, "agent"),
-      model: optionalStringField(body, "model"),
-      maxConcurrency: optionalNumberField(body, "maxConcurrency"),
-      workflowInput: body.workflowInput,
-      ...(this.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: this.ultrafuzzCliEntrypoint }),
-      env: this.env
-    };
   }
 
   commandCapabilities(): JsonObject {

@@ -7773,10 +7773,19 @@ test("startRun lets a trusted embedder reject the exact plan before run material
     projectRoot: project,
     runId: "embedder-plan-rejected",
     env: fakeSmithersEnv(project),
-    verifyLaunchPlan: ({ resolvedConfig, expandedGraph }) => {
+    verifyLaunchPlan: ({
+      resolvedConfig,
+      expandedGraph,
+      launchReviewDigest,
+      launchReviewManifest,
+      launchReviewSummary
+    }) => {
       inspected = true;
       assert.equal(resolvedConfig.project.repo, ".");
       assert.ok(expandedGraph.nodes.length > 0);
+      assert.match(launchReviewDigest, /^[a-f0-9]{64}$/u);
+      assert.equal(launchReviewManifest.schema_version, "ultrafuzz.launch-review.v1");
+      assert.equal(launchReviewSummary.target, ".");
       throw new Error("confirmed launch snapshot changed");
     }
   });

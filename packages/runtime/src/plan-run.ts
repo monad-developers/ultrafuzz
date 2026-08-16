@@ -62,6 +62,7 @@ import {
   type PlanRunInput,
   type PlanRunValue,
   type LaunchReviewManifest,
+  type LaunchReviewPlanSummary,
   type LaunchReviewPreviewValue,
   type PlannedGraph,
   type PlannedGraphNode,
@@ -99,6 +100,7 @@ interface PlanRunHooks {
     expandedGraph: ExpandedGraph;
     launchReviewDigest: string;
     launchReviewManifest: LaunchReviewManifest;
+    launchReviewSummary: LaunchReviewPlanSummary;
     controllerSource: ControllerSourceInspection;
     targetCommit: string | null;
   }): Promise<RuntimeDiagnostic[]>;
@@ -124,9 +126,9 @@ export async function previewRunLaunchReview(input: PlanRunInput) {
   const planned = await planRun(input, {
     beforeMaterialize: async ({
       resolvedConfig,
-      expandedGraph,
       launchReviewDigest,
       launchReviewManifest,
+      launchReviewSummary,
       controllerSource,
       targetCommit
     }) => {
@@ -135,7 +137,7 @@ export async function previewRunLaunchReview(input: PlanRunInput) {
           launch_review_digest: launchReviewDigest,
           review_required: resolvedConfig.permissions.promptReviewRequired || !controllerSource.stock,
           manifest: launchReviewManifest,
-          summary: launchReviewPlanSummary(input, resolvedConfig, expandedGraph)
+          summary: launchReviewSummary
         }),
         controllerSourceDigest: controllerSource.digest,
         targetRoot: path.resolve(projectRoot, resolvedConfig.project.repo),
@@ -305,6 +307,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     workflow_input_digest: input.workflowInput === undefined ? null : sha256Stable(input.workflowInput)
   };
   const launchReviewDigest = sha256Stable(launchReviewManifest);
+  const launchReviewSummary = launchReviewPlanSummary(input, resolved.config, expandedGraph);
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
@@ -317,6 +320,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         expandedGraph,
         launchReviewDigest,
         launchReviewManifest,
+        launchReviewSummary,
         controllerSource,
         targetCommit
       })) ?? [];
