@@ -312,10 +312,14 @@ transitive ancestor graph, and select outputs by the exact
 `ultrafuzz/generated-tests@3` contract. It MUST render the sorted absolute
 declared output paths for every artifact directory associated with each
 matching logical producer: one path directly or multiple paths as a Markdown
-bullet list. It MUST exclude findings-only producers and non-ancestors, MUST NOT
-infer manifests from output filenames or a hardcoded strategy list, and MUST
-fail topology validation or rendering when no ancestor declares a matching
-output.
+bullet list. It MUST exclude findings-only producers and non-ancestors and MUST
+NOT infer manifests from output filenames or a hardcoded strategy list. When no
+ancestor declares a matching output, it MUST render the same explicit no-match
+sentinel as path-filtered ancestor artifact lists so findings-only topologies
+validate; consumers MUST treat the sentinel as an empty manifest set and write
+their schema-defined empty aggregation. Topology validation MUST still fail
+when the variable is used on a node with no ancestor artifact producers at
+all.
 
 For every agent-authored JSON output, the centrally rendered output contract
 MUST include both safely shell-quoted commands using the exact resolved paths
@@ -537,10 +541,15 @@ MUST remain separate from structural range metadata.
 
 Generated-test production is opt-in per topology node. A findings producer MAY
 omit `ultrafuzz/generated-tests@3` when tests or proofs of concept are optional
-supporting evidence rather than a required artifact. Only a node that declares
-that contract receives generated-test bundle instructions, and downstream
-consumers MUST use contract-derived manifest intake instead of assuming that
-every strategy or findings producer emits `generated-tests.json`.
+supporting evidence rather than a required artifact, and MAY instead declare
+the contract as an optional, empty-allowed evidence channel satisfied by the
+schema-defined empty bundle when no proof of concept was produced. Only a node
+that declares that contract receives generated-test bundle instructions, and
+downstream consumers MUST use contract-derived manifest intake instead of
+assuming that every strategy or findings producer emits `generated-tests.json`.
+Review stages MUST define a validation path for findings that arrive with an
+empty manifest or from a producer that declares no manifest, instead of
+treating either case as blocked.
 
 Default review flows SHOULD deduplicate findings, classify severity, aggregate
 generated tests, and write final report artifacts. `ultrafuzz report` MUST read

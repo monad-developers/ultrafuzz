@@ -1,3 +1,4 @@
+import { readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,7 +14,7 @@ import { loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
-const ISSUE_5_NO_GENERATED_TEST_STRATEGIES = [
+const ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES = [
   "externalized-state-accounting",
   "rounding-direction-audit",
   "state-machine-boundaries",
@@ -28,6 +29,42 @@ const ISSUE_5_REFINED_TEST_PRODUCERS = [
   "order-replacement-collateral",
   "dynamic-strategy-generator"
 ] as const;
+
+interface OutputRole {
+  findings: number;
+  generatedTests: number;
+}
+
+const FINDINGS_WITH_OPTIONAL_TESTS: OutputRole = { findings: 1, generatedTests: 1 };
+const FINDINGS_ONLY: OutputRole = { findings: 1, generatedTests: 0 };
+const NO_FINDINGS_NO_TESTS: OutputRole = { findings: 0, generatedTests: 0 };
+
+const FULL_PROFILE_ROLES: Record<string, OutputRole> = {
+  ...Object.fromEntries(ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])),
+  ...Object.fromEntries(ISSUE_5_REFINED_TEST_PRODUCERS.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])),
+  "time-warp-sequences": FINDINGS_WITH_OPTIONAL_TESTS,
+  "boundary-tests": NO_FINDINGS_NO_TESTS,
+  "stateful-invariant-handlers": NO_FINDINGS_NO_TESTS
+};
+
+// Every shipped topology file must appear here with per-node output roles;
+// the role test fails when a topology file exists without a declaration.
+const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
+  "full.yml": FULL_PROFILE_ROLES,
+  "invariant-only.yml": {
+    "stateful-invariant-handlers": NO_FINDINGS_NO_TESTS,
+    "stateful-invariant-coverage": FINDINGS_WITH_OPTIONAL_TESTS,
+    "stateful-invariant-implement-properties": FINDINGS_WITH_OPTIONAL_TESTS,
+    "stateful-invariant-campaign": FINDINGS_WITH_OPTIONAL_TESTS
+  },
+  "smoke.yml": {
+    "time-warp-sequences": FINDINGS_WITH_OPTIONAL_TESTS,
+    "external-dependency-boundaries": FINDINGS_WITH_OPTIONAL_TESTS,
+    "externalized-state-accounting": FINDINGS_WITH_OPTIONAL_TESTS,
+    "lifecycle-view-boundaries": FINDINGS_WITH_OPTIONAL_TESTS,
+    "json-validation-correction": FINDINGS_ONLY
+  }
+};
 
 describe("packaged topology collection", () => {
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
@@ -88,11 +125,20 @@ describe("packaged topology collection", () => {
     }
   });
 
-  it("keeps issue 5 strategy output roles aligned in the canonical and packaged full topologies", () => {
-    for (const [name, topologyPath] of [
-      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml")],
-      ["full", path.join(TOPOLOGY_ROOT, "full.yml")]
-    ] as const) {
+  it("keeps issue 5 strategy output roles aligned in the canonical topology and every packaged topology", () => {
+    const packagedFiles = readdirSync(TOPOLOGY_ROOT)
+      .filter((entry) => entry.endsWith(".yml"))
+      .sort();
+    expect(packagedFiles, "every packaged topology file needs declared output roles").toEqual(
+      Object.keys(EXPECTED_ROLES_BY_TOPOLOGY).sort()
+    );
+
+    const targets: Array<readonly [string, string, Record<string, OutputRole>]> = [
+      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), FULL_PROFILE_ROLES],
+      ...packagedFiles.map((file) => [file, path.join(TOPOLOGY_ROOT, file), EXPECTED_ROLES_BY_TOPOLOGY[file]!] as const)
+    ];
+
+    for (const [name, topologyPath, expectedRoles] of targets) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath,
         requirePromptFiles: true
@@ -100,49 +146,41 @@ describe("packaged topology collection", () => {
       const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
       const contractsFor = (id: string): string[] => (nodeById.get(id)?.outputs ?? []).map((output) => output.contract);
 
-      for (const id of ISSUE_5_NO_GENERATED_TEST_STRATEGIES) {
+      for (const [id, role] of Object.entries(expectedRoles)) {
+        expect(nodeById.has(id), `${name}:${id} exists`).toBe(true);
         const contracts = contractsFor(id);
         expect(
           contracts.filter((contract) => contract === "ultrafuzz/findings@2"),
           `${name}:${id} findings`
-        ).toHaveLength(1);
-        expect(contracts, `${name}:${id} generated tests`).not.toContain("ultrafuzz/generated-tests@3");
-      }
-
-      expect(
-        (nodeById.get("boundary-tests")?.outputs ?? []).map((output) => [
-          output.path,
-          output.contract,
-          output.primary === true
-        ]),
-        `${name}:boundary-tests`
-      ).toEqual([
-        ["boundary-recipes.md", "ultrafuzz/nonempty-markdown@1", true],
-        ["boundary-recipes.json", "ultrafuzz/boundary-recipes@1", false]
-      ]);
-      expect(contractsFor("stateful-invariant-handlers"), `${name}:stateful-invariant-handlers`).not.toContain(
-        "ultrafuzz/findings@2"
-      );
-      expect(contractsFor("stateful-invariant-handlers"), `${name}:stateful-invariant-handlers`).not.toContain(
-        "ultrafuzz/generated-tests@3"
-      );
-
-      for (const id of ISSUE_5_REFINED_TEST_PRODUCERS) {
-        const contracts = contractsFor(id);
-        expect(
-          contracts.filter((contract) => contract === "ultrafuzz/findings@2"),
-          `${name}:${id} findings`
-        ).toHaveLength(1);
+        ).toHaveLength(role.findings);
         expect(
           contracts.filter((contract) => contract === "ultrafuzz/generated-tests@3"),
           `${name}:${id} generated tests`
-        ).toHaveLength(1);
+        ).toHaveLength(role.generatedTests);
       }
 
-      expect(contractsFor("time-warp-sequences"), `${name}:time-warp-sequences`).toEqual([
-        "ultrafuzz/findings@2",
-        "ultrafuzz/generated-tests@3"
-      ]);
+      if (expectedRoles === FULL_PROFILE_ROLES) {
+        expect(
+          (nodeById.get("boundary-tests")?.outputs ?? []).map((output) => [
+            output.path,
+            output.contract,
+            output.primary === true
+          ]),
+          `${name}:boundary-tests`
+        ).toEqual([
+          ["boundary-recipes.md", "ultrafuzz/nonempty-markdown@1", true],
+          ["boundary-recipes.json", "ultrafuzz/boundary-recipes@1", false]
+        ]);
+        expect(contractsFor("time-warp-sequences"), `${name}:time-warp-sequences`).toEqual([
+          "ultrafuzz/findings@2",
+          "ultrafuzz/generated-tests@3"
+        ]);
+        for (const id of ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES) {
+          expect(contractsFor(id), `${name}:${id} converted contracts`).toEqual(
+            expect.arrayContaining(["ultrafuzz/findings@2", "ultrafuzz/generated-tests@3"])
+          );
+        }
+      }
     }
   });
 

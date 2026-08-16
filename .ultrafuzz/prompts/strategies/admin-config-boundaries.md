@@ -160,6 +160,6 @@ must be one this node actually authored. These source, test, and cross-artifact
 relationships are contextual requirements beyond JSON Schema.
 
 Write structured findings to {{output_findings_path}}. Do not emit a non-safety
-`implementation-drift` matrix row as a finding. If no source-backed,
-safety-relevant finding is confirmed, use only the empty form defined by the
-exact pinned schema in the central output contract.
+`implementation-drift` matrix row as a finding. If no finding is confirmed, use
+only the empty form defined by the exact pinned schema in the central output
+contract.

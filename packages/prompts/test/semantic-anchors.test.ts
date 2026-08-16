@@ -27,6 +27,24 @@ const BUG_SEARCH_STRATEGIES = [
   ["lifecycle-view-boundaries", "strategies/lifecycle-view-boundaries.md"]
 ] as const;
 
+const CANONICAL_PERSONA_SENTENCE = "You are a security researcher specializing in Solidity smart contracts.";
+const CANONICAL_EMPTY_FINDINGS_SENTENCE =
+  "If no finding is confirmed, use only the empty form defined by the exact pinned schema in the central output contract.";
+const CANONICAL_OPTIONAL_POC_SENTENCE =
+  "A compact Foundry test or proof of concept may support a candidate finding when useful, but test authoring is optional evidence rather than the objective.";
+const CANONICAL_POC_PERSISTENCE_SENTENCE =
+  "If you author an optional PoC test, keep it under `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the `generated-tests/` directory under `{{artifact_dir}}`, and list that artifact-relative path in `{{artifact_dir}}/generated-tests.json`.";
+const CANONICAL_EMPTY_POC_BUNDLE_SENTENCE =
+  "When no optional PoC exists, write the empty bundle defined by the exact pinned generated-tests schema.";
+const CANONICAL_EXECUTION_CAPTURE_SENTENCE =
+  "When gathering execution evidence, run one direct command at a time and let Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes, command chaining, or output-shortening wrappers.";
+const CANONICAL_FINALIZATION_RESERVE_SENTENCE =
+  "Use the Timeout and Finalization reserve values in the Topology Runtime Context.";
+
+function normalized(markdown: string): string {
+  return markdown.replace(/\s+/gu, " ");
+}
+
 const DIRECT_TEST_CONSTRUCTION_STRATEGIES = [
   "encode-decode",
   "differential-library-tests",
@@ -43,7 +61,7 @@ const DIRECT_TEST_CONSTRUCTION_STRATEGIES = [
 ] as const;
 
 describe("prompt semantic anchors", () => {
-  it("keeps approved bug-search strategies findings-only while protecting construction strategies", () => {
+  it("keeps approved bug-search strategies on the canonical optional-PoC contract", () => {
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
@@ -52,23 +70,28 @@ describe("prompt semantic anchors", () => {
 
     for (const [id, relativePath] of BUG_SEARCH_STRATEGIES) {
       const markdown = prompt(relativePath);
+      const flat = normalized(markdown);
       const outputs = nodeById.get(id)?.outputs ?? [];
+      expect(flat, id).toContain(CANONICAL_PERSONA_SENTENCE);
       expect(markdown, id).toMatch(/\bfind concrete, source-backed bugs associated with\b/u);
       expect(markdown, id).toContain("A property that holds is not a finding.");
-      expect(markdown, id).toMatch(
-        /(?:optional[\s\S]{0,200}(?:test|proof of concept|PoC|evidence)|(?:test|proof of concept|PoC)[\s\S]{0,200}optional)/iu
-      );
+      expect(flat, id).toContain(CANONICAL_OPTIONAL_POC_SENTENCE);
+      expect(flat, id).toContain(CANONICAL_POC_PERSISTENCE_SENTENCE);
+      expect(flat, id).toContain(CANONICAL_EMPTY_POC_BUNDLE_SENTENCE);
+      expect(flat, id).toContain(CANONICAL_EXECUTION_CAPTURE_SENTENCE);
+      expect(flat, id).toContain(CANONICAL_FINALIZATION_RESERVE_SENTENCE);
+      expect(flat, id).toContain(CANONICAL_EMPTY_FINDINGS_SENTENCE);
       expect(markdown, id).toContain("{{output_findings_path}}");
-      expect(markdown, id).not.toContain("{{strategy_attempt_test_dir}}");
+      expect(markdown, id).toMatch(/\{\{artifact_(?:handoff|path):base-test-setup\}\}/u);
       expect(markdown, id).not.toMatch(/Your job is to author/u);
       expect(
         outputs.filter((output) => output.contract === "ultrafuzz/findings@2"),
         id
       ).toHaveLength(1);
       expect(
-        outputs.some((output) => output.contract === "ultrafuzz/generated-tests@3"),
+        outputs.filter((output) => output.contract === "ultrafuzz/generated-tests@3"),
         id
-      ).toBe(false);
+      ).toHaveLength(1);
     }
 
     const boundaryOutputs = nodeById.get("boundary-tests")?.outputs ?? [];
@@ -85,6 +108,8 @@ describe("prompt semantic anchors", () => {
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const boundary = prompt("strategies/boundary-tests.md");
     const handlers = prompt("strategies/invariants/handlers.md");
+    const dedupe = prompt("review/dedupe-findings.md");
+    const triage = prompt("review/triage.md");
 
     for (const relativePath of [
       "strategies/admin-config-boundaries.md",
@@ -92,15 +117,30 @@ describe("prompt semantic anchors", () => {
       "strategies/order-replacement-collateral.md",
       "strategies/dynamic-strategy-generator.md"
     ]) {
-      expect(prompt(relativePath), relativePath).toContain("A property that holds is not a finding.");
+      const markdown = prompt(relativePath);
+      expect(markdown, relativePath).toContain("A property that holds is not a finding.");
+      expect(normalized(markdown), relativePath).toContain(CANONICAL_EMPTY_FINDINGS_SENTENCE);
     }
     expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
     expect(dynamic).toContain("{{ancestor_artifacts_by_path:findings.json}}");
     expect(dynamic).toContain("{{ancestor_artifacts_by_path:boundary-recipes.md,boundary-recipes.json}}");
     expect(generatedTestManifestSources(dynamic)).toEqual([]);
+    expect(normalized(dynamic)).toContain("are a mandatory validation queue for this node");
+    expect(normalized(dynamic)).toContain("Record a disposition for every queued recipe in `strategy-plan.json`");
+    expect(normalized(dynamic)).toContain(
+      "Treat those findings as hypotheses to cover, not as coverage already achieved"
+    );
     expect(boundary).not.toContain("{{output_findings_path}}");
     expect(boundary).not.toContain("{{strategy_attempt_test_dir}}");
-    expect(handlers).not.toMatch(/record a finding/iu);
+    expect(boundary).not.toContain("{{finding_reachability_vocabulary}}");
+    expect(boundary).not.toContain("{{finding_note_key_vocabulary}}");
+    expect(handlers).toContain("This node declares no findings output.");
+    expect(handlers).not.toContain("{{output_findings_path}}");
+    expect(normalized(dedupe)).toContain("must never contribute rows to `deduped-findings.json`");
+    expect(normalized(dedupe)).toContain("is not a blocked state and does not invalidate that producer's findings");
+    expect(normalized(triage)).toContain(
+      "the missing reproducer is neither blocked validation nor demotion evidence by itself"
+    );
   });
 
   it("keeps pinned schemas as the sole producer-side JSON shape authority", () => {

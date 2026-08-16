@@ -302,7 +302,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     if (occurrence.name === "ancestor_generated_test_manifests") {
       const contract = "ultrafuzz/generated-tests@3";
       const matched = ancestorArtifactsByContract(contract, graph);
-      rendered += renderPathList(matched.paths);
+      rendered += renderOptionalPathList(matched.paths);
       artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
       consumed = occurrence.end;
       continue;
@@ -895,9 +895,9 @@ function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { log
       for (const output of outputs) paths.push(path.join(dir, output.path));
     }
   }
-  if (paths.length === 0) {
-    throw new PromptError("invalid-artifact-reference", `no ancestor artifacts use contract ${contract}`);
-  }
+  // A contract with no matching ancestor output is not an error: findings-only
+  // topologies are valid, and the consumer renders the explicit no-match
+  // sentinel (mirroring ancestor_artifacts_by_path) instead of hard-failing.
   return { logicalIds, paths: paths.sort() };
 }
 

@@ -57,6 +57,18 @@ If `forge` is unavailable in `PATH`, record validation as blocked by tool
 availability and do not treat
 `forge: command not found` as a reproducer result or classification signal.
 
+Some findings arrive without a rerunnable generated test or PoC: a producer may
+declare a schema-defined empty generated-tests bundle, or none at all, and
+carry its execution evidence inline in the finding. For those findings, the
+missing reproducer is neither blocked validation nor demotion evidence by
+itself. Each pass must evaluate the recorded evidence — executed commands,
+observed and expected values, source fragments, affected paths — against the
+target source and public specifications, may author a minimal focused
+reproduction in this workspace when practical, and must classify from that
+evidence. When the inline evidence is insufficient to decide, classify the
+finding `undetermined` and state exactly what reproduction evidence is missing
+rather than defaulting to `false-positive`.
+
 ## Helper reachability audit
 
 During each pass, check whether the failing proof depends on directly calling

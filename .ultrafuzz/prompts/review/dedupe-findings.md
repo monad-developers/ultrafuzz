@@ -16,6 +16,10 @@ the effective topology and includes every direct producer's declared handoffs:
 
 {{ancestor_artifacts}}
 
+Boundary-recipe artifacts (`boundary-recipes.md`, `boundary-recipes.json`) are
+unvalidated hypothesis context only and must never contribute rows to
+`deduped-findings.json`.
+
 Optional native-validation context, filtered from all ancestors without
 rendering setup patches or unrelated setup outputs:
 
@@ -79,6 +83,17 @@ metadata and never coerce every bundle through one runner. Do not infer,
 synthesize, normalize, or convert a missing or mismatched framework. If the
 bundle framework is absent, invalid, mixed, or incompatible with the checked-in
 test stack, record validation as blocked instead of guessing.
+
+A schema-defined empty generated-tests manifest, or a producer that declares no
+generated-tests output at all, is not a blocked state and does not invalidate
+that producer's findings. When a finding arrives without a runnable reproducer
+bundle, validate it through a model-only consistency review of its recorded
+evidence — executed commands, observed and expected values, source fragments,
+and affected paths — against the target source; record that no reproducer
+bundle was provided; and keep, merge, or drop the finding on that evidence.
+Treat focused validation as blocked only when a manifest lists a companion
+that fails the checks above, never merely because a manifest is empty or
+because a findings-only producer declares none.
 
 Never install, fetch, restore, or update dependencies during dedupe. This
 includes `forge install`, `git submodule update`, `npm install`, `pnpm install`,

@@ -74,6 +74,15 @@ already covered, including schema-defined empty findings artifacts. The two
 ancestor macros above are the complete declared producer intake for those
 artifact types.
 
+Findings from producers outside the dedupe stage's direct dependency intake —
+including every `property-specification-*` lens findings artifact — never
+reach the deduped findings pipeline. Treat those findings as hypotheses to
+cover, not as coverage already achieved: when one names a concrete unvalidated
+behavior, that is a reason to generate the strategy that would validate it,
+never a reason to skip the strategy as covered. Count a behavior as covered
+only when a producer whose findings flow to dedupe has confirmed or refuted
+it.
+
 Boundary recipe artifacts declared by ancestor producers in the effective
 topology:
 
@@ -82,6 +91,17 @@ topology:
 Read every declared boundary recipe artifact listed above as downstream
 coverage input. Treat missing useful evidence as a reason to record lower
 confidence, not as permission to invent behavior.
+
+Boundary recipes whose `expected_classification_if_red` is `production-bug`
+are a mandatory validation queue for this node, not optional context. Give
+every enumerator the list of those recipes that no current-run findings
+artifact has already confirmed or refuted, and require one candidate strategy
+per queued recipe using the deterministic strategy ID
+`boundary-recipe-<recipe-id>`. Record a disposition for every queued recipe in
+`strategy-plan.json`: either select its candidate strategy for validation, or
+reject that strategy ID with a reason that names the recipe and the evidence
+for skipping it. Never leave a queued production-bug recipe without a recorded
+disposition.
 
 ## Context boundary
 
@@ -202,8 +222,10 @@ manifest. Do not publish support without a runnable test. Use the
 schema-defined empty bundle when no runnable test was produced.
 
 Write findings to {{output_findings_path}} using the exact pinned findings
-schema from the central output contract. Use its schema-defined empty form when
-no finding is confirmed or no generated strategy is actionable. Each finding must
+schema from the central output contract. If no finding is confirmed, use only
+the empty form defined by the exact pinned schema in the central output
+contract. A run where no generated strategy is actionable is such a no-finding
+run. Each finding must
 preserve dynamic provenance with `strategy`, `dynamic_strategy_id`,
 `enumerator_id`, `attempt_index`, and evidence paths. Its
 `dynamic_strategy_id` must name a row in `selected-strategies.json`, and its

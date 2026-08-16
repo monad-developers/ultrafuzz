@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
@@ -29,6 +30,7 @@ import {
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
+import { loadTopology } from "@ultrafuzz/topology";
 
 import {
   captureWorkspacePatch,
@@ -3045,6 +3047,67 @@ test("findings-only strategies do not require a generated-test manifest", () => 
     result.diagnostics.some((diagnostic) => diagnostic.path === "generated-tests.json"),
     false
   );
+});
+
+test("shipped converted bug-search nodes accept empty findings plus the empty optional PoC bundle", () => {
+  let repositoryRoot = path.dirname(fileURLToPath(import.meta.url));
+  while (!fs.existsSync(path.join(repositoryRoot, "packages", "config", "topologies", "full.yml"))) {
+    const parent = path.dirname(repositoryRoot);
+    assert.notEqual(parent, repositoryRoot, "repository root with packaged topologies not found");
+    repositoryRoot = parent;
+  }
+  const topology = loadTopology(repositoryRoot, {
+    topologyPath: path.join(repositoryRoot, "packages", "config", "topologies", "full.yml")
+  });
+  const logical = topology.nodes.find((candidate) => candidate.id === "round-trip");
+  assert.ok(logical, "round-trip node missing from the packaged full topology");
+  assert.deepEqual(
+    (logical.outputs ?? []).map((output) => output.contract),
+    ["ultrafuzz/findings@2", "ultrafuzz/generated-tests@3"],
+    "round-trip must declare findings plus the optional generated-test evidence channel"
+  );
+
+  const runId = "run-converted-bug-search";
+  const layout = createRunLayout({ projectRoot: tempProject(), runId });
+  const artifactDir = getNodeArtifactDir(layout, "round-trip", { create: true });
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "round-trip",
+    logical_id: "round-trip",
+    display_name: "Round Trip",
+    artifact_dir: "artifacts/round-trip",
+    outputs: (logical.outputs ?? []).map((output) =>
+      boundOutput(
+        output.path,
+        output.contract as PlannedGraphNode["outputs"][number]["contract"],
+        output.primary === true
+      )
+    )
+  };
+
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
+  const withoutBundle = verifyRequiredArtifactsForAttempt(layout, node, "round-trip");
+  assert.equal(withoutBundle.ok, false, "a declared optional evidence channel still requires the empty bundle");
+  assert.ok(
+    withoutBundle.missing.some((entry) => entry.includes("generated-tests.json")),
+    JSON.stringify(withoutBundle.missing)
+  );
+
+  fs.writeFileSync(
+    path.join(artifactDir, "generated-tests.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: runId,
+      node_id: "round-trip",
+      framework: "foundry",
+      generated_tests: [],
+      support_files: []
+    }),
+    "utf8"
+  );
+  const result = verifyRequiredArtifactsForAttempt(layout, node, "round-trip");
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.deepEqual(result.missing, []);
 });
 
 test("project discovery gate accepts custom exact typed paths under a noncanonical logical ID", () => {

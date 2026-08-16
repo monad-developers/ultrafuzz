@@ -110,10 +110,12 @@ renders the absolute declared output path under every producer artifact
 directory represented in the render graph. Paths are sorted; one match renders
 as a plain path and multiple matches render as a Markdown bullet list.
 Findings-only ancestors and non-ancestor generated-test producers are excluded,
-and paths are never inferred from a filename or hardcoded strategy list.
-Topology validation and prompt rendering fail when the variable has no matching
-ancestor output; unlike `ancestor_artifacts_by_path`, it has no no-match
-sentinel.
+and paths are never inferred from a filename or hardcoded strategy list. When
+no ancestor declares a matching output, the variable renders the same
+`None declared by this topology.` sentinel as `ancestor_artifacts_by_path`, so
+findings-only topologies validate and render. Topology validation still fails
+when the variable is used on a node with no ancestor artifact producers at
+all.
 
 Looped producers render as a Markdown bullet list of concrete attempt paths.
 Use deterministic split-work assignment for looped strategies:

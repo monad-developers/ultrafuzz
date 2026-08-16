@@ -45,6 +45,12 @@ topology:
 
 {{ancestor_generated_test_manifests}}
 
+When the list above renders the no-match sentinel
+`None declared by this topology.`, no ancestor declares a generated-test
+manifest: copy nothing and write the schema-defined empty `aggregation.json`
+with zero source bundles. That is a successful aggregation for a findings-only
+topology, not an error.
+
 Use only files reported by strategy-owned generated-test manifests. Read every
 manifest listed above, including empty manifests. Validate each one against the
 exact pinned `{{schema_path}}/generated-tests.schema.json`; that schema alone

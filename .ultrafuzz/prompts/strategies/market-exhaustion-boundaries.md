@@ -23,6 +23,23 @@ hypothesis. A compact Foundry test or proof of concept may support a candidate
 finding when useful, but test authoring is optional evidence rather than the
 objective.
 
+If you author an optional PoC test, keep it under
+`{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the
+`generated-tests/` directory under `{{artifact_dir}}`, and list that
+artifact-relative path in `{{artifact_dir}}/generated-tests.json`. When no
+optional PoC exists, write the empty bundle defined by the exact pinned
+generated-tests schema.
+
+When gathering execution evidence, run one direct command at a time and let
+Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes,
+command chaining, or output-shortening wrappers.
+
+Use the Timeout and Finalization reserve values in the Topology Runtime
+Context. Keep that reserve available for mirroring any optional PoC into the
+generated-tests bundle and for writing or refreshing
+`{{output_findings_path}}`. Do not start a command that cannot finish within
+the configured reserve.
+
 ## Focus
 
 - Taking the last bid, ask, pool liquidity, or sale/auction capacity within
@@ -75,10 +92,12 @@ Prefer small state setups with one or two price levels so exhaustion behavior is
 observable. Classify exact rounding rules as incomplete-spec when public sources
 do not define them.
 
-Write only confirmed, structured findings to {{output_findings_path}} using the
-exact pinned `findings@2` schema in the central output contract.
 A property that holds is not a finding.
-If no finding is confirmed, write the schema-defined empty findings result.
+
+Write only confirmed, structured findings to {{output_findings_path}} using the
+exact pinned `findings@2` schema in the central output contract. If no finding
+is confirmed, use only the empty form defined by the exact pinned schema in the
+central output contract.
 
 Use only the authoritative report-bound note vocabulary:
 

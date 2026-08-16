@@ -39,9 +39,30 @@ describe("artifact handoff validation", () => {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
       })
     ).not.toThrow();
+
+    // A findings-only topology stays valid: the variable renders its no-match
+    // sentinel when no ancestor declares the generated-tests contract.
     expect(() =>
       validateTopology(validTopology(), {
         promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
+      })
+    ).not.toThrow();
+
+    // Genuine misconfiguration still fails: the variable on a node with no
+    // ancestor artifact producers at all.
+    const rootConsumer = validTopology();
+    rootConsumer.nodes.splice(1, 0, {
+      id: "orphan-review",
+      prompt: "review/orphan-review.md",
+      group: "review",
+      depends_on: ["__start__"],
+      outputs: [{ path: "orphan.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
+    });
+    const finish = rootConsumer.nodes.find((node) => node.id === "__finish__")!;
+    finish.depends_on = [...finish.depends_on, "orphan-review"];
+    expect(() =>
+      validateTopology(rootConsumer, {
+        promptTexts: { "review/orphan-review.md": "Read {{ancestor_generated_test_manifests}}." }
       })
     ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
   });

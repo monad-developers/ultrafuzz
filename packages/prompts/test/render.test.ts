@@ -898,7 +898,7 @@ describe("prompt rendering", () => {
     });
   });
 
-  it("renders one generated-test manifest as a plain path and rejects an empty contract match", () => {
+  it("renders one generated-test manifest as a plain path and a no-match sentinel for findings-only ancestors", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -922,7 +922,13 @@ describe("prompt rendering", () => {
     boundaryTests.outputs = boundaryTests.outputs?.filter(
       (output) => output.contract !== "ultrafuzz/generated-tests@3"
     );
-    expect(() => renderPrompt(input)).toThrow(/no ancestor artifacts use contract ultrafuzz\/generated-tests@3/u);
+    const sentinel = renderPrompt(input);
+    expect(sentinel.renderedMarkdown).toBe("Generated tests:\nNone declared by this topology.");
+    expect(sentinel.artifactReferences).toContainEqual({
+      kind: "ancestor_artifacts_by_contract",
+      logicalIds: [],
+      contract: "ultrafuzz/generated-tests@3"
+    });
   });
 
   it("filters optional ancestor handoffs by exact declared output path", () => {
