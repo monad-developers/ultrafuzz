@@ -7293,23 +7293,17 @@ test("startRun rejects an untracked cwd executable before task worktrees or mode
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
-test("startRun rejects operator governance acknowledgements as credential environment names", async () => {
+test("startRun rejects operator governance acknowledgements in the explicit agent environment allowlist", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS"'),
-    "utf8"
-  );
-
-  const env = fakeSmithersEnv(project);
+  const env: Record<string, string | undefined> = {
+    ...fakeSmithersEnv(project),
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS"
+  };
   const run = await startRun({
     projectRoot: project,
-    runId: "controller-path-credential",
+    runId: "governance-acknowledgement-credential",
     env
   });
 
