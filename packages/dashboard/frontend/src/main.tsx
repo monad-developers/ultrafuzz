@@ -274,6 +274,23 @@ type DashboardSession = {
   templateVariables: string[];
 };
 
+type LaunchReviewManifest = {
+  schema_version: "ultrafuzz.launch-review.v1";
+  config_fingerprint: string;
+  prompt_digest: string;
+  topology_digest: string;
+  reference_catalog_digest: string | null;
+  reference_expectations_digest: string | null;
+  target_commit: string | null;
+  controller_source_digest: string;
+  controller_source_stock: boolean;
+  controller_source_overrides: string[];
+  project_prompt_overrides: string[];
+  runtime_overrides: Record<string, unknown>;
+  operator_prompt_digest: string | null;
+  workflow_input_digest: string | null;
+};
+
 type LaunchPreview = {
   target: string;
   providers: string[];
@@ -285,6 +302,8 @@ type LaunchPreview = {
     sameAgentAttempts: number;
     expandedAttempts: number;
   };
+  reviewRequired: boolean;
+  review: LaunchReviewManifest;
   confirmationDigest: string;
 };
 
@@ -3055,6 +3074,8 @@ async function postLaunchPreview(commandArguments: Record<string, unknown>, toke
 
 export function launchConfirmationMessage(preview: LaunchPreview): string {
   const budget = preview.configuredBudget;
+  const review = preview.review;
+  const digest = (value: string | null): string => value ?? "none";
   return [
     "Confirm Ultrafuzz run launch",
     "",
@@ -3068,7 +3089,22 @@ export function launchConfirmationMessage(preview: LaunchPreview): string {
     `- Attempts per agent: ${budget.sameAgentAttempts}`,
     `- Expanded attempts: ${budget.expandedAttempts}`,
     "",
-    "Launch this run?"
+    "Comprehensive launch review:",
+    `- Confirmation digest: ${preview.confirmationDigest}`,
+    `- Configuration: ${review.config_fingerprint}`,
+    `- Prompts: ${review.prompt_digest}`,
+    `- Topology: ${review.topology_digest}`,
+    `- Reference catalog: ${digest(review.reference_catalog_digest)}`,
+    `- Reference expectations: ${digest(review.reference_expectations_digest)}`,
+    `- Target commit: ${digest(review.target_commit)}`,
+    `- Controller source: ${review.controller_source_digest} (${review.controller_source_stock ? "stock" : "custom"})`,
+    `- Controller overrides: ${review.controller_source_overrides.join(", ") || "none"}`,
+    `- Project prompt overrides: ${review.project_prompt_overrides.join(", ") || "none"}`,
+    `- Runtime overrides: ${JSON.stringify(review.runtime_overrides)}`,
+    `- Operator prompt: ${digest(review.operator_prompt_digest)}`,
+    `- Workflow input: ${digest(review.workflow_input_digest)}`,
+    "",
+    "Launch this exact reviewed run?"
   ].join("\n");
 }
 

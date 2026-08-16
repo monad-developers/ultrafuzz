@@ -151,6 +151,48 @@ export interface RenderedPromptPlan {
   artifact_references: PromptArtifactReference[];
 }
 
+/** Canonical, non-secret inputs whose exact bytes authorize one launch. */
+export interface LaunchReviewManifest {
+  readonly schema_version: "ultrafuzz.launch-review.v1";
+  readonly config_fingerprint: string;
+  readonly prompt_digest: string;
+  readonly topology_digest: string;
+  readonly reference_catalog_digest: string | null;
+  readonly reference_expectations_digest: string | null;
+  readonly target_commit: string | null;
+  readonly controller_source_digest: string;
+  readonly controller_source_stock: boolean;
+  readonly controller_source_overrides: readonly string[];
+  readonly project_prompt_overrides: readonly string[];
+  readonly runtime_overrides: Readonly<Record<string, unknown>>;
+  readonly operator_prompt_digest: string | null;
+  readonly workflow_input_digest: string | null;
+}
+
+export interface LaunchReviewPlanSummary {
+  readonly target: string;
+  readonly providers: readonly string[];
+  readonly configured_budget: {
+    readonly max_parallel_agents: number;
+    readonly max_parallel_nodes: number;
+    readonly default_timeout_seconds: number;
+    readonly workflow_deadline_seconds: number;
+    readonly same_agent_attempts: number;
+    readonly expanded_attempts: number;
+  };
+}
+
+/**
+ * Read-only launch review produced before run materialization. The manifest is
+ * informational; only a digest recomputed by startRun can authorize execution.
+ */
+export interface LaunchReviewPreviewValue {
+  readonly launch_review_digest: string;
+  readonly review_required: boolean;
+  readonly manifest: LaunchReviewManifest;
+  readonly summary: LaunchReviewPlanSummary;
+}
+
 export interface PlanRunValue {
   run_id: string;
   run_root: string;

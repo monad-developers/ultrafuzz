@@ -67,13 +67,15 @@ import {
   listRuns,
   planRun,
   pauseRun,
+  previewRunLaunchReview,
   readLinkedWorkflowEvidence,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
   syncRun as runtimeSyncRun,
   toPlannedGraph,
-  validateProject
+  validateProject,
+  type StartRunInput
 } from "../src/index.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
 import { assertControllerExecutionSnapshotDigest, inspectControllerSource } from "../src/controller-source.js";
@@ -7448,6 +7450,49 @@ test("workflow synchronization preserves a quota-waiting run with parked tasks",
   assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
   assert.equal(status.value?.status, "running");
   assert.equal(status.value?.workflow?.status, "waiting-quota");
+});
+
+test("launch review preview is immutable, exact, and stops before every launch side effect", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "launch preview baseline");
+  const runId = "launch-review-preview";
+  let preflightCalls = 0;
+  const input: StartRunInput = withFakeCliEntrypoint({
+    projectRoot: project,
+    runId,
+    env: fakeSmithersEnv(project),
+    prompt: "reviewed operator prompt",
+    workflowInput: { reviewed: true },
+    requiredCommandProbe: async (commands) => {
+      preflightCalls += 1;
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+    }
+  });
+
+  const preview = await previewRunLaunchReview(input);
+  assert.equal(preview.ok, true, JSON.stringify(preview.diagnostics));
+  assert.ok(preview.value);
+  assert.equal(preview.value.review_required, true);
+  assert.match(preview.value.launch_review_digest, /^[a-f0-9]{64}$/u);
+  assert.equal(preview.value.manifest.operator_prompt_digest === null, false);
+  assert.equal(preview.value.manifest.workflow_input_digest === null, false);
+  assert.equal(Object.isFrozen(preview.value), true);
+  assert.equal(Object.isFrozen(preview.value.manifest), true);
+  assert.equal(Object.isFrozen(preview.value.manifest.runtime_overrides), true);
+  assert.equal(Object.isFrozen(preview.value.summary.configured_budget), true);
+  assert.equal(preflightCalls, 0);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+
+  const gated = await runtimeStartRun(input);
+  assert.equal(gated.ok, false);
+  assert.equal(gated.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_REQUIRED");
+  assert.equal(gated.diagnostics[0]?.details?.expected_digest, preview.value.launch_review_digest);
+  assert.equal(preflightCalls, 0);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
 });
 
 test("startRun requires a launch acknowledgement bound to prompts, config, topology, references, and commit", async () => {

@@ -104,6 +104,81 @@ test("does not replace a malformed present topology with an empty preview", asyn
   }
 });
 
+test("dashboard preview binds confirmation to the comprehensive runtime launch review", async () => {
+  const projectRoot = makeProject();
+  writeSmallTopology(projectRoot);
+  const fakeRunner = fakeDashboardSmithersEnv(projectRoot);
+  const runId = "dashboard-reviewed-launch";
+  const handle = await serveDashboard({ projectRoot, port: 0, env: fakeRunner.env });
+  const commandRequest = (argumentsValue: Record<string, unknown>) =>
+    dashboardRequest("command", { command: "run", arguments: argumentsValue });
+  const post = (route: string, argumentsValue: Record<string, unknown>) =>
+    fetch(apiUrl(handle.url, route), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify(commandRequest(argumentsValue))
+    });
+  try {
+    const unconfirmed = await post("/api/commands/run", { runId });
+    assert.equal(unconfirmed.status, 400);
+    assert.match(String((await parseHttpResponse(unconfirmed, "errorResponse")).error), /explicit pre-launch/u);
+
+    const previewResponse = await post("/api/commands/run/preview", { runId, maxConcurrency: 2 });
+    if (previewResponse.status !== 200) assert.fail(await previewResponse.text());
+    const preview = await parseHttpResponse(previewResponse, "launchPreviewResponse");
+    assert.equal(preview.document_type, "launch-preview");
+    assert.equal(preview.reviewRequired, true);
+    assert.match(String(preview.confirmationDigest), /^[a-f0-9]{64}$/u);
+    const review = preview.review as Record<string, unknown>;
+    assert.equal(review.schema_version, "ultrafuzz.launch-review.v1");
+    for (const field of ["config_fingerprint", "prompt_digest", "topology_digest", "controller_source_digest"]) {
+      assert.match(String(review[field]), /^[a-f0-9]{64}$/u, field);
+    }
+    assert.equal(fs.existsSync(path.join(projectRoot, ".ultrafuzz", "runs", runId)), false);
+    assert.equal(fs.existsSync(fakeRunner.logPath), false);
+
+    fs.appendFileSync(
+      path.join(projectRoot, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+      "\nDashboard launch review changed.\n",
+      "utf8"
+    );
+    const stale = await post("/api/commands/run", {
+      runId,
+      maxConcurrency: 2,
+      confirmed: true,
+      confirmationDigest: preview.confirmationDigest
+    });
+    assert.equal(stale.status, 409);
+    assert.match(String((await parseHttpResponse(stale, "errorResponse")).error), /stale/u);
+    assert.equal(fs.existsSync(path.join(projectRoot, ".ultrafuzz", "runs", runId)), false);
+    assert.equal(fs.existsSync(fakeRunner.logPath), false);
+
+    const currentPreviewResponse = await post("/api/commands/run/preview", { runId, maxConcurrency: 2 });
+    if (currentPreviewResponse.status !== 200) assert.fail(await currentPreviewResponse.text());
+    const currentPreview = await parseHttpResponse(currentPreviewResponse, "launchPreviewResponse");
+    assert.notEqual(currentPreview.confirmationDigest, preview.confirmationDigest);
+    const accepted = await post("/api/commands/run", {
+      runId,
+      maxConcurrency: 2,
+      confirmed: true,
+      confirmationDigest: currentPreview.confirmationDigest
+    });
+    if (accepted.status !== 202) assert.fail(await accepted.text());
+    const job = await parseHttpResponse(accepted, "commandJobResponse");
+    assert.equal(typeof job.jobId, "string");
+    await waitForFile(fakeRunner.logPath);
+    const completed = await waitForDashboardCommand(handle, String(job.jobId));
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    assert.equal(fs.existsSync(path.join(projectRoot, ".ultrafuzz", "runs", runId)), true);
+    assert.match(fs.readFileSync(fakeRunner.logPath, "utf8"), /up .*ultrafuzz-dashboard-reviewed-launch\.tsx/u);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("creates a topology node prompt as terminal work before finish", async () => {
   const projectRoot = makeProject();
   const prompt =
@@ -1433,6 +1508,36 @@ function makeProject(): string {
   return projectRoot;
 }
 
+function fakeDashboardSmithersEnv(projectRoot: string): {
+  env: Record<string, string | undefined>;
+  logPath: string;
+} {
+  const binDir = path.join(projectRoot, "fake-bin");
+  const smithers = path.join(binDir, "smithers");
+  const logPath = path.join(projectRoot, "dashboard-smithers.log");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    smithers,
+    [
+      "#!/usr/bin/env node",
+      'import fs from "node:fs";',
+      `fs.appendFileSync(${JSON.stringify(logPath)}, process.argv.slice(2).join(" ") + "\\n");`,
+      'process.stdout.write("{\\"ok\\":true}\\n");',
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+  return {
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers,
+      ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+    },
+    logPath
+  };
+}
+
 function writeSmallTopology(projectRoot: string): void {
   fs.writeFileSync(
     path.join(projectRoot, ".ultrafuzz", "topology.yml"),
@@ -1518,6 +1623,29 @@ async function assertGenericUnexpectedError(
   assert.equal(diagnostic.kind, "unexpected-error");
   assert.match(diagnostic.message, diagnosticPattern);
   assert.doesNotMatch(String(error.error), diagnosticPattern);
+}
+
+async function waitForDashboardCommand(
+  handle: DashboardTestHandle,
+  jobId: string
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const response = await dashboardFetch(handle, `/api/commands/${encodeURIComponent(jobId)}`);
+    if (response.status !== 200) assert.fail(await response.text());
+    const job = await parseHttpResponse(response, "commandJobResponse");
+    if (job.status !== "running") return job;
+    if (Date.now() >= deadline) assert.fail(`dashboard command ${jobId} did not finish`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function waitForFile(filePath: string): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (!fs.existsSync(filePath)) {
+    if (Date.now() >= deadline) assert.fail(`file was not created: ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 interface SseFrame {
