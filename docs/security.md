@@ -33,6 +33,17 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Cloud execution dependency closure
+
+Cloud workflows seal the package bytes needed by generated workflow modules
+before handing them to the provider. Internal modules may declare a canonical
+`ultrafuzzWorkflowExecutionDependencies` projection in their package manifest
+when their published package also carries image-build tools. Every projected
+entry must still be a declared dependency, and external packages cannot narrow
+their own transitive closure. This prevents Modal-only image-build dependency
+edges from enlarging workflow control snapshots without increasing the
+control-file size limits or changing the agents' unrestricted execution mode.
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,
