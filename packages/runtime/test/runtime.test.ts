@@ -9690,20 +9690,14 @@ credential_env = ["UFZ_PROVIDER_ID", "ULTRAFUZZ_CONFIG_PATH"]
   assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
 });
 
-test("startRun rejects operator governance acknowledgements as credential environment names", async () => {
+test("startRun rejects operator governance acknowledgements in the explicit agent environment allowlist", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS"'),
-    "utf8"
-  );
-
-  const env = fakeSmithersEnv(project);
+  const env: Record<string, string | undefined> = {
+    ...fakeSmithersEnv(project),
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS"
+  };
   const run = await startRun({
     projectRoot: project,
     runId: "governance-acknowledgement-credential",
