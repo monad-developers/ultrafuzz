@@ -99,6 +99,79 @@ export function containsSensitiveSecrets(value: string, forbiddenSecretValues: r
   return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues) !== value;
 }
 
+/** Match exact concealed spans without allowing surrounding context to drift. */
+export function matchesRedactedText(
+  redacted: string,
+  observed: string,
+  redactedSpanCodePoints: readonly number[],
+  options: { allowObservedSuffix?: boolean } = {}
+): boolean {
+  const fragments = redacted.split(SENSITIVE_REDACTION_PLACEHOLDER);
+  if (fragments.length === 1) return redactedSpanCodePoints.length === 0 && redacted === observed;
+  if (redactedSpanCodePoints.length !== fragments.length - 1) return false;
+  const first = fragments[0] ?? "";
+  if (!observed.startsWith(first)) return false;
+  let cursor = first.length;
+  for (let index = 0; index < redactedSpanCodePoints.length; index += 1) {
+    const next = advanceCodePoints(observed, cursor, redactedSpanCodePoints[index]!);
+    if (next === undefined) return false;
+    cursor = next;
+    const fragment = fragments[index + 1] ?? "";
+    if (!observed.startsWith(fragment, cursor)) return false;
+    cursor += fragment.length;
+  }
+  return options.allowObservedSuffix === true || cursor === observed.length;
+}
+
+/** Infer one unambiguous normalized source span for each inserted placeholder. */
+export function redactedTextSpanCodePointLengths(redacted: string, observed: string): number[] | undefined {
+  if (redacted.length > 16_384 || observed.length > 16_384) return undefined;
+  const fragments = redacted.split(SENSITIVE_REDACTION_PLACEHOLDER);
+  if (fragments.length > 65) return undefined;
+  if (fragments.length === 1) return redacted === observed ? [] : undefined;
+  if (!observed.startsWith(fragments[0] ?? "") || fragments.slice(1, -1).some((fragment) => fragment === "")) {
+    return undefined;
+  }
+  const solutions: number[][] = [];
+  let probes = 0;
+  let exhausted = false;
+  const visit = (index: number, cursor: number, lengths: number[]): void => {
+    if (solutions.length > 1 || exhausted) return;
+    const fragment = fragments[index] ?? "";
+    if (index === fragments.length - 1) {
+      const start = observed.length - fragment.length;
+      if (start > cursor && observed.startsWith(fragment, start)) {
+        solutions.push([...lengths, [...observed.slice(cursor, start)].length]);
+      }
+      return;
+    }
+    for (
+      let start = observed.indexOf(fragment, cursor + 1);
+      start >= 0;
+      start = observed.indexOf(fragment, start + 1)
+    ) {
+      if (++probes > 256) {
+        exhausted = true;
+        return;
+      }
+      visit(index + 1, start + fragment.length, [...lengths, [...observed.slice(cursor, start)].length]);
+      if (solutions.length > 1) return;
+    }
+  };
+  visit(1, (fragments[0] ?? "").length, []);
+  return !exhausted && solutions.length === 1 ? solutions[0] : undefined;
+}
+
+function advanceCodePoints(value: string, start: number, count: number): number | undefined {
+  if (!Number.isSafeInteger(count) || count <= 0) return undefined;
+  let cursor = start;
+  for (let index = 0; index < count; index += 1) {
+    if (cursor >= value.length) return undefined;
+    cursor += value.codePointAt(cursor)! > 0xffff ? 2 : 1;
+  }
+  return cursor;
+}
+
 export function hasRedactionPlaceholder(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return (

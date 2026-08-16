@@ -1,6 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
+import {
+  matchesRedactedText,
+  redactSecretsInText,
+  redactedTextSpanCodePointLengths,
+  SENSITIVE_REDACTION_PLACEHOLDER
+} from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import {
@@ -98,6 +103,8 @@ export interface NodeAttemptLedgerEntry {
   agent?: NodeAttemptAgentProvenance;
   failure_category?: NodeAttemptFailureCategory;
   failure_message?: string;
+  failure_message_redaction_span_code_points?: number[];
+  failure_message_truncated?: true;
 }
 
 export interface AppendNodeAttemptInput {
@@ -212,7 +219,13 @@ export const nodeAttemptLedgerEntrySchema = z
     }),
     agent: attemptAgentProvenanceSchema.optional(),
     failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional(),
-    failure_message: failureMessage.optional()
+    failure_message: failureMessage.optional(),
+    failure_message_redaction_span_code_points: z
+      .array(z.number().int().min(1).max(Number.MAX_SAFE_INTEGER))
+      .min(1)
+      .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS)
+      .optional(),
+    failure_message_truncated: z.literal(true).optional()
   })
   .superRefine((entry, ctx) => {
     if ((entry.outcome === "reused") !== (entry.reuse.status === "reused")) {
@@ -233,10 +246,52 @@ export const nodeAttemptLedgerEntrySchema = z
         message: "failed attempts require a failure category"
       });
     }
-    if (!failed && (entry.failure_category !== undefined || entry.failure_message !== undefined)) {
+    if (
+      !failed &&
+      (entry.failure_category !== undefined ||
+        entry.failure_message !== undefined ||
+        entry.failure_message_redaction_span_code_points !== undefined ||
+        entry.failure_message_truncated !== undefined)
+    ) {
       ctx.addIssue({ code: "custom", path: [], message: "non-failed attempts cannot carry failure details" });
     }
+    if (
+      entry.failure_message === undefined &&
+      (entry.failure_message_redaction_span_code_points !== undefined || entry.failure_message_truncated !== undefined)
+    ) {
+      ctx.addIssue({ code: "custom", path: ["failure_message"], message: "failure message flags require a message" });
+    }
+    const redactionProvenanceIssue = failureMessageRedactionProvenanceIssue(entry);
+    if (redactionProvenanceIssue !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["failure_message_redaction_span_code_points"],
+        message: redactionProvenanceIssue
+      });
+    }
+    if (
+      entry.failure_message_truncated === true &&
+      Buffer.byteLength(entry.failure_message ?? "", "utf8") !== MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["failure_message_truncated"],
+        message: `truncated failure messages must occupy ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`
+      });
+    }
   });
+
+function failureMessageRedactionProvenanceIssue(
+  entry: Pick<NodeAttemptLedgerEntry, "failure_message" | "failure_message_redaction_span_code_points">
+): string | undefined {
+  const placeholderCount = (entry.failure_message?.split(SENSITIVE_REDACTION_PLACEHOLDER).length ?? 1) - 1;
+  const spans = entry.failure_message_redaction_span_code_points;
+  if (spans !== undefined) {
+    if (placeholderCount === 0) return "redaction span lengths require an inserted redaction placeholder";
+    if (spans.length !== placeholderCount) return "redaction span lengths must match persisted placeholders exactly";
+  }
+  return undefined;
+}
 
 const dimensionJsonSchema = {
   type: "string",
@@ -352,6 +407,22 @@ export const nodeAttemptLedgerJsonSchema = {
       type: "string",
       minLength: 1,
       maxLength: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS
+    },
+    failure_message_redaction_span_code_points: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_NODE_ATTEMPT_FAILURE_MESSAGE_CODE_POINTS,
+      items: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER }
+    },
+    failure_message_truncated: { const: true }
+  },
+  dependentRequired: {
+    failure_message_redaction_span_code_points: ["failure_message"],
+    failure_message_truncated: ["failure_message"]
+  },
+  dependentSchemas: {
+    failure_message_redaction_span_code_points: {
+      properties: { failure_message: { type: "string", pattern: SENSITIVE_REDACTION_PLACEHOLDER } }
     }
   },
   allOf: [
@@ -413,7 +484,17 @@ export const nodeAttemptLedgerJsonSchema = {
         not: {
           anyOf: [
             { type: "object", properties: { failure_category: {} }, required: ["failure_category"] },
-            { type: "object", properties: { failure_message: {} }, required: ["failure_message"] }
+            { type: "object", properties: { failure_message: {} }, required: ["failure_message"] },
+            {
+              type: "object",
+              properties: { failure_message_redaction_span_code_points: {} },
+              required: ["failure_message_redaction_span_code_points"]
+            },
+            {
+              type: "object",
+              properties: { failure_message_truncated: {} },
+              required: ["failure_message_truncated"]
+            }
           ]
         }
       }
@@ -447,16 +528,15 @@ export function normalizeNodeAttemptFailureMessage(
   value: string,
   forbiddenSecretValues: readonly string[] = []
 ): string | undefined {
-  const normalizedRedaction = redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues);
-  const normalized = [...normalizedRedaction]
-    .map((character) => {
-      const codePoint = character.codePointAt(0)!;
-      return codePoint <= 31 || codePoint === 127 ? " " : character;
-    })
-    .join("")
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (normalized === "") return undefined;
+  return normalizeNodeAttemptFailureEvidence(value, forbiddenSecretValues).message;
+}
+
+function normalizeNodeAttemptFailureEvidence(value: string, forbiddenSecretValues: readonly string[] = []) {
+  const unredacted = normalizeNodeAttemptFailureText(value);
+  const normalized = normalizeNodeAttemptFailureText(
+    redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues)
+  );
+  if (normalized === undefined) return { truncated: false };
 
   let bytes = 0;
   let bounded = "";
@@ -466,17 +546,42 @@ export function normalizeNodeAttemptFailureMessage(
     bounded += character;
     bytes += characterBytes;
   }
-  return bounded;
+  const visiblePlaceholderCount = bounded.split(SENSITIVE_REDACTION_PLACEHOLDER).length - 1;
+  const inferredSpans =
+    unredacted !== undefined && normalized !== unredacted && !value.includes(SENSITIVE_REDACTION_PLACEHOLDER)
+      ? redactedTextSpanCodePointLengths(normalized, unredacted)
+      : undefined;
+  const redactionSpanCodePoints =
+    visiblePlaceholderCount > 0 && (inferredSpans?.length ?? 0) >= visiblePlaceholderCount
+      ? inferredSpans!.slice(0, visiblePlaceholderCount)
+      : undefined;
+  return {
+    message: bounded,
+    redactionSpanCodePoints,
+    truncated: bounded !== normalized && bytes === MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+  };
+}
+
+function normalizeNodeAttemptFailureText(value: string): string | undefined {
+  const normalized = [...value]
+    .map((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 || codePoint === 127 ? " " : character;
+    })
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return normalized === "" ? undefined : normalized;
 }
 
 export function createNodeAttemptLedgerEntry(
   layout: Pick<RunLayout, "runId">,
   input: AppendNodeAttemptInput
 ): NodeAttemptLedgerEntry {
-  const normalizedFailureMessage =
+  const normalizedFailure =
     input.failureMessage === undefined
-      ? undefined
-      : normalizeNodeAttemptFailureMessage(input.failureMessage, input.forbiddenSecretValues);
+      ? { truncated: false }
+      : normalizeNodeAttemptFailureEvidence(input.failureMessage, input.forbiddenSecretValues);
   return assertNodeAttemptLedgerEntry({
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
     run_id: validateSafeId(input.runId ?? layout.runId, "run ID"),
@@ -509,7 +614,11 @@ export function createNodeAttemptLedgerEntry(
     },
     ...(input.agent === undefined ? {} : { agent: structuredClone(input.agent) }),
     ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory }),
-    ...(normalizedFailureMessage === undefined ? {} : { failure_message: normalizedFailureMessage })
+    ...(normalizedFailure.message === undefined ? {} : { failure_message: normalizedFailure.message }),
+    ...(normalizedFailure.redactionSpanCodePoints === undefined
+      ? {}
+      : { failure_message_redaction_span_code_points: normalizedFailure.redactionSpanCodePoints }),
+    ...(normalizedFailure.truncated ? { failure_message_truncated: true as const } : {})
   });
 }
 
@@ -518,6 +627,46 @@ export function appendNodeAttempt(
   input: AppendNodeAttemptInput
 ): AppendNodeAttemptResult {
   return appendNodeAttempts(layout, [input])[0]!;
+}
+
+/** Preserve an inserted redaction only when its exact spans and all surrounding evidence replay unchanged. */
+export function reconcileNodeAttemptLedgerEntry(
+  prior: NodeAttemptLedgerEntry,
+  candidate: NodeAttemptLedgerEntry,
+  replayEvidence: { failureMessage?: string } = {}
+): NodeAttemptLedgerEntry | undefined {
+  if (isDeepStrictEqual(prior, candidate)) return prior;
+
+  const {
+    failure_message: priorFailureMessage,
+    failure_message_redaction_span_code_points: priorRedactionSpanCodePoints,
+    failure_message_truncated: priorFailureMessageTruncated,
+    ...priorWithoutFailureMessage
+  } = prior;
+  const {
+    failure_message: candidateFailureMessage,
+    failure_message_redaction_span_code_points: _candidateRedactionSpanCodePoints,
+    failure_message_truncated: _candidateFailureMessageTruncated,
+    ...candidateWithoutFailureMessage
+  } = candidate;
+  const replayFailure =
+    replayEvidence.failureMessage === undefined ||
+    replayEvidence.failureMessage.includes(SENSITIVE_REDACTION_PLACEHOLDER)
+      ? undefined
+      : normalizeNodeAttemptFailureText(replayEvidence.failureMessage);
+  if (
+    typeof priorFailureMessage === "string" &&
+    typeof candidateFailureMessage === "string" &&
+    priorRedactionSpanCodePoints !== undefined &&
+    replayFailure !== undefined &&
+    isDeepStrictEqual(priorWithoutFailureMessage, candidateWithoutFailureMessage) &&
+    matchesRedactedText(priorFailureMessage, replayFailure, priorRedactionSpanCodePoints, {
+      allowObservedSuffix: priorFailureMessageTruncated === true
+    })
+  ) {
+    return prior;
+  }
+  return undefined;
 }
 
 export function appendNodeAttempts(
@@ -534,10 +683,13 @@ export function appendNodeAttempts(
     const identity = nodeAttemptLedgerIdentity(candidate);
     const prior = byIdentity.get(identity);
     if (prior !== undefined) {
-      if (!isDeepStrictEqual(prior, candidate)) {
+      const reconciled = reconcileNodeAttemptLedgerEntry(prior, candidate, {
+        failureMessage: input.failureMessage
+      });
+      if (reconciled === undefined) {
         throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
       }
-      return { entry: prior, appended: false };
+      return { entry: reconciled, appended: false };
     }
     byIdentity.set(identity, candidate);
     pending.push(candidate);
@@ -652,6 +804,16 @@ function assertNodeAttemptLedgerReadSemantics(entry: NodeAttemptLedgerEntry, rec
     Buffer.byteLength(entry.failure_message, "utf8") > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
   ) {
     throw new Error(`${recordPath}.failure_message exceeds ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`);
+  }
+  const redactionProvenanceIssue = failureMessageRedactionProvenanceIssue(entry);
+  if (redactionProvenanceIssue !== undefined) throw new Error(`${recordPath}: ${redactionProvenanceIssue}`);
+  if (
+    entry.failure_message_truncated === true &&
+    Buffer.byteLength(entry.failure_message ?? "", "utf8") !== MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+  ) {
+    throw new Error(
+      `${recordPath}.failure_message_truncated requires exactly ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`
+    );
   }
 }
 

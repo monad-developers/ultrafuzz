@@ -21,10 +21,10 @@ import {
   layoutForRunRoot,
   manifestDigest,
   nodeAttemptLedgerIdentity,
-  normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
   readRegularFileSnapshot,
   readRunMetadataDocument,
+  reconcileNodeAttemptLedgerEntry,
   replayEvents,
   replayNodeAttempts,
   readRunState,
@@ -2822,10 +2822,8 @@ async function synchronizeTasks(input: {
     });
 
     const previousIsImmutable = immutableTerminalFinalization(previous);
-    const needsFinalization =
-      !previousIsImmutable &&
-      terminalStatus(evidence.status) &&
-      workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const needsFinalization = !previousIsImmutable && terminalStatus(evidence.status) && evidenceSupersedesPrevious;
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
           layout: input.layout,
@@ -2891,7 +2889,7 @@ async function synchronizeTasks(input: {
       timed_out: patchStatus === "timed-out",
       ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
-      last_error: finalization.lastError,
+      last_error: monotonicReplayedLastError(previous, finalization.lastError, evidenceSupersedesPrevious),
       provenance: {
         ...withoutSupersededFailure(withoutTerminalDisposition(previous?.provenance), patchStatus, finalization),
         workflow: {
@@ -3670,10 +3668,6 @@ function appendTerminalTaskAttempts(input: {
             sourceWorkflowRunId: reuseSource.workflowRunId,
             sourceEventSequence: reuseSource.sourceEventSequence
           };
-    const normalizedFailureMessage =
-      failureMessage === undefined
-        ? undefined
-        : normalizeNodeAttemptFailureMessage(failureMessage, input.forbiddenSecretValues);
     const appendInput: AppendNodeAttemptInput = {
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
@@ -3693,7 +3687,7 @@ function appendTerminalTaskAttempts(input: {
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory }),
-      ...(normalizedFailureMessage === undefined ? {} : { failureMessage: normalizedFailureMessage }),
+      ...(failureMessage === undefined ? {} : { failureMessage }),
       forbiddenSecretValues: input.forbiddenSecretValues
     };
     const candidate = createNodeAttemptLedgerEntry(input.layout, appendInput);
@@ -3708,11 +3702,14 @@ function appendTerminalTaskAttempts(input: {
     }
     const recordedEntry = existingByIdentity.get(identity);
     if (recordedEntry !== undefined) {
-      if (!isDeepStrictEqual(recordedEntry, candidate)) {
+      const reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, candidate, {
+        failureMessage
+      });
+      if (reconciled === undefined) {
         throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
       }
-      candidatesByIdentity.set(identity, candidate);
-      candidates.push(candidate);
+      candidatesByIdentity.set(identity, reconciled);
+      candidates.push(reconciled);
       currentAttemptExecuted ||= isCurrent && recordedEntry.reuse.status === "executed";
       continue;
     }
@@ -4322,6 +4319,15 @@ function workflowEvidenceSupersedesPrevious(
   if (previous === undefined || previous.status !== evidence.status) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
+}
+
+function monotonicReplayedLastError(
+  previous: NodeState | undefined,
+  observed: string | undefined,
+  evidenceSupersedesPrevious: boolean
+): string | undefined {
+  if (!evidenceSupersedesPrevious && previous?.last_error !== undefined) return previous.last_error;
+  return observed;
 }
 
 function preparationWorkflowStateIsFailure(evidence: NodeWorkflowEvidence): boolean {
