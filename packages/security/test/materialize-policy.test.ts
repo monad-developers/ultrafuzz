@@ -106,6 +106,20 @@ test("materialize policy rejects denied destinations, duplicate destinations, an
   assert.ok(publishingMode.diagnostics.some((diagnostic) => diagnostic.code === "MATERIALIZE_UNSAFE_MODE"));
 });
 
+test("materialize policy rejects overwrite requests even for otherwise valid selections", () => {
+  const overwrite = validateMaterializePolicy({
+    confirmed: true,
+    allowOverwrite: true,
+    copies: [{ source: "artifacts/node-1/output.txt", destination: "test/Generated.t.sol" }]
+  });
+
+  assert.equal(overwrite.ok, false);
+  assert.deepEqual(
+    overwrite.diagnostics.map((diagnostic) => diagnostic.code),
+    ["MATERIALIZE_OVERWRITE_UNSUPPORTED"]
+  );
+});
+
 test("clean policy allows selected generated roots and rejects bulk or non-generated selections", () => {
   assert.equal(validateCleanPolicy({ selections: ["runs/run-1"], confirmed: true }).ok, true);
   assert.equal(validateCleanPolicy({ selections: ["runs/run-1/artifacts/node-1"], confirmed: true }).ok, true);

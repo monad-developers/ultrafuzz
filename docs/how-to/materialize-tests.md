@@ -34,8 +34,10 @@ ultrafuzz materialize <run-id> --project /path/to/target-protocol --confirm \
   --copy artifacts/<node-id>/generated-tests/Generated.t.sol:test/foundry/Generated.t.sol
 ```
 
-Use `--yes` instead of `--confirm` if you prefer. Use `--force` only when you
-intend to overwrite an existing destination file.
+Use `--yes` instead of `--confirm` if you prefer. Destinations must be new:
+Ultrafuzz rejects existing destinations, and `--force` is retained only to
+return an explicit unsupported-overwrite diagnostic. Choose a different path
+or review and remove the existing file outside Ultrafuzz before copying.
 
 Materialized files are left as unstaged working-tree changes. Ultrafuzz writes
 an audit record under `.ultrafuzz/materialize-audit.jsonl`.

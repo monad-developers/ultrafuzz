@@ -12,7 +12,7 @@ export default class Materialize extends Command {
     yes: Flags.boolean({ summary: "Confirm materialization" }),
     confirm: Flags.boolean({ summary: "Confirm materialization" }),
     "dry-run": Flags.boolean({ summary: "Plan without writing" }),
-    force: Flags.boolean({ summary: "Allow overwriting destinations" })
+    force: Flags.boolean({ summary: "Unsupported: materialize never overwrites destinations" })
   };
 
   async run(): Promise<void> {

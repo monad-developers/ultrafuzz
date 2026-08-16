@@ -112,7 +112,6 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
       layout,
       projectRoot,
       copy,
-      input.allowOverwrite === true,
       MAX_MATERIALIZE_SNAPSHOT_BYTES - plannedSnapshotBytes,
       plannedSnapshotBytes,
       diagnostics
@@ -148,12 +147,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
   }
   if (input.dryRun !== true) {
     for (const copy of plannedCopies) {
-      const destinationCheck = resolveDestination(
-        copy.selection.destination,
-        projectRoot,
-        input.allowOverwrite === true,
-        []
-      );
+      const destinationCheck = resolveDestination(copy.selection.destination, projectRoot, []);
       if (destinationCheck === undefined) {
         diagnostics.push(
           runtimeError(
@@ -166,12 +160,12 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
         break;
       }
       try {
-        copyMaterializationWithoutFollowingDestination(copy, projectRoot, input.allowOverwrite === true);
+        copyMaterializationWithoutFollowingDestination(copy, projectRoot);
       } catch (error) {
         diagnostics.push(
           runtimeError(
             "MATERIALIZE_DESTINATION_RACE",
-            `destination ${copy.selection.destination} changed or could not be replaced safely`,
+            `destination ${copy.selection.destination} changed or could not be created safely`,
             "materialize",
             copy.selection.destination,
             { error: error instanceof Error ? error.message : String(error) }
@@ -195,7 +189,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     mode,
     unstaged: true,
     confirmed: input.confirmed === true,
-    allow_overwrite: input.allowOverwrite === true,
+    allow_overwrite: false,
     copies: plannedCopies.map((copy) => ({
       source: copy.selection.source,
       destination: copy.selection.destination,
@@ -237,11 +231,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
 
 export const materializeRun = materializeSelection;
 
-function copyMaterializationWithoutFollowingDestination(
-  copy: PlannedMaterialization,
-  projectRoot: string,
-  allowOverwrite: boolean
-): void {
+function copyMaterializationWithoutFollowingDestination(copy: PlannedMaterialization, projectRoot: string): void {
   const destinationDirectory = path.dirname(copy.destinationPath);
   const openedDirectory = openMaterializeDestinationDirectory(projectRoot, destinationDirectory);
   let committed = false;
@@ -250,20 +240,8 @@ function copyMaterializationWithoutFollowingDestination(
   try {
     assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
     const destinationAccessPath = path.join(openedDirectory.accessPath, path.basename(copy.destinationPath));
-    const stageAccessPath = allowOverwrite
-      ? path.join(
-          openedDirectory.accessPath,
-          `.${path.basename(copy.destinationPath)}.ultrafuzz-materialize-${process.pid}-${crypto.randomUUID()}.tmp`
-        )
-      : destinationAccessPath;
-    staged = createStagedMaterialization(openedDirectory, stageAccessPath, copy);
+    staged = createStagedMaterialization(openedDirectory, destinationAccessPath, copy);
     assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
-    if (allowOverwrite) {
-      // Both names resolve below the same opened parent descriptor. A lexical
-      // parent swap can therefore make the operation fail its identity recheck,
-      // but it cannot redirect the replacement to the attacker's directory.
-      fs.renameSync(staged.accessPath, destinationAccessPath);
-    }
     assertStagedMaterializationAt(destinationAccessPath, staged);
     assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
     fs.fsyncSync(openedDirectory.descriptor);
@@ -519,13 +497,12 @@ function planCopy(
   layout: RunLayout,
   projectRoot: string,
   copy: MaterializeCopySelection,
-  allowOverwrite: boolean,
   remainingSnapshotBytes: number,
   plannedSnapshotBytes: number,
   diagnostics: RuntimeDiagnostic[]
 ): PlannedCopyResult {
   const sourcePath = resolveSource(copy.source, layout, diagnostics);
-  const destinationPath = resolveDestination(copy.destination, projectRoot, allowOverwrite, diagnostics);
+  const destinationPath = resolveDestination(copy.destination, projectRoot, diagnostics);
   if (sourcePath === undefined || destinationPath === undefined) {
     return { status: "invalid" };
   }
@@ -629,7 +606,6 @@ function resolveSource(selection: string, layout: RunLayout, diagnostics: Runtim
 function resolveDestination(
   selection: string,
   projectRoot: string,
-  allowOverwrite: boolean,
   diagnostics: RuntimeDiagnostic[]
 ): string | undefined {
   let destinationPath: string;
@@ -671,17 +647,15 @@ function resolveDestination(
       );
       return undefined;
     }
-    if (!allowOverwrite) {
-      diagnostics.push(
-        runtimeError(
-          "MATERIALIZE_DESTINATION_EXISTS",
-          `destination ${selection} already exists`,
-          "materialize",
-          selection
-        )
-      );
-      return undefined;
-    }
+    diagnostics.push(
+      runtimeError(
+        "MATERIALIZE_DESTINATION_EXISTS",
+        `destination ${selection} already exists`,
+        "materialize",
+        selection
+      )
+    );
+    return undefined;
   }
   return destinationPath;
 }

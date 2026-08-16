@@ -88,19 +88,17 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   const project = tempProject();
   const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
 
-  fs.mkdirSync(path.join(project, "test"), { recursive: true });
-  fs.writeFileSync(path.join(project, "test/Generated.t.sol"), "contract OldGenerated {}\n", "utf8");
+  fs.writeFileSync(path.join(project, "README.md"), "# Materialize fixture\n", "utf8");
   git(project, ["init"]);
   git(project, ["config", "user.email", "tester@example.invalid"]);
   git(project, ["config", "user.name", "Ultrafuzz Tester"]);
-  git(project, ["add", "test/Generated.t.sol"]);
+  git(project, ["add", "README.md"]);
   git(project, ["commit", "-m", "seed"]);
 
   const result = await materializeSelection({
     projectRoot: project,
     runId,
     confirmed: true,
-    allowOverwrite: true,
     copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
   });
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -108,15 +106,17 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   assert.equal(result.value?.audit.unstaged, true);
   assert.equal(result.value?.copied.length, 1);
   assert.equal(fs.existsSync(result.value!.audit.audit_path), true);
+  assert.equal(fs.readFileSync(path.join(project, "test/Generated.t.sol"), "utf8"), "generated output\n");
 
-  const status = git(project, ["status", "--porcelain=v1"]);
-  assert.match(status, / M test\/Generated\.t\.sol/u);
-  assert.doesNotMatch(status, /^M {2}test\/Generated\.t\.sol/mu);
+  const status = git(project, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  assert.match(status, /\?\? test\/Generated\.t\.sol/u);
+  assert.doesNotMatch(git(project, ["diff", "--cached", "--name-only"]), /test\/Generated\.t\.sol/u);
 
   const events = fs.readFileSync(path.join(runRoot, "events.jsonl"), "utf8");
   assert.match(events, /materialize-selection/u);
   const audit = fs.readFileSync(result.value!.audit.audit_path, "utf8");
   assert.match(audit, /"unstaged":true/u);
+  assert.match(audit, /"allow_overwrite":false/u);
   assert.doesNotMatch(audit, /"mutation_policy"/u);
 });
 
@@ -137,28 +137,26 @@ test("materializeSelection creates missing destination parents through directory
 });
 
 test(
-  "overwrite materialization atomically replaces a raced destination symlink without following it",
+  "materializeSelection rejects allowOverwrite before any rename or destination mutation",
   { concurrency: false },
   async () => {
     const project = tempProject();
     const { runId, nodeId } = await plannedRunWithArtifact(project);
     const destinationPath = path.join(project, "test", "Generated.t.sol");
-    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-race-target-"));
-    const outsidePath = path.join(outsideRoot, "outside.txt");
+    const auditPath = path.join(project, ".ultrafuzz", "materialize-audit.jsonl");
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    fs.writeFileSync(destinationPath, "old generated output\n", "utf8");
-    fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+    fs.writeFileSync(destinationPath, "reviewed project output\n", "utf8");
 
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
     const originalRenameSync = fs.renameSync;
-    let swapped = false;
-    fs.renameSync = ((oldPath, newPath) => {
-      if (!swapped && isDescriptorAnchoredChild(newPath, path.basename(destinationPath))) {
-        swapped = true;
-        fs.unlinkSync(destinationPath);
-        fs.symlinkSync(outsidePath, destinationPath);
+    let renameCalls = 0;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        renameCalls += 1;
+        return Reflect.apply(originalRenameSync, fs, args) as void;
       }
-      originalRenameSync(oldPath, newPath);
-    }) as typeof fs.renameSync;
+    });
     try {
       const result = await materializeSelection({
         projectRoot: project,
@@ -168,14 +166,16 @@ test(
         copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
       });
 
-      assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-      assert.equal(swapped, true);
-      assert.equal(fs.lstatSync(destinationPath).isSymbolicLink(), false);
-      assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
-      assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
+      assert.equal(result.ok, false);
+      assert.deepEqual(
+        result.diagnostics.map((entry) => entry.code),
+        ["MATERIALIZE_OVERWRITE_UNSUPPORTED"]
+      );
+      assert.equal(renameCalls, 0);
+      assert.equal(fs.readFileSync(destinationPath, "utf8"), "reviewed project output\n");
+      assert.equal(fs.existsSync(auditPath), false);
     } finally {
-      fs.renameSync = originalRenameSync;
-      fs.rmSync(outsideRoot, { recursive: true, force: true });
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
     }
   }
 );
@@ -230,48 +230,41 @@ test(
 );
 
 test(
-  "overwrite materialization cannot replace through a checked parent swapped to an outside directory",
+  "materializeSelection rejects an existing destination without rename or mutation",
   { concurrency: false },
   async () => {
     const project = tempProject();
     const { runId, nodeId } = await plannedRunWithArtifact(project);
-    const destinationDirectory = path.join(project, "test");
-    const destinationPath = path.join(destinationDirectory, "Generated.t.sol");
-    const displacedDirectory = `${destinationDirectory}.displaced`;
-    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-overwrite-parent-outside-"));
-    const outsidePath = path.join(outsideRoot, "Generated.t.sol");
-    fs.mkdirSync(destinationDirectory);
-    fs.writeFileSync(destinationPath, "old project output\n", "utf8");
-    fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+    const destinationPath = path.join(project, "test", "Generated.t.sol");
+    const auditPath = path.join(project, ".ultrafuzz", "materialize-audit.jsonl");
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.writeFileSync(destinationPath, "reviewed project output\n", "utf8");
 
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
     const originalRenameSync = fs.renameSync;
-    let swapped = false;
-    fs.renameSync = ((oldPath, newPath) => {
-      if (!swapped && isDescriptorAnchoredChild(newPath, path.basename(destinationPath))) {
-        swapped = true;
-        originalRenameSync(destinationDirectory, displacedDirectory);
-        fs.symlinkSync(outsideRoot, destinationDirectory, process.platform === "win32" ? "junction" : "dir");
+    let renameCalls = 0;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        renameCalls += 1;
+        return Reflect.apply(originalRenameSync, fs, args) as void;
       }
-      originalRenameSync(oldPath, newPath);
-    }) as typeof fs.renameSync;
+    });
     try {
       const result = await materializeSelection({
         projectRoot: project,
         runId,
         confirmed: true,
-        allowOverwrite: true,
         copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
       });
 
       assert.equal(result.ok, false);
-      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
-      assert.equal(swapped, true);
-      assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
-      assert.equal(fs.statSync(path.join(displacedDirectory, "Generated.t.sol")).size, 0);
+      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_EXISTS"));
+      assert.equal(renameCalls, 0);
+      assert.equal(fs.readFileSync(destinationPath, "utf8"), "reviewed project output\n");
+      assert.equal(fs.existsSync(auditPath), false);
     } finally {
-      fs.renameSync = originalRenameSync;
-      restoreSwappedDirectory(destinationDirectory, displacedDirectory);
-      fs.rmSync(outsideRoot, { recursive: true, force: true });
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
     }
   }
 );
