@@ -563,7 +563,10 @@ test("dashboard run launch requires a matching preview confirmation and appends 
   const handle = await serveDashboard({
     projectRoot,
     port: 0,
-    env: { ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDashboardDataGovernancePolicy() }
+    env: {
+      ...process.env,
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDashboardDataGovernancePolicy()
+    }
   });
   try {
     const commandRequest = (argumentsValue: Record<string, unknown>) =>
