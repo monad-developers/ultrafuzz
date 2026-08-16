@@ -59,6 +59,31 @@ async function plannedRunWithArtifact(project: string): Promise<{ runId: string;
   return { runId: plan.value!.run_id, runRoot: plan.value!.run_root, nodeId };
 }
 
+function isDescriptorAnchoredChild(candidate: fs.PathLike, basename: string): boolean {
+  const value = String(candidate);
+  return path.basename(value) === basename && (value.startsWith("/proc/self/fd/") || value.startsWith("/dev/fd/"));
+}
+
+function openedDescriptorPath(descriptor: number): string {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      return fs.realpathSync(candidate);
+    } catch {
+      // Continue to the next descriptor filesystem.
+    }
+  }
+  return "";
+}
+
+function restoreSwappedDirectory(directory: string, displaced: string): void {
+  try {
+    if (fs.lstatSync(directory).isSymbolicLink()) fs.unlinkSync(directory);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (fs.existsSync(displaced)) fs.renameSync(displaced, directory);
+}
+
 test("materializeSelection copies only explicit outputs, leaves git changes unstaged, and records audit evidence", async () => {
   const project = tempProject();
   const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
@@ -95,45 +120,375 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   assert.doesNotMatch(audit, /"mutation_policy"/u);
 });
 
-test("overwrite materialization atomically replaces a raced destination symlink without following it", async () => {
+test("materializeSelection creates missing destination parents through directory descriptors", async () => {
   const project = tempProject();
   const { runId, nodeId } = await plannedRunWithArtifact(project);
-  const destinationPath = path.join(project, "test", "Generated.t.sol");
-  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-race-target-"));
-  const outsidePath = path.join(outsideRoot, "outside.txt");
-  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-  fs.writeFileSync(destinationPath, "old generated output\n", "utf8");
-  fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+  const destinationPath = path.join(project, "generated", "nested", "output.txt");
 
-  const originalRenameSync = fs.renameSync;
-  let swapped = false;
-  fs.renameSync = ((oldPath, newPath) => {
-    if (!swapped && path.resolve(String(newPath)) === destinationPath) {
-      swapped = true;
-      fs.unlinkSync(destinationPath);
-      fs.symlinkSync(outsidePath, destinationPath);
+  const result = await materializeSelection({
+    projectRoot: project,
+    runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "generated/nested/output.txt" }]
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
+});
+
+test(
+  "overwrite materialization atomically replaces a raced destination symlink without following it",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const destinationPath = path.join(project, "test", "Generated.t.sol");
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-race-target-"));
+    const outsidePath = path.join(outsideRoot, "outside.txt");
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.writeFileSync(destinationPath, "old generated output\n", "utf8");
+    fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+
+    const originalRenameSync = fs.renameSync;
+    let swapped = false;
+    fs.renameSync = ((oldPath, newPath) => {
+      if (!swapped && isDescriptorAnchoredChild(newPath, path.basename(destinationPath))) {
+        swapped = true;
+        fs.unlinkSync(destinationPath);
+        fs.symlinkSync(outsidePath, destinationPath);
+      }
+      originalRenameSync(oldPath, newPath);
+    }) as typeof fs.renameSync;
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        allowOverwrite: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
+      });
+
+      assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+      assert.equal(swapped, true);
+      assert.equal(fs.lstatSync(destinationPath).isSymbolicLink(), false);
+      assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
+      assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
+    } finally {
+      fs.renameSync = originalRenameSync;
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
     }
-    originalRenameSync(oldPath, newPath);
-  }) as typeof fs.renameSync;
+  }
+);
+
+test(
+  "new materialization cannot follow a checked parent replaced by an outside symlink",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const destinationDirectory = path.join(project, "test");
+    const destinationPath = path.join(destinationDirectory, "created.txt");
+    const displacedDirectory = `${destinationDirectory}.displaced`;
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-create-parent-outside-"));
+    const outsidePath = path.join(outsideRoot, "created.txt");
+    fs.mkdirSync(destinationDirectory);
+
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
+    const originalWriteSync = fs.writeSync;
+    let swapped = false;
+    Object.defineProperty(fs, "writeSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const openedPath = openedDescriptorPath(Number(args[0]));
+        if (!swapped && path.basename(openedPath) === path.basename(destinationPath)) {
+          swapped = true;
+          fs.renameSync(destinationDirectory, displacedDirectory);
+          fs.symlinkSync(outsideRoot, destinationDirectory, process.platform === "win32" ? "junction" : "dir");
+        }
+        return Reflect.apply(originalWriteSync, fs, args) as number;
+      }
+    });
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/created.txt" }]
+      });
+
+      assert.equal(result.ok, false);
+      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+      assert.equal(swapped, true);
+      assert.equal(fs.existsSync(outsidePath), false);
+      assert.equal(fs.statSync(path.join(displacedDirectory, "created.txt")).size, 0);
+    } finally {
+      Object.defineProperty(fs, "writeSync", originalDescriptor);
+      restoreSwappedDirectory(destinationDirectory, displacedDirectory);
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "overwrite materialization cannot replace through a checked parent swapped to an outside directory",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const destinationDirectory = path.join(project, "test");
+    const destinationPath = path.join(destinationDirectory, "Generated.t.sol");
+    const displacedDirectory = `${destinationDirectory}.displaced`;
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-overwrite-parent-outside-"));
+    const outsidePath = path.join(outsideRoot, "Generated.t.sol");
+    fs.mkdirSync(destinationDirectory);
+    fs.writeFileSync(destinationPath, "old project output\n", "utf8");
+    fs.writeFileSync(outsidePath, "must remain unchanged\n", "utf8");
+
+    const originalRenameSync = fs.renameSync;
+    let swapped = false;
+    fs.renameSync = ((oldPath, newPath) => {
+      if (!swapped && isDescriptorAnchoredChild(newPath, path.basename(destinationPath))) {
+        swapped = true;
+        originalRenameSync(destinationDirectory, displacedDirectory);
+        fs.symlinkSync(outsideRoot, destinationDirectory, process.platform === "win32" ? "junction" : "dir");
+      }
+      originalRenameSync(oldPath, newPath);
+    }) as typeof fs.renameSync;
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        allowOverwrite: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
+      });
+
+      assert.equal(result.ok, false);
+      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+      assert.equal(swapped, true);
+      assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
+      assert.equal(fs.statSync(path.join(displacedDirectory, "Generated.t.sol")).size, 0);
+    } finally {
+      fs.renameSync = originalRenameSync;
+      restoreSwappedDirectory(destinationDirectory, displacedDirectory);
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "missing destination parents are created through the checked directory descriptor",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const checkedDirectory = path.join(project, "test");
+    const displacedDirectory = `${checkedDirectory}.displaced`;
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-mkdir-parent-outside-"));
+    fs.mkdirSync(checkedDirectory);
+
+    const originalMkdirSync = fs.mkdirSync;
+    let swapped = false;
+    fs.mkdirSync = ((directory, options) => {
+      if (!swapped && isDescriptorAnchoredChild(directory, "generated")) {
+        swapped = true;
+        fs.renameSync(checkedDirectory, displacedDirectory);
+        fs.symlinkSync(outsideRoot, checkedDirectory, process.platform === "win32" ? "junction" : "dir");
+      }
+      return originalMkdirSync(directory, options as never);
+    }) as typeof fs.mkdirSync;
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/generated/output.txt" }]
+      });
+
+      assert.equal(result.ok, false);
+      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+      assert.equal(swapped, true);
+      assert.deepEqual(fs.readdirSync(outsideRoot), []);
+      assert.deepEqual(fs.readdirSync(path.join(displacedDirectory, "generated")), []);
+    } finally {
+      fs.mkdirSync = originalMkdirSync;
+      restoreSwappedDirectory(checkedDirectory, displacedDirectory);
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  "materialization fails closed when the parent descriptor has no verifiable access path",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const destinationPath = path.join(project, "test", "blocked.txt");
+    fs.mkdirSync(path.dirname(destinationPath));
+
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "statSync")!;
+    const originalStatSync = fs.statSync;
+    let descriptorPathRejected = false;
+    Object.defineProperty(fs, "statSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const candidate = String(args[0]);
+        if (candidate.startsWith("/proc/self/fd/") || candidate.startsWith("/dev/fd/")) {
+          descriptorPathRejected = true;
+          throw Object.assign(new Error("descriptor path unavailable for test"), { code: "ENOENT" });
+        }
+        return Reflect.apply(originalStatSync, fs, args) as fs.Stats;
+      }
+    });
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/blocked.txt" }]
+      });
+
+      assert.equal(result.ok, false);
+      assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+      assert.match(JSON.stringify(result.diagnostics), /no verifiable descriptor path/u);
+      assert.equal(descriptorPathRejected, true);
+      assert.equal(fs.existsSync(destinationPath), false);
+    } finally {
+      Object.defineProperty(fs, "statSync", originalDescriptor);
+    }
+  }
+);
+
+test("a failed stage write preserves a concurrently created destination", { concurrency: false }, async () => {
+  const project = tempProject();
+  const { runId, nodeId } = await plannedRunWithArtifact(project);
+  const destinationPath = path.join(project, "test", "concurrent.txt");
+  fs.mkdirSync(path.dirname(destinationPath));
+
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "writeSync")!;
+  const originalWriteSync = fs.writeSync;
+  let failedWhileStaging = false;
+  Object.defineProperty(fs, "writeSync", {
+    ...originalDescriptor,
+    value: (...args: unknown[]) => {
+      const descriptor = Number(args[0]);
+      const openedPath = openedDescriptorPath(descriptor);
+      if (!failedWhileStaging && path.basename(openedPath) === "concurrent.txt") {
+        failedWhileStaging = true;
+        fs.unlinkSync(destinationPath);
+        fs.writeFileSync(destinationPath, "concurrent project file\n", { flag: "wx" });
+        throw Object.assign(new Error("simulated stage write failure"), { code: "ENOSPC" });
+      }
+      return Reflect.apply(originalWriteSync, fs, args) as number;
+    }
+  });
   try {
     const result = await materializeSelection({
       projectRoot: project,
       runId,
       confirmed: true,
-      allowOverwrite: true,
-      copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
+      copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/concurrent.txt" }]
     });
 
-    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-    assert.equal(swapped, true);
-    assert.equal(fs.lstatSync(destinationPath).isSymbolicLink(), false);
-    assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
-    assert.equal(fs.readFileSync(outsidePath, "utf8"), "must remain unchanged\n");
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+    assert.equal(failedWhileStaging, true);
+    assert.equal(fs.readFileSync(destinationPath, "utf8"), "concurrent project file\n");
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(destinationPath)).filter((entry) => entry.includes(".ultrafuzz-materialize-")),
+      []
+    );
   } finally {
-    fs.renameSync = originalRenameSync;
-    fs.rmSync(outsideRoot, { recursive: true, force: true });
+    Object.defineProperty(fs, "writeSync", originalDescriptor);
   }
 });
+
+test("exclusive open preserves a destination raced in before creation", { concurrency: false }, async () => {
+  const project = tempProject();
+  const { runId, nodeId } = await plannedRunWithArtifact(project);
+  const destinationPath = path.join(project, "test", "raced.txt");
+  fs.mkdirSync(path.dirname(destinationPath));
+
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+  const originalOpenSync = fs.openSync;
+  let raced = false;
+  Object.defineProperty(fs, "openSync", {
+    ...originalDescriptor,
+    value: (...args: unknown[]) => {
+      const openPath = args[0] as fs.PathLike;
+      const flags = Number(args[1]);
+      if (
+        !raced &&
+        isDescriptorAnchoredChild(openPath, path.basename(destinationPath)) &&
+        (flags & fs.constants.O_EXCL) !== 0
+      ) {
+        raced = true;
+        fs.writeFileSync(destinationPath, "concurrent project file\n", { flag: "wx" });
+      }
+      return Reflect.apply(originalOpenSync, fs, args) as number;
+    }
+  });
+  try {
+    const result = await materializeSelection({
+      projectRoot: project,
+      runId,
+      confirmed: true,
+      copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/raced.txt" }]
+    });
+
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.some((entry) => entry.code === "MATERIALIZE_DESTINATION_RACE"));
+    assert.equal(raced, true);
+    assert.equal(fs.readFileSync(destinationPath, "utf8"), "concurrent project file\n");
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(destinationPath)).filter((entry) => entry.includes(".ultrafuzz-materialize-")),
+      []
+    );
+  } finally {
+    Object.defineProperty(fs, "openSync", originalDescriptor);
+  }
+});
+
+test(
+  "a descriptor close error after verified publication does not report an uncommitted failure",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const { runId, nodeId } = await plannedRunWithArtifact(project);
+    const destinationPath = path.join(project, "test", "close-ok.txt");
+    fs.mkdirSync(path.dirname(destinationPath));
+
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
+    const originalCloseSync = fs.closeSync;
+    let closeFailed = false;
+    Object.defineProperty(fs, "closeSync", {
+      ...originalDescriptor,
+      value: (descriptor: number) => {
+        const openedPath = openedDescriptorPath(descriptor);
+        originalCloseSync(descriptor);
+        if (!closeFailed && path.basename(openedPath) === path.basename(destinationPath)) {
+          closeFailed = true;
+          throw Object.assign(new Error("simulated committed descriptor close failure"), { code: "EIO" });
+        }
+      }
+    });
+    try {
+      const result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/close-ok.txt" }]
+      });
+
+      assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+      assert.equal(closeFailed, true);
+      assert.equal(fs.readFileSync(destinationPath, "utf8"), "generated output\n");
+    } finally {
+      Object.defineProperty(fs, "closeSync", originalDescriptor);
+    }
+  }
+);
 
 test("materializeSelection rejects conflicts, denied destinations, source symlinks, and destination symlink escapes", async () => {
   const project = tempProject();
