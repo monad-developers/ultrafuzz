@@ -60,12 +60,19 @@ the configured reserve.
   accounting invariant.
 - Aggregate accounting after the loop: total assets, total shares, reserves,
   debt shares, fee recipient balances, reward escrow, and user balances must
-  reconcile with the expected direction and bounded dust policy.
+  reconcile with the expected direction; a divergence that transfers value to
+  the wrong party or breaches an accounting invariant is a finding even when
+  each step is small.
 
-For each candidate, first identify the intended rounding beneficiary from
-public docs, tests, naming, comments, or protocol invariants. When the target
-design is genuinely ambiguous, preserve the repro as incomplete-spec instead of
-claiming a bug.
+For each candidate, identify the intended rounding beneficiary from public
+docs, tests, naming, comments, or protocol invariants when it is discoverable.
+A reachable rounding error that moves value to the wrong party, breaches an
+advertised exact-input or exact-output amount, lets a caller consume nonzero
+liquidity for zero input, or accumulates against a protocol accounting
+invariant is a finding regardless of the per-operation magnitude — do not
+excuse it as bounded dust. Reserve the incomplete-spec classification for cases
+where the rounding direction is genuinely ambiguous AND no party suffers a
+value loss or gain in any reachable sequence.
 
 Evaluate candidates with exact reference calculations that expose the operands,
 denominator, remainder, expected rounded result, observed result, and balance
