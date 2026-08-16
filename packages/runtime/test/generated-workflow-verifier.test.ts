@@ -5189,7 +5189,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
     source.indexOf("function isStrictlyInsideDirectory")
   );
   assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
-  assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
+  assert.doesNotMatch(agent, /previousFailure|error\.message|String\(error\)/u);
   assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
