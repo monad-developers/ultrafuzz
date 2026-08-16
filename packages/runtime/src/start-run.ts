@@ -41,12 +41,12 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { assertTargetCommitForReview, planRun } from "./plan-run.js";
+import { assertTargetCommitForReview, planRun, snapshotPlanRunInput } from "./plan-run.js";
 import { assertControllerExecutionSnapshotDigest } from "./controller-source.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   requestSmithersPause,
@@ -109,6 +109,11 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
 ]);
 
 export async function startRun(input: StartRunInput) {
+  try {
+    input = snapshotPlanRunInput(input);
+  } catch (error) {
+    return runtimeFailure<StartRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")]);
+  }
   const planned = await planRun(input, {
     beforeMaterialize: async ({
       resolvedConfig,

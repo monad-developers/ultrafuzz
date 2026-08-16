@@ -112,6 +112,13 @@ const LAUNCH_REVIEW_PREVIEW_READY = "RUN_LAUNCH_REVIEW_PREVIEW_READY";
  * when this function returns.
  */
 export async function previewRunLaunchReview(input: PlanRunInput) {
+  try {
+    input = snapshotPlanRunInput(input);
+  } catch (error) {
+    return runtimeFailure<LaunchReviewPreviewValue>([
+      diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")
+    ]);
+  }
   const projectRoot = path.resolve(input.projectRoot);
   let captured:
     | {
@@ -164,6 +171,11 @@ export async function previewRunLaunchReview(input: PlanRunInput) {
 }
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
+  try {
+    input = snapshotPlanRunInput(input);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")]);
+  }
   const projectRoot = path.resolve(input.projectRoot);
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
@@ -294,7 +306,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       .filter((entry) => entry.source === "project")
       .map((entry) => entry.relativePath)
       .sort(),
-    runtime_overrides: launchReviewOverrides(input),
+    runtime_overrides: launchReviewOverrides(input, resolved.config.run.maxParallelAgents),
     operator_prompt_digest: input.prompt === undefined ? null : sha256Stable(input.prompt),
     workflow_input_digest: input.workflowInput === undefined ? null : sha256Stable(input.workflowInput)
   };
@@ -305,15 +317,15 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   }
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
-    preMaterializeDiagnostics =
-      (await hooks.beforeMaterialize?.({
-        resolvedConfig: resolved.config,
-        expandedGraph,
-        launchReviewDigest,
-        launchReviewManifest,
-        controllerSource,
-        targetCommit
-      })) ?? [];
+    const preMaterializeContext = snapshotLaunchData({
+      resolvedConfig: resolved.config,
+      expandedGraph,
+      launchReviewDigest,
+      launchReviewManifest,
+      controllerSource,
+      targetCommit
+    });
+    preMaterializeDiagnostics = (await hooks.beforeMaterialize?.(preMaterializeContext)) ?? [];
   } catch (error) {
     preMaterializeDiagnostics = [diagnosticFromError(error, "runtime", "RUN_PREFLIGHT_FAILED")];
   }
@@ -486,6 +498,47 @@ function immutableLaunchReviewPreview(value: LaunchReviewPreviewValue): LaunchRe
   return deepFreezeJson(JSON.parse(JSON.stringify(value)) as LaunchReviewPreviewValue);
 }
 
+/**
+ * Capture every current and future data field before the first asynchronous
+ * launch step. Callback fields retain their identity, while all data supplied
+ * by the caller is detached and frozen so a preflight callback cannot change
+ * what later materialization or submission consumes.
+ */
+export function snapshotPlanRunInput<T extends PlanRunInput>(input: T): T {
+  try {
+    const snapshot = Object.fromEntries(
+      Object.entries(input).map(([key, value]) => [
+        key,
+        typeof value === "function" ? value : snapshotLaunchData(value)
+      ])
+    ) as T;
+    return deepFreezeLaunchInput(snapshot);
+  } catch (error) {
+    throw new Error(
+      `launch input cannot be captured before review: ${error instanceof Error ? error.message : error}`,
+      {
+        cause: error
+      }
+    );
+  }
+}
+
+function snapshotLaunchData<T>(value: T): T {
+  return deepFreezeLaunchInput(structuredClone(value));
+}
+
+function deepFreezeLaunchInput<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== "object") return value;
+  const object = value as object;
+  if (seen.has(object)) return value;
+  seen.add(object);
+  const prototype = Object.getPrototypeOf(object);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreezeLaunchInput(child, seen);
+  Object.freeze(object);
+  return value;
+}
+
 function launchReviewPlanSummary(
   input: PlanRunInput,
   config: PlanRunValue["resolved_config"],
@@ -598,8 +651,9 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value;
 }
 
-function launchReviewOverrides(input: PlanRunInput): Record<string, unknown> {
+function launchReviewOverrides(input: PlanRunInput, configuredMaxConcurrency: number): Record<string, unknown> {
   return {
+    max_concurrency: input.maxConcurrency ?? configuredMaxConcurrency,
     ...(input.agent === undefined ? {} : { agent: input.agent }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.reasoning === undefined ? {} : { reasoning: input.reasoning }),
