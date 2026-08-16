@@ -145,7 +145,23 @@
         "unknown"
       ]
     },
-    "failure_message": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    "failure_message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "failure_message_redaction_span_code_points": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+    },
+    "failure_message_truncated": { "const": true }
+  },
+  "dependentRequired": {
+    "failure_message_redaction_span_code_points": ["failure_message"],
+    "failure_message_truncated": ["failure_message"]
+  },
+  "dependentSchemas": {
+    "failure_message_redaction_span_code_points": {
+      "properties": { "failure_message": { "type": "string", "pattern": "<redacted>" } }
+    }
   },
   "allOf": [
     {
@@ -218,7 +234,17 @@
         "not": {
           "anyOf": [
             { "type": "object", "properties": { "failure_category": {} }, "required": ["failure_category"] },
-            { "type": "object", "properties": { "failure_message": {} }, "required": ["failure_message"] }
+            { "type": "object", "properties": { "failure_message": {} }, "required": ["failure_message"] },
+            {
+              "type": "object",
+              "properties": { "failure_message_redaction_span_code_points": {} },
+              "required": ["failure_message_redaction_span_code_points"]
+            },
+            {
+              "type": "object",
+              "properties": { "failure_message_truncated": {} },
+              "required": ["failure_message_truncated"]
+            }
           ]
         }
       }

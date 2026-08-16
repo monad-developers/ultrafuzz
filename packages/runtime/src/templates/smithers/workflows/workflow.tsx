@@ -1225,6 +1225,77 @@ function artifactAwareAgent(
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   const configuredModel = task.agentChain[chainIndex]?.modelName;
+  const credentialEnvironmentNames = [
+    ...(task.execution?.agentCredentialEnv ?? []),
+    ...(task.execution?.modal?.credentialEnv ?? [])
+  ];
+  const freshNormalizedAgentFailure = (error: unknown): Error => {
+    const fallback = "agent execution failed";
+    // Snapshot credentials before hostile getters can mutate the environment.
+    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env, credentialEnvironmentNames);
+    const safeSmithersControlCodes = new Set([
+      "AGENT_QUOTA_EXCEEDED",
+      "AGENT_CONFIG_INVALID",
+      "AGENT_SESSION_LOST",
+      "AGENT_CHECKPOINT_INVALID",
+      "TASK_ABORTED"
+    ]);
+    const readProperty = (value: object, key: string): unknown => {
+      try {
+        return Reflect.get(value, key);
+      } catch {
+        return undefined;
+      }
+    };
+    let sourceError: Error | undefined;
+    try {
+      if (error instanceof Error) sourceError = error;
+    } catch {}
+    const sourceMessage = sourceError === undefined ? undefined : readProperty(sourceError, "message");
+    const sourceName = sourceError === undefined ? undefined : readProperty(sourceError, "name");
+    const sourceCode = sourceError === undefined ? undefined : readProperty(sourceError, "code");
+    const sourceDetails = sourceError === undefined ? undefined : readProperty(sourceError, "details");
+    let failureMessage = fallback;
+    if (typeof error === "string") failureMessage = error;
+    else if (typeof sourceMessage === "string") failureMessage = sourceMessage;
+    const normalizedFailureMessage = normalizeNodeAttemptFailureMessage(failureMessage, forbiddenSecretValues);
+    // Retain only normalized text and allowlisted scheduler controls.
+    const normalizedError = new Error(normalizedFailureMessage ?? fallback) as Error & {
+      code?: string;
+      details?: Record<string, boolean | number>;
+    };
+    if (sourceName === "AbortError") {
+      Object.defineProperty(normalizedError, "name", {
+        configurable: true,
+        value: "AbortError",
+        writable: true
+      });
+    }
+    if (typeof sourceCode === "string" && safeSmithersControlCodes.has(sourceCode)) {
+      normalizedError.code = sourceCode;
+    }
+    if (sourceDetails !== null && typeof sourceDetails === "object") {
+      const details: Record<string, boolean | number> = {};
+      for (const key of ["failureQuota", "failureRetryable", "discardResumeSession", "discardAgentCheckpoint"]) {
+        const value = readProperty(sourceDetails, key);
+        if (typeof value === "boolean") details[key] = value;
+      }
+      const quotaResetAtMs = readProperty(sourceDetails, "quotaResetAtMs");
+      if (
+        Number.isSafeInteger(quotaResetAtMs) &&
+        (quotaResetAtMs as number) >= 0 &&
+        (quotaResetAtMs as number) <= 8_640_000_000_000_000
+      ) {
+        details.quotaResetAtMs = quotaResetAtMs as number;
+      }
+      const retryAfterMs = readProperty(sourceDetails, "retryAfterMs");
+      if (Number.isSafeInteger(retryAfterMs) && (retryAfterMs as number) >= 0) {
+        details.retryAfterMs = retryAfterMs as number;
+      }
+      if (Object.keys(details).length > 0) normalizedError.details = details;
+    }
+    return normalizedError;
+  };
   return {
     id: smithersTaskAgentId(task, chainIndex),
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
@@ -1233,7 +1304,17 @@ function artifactAwareAgent(
     ...(agent.supportsNativeStructuredOutput === undefined
       ? {}
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
-    ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
+    ...(agent.preflight === undefined
+      ? {}
+      : {
+          preflight: async (args) => {
+            try {
+              return await agent.preflight!(args);
+            } catch (error) {
+              throw freshNormalizedAgentFailure(error);
+            }
+          }
+        }),
     generate: async (args) => {
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
@@ -1280,7 +1361,11 @@ function artifactAwareAgent(
             execution
           )
         : retryArgs;
-      return await agent.generate(attemptArgs);
+      try {
+        return await agent.generate(attemptArgs);
+      } catch (error) {
+        throw freshNormalizedAgentFailure(error);
+      }
     }
   };
 }

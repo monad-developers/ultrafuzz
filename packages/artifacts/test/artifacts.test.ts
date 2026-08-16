@@ -254,6 +254,108 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
 });
 
+function failedAttemptInput(id: string, failureMessage: string) {
+  return {
+    workflowRunId: `workflow-run-${id}`,
+    controlGeneration: "d".repeat(64),
+    nodeId: `strategy-${id}`,
+    strategyAttemptId: `strategy-${id}`,
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
+    startedAt: "2026-07-18T11:00:00.000Z",
+    finishedAt: "2026-07-18T11:01:00.000Z",
+    outcome: "failed" as const,
+    inputManifestDigest: manifestDigest(`${id} input manifest`),
+    failureCategory: "executor-error" as const,
+    failureMessage
+  };
+}
+
+test("node attempt ledger replay keeps a persisted failure redaction authoritative across credential rotation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-redacted-replay" });
+  const oldCredential = "correct horse battery staple";
+  const input = failedAttemptInput("redacted-replay", `provider echoed ${oldCredential}`);
+
+  const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
+  const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
+  assert.equal(first.entry.failure_message, "provider echoed <redacted>");
+  assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
+  assert.equal(first.entry.failure_message_truncated, undefined);
+
+  const replayed = appendNodeAttempt(layout, {
+    ...input,
+    forbiddenSecretValues: ["new credential value"]
+  });
+  assert.equal(replayed.appended, false);
+  assert.deepEqual(replayed.entry, first.entry);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+
+  for (const failureMessage of [
+    `different provider failure ${oldCredential}`,
+    `provider echoed ${oldCredential}; changed non-secret context`
+  ]) {
+    assert.throws(
+      () =>
+        appendNodeAttempt(layout, {
+          ...input,
+          failureMessage,
+          forbiddenSecretValues: ["new credential value"]
+        }),
+      /already recorded with different immutable data/u
+    );
+  }
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+});
+
+test("node attempt ledger uses explicit provenance for truncated redaction replay", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-truncated-replay" });
+  const oldCredential = "old credential material ".repeat(30).trim();
+  const input = failedAttemptInput(
+    "truncated-replay",
+    `provider echoed ${oldCredential}; stable context ${"x".repeat(1_500)}`
+  );
+
+  const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
+  const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
+  assert.equal(Buffer.byteLength(first.entry.failure_message ?? "", "utf8"), MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+  assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
+  assert.equal(first.entry.failure_message_truncated, true);
+
+  const replayed = appendNodeAttempt(layout, {
+    ...input,
+    forbiddenSecretValues: ["rotated credential value"]
+  });
+  assert.equal(replayed.appended, false);
+  assert.deepEqual(replayed.entry, first.entry);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+
+  assert.throws(
+    () =>
+      appendNodeAttempt(layout, {
+        ...input,
+        failureMessage: `changed prefix ${oldCredential}; stable context ${"x".repeat(1_500)}`,
+        forbiddenSecretValues: ["rotated credential value"]
+      }),
+    /already recorded with different immutable data/u
+  );
+});
+
+test("node attempt ledger does not infer replay-safe redaction from a literal placeholder", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-literal-placeholder" });
+  const input = failedAttemptInput("literal-placeholder", `provider echoed <redacted>; ${"x".repeat(1_500)}`);
+
+  const first = appendNodeAttempt(layout, input);
+  assert.equal(first.entry.failure_message_redaction_span_code_points, undefined);
+  assert.equal(first.entry.failure_message_truncated, true);
+  assert.throws(
+    () =>
+      appendNodeAttempt(layout, { ...input, failureMessage: `provider echoed old credential; ${"x".repeat(1_500)}` }),
+    /already recorded with different immutable data/u
+  );
+});
+
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
   const project = tempProject();
   const outside = tempProject();
