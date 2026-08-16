@@ -149,19 +149,17 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   const project = tempProject();
   const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
 
-  fs.mkdirSync(path.join(project, "test"), { recursive: true });
-  fs.writeFileSync(path.join(project, "test/Generated.t.sol"), "contract OldGenerated {}\n", "utf8");
+  fs.writeFileSync(path.join(project, "README.md"), "# Materialize fixture\n", "utf8");
   git(project, ["init"]);
   git(project, ["config", "user.email", "tester@example.invalid"]);
   git(project, ["config", "user.name", "Ultrafuzz Tester"]);
-  git(project, ["add", "test/Generated.t.sol"]);
+  git(project, ["add", "README.md"]);
   git(project, ["commit", "-m", "seed"]);
 
   const result = await materializeSelection({
     projectRoot: project,
     runId,
     confirmed: true,
-    allowOverwrite: true,
     copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
   });
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -169,15 +167,17 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   assert.equal(result.value?.audit.unstaged, true);
   assert.equal(result.value?.copied.length, 1);
   assert.equal(fs.existsSync(result.value!.audit.audit_path), true);
+  assert.equal(fs.readFileSync(path.join(project, "test/Generated.t.sol"), "utf8"), "generated output\n");
 
-  const status = git(project, ["status", "--porcelain=v1"]);
-  assert.match(status, / M test\/Generated\.t\.sol/u);
-  assert.doesNotMatch(status, /^M {2}test\/Generated\.t\.sol/mu);
+  const status = git(project, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  assert.match(status, /\?\? test\/Generated\.t\.sol/u);
+  assert.doesNotMatch(git(project, ["diff", "--cached", "--name-only"]), /test\/Generated\.t\.sol/u);
 
   const events = fs.readFileSync(path.join(runRoot, "events.jsonl"), "utf8");
   assert.match(events, /materialize-selection/u);
   const audit = fs.readFileSync(result.value!.audit.audit_path, "utf8");
   assert.match(audit, /"unstaged":true/u);
+  assert.match(audit, /"allow_overwrite":false/u);
   assert.doesNotMatch(audit, /"mutation_policy"/u);
 });
 

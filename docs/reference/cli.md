@@ -540,8 +540,9 @@ ultrafuzz materialize <run-id> \
 
 Materialization is copy-only. Each `--copy` source is relative to the run root,
 and each destination is relative to the project root. Non-dry-run
-materialization requires `--yes` or `--confirm`. `--force` allows overwriting an
-existing file destination after path checks.
+materialization requires `--yes` or `--confirm`. Destinations must be new;
+`--force` is retained only to return an explicit unsupported-overwrite
+diagnostic and never replaces an existing file.
 
 Copying a final report or writing below a configured production-source root is
 publication-sensitive. A dry run returns the exact signoff request. The real

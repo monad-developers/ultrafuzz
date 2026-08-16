@@ -58,6 +58,14 @@ export function validateMaterializePolicy(input: MaterializePolicyInput): Policy
       policyError("MATERIALIZE_UNSAFE_MODE", `materialization mode \`${input.mode}\` would publish or stage changes`)
     );
   }
+  if (input.allowOverwrite === true) {
+    diagnostics.push(
+      policyError(
+        "MATERIALIZE_OVERWRITE_UNSUPPORTED",
+        "materialization does not support overwriting an existing destination; choose a new destination path"
+      )
+    );
+  }
 
   for (const patch of patches) {
     diagnostics.push(...validateSelectedRunOutput("patch", patch).diagnostics);

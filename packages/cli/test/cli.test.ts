@@ -1097,6 +1097,39 @@ test("run reads a bounded immutable workflow-input file", async () => {
   assert.equal(smithersInput.operator_input?.ticket, 3);
 });
 
+test("materialize --force reports unsupported overwrite without mutating the destination", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  const runId = "cli-materialize-force";
+  const artifactPath = path.join(project, ".ultrafuzz", "runs", runId, "artifacts", "node-1", "stdout.txt");
+  const destinationPath = path.join(project, "materialized", "stdout.txt");
+  fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  fs.writeFileSync(artifactPath, "generated output\n", "utf8");
+  fs.writeFileSync(destinationPath, "reviewed project output\n", "utf8");
+  const destinationBytes = fs.readFileSync(destinationPath);
+
+  const forced = await cli(project, [
+    "materialize",
+    runId,
+    "--copy",
+    "artifacts/node-1/stdout.txt:materialized/stdout.txt",
+    "--yes",
+    "--force",
+    "--json"
+  ]);
+
+  assert.equal(forced.code, 1);
+  const body = parseJson(forced);
+  assertNoSmithersSurface(body);
+  assert.deepEqual(
+    (body.diagnostics as Array<{ code: string }>).map((diagnostic) => diagnostic.code),
+    ["MATERIALIZE_OVERWRITE_UNSUPPORTED"]
+  );
+  assert.deepEqual(fs.readFileSync(destinationPath), destinationBytes);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "materialize-audit.jsonl")), false);
+});
+
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);

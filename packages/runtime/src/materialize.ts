@@ -236,7 +236,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
         diagnostics.push(
           runtimeError(
             "MATERIALIZE_DESTINATION_RACE",
-            `destination ${copy.selection.destination} changed or could not be replaced safely`,
+            `destination ${copy.selection.destination} changed or could not be created safely`,
             "materialize",
             copy.selection.destination,
             { error: error instanceof Error ? error.message : String(error) }
@@ -260,7 +260,7 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     mode,
     unstaged: true,
     confirmed: input.confirmed === true,
-    allow_overwrite: input.allowOverwrite === true,
+    allow_overwrite: false,
     copies: plannedCopies.map((copy) => ({
       source: copy.selection.source,
       destination: copy.selection.destination,
@@ -381,7 +381,7 @@ function planCopy(
   diagnostics: RuntimeDiagnostic[]
 ): PlannedMaterialization | undefined {
   const sourcePath = resolveSource(copy.source, layout, diagnostics);
-  const destinationPath = resolveDestination(copy.destination, projectRoot, allowOverwrite, diagnostics);
+  const destinationPath = resolveDestination(copy.destination, projectRoot, diagnostics);
   if (sourcePath === undefined || destinationPath === undefined) {
     return undefined;
   }
@@ -457,7 +457,6 @@ function resolveSource(selection: string, layout: RunLayout, diagnostics: Runtim
 function resolveDestination(
   selection: string,
   projectRoot: string,
-  allowOverwrite: boolean,
   diagnostics: RuntimeDiagnostic[]
 ): string | undefined {
   let destinationPath: string;
@@ -499,17 +498,15 @@ function resolveDestination(
       );
       return undefined;
     }
-    if (!allowOverwrite) {
-      diagnostics.push(
-        runtimeError(
-          "MATERIALIZE_DESTINATION_EXISTS",
-          `destination ${selection} already exists`,
-          "materialize",
-          selection
-        )
-      );
-      return undefined;
-    }
+    diagnostics.push(
+      runtimeError(
+        "MATERIALIZE_DESTINATION_EXISTS",
+        `destination ${selection} already exists`,
+        "materialize",
+        selection
+      )
+    );
+    return undefined;
   }
   return destinationPath;
 }
