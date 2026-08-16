@@ -221,6 +221,20 @@ test("operator production roots must exactly match resolved publication-sensitiv
   );
 });
 
+test("operator production roots reject portable case and Unicode aliases", () => {
+  for (const roots of [
+    ["SRC", "src"],
+    ["caf\u00e9", "cafe\u0301"]
+  ]) {
+    const policy = JSON.parse(privatePolicy) as Record<string, unknown>;
+    policy.production_source_roots = roots;
+    assert.throws(
+      () => parseDataGovernancePolicy(JSON.stringify(policy)),
+      /production_source_roots must be unique after Unicode and case normalization/u
+    );
+  }
+});
+
 test("operator policy pins OpenRouter models and can classify a self-hosted agent as local", () => {
   const projectRoot = repository();
   const localGraph = {
