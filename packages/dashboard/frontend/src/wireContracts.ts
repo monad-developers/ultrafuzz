@@ -29,6 +29,7 @@ export type DashboardCommandName =
   | "clean";
 export type DashboardHttpDocumentType =
   | "session"
+  | "launch-preview"
   | "run-overview"
   | "flow"
   | "graph"

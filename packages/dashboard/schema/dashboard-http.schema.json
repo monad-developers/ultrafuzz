@@ -4,6 +4,7 @@
   "title": "Ultrafuzz dashboard HTTP JSON document",
   "oneOf": [
     { "$ref": "#/$defs/sessionResponse" },
+    { "$ref": "#/$defs/launchPreviewResponse" },
     { "$ref": "#/$defs/runOverviewResponse" },
     { "$ref": "#/$defs/flowResponse" },
     { "$ref": "#/$defs/graphResponse" },
@@ -517,6 +518,112 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmptyString" }
         }
+      }
+    },
+    "configuredLaunchBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxParallelAgents",
+        "maxParallelNodes",
+        "defaultTimeoutSeconds",
+        "workflowDeadlineSeconds",
+        "sameAgentAttempts",
+        "expandedAttempts"
+      ],
+      "properties": {
+        "maxParallelAgents": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxParallelNodes": { "$ref": "#/$defs/positiveSafeInteger" },
+        "defaultTimeoutSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "workflowDeadlineSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "sameAgentAttempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "expandedAttempts": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+      }
+    },
+    "launchReviewManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "config_fingerprint",
+        "prompt_digest",
+        "topology_digest",
+        "reference_catalog_digest",
+        "reference_expectations_digest",
+        "target_commit",
+        "controller_source_digest",
+        "controller_source_stock",
+        "controller_source_overrides",
+        "project_prompt_overrides",
+        "runtime_overrides",
+        "operator_prompt_digest",
+        "workflow_input_digest"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.launch-review.v1" },
+        "config_fingerprint": { "$ref": "#/$defs/sha256" },
+        "prompt_digest": { "$ref": "#/$defs/sha256" },
+        "topology_digest": { "$ref": "#/$defs/sha256" },
+        "reference_catalog_digest": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "reference_expectations_digest": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "target_commit": {
+          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[a-f0-9]{40,64}$" }]
+        },
+        "controller_source_digest": { "$ref": "#/$defs/sha256" },
+        "controller_source_stock": { "type": "boolean" },
+        "controller_source_overrides": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "project_prompt_overrides": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "runtime_overrides": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/operatorWorkflowInput" }
+        },
+        "operator_prompt_digest": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "workflow_input_digest": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        }
+      }
+    },
+    "launchPreviewResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document_type",
+        "target",
+        "providers",
+        "configuredBudget",
+        "reviewRequired",
+        "review",
+        "confirmationDigest"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "launch-preview" },
+        "target": { "$ref": "#/$defs/nonEmptyString" },
+        "providers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "configuredBudget": { "$ref": "#/$defs/configuredLaunchBudget" },
+        "reviewRequired": { "type": "boolean" },
+        "review": { "$ref": "#/$defs/launchReviewManifest" },
+        "confirmationDigest": { "$ref": "#/$defs/sha256" }
       }
     },
     "runOverviewResponse": {
@@ -1047,7 +1154,9 @@
         "agent": { "$ref": "#/$defs/nonEmptyString" },
         "model": { "$ref": "#/$defs/nonEmptyString" },
         "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" },
-        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" }
+        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" },
+        "confirmed": { "const": true },
+        "confirmationDigest": { "$ref": "#/$defs/sha256" }
       }
     },
     "runIdCommandArguments": {

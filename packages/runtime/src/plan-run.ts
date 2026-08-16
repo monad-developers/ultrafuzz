@@ -61,6 +61,8 @@ import {
 import {
   type PlanRunInput,
   type PlanRunValue,
+  type LaunchReviewManifest,
+  type LaunchReviewPreviewValue,
   type PlannedGraph,
   type PlannedGraphNode,
   type RenderedPromptPlan,
@@ -96,9 +98,69 @@ interface PlanRunHooks {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
     launchReviewDigest: string;
+    launchReviewManifest: LaunchReviewManifest;
     controllerSource: ControllerSourceInspection;
     targetCommit: string | null;
   }): Promise<RuntimeDiagnostic[]>;
+}
+
+const LAUNCH_REVIEW_PREVIEW_READY = "RUN_LAUNCH_REVIEW_PREVIEW_READY";
+
+/**
+ * Compute the same launch-review manifest consumed by startRun, then stop at
+ * planRun's pre-materialization boundary. No run root or provider state exists
+ * when this function returns.
+ */
+export async function previewRunLaunchReview(input: PlanRunInput) {
+  const projectRoot = path.resolve(input.projectRoot);
+  let captured:
+    | {
+        value: LaunchReviewPreviewValue;
+        controllerSourceDigest: string;
+        targetRoot: string;
+        targetCommit: string | null;
+      }
+    | undefined;
+  const planned = await planRun(input, {
+    beforeMaterialize: async ({
+      resolvedConfig,
+      expandedGraph,
+      launchReviewDigest,
+      launchReviewManifest,
+      controllerSource,
+      targetCommit
+    }) => {
+      captured = {
+        value: immutableLaunchReviewPreview({
+          launch_review_digest: launchReviewDigest,
+          review_required: resolvedConfig.permissions.promptReviewRequired || !controllerSource.stock,
+          manifest: launchReviewManifest,
+          summary: launchReviewPlanSummary(input, resolvedConfig, expandedGraph)
+        }),
+        controllerSourceDigest: controllerSource.digest,
+        targetRoot: path.resolve(projectRoot, resolvedConfig.project.repo),
+        targetCommit
+      };
+      return [
+        {
+          code: LAUNCH_REVIEW_PREVIEW_READY,
+          message: "launch review preview is ready",
+          severity: "error",
+          source: "runtime"
+        }
+      ];
+    }
+  });
+  if (captured === undefined) return runtimeFailure<LaunchReviewPreviewValue>(planned.diagnostics);
+  try {
+    assertControllerSourceDigest(projectRoot, captured.controllerSourceDigest);
+    assertTargetCommitForReview(captured.targetRoot, captured.targetCommit);
+  } catch (error) {
+    return runtimeFailure<LaunchReviewPreviewValue>([
+      diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_CHANGED")
+    ]);
+  }
+  return runtimeResult(true, captured.value);
 }
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
@@ -217,7 +279,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")]);
   }
-  const launchReviewDigest = sha256Stable({
+  const launchReviewManifest: LaunchReviewManifest = {
     schema_version: "ultrafuzz.launch-review.v1",
     config_fingerprint: configFingerprint,
     prompt_digest: promptDigest,
@@ -235,7 +297,8 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     runtime_overrides: launchReviewOverrides(input),
     operator_prompt_digest: input.prompt === undefined ? null : sha256Stable(input.prompt),
     workflow_input_digest: input.workflowInput === undefined ? null : sha256Stable(input.workflowInput)
-  });
+  };
+  const launchReviewDigest = sha256Stable(launchReviewManifest);
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
@@ -247,6 +310,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         resolvedConfig: resolved.config,
         expandedGraph,
         launchReviewDigest,
+        launchReviewManifest,
         controllerSource,
         targetCommit
       })) ?? [];
@@ -416,6 +480,48 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+function immutableLaunchReviewPreview(value: LaunchReviewPreviewValue): LaunchReviewPreviewValue {
+  return deepFreezeJson(JSON.parse(JSON.stringify(value)) as LaunchReviewPreviewValue);
+}
+
+function launchReviewPlanSummary(
+  input: PlanRunInput,
+  config: PlanRunValue["resolved_config"],
+  expandedGraph: ExpandedGraph
+): LaunchReviewPreviewValue["summary"] {
+  const profileIds = [
+    ...new Set([
+      ...expandedGraph.nodes.flatMap((node) => node.modelFanout.map((selection) => selection.modelProfileId)),
+      ...config.retry.agents,
+      config.models.default
+    ])
+  ];
+  const providers = profileIds.map((profileId) => config.models.profiles[profileId]?.agent ?? profileId);
+  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
+    providers.push(`execution:${config.execution.provider}`);
+  }
+  return {
+    target: config.project.repo,
+    providers: [...new Set(providers)].sort(),
+    configured_budget: {
+      max_parallel_agents: input.maxConcurrency ?? config.run.maxParallelAgents,
+      max_parallel_nodes: config.run.maxParallelNodes,
+      default_timeout_seconds: config.run.defaultTimeoutSeconds,
+      workflow_deadline_seconds: config.run.workflowDeadlineSeconds,
+      same_agent_attempts: config.retry.sameAgentAttempts,
+      expanded_attempts: expandedGraph.nodes.length
+    }
+  };
+}
+
+function deepFreezeJson<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreezeJson(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export function targetCommitForReview(targetRoot: string): string | null {

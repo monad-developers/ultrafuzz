@@ -273,6 +273,39 @@ type DashboardSession = {
   templateVariables: string[];
 };
 
+type LaunchReviewManifest = {
+  schema_version: "ultrafuzz.launch-review.v1";
+  config_fingerprint: string;
+  prompt_digest: string;
+  topology_digest: string;
+  reference_catalog_digest: string | null;
+  reference_expectations_digest: string | null;
+  target_commit: string | null;
+  controller_source_digest: string;
+  controller_source_stock: boolean;
+  controller_source_overrides: string[];
+  project_prompt_overrides: string[];
+  runtime_overrides: Record<string, unknown>;
+  operator_prompt_digest: string | null;
+  workflow_input_digest: string | null;
+};
+
+type LaunchPreview = {
+  target: string;
+  providers: string[];
+  configuredBudget: {
+    maxParallelAgents: number;
+    maxParallelNodes: number;
+    defaultTimeoutSeconds: number;
+    workflowDeadlineSeconds: number;
+    sameAgentAttempts: number;
+    expandedAttempts: number;
+  };
+  reviewRequired: boolean;
+  review: LaunchReviewManifest;
+  confirmationDigest: string;
+};
+
 type NodeSummary = {
   id: string;
   label: string;
@@ -1121,6 +1154,15 @@ function App() {
         }
 
         const commandBody = { ...body };
+        if (command === "run") {
+          const preview = await postLaunchPreview(commandBody, session.sessionToken);
+          if (!window.confirm(launchConfirmationMessage(preview))) {
+            setMessage("Run launch canceled before submission.");
+            return;
+          }
+          commandBody.confirmed = true;
+          commandBody.confirmationDigest = preview.confirmationDigest;
+        }
         if ((command === "clean" || command === "materialize") && commandBody.confirmed !== true) {
           if (commandBody.dryRun === true) {
             commandBody.confirmed = true;
@@ -2984,6 +3026,55 @@ async function postCommandJson<T>(
     await throwDashboardHttpError(response);
   }
   return parseDashboardHttpResponse<T>(response, "command-job");
+}
+
+async function postLaunchPreview(commandArguments: Record<string, unknown>, token: string): Promise<LaunchPreview> {
+  const response = await fetch("/api/commands/run/preview", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-ultrafuzz-session": token
+    },
+    body: JSON.stringify(dashboardCommandRequest("run", commandArguments))
+  });
+  if (!response.ok) await throwDashboardHttpError(response);
+  return parseDashboardHttpResponse<LaunchPreview>(response, "launch-preview");
+}
+
+export function launchConfirmationMessage(preview: LaunchPreview): string {
+  const budget = preview.configuredBudget;
+  const review = preview.review;
+  const digest = (value: string | null): string => value ?? "none";
+  return [
+    "Confirm Ultrafuzz run launch",
+    "",
+    `Target: ${preview.target}`,
+    `Providers: ${preview.providers.join(", ")}`,
+    "Configured budget:",
+    `- Parallel agents: ${budget.maxParallelAgents}`,
+    `- Parallel nodes: ${budget.maxParallelNodes}`,
+    `- Default node timeout: ${budget.defaultTimeoutSeconds}s`,
+    `- Workflow deadline: ${budget.workflowDeadlineSeconds}s`,
+    `- Attempts per agent: ${budget.sameAgentAttempts}`,
+    `- Expanded attempts: ${budget.expandedAttempts}`,
+    "",
+    "Comprehensive launch review:",
+    `- Confirmation digest: ${preview.confirmationDigest}`,
+    `- Configuration: ${review.config_fingerprint}`,
+    `- Prompts: ${review.prompt_digest}`,
+    `- Topology: ${review.topology_digest}`,
+    `- Reference catalog: ${digest(review.reference_catalog_digest)}`,
+    `- Reference expectations: ${digest(review.reference_expectations_digest)}`,
+    `- Target commit: ${digest(review.target_commit)}`,
+    `- Controller source: ${review.controller_source_digest} (${review.controller_source_stock ? "stock" : "custom"})`,
+    `- Controller overrides: ${review.controller_source_overrides.join(", ") || "none"}`,
+    `- Project prompt overrides: ${review.project_prompt_overrides.join(", ") || "none"}`,
+    `- Runtime overrides: ${JSON.stringify(review.runtime_overrides)}`,
+    `- Operator prompt: ${digest(review.operator_prompt_digest)}`,
+    `- Workflow input: ${digest(review.workflow_input_digest)}`,
+    "",
+    "Launch this exact reviewed run?"
+  ].join("\n");
 }
 
 function promptEndpointForNode(node: DashboardFlowNode): string | null {

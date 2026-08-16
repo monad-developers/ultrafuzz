@@ -24,6 +24,7 @@ const MAX_DASHBOARD_SSE_BYTES = 64 * 1024 * 1024;
 
 export type DashboardHttpDefinition =
   | "sessionResponse"
+  | "launchPreviewResponse"
   | "runOverviewResponse"
   | "flowResponse"
   | "graphResponse"

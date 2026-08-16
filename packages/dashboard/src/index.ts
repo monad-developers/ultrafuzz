@@ -61,7 +61,10 @@ import {
   loadVerifiedFinalReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
+  previewRunLaunchReview,
   verifySealedTaskManifestSnapshot,
+  type LaunchReviewManifest,
+  type PlanRunInput,
   type RuntimeResult,
   type VerifiedNodeOutputSnapshot,
   type VerifiedRunOutputAuthoritySnapshot
@@ -151,6 +154,22 @@ interface DashboardCapturedRunAuthority {
   context: DashboardRunContext;
   state: RunState | undefined;
   authorityProjection: DashboardFlowAuthorityProjection | undefined;
+}
+
+interface DashboardLaunchPreview extends JsonObject {
+  target: string;
+  providers: string[];
+  configuredBudget: {
+    maxParallelAgents: number;
+    maxParallelNodes: number;
+    defaultTimeoutSeconds: number;
+    workflowDeadlineSeconds: number;
+    sameAgentAttempts: number;
+    expandedAttempts: number;
+  };
+  reviewRequired: boolean;
+  review: LaunchReviewManifest;
+  confirmationDigest: string;
 }
 
 const DASHBOARD_FINDINGS_CONTRACTS = [
@@ -461,6 +480,19 @@ class DashboardApp {
   ): Promise<void> {
     if (method === "GET" && segments.length === 2 && segments[1] === "stream") {
       await this.streamCommandJobs(request, response);
+      return;
+    }
+    if (method === "POST" && segments.length === 3 && segments[1] === "run" && segments[2] === "preview") {
+      requireMutation(request, this.sessionToken);
+      const body = await readDashboardRequest(request, "commandRequest");
+      if (stringField(body, "command") !== "run") {
+        throw new HttpError(400, "launch preview requires the run command");
+      }
+      sendJson(
+        response,
+        dashboardHttpDocument("launch-preview", await this.launchPreview(recordField(body, "arguments"))),
+        "launchPreviewResponse"
+      );
       return;
     }
     if (method === "POST" && segments.length === 2) {
@@ -1279,6 +1311,7 @@ class DashboardApp {
     if ((command === "materialize" || command === "clean") && body.confirmed !== true) {
       throw new HttpError(400, `${command} requires explicit confirmation`);
     }
+    if (command === "run") await this.validateRunLaunchConfirmation(body);
     const job: CommandJob = {
       schema_version: DASHBOARD_HTTP_SCHEMA_VERSION,
       document_type: "command-job",
@@ -1334,15 +1367,8 @@ class DashboardApp {
         break;
       case "run":
         result = await startRun({
-          projectRoot: this.projectRoot,
-          runId: optionalStringField(body, "runId"),
-          prompt: optionalStringField(body, "prompt"),
-          agent: optionalStringField(body, "agent"),
-          model: optionalStringField(body, "model"),
-          maxConcurrency: optionalNumberField(body, "maxConcurrency"),
-          workflowInput: body.workflowInput,
-          ...trustedCli,
-          env: this.env
+          ...this.runLaunchInput(body),
+          reviewAcknowledgement: optionalStringField(body, "confirmationDigest")
         });
         if (isRuntimeOk(result) && result.value && isRecord(result.value) && typeof result.value.run_id === "string") {
           this.currentRunId = result.value.run_id;
@@ -1427,6 +1453,52 @@ class DashboardApp {
       throw new HttpError(400, "this command requires a persisted run");
     }
     return validateSafeId(runId, "run ID");
+  }
+
+  async launchPreview(body: JsonObject): Promise<DashboardLaunchPreview> {
+    const preview = await previewRunLaunchReview(this.runLaunchInput(body));
+    if (!preview.ok || preview.value === undefined) {
+      throw new HttpError(400, diagnosticsMessage(preview.diagnostics));
+    }
+    const { configured_budget: budget } = preview.value.summary;
+    return {
+      target: preview.value.summary.target,
+      providers: [...preview.value.summary.providers],
+      configuredBudget: {
+        maxParallelAgents: budget.max_parallel_agents,
+        maxParallelNodes: budget.max_parallel_nodes,
+        defaultTimeoutSeconds: budget.default_timeout_seconds,
+        workflowDeadlineSeconds: budget.workflow_deadline_seconds,
+        sameAgentAttempts: budget.same_agent_attempts,
+        expandedAttempts: budget.expanded_attempts
+      },
+      reviewRequired: preview.value.review_required,
+      review: preview.value.manifest,
+      confirmationDigest: preview.value.launch_review_digest
+    };
+  }
+
+  private async validateRunLaunchConfirmation(body: JsonObject): Promise<void> {
+    if (body.confirmed !== true) throw new HttpError(400, "run requires explicit pre-launch confirmation");
+    const suppliedDigest = optionalStringField(body, "confirmationDigest");
+    const preview = await this.launchPreview(body);
+    if (suppliedDigest === undefined || !constantTimeEqual(suppliedDigest, preview.confirmationDigest)) {
+      throw new HttpError(409, "run launch confirmation is missing or stale for the comprehensive launch review");
+    }
+  }
+
+  private runLaunchInput(body: JsonObject): PlanRunInput {
+    return {
+      projectRoot: this.projectRoot,
+      runId: optionalStringField(body, "runId"),
+      prompt: optionalStringField(body, "prompt"),
+      agent: optionalStringField(body, "agent"),
+      model: optionalStringField(body, "model"),
+      maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+      workflowInput: body.workflowInput,
+      ...(this.ultrafuzzCliEntrypoint === undefined ? {} : { ultrafuzzCliEntrypoint: this.ultrafuzzCliEntrypoint }),
+      env: this.env
+    };
   }
 
   commandCapabilities(): JsonObject {
