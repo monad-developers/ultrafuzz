@@ -80,7 +80,7 @@
     {
       "kind": "modal-manifest",
       "path": "packages/modal/package.json",
-      "sha256": "fd0b53ae55be67ca633d47aa1a615efc7c6ea152c2b90730791048e3720170b6"
+      "sha256": "d478f57d98c76bb6d6bb150bd6d181977b1d71b3dd94993add980fc0ffaaaa7e"
     },
     {
       "kind": "workspace-manifest",
