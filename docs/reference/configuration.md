@@ -166,11 +166,24 @@ eval watchers.
 limits cover estimated spend, total tokens, provider requests, normalized
 agent turns, submitted context bytes, and emitted output bytes. The
 `max_attempt_*` fields independently bound one attempt. Exact limits are
-allowed; the first increment beyond a limit aborts the active work, cancels the
-workflow, and records typed exhaustion evidence. When catalog pricing is
-missing or incomplete, `unpriced_token_usd_per_million` supplies the
-operator-owned conservative cost basis. In cloud execution, run-wide limits
-are partitioned across rows so their shares sum to the configured ceiling.
+allowed; the first authenticated increment beyond a limit aborts the active
+work, cancels the workflow, and records typed exhaustion evidence. Token and
+cost limits are necessarily enforced after each provider generation settles,
+when its controller-authenticated usage becomes available. The shared abort is
+raised immediately at that point and prevents later provider calls. A response
+that crosses the ceiling is still durably charged, and already in-flight
+siblings can add bounded overshoot up to the configured scheduler concurrency.
+When component usage or catalog pricing is incomplete,
+`unpriced_token_usd_per_million` supplies the operator-owned conservative cost
+basis for the known inclusive token total. A configured cache-read ratio is an
+explicit estimate and remains priceable; a provider result with wholly missing,
+zero-only, or malformed generation telemetry instead fails closed. In cloud
+execution, run-wide limits are partitioned across rows so their shares sum to
+the configured ceiling.
+
+These accounting limits do not mediate individual commands or tool calls and
+do not change the configured sandbox or YOLO/bypass-permissions execution
+policy.
 
 ## Execution
 

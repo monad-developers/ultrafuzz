@@ -333,6 +333,23 @@ export interface NormalizedUsageAccountingProjection {
   pricing_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
 }
 
+export interface NormalizedUsageResourceBudgetProjection {
+  /** Inclusive token total used by the persisted workflow accounting. */
+  total_tokens: number;
+  /** Present only when every observed usage component has an authenticated price. */
+  estimated_spend_usd: number | null;
+  /** Matches the cost-budget predicate used by exhaustedAccountingBudget. */
+  cost_complete: boolean;
+}
+
+export interface SmithersGenerationUsageInput {
+  /** The controller-authenticated value returned or thrown by AgentLike.generate. */
+  value: unknown;
+  configuredModel?: string;
+  agent: string;
+  failure?: boolean;
+}
+
 interface NodeWorkflowEvidence {
   status: NodeStatus;
   workflowState?: SmithersNodeState;
@@ -1809,30 +1826,103 @@ function normalizedUsageLedgerInput(
     nodeId: requiredWorkflowEventString(payload.nodeId, "TokenUsageReported nodeId"),
     iteration: requiredWorkflowEventCount(payload.iteration, "TokenUsageReported iteration"),
     attempt: requiredWorkflowEventCount(payload.attempt, "TokenUsageReported attempt"),
-    usage: {
-      model: requiredWorkflowEventString(payload.model, "TokenUsageReported model"),
-      agent: requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"),
-      input_tokens: requiredWorkflowEventCount(payload.inputTokens, "TokenUsageReported inputTokens"),
-      output_tokens: requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens"),
-      ...(payload.cacheReadTokens === undefined
-        ? {}
-        : {
-            cache_read_tokens: requiredWorkflowEventCount(payload.cacheReadTokens, "TokenUsageReported cacheReadTokens")
-          }),
-      ...(payload.cacheWriteTokens === undefined
-        ? {}
-        : {
-            cache_write_tokens: requiredWorkflowEventCount(
-              payload.cacheWriteTokens,
-              "TokenUsageReported cacheWriteTokens"
-            )
-          }),
-      ...(payload.reasoningTokens === undefined
-        ? {}
-        : {
-            reasoning_tokens: requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens")
-          })
-    }
+    usage: normalizedUsageFromSmithersFields({
+      model: payload.model,
+      agent: payload.agent,
+      inputTokens: payload.inputTokens,
+      outputTokens: payload.outputTokens,
+      cacheReadTokens: payload.cacheReadTokens,
+      cacheWriteTokens: payload.cacheWriteTokens,
+      reasoningTokens: payload.reasoningTokens,
+      label: "TokenUsageReported"
+    })
+  };
+}
+
+/**
+ * Project the exact usage fields Smithers will persist after one provider
+ * generation. This runs inside the generated controller, before Smithers can
+ * schedule a later generation, so a one-response budget overshoot is visible
+ * immediately. The returned/thrown AgentLike value is the authority: display
+ * events are not accepted as accounting input.
+ */
+export function normalizeSmithersGenerationUsage(input: SmithersGenerationUsageInput): NormalizedUsage | undefined {
+  if (!isRecord(input.value)) return undefined;
+  const container = input.value;
+  const partialResult = input.failure === true && isRecord(container.result) ? container.result : undefined;
+  const usageValue =
+    input.failure === true
+      ? (container.usage ?? partialResult?.usage ?? container.totalUsage)
+      : (container.usage ?? container.totalUsage);
+  if (usageValue === undefined || usageValue === null) return undefined;
+  if (!isRecord(usageValue)) throw new Error("Smithers generation usage must be an object");
+
+  const inputTokens = usageValue.inputTokens ?? usageValue.promptTokens ?? 0;
+  const outputTokens = usageValue.outputTokens ?? usageValue.completionTokens ?? 0;
+  const cacheReadTokens =
+    (isRecord(usageValue.inputTokenDetails) ? usageValue.inputTokenDetails.cacheReadTokens : undefined) ??
+    usageValue.cacheReadTokens;
+  const cacheWriteTokens =
+    (isRecord(usageValue.inputTokenDetails) ? usageValue.inputTokenDetails.cacheWriteTokens : undefined) ??
+    usageValue.cacheWriteTokens;
+  const reasoningTokens =
+    (isRecord(usageValue.outputTokenDetails) ? usageValue.outputTokenDetails.reasoningTokens : undefined) ??
+    usageValue.reasoningTokens;
+  const checkedInputTokens = requiredWorkflowEventCount(inputTokens, "Smithers generation inputTokens");
+  const checkedOutputTokens = requiredWorkflowEventCount(outputTokens, "Smithers generation outputTokens");
+  // Smithers emits TokenUsageReported under this same predicate. Keeping the
+  // predicate here prevents a controller-only zero event from disagreeing with
+  // the immutable usage ledger during synchronization.
+  if (checkedInputTokens === 0 && checkedOutputTokens === 0) {
+    throw new Error("Smithers generation usage has no accountable input or output tokens");
+  }
+
+  const generationResult = partialResult ?? container;
+  const response = isRecord(generationResult.response) ? generationResult.response : undefined;
+  const resolvedModel =
+    typeof response?.modelId === "string" && response.modelId.length > 0 ? response.modelId : input.configuredModel;
+  return normalizedUsageFromSmithersFields({
+    model: resolvedModel ?? "unknown",
+    agent: input.agent,
+    inputTokens: checkedInputTokens,
+    outputTokens: checkedOutputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    label: "Smithers generation"
+  });
+}
+
+function normalizedUsageFromSmithersFields(input: {
+  model: unknown;
+  agent: unknown;
+  inputTokens: unknown;
+  outputTokens: unknown;
+  cacheReadTokens?: unknown;
+  cacheWriteTokens?: unknown;
+  reasoningTokens?: unknown;
+  label: string;
+}): NormalizedUsage {
+  return {
+    model: requiredWorkflowEventString(input.model, `${input.label} model`),
+    agent: requiredWorkflowEventString(input.agent, `${input.label} agent`),
+    input_tokens: requiredWorkflowEventCount(input.inputTokens, `${input.label} inputTokens`),
+    output_tokens: requiredWorkflowEventCount(input.outputTokens, `${input.label} outputTokens`),
+    ...(input.cacheReadTokens === undefined
+      ? {}
+      : {
+          cache_read_tokens: requiredWorkflowEventCount(input.cacheReadTokens, `${input.label} cacheReadTokens`)
+        }),
+    ...(input.cacheWriteTokens === undefined
+      ? {}
+      : {
+          cache_write_tokens: requiredWorkflowEventCount(input.cacheWriteTokens, `${input.label} cacheWriteTokens`)
+        }),
+    ...(input.reasoningTokens === undefined
+      ? {}
+      : {
+          reasoning_tokens: requiredWorkflowEventCount(input.reasoningTokens, `${input.label} reasoningTokens`)
+        })
   };
 }
 
@@ -3019,6 +3109,32 @@ export function projectNormalizedUsageAccounting(input: {
   };
 }
 
+/**
+ * Resource-budget view of the canonical accounting projection. In particular,
+ * unknown cache usage still contributes the known components to total_tokens,
+ * while any incomplete usage or pricing switches the whole run to its configured
+ * conservative unpriced-token rate.
+ */
+export function projectNormalizedUsageResourceBudget(input: {
+  usage: NormalizedUsage;
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio?: number;
+}): NormalizedUsageResourceBudgetProjection {
+  const accounting = projectNormalizedUsageAccounting(input);
+  const totalTokens = Object.values(accounting.components).reduce<number>(
+    (total, component) => total + (component ?? 0),
+    0
+  );
+  if (!Number.isSafeInteger(totalTokens) || totalTokens < 0) {
+    throw new Error("normalized resource-budget usage exceeds the safe numeric range");
+  }
+  return {
+    total_tokens: totalTokens,
+    estimated_spend_usd: accounting.estimated_spend_usd,
+    cost_complete: accounting.pricing_complete && accounting.estimated_spend_usd !== null
+  };
+}
+
 function sumUsageComponents(components: NormalizedUsageComponents): BoundedAccountingNumber {
   return boundedAccountingValues(Object.values(components));
 }
@@ -3137,7 +3253,7 @@ function storedComponentCosts(value: unknown, label: string): UsageComponentCost
   };
 }
 
-function configuredCacheReadRatio(value: string | undefined): number | undefined {
+export function configuredCacheReadRatio(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/u.test(value)) {
     throw new Error("ULTRAFUZZ_CACHE_READ_RATIO must be an exact decimal between 0 and 1");

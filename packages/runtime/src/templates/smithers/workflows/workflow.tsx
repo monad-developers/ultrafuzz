@@ -68,8 +68,13 @@ const {
   deriveWorkspacePatchGitFacts,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   invariantLedgerMarkdownParityIssues,
+  configuredCacheReadRatio,
+  normalizeSmithersGenerationUsage,
+  projectNormalizedUsageResourceBudget,
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
+  resolveLiveModelPricing,
+  roundAccountingUsd,
   smithersTaskAgentId,
   validateWorkspacePatchCapture,
   verifyPinnedSubmodulesFromExecutionSnapshot,
@@ -1267,7 +1272,18 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
   return selected.length === 1 ? selected[0] : selected;
 }
 
-type BudgetCounter = { requests: number; turns: number; contextBytes: number; outputBytes: number };
+type BudgetCounter = {
+  requests: number;
+  turns: number;
+  contextBytes: number;
+  outputBytes: number;
+  totalTokens: number;
+};
+type BudgetAggregateCounter = BudgetCounter & { pricedCostUsd: number; costComplete: boolean };
+type BudgetModelPricing =
+  Awaited<ReturnType<typeof resolveLiveModelPricing>>["prices"] extends ReadonlyMap<string, infer Pricing>
+    ? Pricing
+    : never;
 type ResourceBudgetExhaustionEvidence = {
   schema_version: "ultrafuzz.resource-budget-exhaustion.v1";
   ultrafuzz_run_id: string;
@@ -1279,15 +1295,18 @@ type ResourceBudgetExhaustionEvidence = {
   task_id: string;
   recorded_at: string;
 };
-type BudgetTaskState = BudgetCounter & {
+type BudgetTaskState = BudgetAggregateCounter & {
   taskId: string;
   attempts: Map<string, BudgetCounter>;
   exhaustion?: ResourceBudgetExhaustionEvidence;
 };
-type BudgetState = BudgetCounter & {
+type BudgetState = BudgetAggregateCounter & {
   taskStates: Map<string, BudgetTaskState>;
   stateRoot: string;
   abortController: AbortController;
+  modelPricing: Map<string, BudgetModelPricing>;
+  pricingRequests: Map<string, Promise<void>>;
+  cacheReadRatio: number | undefined;
   exhausted?: Error;
 };
 type ResourceBudgetName =
@@ -1300,7 +1319,7 @@ type ResourceBudgetName =
   | "attempt_tokens"
   | "attempt_requests";
 const resourceBudgetStates = new Map<string, BudgetState>();
-const RESOURCE_BUDGET_STATE_SCHEMA_VERSION = "ultrafuzz.resource-budget-state.v1";
+const RESOURCE_BUDGET_STATE_SCHEMA_VERSION = "ultrafuzz.resource-budget-state.v2";
 const RESOURCE_BUDGET_STATE_DIRECTORY = "resource-budget-counters";
 const MAX_RESOURCE_BUDGET_STATE_FILES = 100_000;
 const MAX_RESOURCE_BUDGET_STATE_BYTES = 1024 * 1024;
@@ -1327,13 +1346,13 @@ function resourceBudgetStateForTask(task: (typeof taskSpecs)[number]): BudgetSta
   const current = resourceBudgetStates.get(runBudgetKey);
   if (current !== undefined) return current;
   const created: BudgetState = {
-    requests: 0,
-    turns: 0,
-    contextBytes: 0,
-    outputBytes: 0,
+    ...emptyBudgetAggregateCounter(),
     taskStates: new Map(),
     stateRoot,
-    abortController: new AbortController()
+    abortController: new AbortController(),
+    modelPricing: new Map(),
+    pricingRequests: new Map(),
+    cacheReadRatio: configuredCacheReadRatio(process.env.ULTRAFUZZ_CACHE_READ_RATIO)
   };
   const names = readdirSync(stateRoot);
   if (names.length > MAX_RESOURCE_BUDGET_STATE_FILES) {
@@ -1355,11 +1374,13 @@ function resourceBudgetStateForTask(task: (typeof taskSpecs)[number]): BudgetSta
       throw new Error(`resource budget state repeats task ${taskState.taskId}`);
     }
     created.taskStates.set(taskState.taskId, taskState);
-    for (const field of ["requests", "turns", "contextBytes", "outputBytes"] as const) {
+    for (const field of ["requests", "turns", "contextBytes", "outputBytes", "totalTokens"] as const) {
       const total = created[field] + taskState[field];
       if (!Number.isSafeInteger(total)) throw new Error(`resource budget ${field} total exceeds the safe range`);
       created[field] = total;
     }
+    created.pricedCostUsd = addBudgetCostUsd(created.pricedCostUsd, taskState.pricedCostUsd);
+    created.costComplete = created.costComplete && taskState.costComplete;
     if (taskState.exhaustion !== undefined && created.exhausted === undefined) {
       created.exhausted = resourceBudgetError(taskState.exhaustion);
       created.abortController.abort(created.exhausted);
@@ -1383,13 +1404,17 @@ function resourceBudgetStateRoot(task: (typeof taskSpecs)[number]): string {
 }
 
 function emptyBudgetCounter(): BudgetCounter {
-  return { requests: 0, turns: 0, contextBytes: 0, outputBytes: 0 };
+  return { requests: 0, turns: 0, contextBytes: 0, outputBytes: 0, totalTokens: 0 };
+}
+
+function emptyBudgetAggregateCounter(): BudgetAggregateCounter {
+  return { ...emptyBudgetCounter(), pricedCostUsd: 0, costComplete: true };
 }
 
 function resourceBudgetTaskStateForTask(task: (typeof taskSpecs)[number], state: BudgetState): BudgetTaskState {
   const current = state.taskStates.get(task.id);
   if (current !== undefined) return current;
-  const created: BudgetTaskState = { taskId: task.id, ...emptyBudgetCounter(), attempts: new Map() };
+  const created: BudgetTaskState = { taskId: task.id, ...emptyBudgetAggregateCounter(), attempts: new Map() };
   state.taskStates.set(task.id, created);
   return created;
 }
@@ -1401,7 +1426,7 @@ function persistResourceBudgetTaskState(task: (typeof taskSpecs)[number], state:
     ultrafuzz_run_id: task.metadata.run.ultrafuzzRunId,
     workflow_run_id: task.smithersRunId,
     task_id: task.id,
-    counters: persistedBudgetCounter(taskState),
+    counters: persistedBudgetAggregateCounter(taskState),
     attempts: [...taskState.attempts]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([attempt_key, counter]) => ({ attempt_key, counters: persistedBudgetCounter(counter) })),
@@ -1416,7 +1441,16 @@ function persistedBudgetCounter(counter: BudgetCounter): Record<string, number> 
     requests: counter.requests,
     turns: counter.turns,
     context_bytes: counter.contextBytes,
-    output_bytes: counter.outputBytes
+    output_bytes: counter.outputBytes,
+    total_tokens: counter.totalTokens
+  };
+}
+
+function persistedBudgetAggregateCounter(counter: BudgetAggregateCounter): Record<string, number | boolean> {
+  return {
+    ...persistedBudgetCounter(counter),
+    priced_cost_usd: counter.pricedCostUsd,
+    cost_complete: counter.costComplete
   };
 }
 
@@ -1444,6 +1478,12 @@ function parsePersistedResourceBudgetTaskState(
   ) {
     throw new Error("resource budget task state is not a closed object");
   }
+  if (value.schema_version === "ultrafuzz.resource-budget-state.v1") {
+    // v1 persisted only request/turn/byte counters. Resuming it as zero token
+    // and zero cost would silently reset the two monetary authorities, so the
+    // current controller fails closed before another provider invocation.
+    throw new Error("resource budget state v1 cannot resume without authenticated token and cost counters");
+  }
   if (
     value.schema_version !== RESOURCE_BUDGET_STATE_SCHEMA_VERSION ||
     value.ultrafuzz_run_id !== ultrafuzzRunId ||
@@ -1456,7 +1496,7 @@ function parsePersistedResourceBudgetTaskState(
   ) {
     throw new Error("resource budget task state identity is invalid");
   }
-  const counter = parsePersistedBudgetCounter(value.counters);
+  const counter = parsePersistedBudgetAggregateCounter(value.counters);
   const attempts = new Map<string, BudgetCounter>();
   for (const entry of value.attempts) {
     if (
@@ -1482,7 +1522,7 @@ function parsePersistedResourceBudgetTaskState(
   }
   const attemptTotals = emptyBudgetCounter();
   for (const attempt of attempts.values()) {
-    for (const field of ["requests", "turns", "contextBytes", "outputBytes"] as const) {
+    for (const field of ["requests", "turns", "contextBytes", "outputBytes", "totalTokens"] as const) {
       const total = attemptTotals[field] + attempt[field];
       if (!Number.isSafeInteger(total)) throw new Error(`resource budget attempt ${field} exceeds the safe range`);
       attemptTotals[field] = total;
@@ -1492,7 +1532,8 @@ function parsePersistedResourceBudgetTaskState(
     attemptTotals.requests !== counter.requests ||
     attemptTotals.turns !== counter.turns ||
     attemptTotals.contextBytes !== counter.contextBytes ||
-    attemptTotals.outputBytes !== counter.outputBytes
+    attemptTotals.outputBytes !== counter.outputBytes ||
+    attemptTotals.totalTokens !== counter.totalTokens
   ) {
     throw new Error("resource budget task counters disagree with their attempt totals");
   }
@@ -1500,10 +1541,10 @@ function parsePersistedResourceBudgetTaskState(
 }
 
 function parsePersistedBudgetCounter(value: unknown): BudgetCounter {
-  if (!plainRecordWithKeys(value, ["requests", "turns", "context_bytes", "output_bytes"])) {
+  if (!plainRecordWithKeys(value, ["requests", "turns", "context_bytes", "output_bytes", "total_tokens"])) {
     throw new Error("resource budget counter is not a closed object");
   }
-  for (const field of ["requests", "turns", "context_bytes", "output_bytes"] as const) {
+  for (const field of ["requests", "turns", "context_bytes", "output_bytes", "total_tokens"] as const) {
     if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0) {
       throw new Error(`resource budget counter ${field} is invalid`);
     }
@@ -1512,7 +1553,47 @@ function parsePersistedBudgetCounter(value: unknown): BudgetCounter {
     requests: Number(value.requests),
     turns: Number(value.turns),
     contextBytes: Number(value.context_bytes),
-    outputBytes: Number(value.output_bytes)
+    outputBytes: Number(value.output_bytes),
+    totalTokens: Number(value.total_tokens)
+  };
+}
+
+function parsePersistedBudgetAggregateCounter(value: unknown): BudgetAggregateCounter {
+  if (
+    !plainRecordWithKeys(value, [
+      "requests",
+      "turns",
+      "context_bytes",
+      "output_bytes",
+      "total_tokens",
+      "priced_cost_usd",
+      "cost_complete"
+    ])
+  ) {
+    throw new Error("resource budget aggregate counter is not a closed object");
+  }
+  for (const field of ["requests", "turns", "context_bytes", "output_bytes", "total_tokens"] as const) {
+    if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 0) {
+      throw new Error(`resource budget counter ${field} is invalid`);
+    }
+  }
+  if (
+    typeof value.priced_cost_usd !== "number" ||
+    !Number.isFinite(value.priced_cost_usd) ||
+    value.priced_cost_usd < 0 ||
+    value.priced_cost_usd > Number.MAX_SAFE_INTEGER ||
+    typeof value.cost_complete !== "boolean"
+  ) {
+    throw new Error("resource budget aggregate cost counter is invalid");
+  }
+  return {
+    requests: Number(value.requests),
+    turns: Number(value.turns),
+    contextBytes: Number(value.context_bytes),
+    outputBytes: Number(value.output_bytes),
+    totalTokens: Number(value.total_tokens),
+    pricedCostUsd: value.priced_cost_usd,
+    costComplete: value.cost_complete
   };
 }
 
@@ -1784,6 +1865,183 @@ function boundedCounterObserved(current: number, amount: number): number {
   return amount > Number.MAX_SAFE_INTEGER - current ? RESOURCE_BUDGET_OVERFLOW_OBSERVED : current + amount;
 }
 
+function addBudgetCostUsd(current: number, amount: number): number {
+  if (
+    !Number.isFinite(current) ||
+    current < 0 ||
+    !Number.isFinite(amount) ||
+    amount < 0 ||
+    amount > Number.MAX_SAFE_INTEGER - current
+  ) {
+    throw new Error("resource budget priced cost exceeds the safe range");
+  }
+  const total = roundAccountingUsd(current + amount);
+  if (!Number.isFinite(total) || total < 0 || total > Number.MAX_SAFE_INTEGER) {
+    throw new Error("resource budget priced cost exceeds the safe range");
+  }
+  return total;
+}
+
+async function ensureResourceBudgetModelPricing(
+  state: BudgetState,
+  model: string | undefined
+): Promise<ReadonlyMap<string, BudgetModelPricing>> {
+  if (model === undefined || model.length === 0 || state.modelPricing.has(model)) return state.modelPricing;
+  let request = state.pricingRequests.get(model);
+  if (request === undefined) {
+    request = resolveLiveModelPricing({
+      models: [model],
+      env: process.env,
+      signal: state.abortController.signal
+    }).then((resolved) => {
+      for (const [resolvedModel, pricing] of resolved.prices) state.modelPricing.set(resolvedModel, pricing);
+    });
+    // A catalog miss is final for this controller process. Re-fetching before
+    // every generation would create an unbounded external request surface and
+    // could price different calls from different catalog snapshots.
+    state.pricingRequests.set(model, request);
+  }
+  await request;
+  if (state.exhausted !== undefined) throw state.exhausted;
+  return state.modelPricing;
+}
+
+function accountResourceBudgetGeneration(input: {
+  task: (typeof taskSpecs)[number];
+  result: unknown;
+  failure: boolean;
+  configuredModel: string | undefined;
+  agentId: string;
+  state: BudgetState;
+  taskState: BudgetTaskState;
+  attempt: BudgetCounter;
+  run: BudgetAggregateCounter;
+}): void {
+  let usage: ReturnType<typeof normalizeSmithersGenerationUsage>;
+  try {
+    usage = normalizeSmithersGenerationUsage({
+      value: input.result,
+      configuredModel: input.configuredModel,
+      agent: input.agentId,
+      failure: input.failure
+    });
+  } catch {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "total_tokens",
+      "run",
+      input.task.resourceBudget.maxTotalTokens,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  if (usage === undefined) {
+    // A provider rejection without authenticated usage cannot be distinguished
+    // from a failure after the provider consumed tokens. Fail closed for both
+    // returned and thrown values so retrying cannot reset token/cost authority.
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "total_tokens",
+      "run",
+      input.task.resourceBudget.maxTotalTokens,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  const budget = input.task.resourceBudget;
+  let projection: ReturnType<typeof projectNormalizedUsageResourceBudget>;
+  try {
+    projection = projectNormalizedUsageResourceBudget({
+      usage,
+      modelPricing: input.state.modelPricing,
+      ...(input.state.cacheReadRatio === undefined ? {} : { cacheReadRatio: input.state.cacheReadRatio })
+    });
+  } catch {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "total_tokens",
+      "run",
+      budget.maxTotalTokens,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  const runTokens = boundedCounterObserved(input.run.totalTokens, projection.total_tokens);
+  const attemptTokens = boundedCounterObserved(input.attempt.totalTokens, projection.total_tokens);
+  const taskTokens = boundedCounterObserved(input.taskState.totalTokens, projection.total_tokens);
+  if (!Number.isSafeInteger(runTokens) || !Number.isSafeInteger(attemptTokens) || !Number.isSafeInteger(taskTokens)) {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "total_tokens",
+      "run",
+      budget.maxTotalTokens,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  const pricedCostIncrement = projection.estimated_spend_usd ?? 0;
+  let pricedCostUsd: number;
+  try {
+    pricedCostUsd = addBudgetCostUsd(input.run.pricedCostUsd, pricedCostIncrement);
+  } catch {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "cost_usd",
+      "run",
+      budget.maxCostUsd,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  let taskPricedCostUsd: number;
+  try {
+    taskPricedCostUsd = addBudgetCostUsd(input.taskState.pricedCostUsd, pricedCostIncrement);
+  } catch {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "cost_usd",
+      "run",
+      budget.maxCostUsd,
+      RESOURCE_BUDGET_OVERFLOW_OBSERVED
+    );
+  }
+  const costComplete = input.run.costComplete && projection.cost_complete;
+  const observedCostUsd = costComplete ? pricedCostUsd : (runTokens / 1_000_000) * budget.unpricedTokenUsdPerMillion;
+
+  // Commit authenticated usage before evaluating the ceilings. The generated
+  // wrapper throws instead of returning an over-limit provider result, so this
+  // v2 state is the durable accounting authority for the triggering response.
+  input.run.totalTokens = runTokens;
+  input.run.pricedCostUsd = pricedCostUsd;
+  input.run.costComplete = costComplete;
+  input.taskState.totalTokens = taskTokens;
+  input.taskState.pricedCostUsd = taskPricedCostUsd;
+  input.taskState.costComplete = input.taskState.costComplete && projection.cost_complete;
+  input.attempt.totalTokens = attemptTokens;
+  // Persist before the checks so the response that crosses a ceiling—and any
+  // already-in-flight sibling that settles after the shared abort—remains in
+  // the durable counters even though its wrapper cannot return successfully.
+  persistResourceBudgetTaskState(input.task, input.state);
+  if (runTokens > budget.maxTotalTokens) {
+    throw resourceBudgetExhaustionError(input.task, "total_tokens", "run", budget.maxTotalTokens, runTokens);
+  }
+  if (!Number.isFinite(observedCostUsd) || observedCostUsd > budget.maxCostUsd) {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "cost_usd",
+      "run",
+      budget.maxCostUsd,
+      !Number.isFinite(observedCostUsd) || observedCostUsd > RESOURCE_BUDGET_OVERFLOW_OBSERVED
+        ? RESOURCE_BUDGET_OVERFLOW_OBSERVED
+        : observedCostUsd
+    );
+  }
+  if (attemptTokens > budget.maxAttemptTokens) {
+    throw resourceBudgetExhaustionError(
+      input.task,
+      "attempt_tokens",
+      "attempt",
+      budget.maxAttemptTokens,
+      attemptTokens
+    );
+  }
+}
+
 function artifactAwareAgent(
   task: (typeof taskSpecs)[number],
   chainIndex: number,
@@ -1792,13 +2050,14 @@ function artifactAwareAgent(
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   const configuredModel = task.agentChain[chainIndex]?.modelName;
+  const wrappedAgentId = smithersTaskAgentId(task, chainIndex);
   const resourceBudget = task.resourceBudget;
   const resourceBudgetState = resourceBudgetStateForTask(task);
   const resourceBudgetTaskState =
     resourceBudgetState === undefined ? undefined : resourceBudgetTaskStateForTask(task, resourceBudgetState);
 
   return {
-    id: smithersTaskAgentId(task, chainIndex),
+    id: wrappedAgentId,
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
     ...(agent.tools === undefined ? {} : { tools: agent.tools }),
     ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
@@ -1858,12 +2117,17 @@ function artifactAwareAgent(
         return await agent.generate(attemptArgs);
       }
 
+      await ensureResourceBudgetModelPricing(resourceBudgetState, configuredModel);
+      if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
+
       const attemptKey = `${task.id}:${smithersAttempt}`;
       const attemptBudget = resourceBudgetTaskState.attempts.get(attemptKey) ?? emptyBudgetCounter();
       resourceBudgetTaskState.attempts.set(attemptKey, attemptBudget);
-      const runCounter: BudgetCounter = task.resourceBudgetPartitioned ? resourceBudgetTaskState : resourceBudgetState;
+      const runCounter: BudgetAggregateCounter = task.resourceBudgetPartitioned
+        ? resourceBudgetTaskState
+        : resourceBudgetState;
       const addBounded = (
-        field: keyof BudgetCounter,
+        field: "requests" | "turns" | "contextBytes" | "outputBytes",
         amount: number,
         runLimit: number,
         attemptLimit: number,
@@ -1989,9 +2253,37 @@ function artifactAwareAgent(
       try {
         result = await agent.generate(boundedArgs);
       } catch (error) {
+        accountResourceBudgetGeneration({
+          task,
+          result: error,
+          failure: true,
+          configuredModel,
+          agentId: wrappedAgentId,
+          state: resourceBudgetState,
+          taskState: resourceBudgetTaskState,
+          attempt: attemptBudget,
+          run: runCounter
+        });
         if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
         throw error;
       }
+      // Usage is necessarily known only when a provider generation settles.
+      // Other generations already in flight may therefore consume up to the
+      // configured scheduler concurrency before this shared abort signal lands.
+      // Accounting below is synchronous after settlement: once it exhausts,
+      // no later generation or task can begin, and in-flight siblings are
+      // cancelled without mediating any individual command or tool call.
+      accountResourceBudgetGeneration({
+        task,
+        result,
+        failure: false,
+        configuredModel,
+        agentId: wrappedAgentId,
+        state: resourceBudgetState,
+        taskState: resourceBudgetTaskState,
+        attempt: attemptBudget,
+        run: runCounter
+      });
       if (resourceBudgetState.exhausted !== undefined) throw resourceBudgetState.exhausted;
       const postStreamOutputBytesRemaining = Math.max(
         0,

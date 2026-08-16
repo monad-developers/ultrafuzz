@@ -35,6 +35,13 @@ import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
+import {
+  configuredCacheReadRatio,
+  normalizeSmithersGenerationUsage,
+  projectNormalizedUsageResourceBudget,
+  roundAccountingUsd
+} from "../src/workflow-sync.js";
+import { type ModelPricing } from "../src/model-pricing.js";
 import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -173,6 +180,8 @@ function loadArtifactAwareAgent(
     onReset?: () => void;
     onBudgetEvidence?: (filePath: string, contents: string) => void;
     persistedBudgetStates?: Map<string, string>;
+    modelPricing?: ReadonlyMap<string, ModelPricing>;
+    cacheReadRatio?: string;
   } = {}
 ): (
   task: unknown,
@@ -189,6 +198,9 @@ function loadArtifactAwareAgent(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const persistedBudgetStates = options.persistedBudgetStates ?? new Map<string, string>();
+  const harnessEnv = { ...process.env };
+  delete harnessEnv.ULTRAFUZZ_CACHE_READ_RATIO;
+  if (options.cacheReadRatio !== undefined) harnessEnv.ULTRAFUZZ_CACHE_READ_RATIO = options.cacheReadRatio;
   return new Function(
     "resetTaskArtifactsForRetry",
     "authoritativeFinalReportCoverageArgs",
@@ -206,6 +218,12 @@ function loadArtifactAwareAgent(
     "readRegularFileSnapshot",
     "parseStrictJsonBytes",
     "path",
+    "resolveLiveModelPricing",
+    "configuredCacheReadRatio",
+    "normalizeSmithersGenerationUsage",
+    "projectNormalizedUsageResourceBudget",
+    "roundAccountingUsd",
+    "process",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onReset?.(),
@@ -238,8 +256,42 @@ function loadArtifactAwareAgent(
       return bytes;
     },
     parseStrictJsonBytes,
-    path
+    path,
+    async () => ({ prices: new Map(options.modelPricing ?? []) }),
+    configuredCacheReadRatio,
+    normalizeSmithersGenerationUsage,
+    projectNormalizedUsageResourceBudget,
+    roundAccountingUsd,
+    { cwd: () => process.cwd(), env: harnessEnv }
   ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+function generatedUsageResult<T extends Record<string, unknown>>(
+  value: T,
+  options: {
+    inputTokens?: number;
+    outputTokens?: number;
+    model?: string;
+    usage?: Record<string, unknown>;
+  } = {}
+): T {
+  Object.defineProperties(value, {
+    usage: {
+      configurable: false,
+      enumerable: false,
+      value: options.usage ?? {
+        inputTokens: options.inputTokens ?? 1,
+        outputTokens: options.outputTokens ?? 0,
+        cacheReadTokens: 0
+      }
+    },
+    response: {
+      configurable: false,
+      enumerable: false,
+      value: { modelId: options.model ?? "gpt-generated-budget" }
+    }
+  });
+  return value;
 }
 
 function loadPromptBudgetHarness(options: { onExhaustion?: (details: unknown[]) => Error; onRead?: () => void } = {}): {
@@ -4868,6 +4920,70 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
   assert.equal(calls[2]?.prompt, undefined);
 });
 
+test("live resource accounting normalizes aliases and independent nested token components", () => {
+  const model = "gpt-live-component-parity";
+  const usage = normalizeSmithersGenerationUsage({
+    value: generatedUsageResult(
+      {},
+      {
+        model,
+        usage: {
+          promptTokens: 10,
+          completionTokens: 4,
+          inputTokenDetails: { cacheReadTokens: 5, cacheWriteTokens: 2 },
+          outputTokenDetails: { reasoningTokens: 3 }
+        }
+      }
+    ),
+    configuredModel: "ignored-configured-model",
+    agent: "ultrafuzz-agent:test"
+  });
+  assert.deepEqual(usage, {
+    model,
+    agent: "ultrafuzz-agent:test",
+    input_tokens: 10,
+    output_tokens: 4,
+    cache_read_tokens: 5,
+    cache_write_tokens: 2,
+    reasoning_tokens: 3
+  });
+
+  const pricing = new Map<string, ModelPricing>([
+    [
+      model,
+      {
+        inputUsdPerMillion: 1,
+        cachedInputUsdPerMillion: 0.5,
+        cacheWriteUsdPerMillion: 2,
+        outputUsdPerMillion: 3
+      }
+    ]
+  ]);
+  assert.deepEqual(projectNormalizedUsageResourceBudget({ usage: usage!, modelPricing: pricing }), {
+    total_tokens: 24,
+    estimated_spend_usd: 0.0000375,
+    cost_complete: true
+  });
+
+  const missingCacheUsage = normalizeSmithersGenerationUsage({
+    value: generatedUsageResult({}, { model, usage: { inputTokens: 10, outputTokens: 4 } }),
+    agent: "ultrafuzz-agent:test"
+  });
+  assert.deepEqual(
+    projectNormalizedUsageResourceBudget({ usage: missingCacheUsage!, modelPricing: pricing, cacheReadRatio: 0.5 }),
+    {
+      total_tokens: 19,
+      estimated_spend_usd: 0.0000245,
+      cost_complete: true
+    }
+  );
+  assert.deepEqual(projectNormalizedUsageResourceBudget({ usage: missingCacheUsage!, modelPricing: pricing }), {
+    total_tokens: 14,
+    estimated_spend_usd: null,
+    cost_complete: false
+  });
+});
+
 test("generated agent boundary enforces exact and over run/attempt ceilings", async () => {
   let durableEvidence: Record<string, unknown> | undefined;
   const artifactAwareAgent = loadArtifactAwareAgent({
@@ -4879,6 +4995,7 @@ test("generated agent boundary enforces exact and over run/attempt ceilings", as
   const exactContextBytes = Buffer.byteLength(prompt, "utf8");
   const resourceBudget = {
     maxCostUsd: 1,
+    unpricedTokenUsdPerMillion: 1,
     maxTotalTokens: 100,
     maxRequests: 1,
     maxTurns: 1,
@@ -4890,6 +5007,7 @@ test("generated agent boundary enforces exact and over run/attempt ceilings", as
     maxAttemptContextBytes: exactContextBytes,
     maxAttemptOutputBytes: 2
   };
+  const settledResult = generatedUsageResult({});
   let boundedArgs: Record<string, unknown> | undefined;
   const wrapped = artifactAwareAgent(
     {
@@ -4910,12 +5028,12 @@ test("generated agent boundary enforces exact and over run/attempt ceilings", as
           phase: "started",
           action: { kind: "turn" }
         });
-        return "ok";
+        return settledResult;
       }
     }
   );
 
-  assert.equal(await wrapped.generate({ prompt, taskContext: { attempt: 1 } }), "ok");
+  assert.equal(await wrapped.generate({ prompt, taskContext: { attempt: 1 } }), settledResult);
   assert.equal(boundedArgs?.maxOutputBytes, 2);
   assert.equal((boundedArgs?.abortSignal as AbortSignal).aborted, false);
   await assert.rejects(
@@ -4928,6 +5046,300 @@ test("generated agent boundary enforces exact and over run/attempt ceilings", as
   assert.equal(durableEvidence?.scope, "run");
   assert.equal(durableEvidence?.limit, 1);
   assert.equal(durableEvidence?.observed, 2);
+});
+
+test("generated agent boundary stops later tasks after live token and cost exhaustion", async () => {
+  const model = "gpt-live-budget";
+  const pricedModel = new Map<string, ModelPricing>([
+    [model, { inputUsdPerMillion: 1, cachedInputUsdPerMillion: 1, outputUsdPerMillion: 1 }]
+  ]);
+  const scenarios: Array<{
+    id: string;
+    inputTokens: number;
+    budget: {
+      maxCostUsd: number;
+      maxTotalTokens: number;
+      maxAttemptTokens: number;
+      unpricedTokenUsdPerMillion: number;
+    };
+    pricing: ReadonlyMap<string, ModelPricing>;
+    resource: "total_tokens" | "attempt_tokens" | "cost_usd";
+  }> = [
+    {
+      id: "total-token",
+      inputTokens: 11,
+      budget: { maxCostUsd: 1, maxTotalTokens: 10, maxAttemptTokens: 100, unpricedTokenUsdPerMillion: 1 },
+      pricing: pricedModel,
+      resource: "total_tokens"
+    },
+    {
+      id: "attempt-token",
+      inputTokens: 11,
+      budget: { maxCostUsd: 1, maxTotalTokens: 100, maxAttemptTokens: 10, unpricedTokenUsdPerMillion: 1 },
+      pricing: pricedModel,
+      resource: "attempt_tokens"
+    },
+    {
+      id: "priced-cost",
+      inputTokens: 600_000,
+      budget: {
+        maxCostUsd: 0.5,
+        maxTotalTokens: 1_000_000,
+        maxAttemptTokens: 1_000_000,
+        unpricedTokenUsdPerMillion: 10
+      },
+      pricing: pricedModel,
+      resource: "cost_usd"
+    },
+    {
+      id: "unpriced-cost",
+      inputTokens: 600_000,
+      budget: {
+        maxCostUsd: 0.5,
+        maxTotalTokens: 1_000_000,
+        maxAttemptTokens: 1_000_000,
+        unpricedTokenUsdPerMillion: 1
+      },
+      pricing: new Map(),
+      resource: "cost_usd"
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    let providerCalls = 0;
+    const artifactAwareAgent = loadArtifactAwareAgent({ modelPricing: scenario.pricing });
+    const resourceBudget = {
+      ...scenario.budget,
+      maxRequests: 10,
+      maxTurns: 10,
+      maxContextBytes: 10_000,
+      maxOutputBytes: 10_000,
+      maxAttemptRequests: 10,
+      maxAttemptTurns: 10,
+      maxAttemptContextBytes: 10_000,
+      maxAttemptOutputBytes: 10_000
+    };
+    const task = (suffix: string) => ({
+      id: `node:${scenario.id}:${suffix}`,
+      smithersRunId: `ultrafuzz-generated-${scenario.id}`,
+      runRoot: ".",
+      agentChain: [{ modelName: model }],
+      resourceBudget,
+      resourceBudgetPartitioned: false,
+      metadata: { run: { ultrafuzzRunId: `generated-${scenario.id}` } }
+    });
+    const provider = {
+      async generate(): Promise<unknown> {
+        providerCalls += 1;
+        return {
+          text: "done",
+          response: { modelId: model },
+          usage: { inputTokens: scenario.inputTokens, outputTokens: 0, cacheReadTokens: 0 }
+        };
+      }
+    };
+    const exhausting = artifactAwareAgent(task("first"), 0, "prompt", provider);
+    const laterTask = artifactAwareAgent(task("second"), 0, "prompt", provider);
+
+    await assert.rejects(
+      () => exhausting.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      new RegExp(`ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"${scenario.resource}"`, "u"),
+      scenario.id
+    );
+    await assert.rejects(
+      () => laterTask.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      new RegExp(`ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"${scenario.resource}"`, "u"),
+      scenario.id
+    );
+    assert.equal(providerCalls, 1, `${scenario.id}: a task scheduled after exhaustion must not reach the provider`);
+  }
+});
+
+test("generated agent boundary charges authenticated usage from already in-flight siblings", async () => {
+  const model = "gpt-inflight-budget";
+  const persistedBudgetStates = new Map<string, string>();
+  const modelPricing = new Map<string, ModelPricing>([
+    [model, { inputUsdPerMillion: 1, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 1 }]
+  ]);
+  const artifactAwareAgent = loadArtifactAwareAgent({ persistedBudgetStates, modelPricing });
+  const resourceBudget = {
+    maxCostUsd: 1,
+    unpricedTokenUsdPerMillion: 1,
+    maxTotalTokens: 10,
+    maxRequests: 10,
+    maxTurns: 10,
+    maxContextBytes: 10_000,
+    maxOutputBytes: 10_000,
+    maxAttemptTokens: 100,
+    maxAttemptRequests: 10,
+    maxAttemptTurns: 10,
+    maxAttemptContextBytes: 10_000,
+    maxAttemptOutputBytes: 10_000
+  };
+  const task = (suffix: string) => ({
+    id: `node:inflight-budget:${suffix}`,
+    smithersRunId: "ultrafuzz-generated-inflight-budget",
+    runRoot: ".",
+    agentChain: [{ modelName: model }],
+    resourceBudget,
+    resourceBudgetPartitioned: false,
+    metadata: { run: { ultrafuzzRunId: "generated-inflight-budget" } }
+  });
+  const pending: Array<(value: unknown) => void> = [];
+  let providerCalls = 0;
+  const provider = {
+    async generate(): Promise<unknown> {
+      providerCalls += 1;
+      return await new Promise((resolve) => pending.push(resolve));
+    }
+  };
+  const first = artifactAwareAgent(task("first"), 0, "prompt", provider);
+  const sibling = artifactAwareAgent(task("sibling"), 0, "prompt", provider);
+  const firstCall = first.generate({ prompt: "prompt", taskContext: { attempt: 1 } });
+  const siblingCall = sibling.generate({ prompt: "prompt", taskContext: { attempt: 1 } });
+  while (pending.length < 2) await new Promise<void>((resolve) => setImmediate(resolve));
+
+  pending[0]!(generatedUsageResult({}, { model, usage: { inputTokens: 11, outputTokens: 0, cacheReadTokens: 0 } }));
+  await assert.rejects(() => firstCall, /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u);
+  pending[1]!(generatedUsageResult({}, { model, usage: { inputTokens: 5, outputTokens: 0, cacheReadTokens: 0 } }));
+  await assert.rejects(() => siblingCall, /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u);
+  assert.equal(providerCalls, 2);
+  const durableTotalTokens = [...persistedBudgetStates.values()].reduce((total, contents) => {
+    const state = JSON.parse(contents) as { counters: { total_tokens: number } };
+    return total + state.counters.total_tokens;
+  }, 0);
+  assert.equal(durableTotalTokens, 16);
+
+  let laterProviderCalls = 0;
+  const afterRestart = loadArtifactAwareAgent({ persistedBudgetStates, modelPricing });
+  const blocked = afterRestart(task("later"), 0, "prompt", {
+    async generate(): Promise<unknown> {
+      laterProviderCalls += 1;
+      return generatedUsageResult({});
+    }
+  });
+  await assert.rejects(
+    () => blocked.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u
+  );
+  assert.equal(laterProviderCalls, 0);
+});
+
+test("generated agent boundary charges failed-generation usage before allowing a retry", async () => {
+  const model = "gpt-failed-budget";
+  let providerCalls = 0;
+  const artifactAwareAgent = loadArtifactAwareAgent({
+    modelPricing: new Map([[model, { inputUsdPerMillion: 1, outputUsdPerMillion: 1 }]])
+  });
+  const task = {
+    id: "node:failed-generation-budget",
+    smithersRunId: "ultrafuzz-generated-failed-generation-budget",
+    runRoot: ".",
+    agentChain: [{ modelName: model }],
+    resourceBudget: {
+      maxCostUsd: 1,
+      unpricedTokenUsdPerMillion: 1,
+      maxTotalTokens: 10,
+      maxRequests: 10,
+      maxTurns: 10,
+      maxContextBytes: 10_000,
+      maxOutputBytes: 10_000,
+      maxAttemptTokens: 100,
+      maxAttemptRequests: 10,
+      maxAttemptTurns: 10,
+      maxAttemptContextBytes: 10_000,
+      maxAttemptOutputBytes: 10_000
+    },
+    resourceBudgetPartitioned: false,
+    metadata: { run: { ultrafuzzRunId: "generated-failed-generation-budget" } }
+  };
+  const wrapped = artifactAwareAgent(task, 0, "prompt", {
+    async generate(): Promise<unknown> {
+      providerCalls += 1;
+      const error = new Error("provider failed after producing a response") as Error & {
+        usage?: Record<string, unknown>;
+      };
+      error.usage = { inputTokens: 11, outputTokens: 0, cacheReadTokens: 0 };
+      throw error;
+    }
+  });
+
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u
+  );
+  await assert.rejects(
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 2 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u
+  );
+  assert.equal(providerCalls, 1, "failed usage exhaustion must prevent the provider retry");
+});
+
+test("generated agent boundary fails closed on absent, total-only, cache-only, zero-only, and malformed usage", async () => {
+  const cases: Array<{ id: string; result: unknown }> = [
+    { id: "absent", result: { text: "done" } },
+    { id: "total-only", result: { usage: { totalTokens: 7 }, text: "done" } },
+    {
+      id: "cache-only",
+      result: { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 7 }, text: "done" }
+    },
+    { id: "zero-only", result: { usage: { inputTokens: 0, outputTokens: 0 }, text: "done" } },
+    { id: "malformed", result: { usage: { inputTokens: "7", outputTokens: 0 }, text: "done" } }
+  ];
+
+  for (const scenario of cases) {
+    let providerCalls = 0;
+    let durableEvidence: Record<string, unknown> | undefined;
+    const artifactAwareAgent = loadArtifactAwareAgent({
+      onBudgetEvidence: (_filePath, contents) => {
+        durableEvidence = JSON.parse(contents) as Record<string, unknown>;
+      }
+    });
+    const resourceBudget = {
+      maxCostUsd: 1,
+      unpricedTokenUsdPerMillion: 1,
+      maxTotalTokens: 100,
+      maxRequests: 10,
+      maxTurns: 10,
+      maxContextBytes: 10_000,
+      maxOutputBytes: 10_000,
+      maxAttemptTokens: 100,
+      maxAttemptRequests: 10,
+      maxAttemptTurns: 10,
+      maxAttemptContextBytes: 10_000,
+      maxAttemptOutputBytes: 10_000
+    };
+    const task = (suffix: string) => ({
+      id: `node:invalid-usage:${scenario.id}:${suffix}`,
+      smithersRunId: `ultrafuzz-generated-invalid-usage-${scenario.id}`,
+      runRoot: ".",
+      agentChain: [{}],
+      resourceBudget,
+      resourceBudgetPartitioned: false,
+      metadata: { run: { ultrafuzzRunId: `generated-invalid-usage-${scenario.id}` } }
+    });
+    const provider = {
+      async generate(): Promise<unknown> {
+        providerCalls += 1;
+        return scenario.result;
+      }
+    };
+    const first = artifactAwareAgent(task("first"), 0, "prompt", provider);
+    const later = artifactAwareAgent(task("later"), 0, "prompt", provider);
+
+    await assert.rejects(
+      () => first.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens".*"observed":9007199254740992/u,
+      scenario.id
+    );
+    await assert.rejects(
+      () => later.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u,
+      scenario.id
+    );
+    assert.equal(providerCalls, 1, `${scenario.id}: later tasks must not invoke the provider`);
+    assert.equal(durableEvidence?.observed, Number.MAX_SAFE_INTEGER + 1, scenario.id);
+  }
 });
 
 test("generated agent boundary counts only normalized adapter turns", async () => {
@@ -4952,6 +5364,7 @@ test("generated agent boundary counts only normalized adapter turns", async () =
       agentChain: [{}],
       resourceBudget: {
         maxCostUsd: 1,
+        unpricedTokenUsdPerMillion: 1,
         maxTotalTokens: 100,
         maxRequests: 10,
         maxTurns: 1,
@@ -4988,6 +5401,7 @@ test("generated agent boundary counts only normalized adapter turns", async () =
 test("generated agent boundary treats every normalized model turn as a request", async () => {
   const budget = (maxRequests: number) => ({
     maxCostUsd: 1,
+    unpricedTokenUsdPerMillion: 1,
     maxTotalTokens: 100,
     maxRequests,
     maxTurns: 100,
@@ -5004,7 +5418,7 @@ test("generated agent boundary treats every normalized model turn as a request",
       const onEvent = (args as { onEvent: (event: unknown) => Promise<void> }).onEvent;
       await onEvent({ type: "action", phase: "started", action: { kind: "turn" } });
       await onEvent({ type: "action", phase: "started", action: { kind: "turn" } });
-      return "ok";
+      return generatedUsageResult({ ok: true });
     }
   };
 
@@ -5021,7 +5435,7 @@ test("generated agent boundary treats every normalized model turn as a request",
     "prompt",
     twoTurnAgent
   );
-  assert.equal(await exact.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "ok");
+  assert.deepEqual(await exact.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), { ok: true });
 
   const over = loadArtifactAwareAgent()(
     {
@@ -5042,51 +5456,56 @@ test("generated agent boundary treats every normalized model turn as a request",
   );
 });
 
-test("generated agent boundary charges pre-turn failures and aggregates generation calls", async () => {
-  const artifactAwareAgent = loadArtifactAwareAgent();
+test("generated agent boundary fails closed when a provider throws without authenticated usage", async () => {
+  let durableEvidence: Record<string, unknown> | undefined;
+  const artifactAwareAgent = loadArtifactAwareAgent({
+    onBudgetEvidence: (_filePath, contents) => {
+      durableEvidence = JSON.parse(contents) as Record<string, unknown>;
+    }
+  });
   let providerCalls = 0;
   const wrapped = artifactAwareAgent(
     {
-      id: "node:budget-request-attempts",
-      smithersRunId: "ultrafuzz-generated-budget-request-attempts",
+      id: "node:budget-missing-failure-usage",
+      smithersRunId: "ultrafuzz-generated-budget-missing-failure-usage",
       runRoot: ".",
       agentChain: [{}],
       resourceBudget: {
         maxCostUsd: 1,
+        unpricedTokenUsdPerMillion: 1,
         maxTotalTokens: 100,
-        maxRequests: 2,
+        maxRequests: 10,
         maxTurns: 100,
         maxContextBytes: 10_000,
         maxOutputBytes: 10_000,
         maxAttemptTokens: 100,
-        maxAttemptRequests: 2,
+        maxAttemptRequests: 10,
         maxAttemptTurns: 100,
         maxAttemptContextBytes: 10_000,
         maxAttemptOutputBytes: 10_000
       },
-      metadata: { run: { ultrafuzzRunId: "generated-budget-request-attempts" } }
+      metadata: { run: { ultrafuzzRunId: "generated-budget-missing-failure-usage" } }
     },
     0,
     "prompt",
     {
       async generate(): Promise<unknown> {
         providerCalls += 1;
-        if (providerCalls === 1) throw new Error("provider failed before emitting a turn");
-        return "ok";
+        throw new Error("provider rejected without exposing usage");
       }
     }
   );
 
   await assert.rejects(
     () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
-    /provider failed before emitting a turn/u
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens".*"observed":9007199254740992/u
   );
-  assert.equal(await wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "ok");
   await assert.rejects(
-    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
-    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+    () => wrapped.generate({ prompt: "prompt", taskContext: { attempt: 2 } }),
+    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"total_tokens"/u
   );
-  assert.equal(providerCalls, 2, "the exhausted third request must be rejected before provider invocation");
+  assert.equal(providerCalls, 1, "missing failure usage must prevent a second provider invocation");
+  assert.equal(durableEvidence?.observed, Number.MAX_SAFE_INTEGER + 1);
 });
 
 test("generated agent boundary charges each adapter-internal provider retry", async () => {
@@ -5100,6 +5519,7 @@ test("generated agent boundary charges each adapter-internal provider retry", as
       agentChain: [{}],
       resourceBudget: {
         maxCostUsd: 1,
+        unpricedTokenUsdPerMillion: 1,
         maxTotalTokens: 100,
         maxRequests: 1,
         maxTurns: 10,
@@ -5144,6 +5564,7 @@ test("generated agent boundary aborts incrementally on stdout and stderr bytes",
       agentChain: [{}],
       resourceBudget: {
         maxCostUsd: 1,
+        unpricedTokenUsdPerMillion: 1,
         maxTotalTokens: 100,
         maxRequests: 10,
         maxTurns: 10,
@@ -5198,16 +5619,17 @@ test("generated agent boundary counts a returned value independently from stream
       agentChain: [{}],
       resourceBudget: {
         maxCostUsd: 1,
+        unpricedTokenUsdPerMillion: 1,
         maxTotalTokens: 100,
         maxRequests: 10,
         maxTurns: 10,
         maxContextBytes: 10_000,
-        maxOutputBytes: 5,
+        maxOutputBytes: 4,
         maxAttemptTokens: 100,
         maxAttemptRequests: 10,
         maxAttemptTurns: 10,
         maxAttemptContextBytes: 10_000,
-        maxAttemptOutputBytes: 5
+        maxAttemptOutputBytes: 4
       },
       metadata: { run: { ultrafuzzRunId: "generated-budget-stream-and-result" } }
     },
@@ -5216,7 +5638,7 @@ test("generated agent boundary counts a returned value independently from stream
     {
       async generate(args: unknown): Promise<unknown> {
         (args as { onStdout: (text: string) => void }).onStdout("abc");
-        return "def";
+        return generatedUsageResult({});
       }
     }
   );
@@ -5230,6 +5652,7 @@ test("generated agent boundary counts a returned value independently from stream
 test("generated agent boundary counts nested JSON bytes without unbounded serialization", async () => {
   const resourceBudget = {
     maxCostUsd: 1,
+    unpricedTokenUsdPerMillion: 1,
     maxTotalTokens: 100,
     maxRequests: 10,
     maxTurns: 10,
@@ -5271,7 +5694,7 @@ test("generated agent boundary counts nested JSON bytes without unbounded serial
   const oversizedResult = loadArtifactAwareAgent()(task("nested-result"), 0, "", {
     async generate(): Promise<unknown> {
       resultProviderCalls += 1;
-      return { nested: [{ value: "y".repeat(100_000) }] };
+      return generatedUsageResult({ nested: [{ value: "y".repeat(100_000) }] });
     }
   });
   await assert.rejects(
@@ -5285,6 +5708,7 @@ test("generated agent boundary rejects cyclic and accessor-bearing context befor
   const artifactAwareAgent = loadArtifactAwareAgent();
   const resourceBudget = {
     maxCostUsd: 1,
+    unpricedTokenUsdPerMillion: 1,
     maxTotalTokens: 100,
     maxRequests: 10,
     maxTurns: 10,
@@ -5355,61 +5779,204 @@ test("generated agent boundary rejects cyclic and accessor-bearing context befor
   assert.equal(providerCalls, 0);
 });
 
-test("generated agent boundary restores durable aggregate counters after a process restart", async () => {
-  const persistedBudgetStates = new Map<string, string>();
-  const resourceBudget = {
-    maxCostUsd: 1,
-    maxTotalTokens: 100,
-    maxRequests: 1,
-    maxTurns: 10,
-    maxContextBytes: 10_000,
-    maxOutputBytes: 10_000,
-    maxAttemptTokens: 100,
-    maxAttemptRequests: 10,
-    maxAttemptTurns: 10,
-    maxAttemptContextBytes: 10_000,
-    maxAttemptOutputBytes: 10_000
-  };
-  const task = (id: string) => ({
-    id,
-    smithersRunId: "ultrafuzz-generated-budget-restart",
-    runRoot: ".",
-    agentChain: [{}],
-    resourceBudget,
-    resourceBudgetPartitioned: false,
-    metadata: { run: { ultrafuzzRunId: "generated-budget-restart" } }
-  });
-
-  const beforeRestart = loadArtifactAwareAgent({ persistedBudgetStates });
-  const first = beforeRestart(task("node:first"), 0, "prompt", {
-    async generate(): Promise<unknown> {
-      return "";
-    }
-  });
-  assert.equal(await first.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), "");
-  assert.equal(persistedBudgetStates.size, 1);
-
-  let invokedAfterRestart = false;
-  let durableEvidence: Record<string, unknown> | undefined;
-  const afterRestart = loadArtifactAwareAgent({
-    persistedBudgetStates,
-    onBudgetEvidence: (_filePath, contents) => {
-      durableEvidence = JSON.parse(contents) as Record<string, unknown>;
-    }
-  });
-  const second = afterRestart(task("node:second"), 0, "prompt", {
-    async generate(): Promise<unknown> {
-      invokedAfterRestart = true;
-      return "unreachable";
-    }
-  });
-  await assert.rejects(
-    () => second.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
-    /ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"requests"/u
+test("generated agent boundary rejects legacy v1 counters before provider invocation", () => {
+  const taskId = "node:legacy-budget-state";
+  const workflowRunId = "ultrafuzz-generated-legacy-budget-state";
+  const ultrafuzzRunId = "generated-legacy-budget-state";
+  const stateFile = path.resolve(
+    process.cwd(),
+    "resource-budget-counters",
+    `${createHash("sha256").update(taskId).digest("hex")}.json`
   );
-  assert.equal(invokedAfterRestart, false);
-  assert.equal(durableEvidence?.limit, 1);
-  assert.equal(durableEvidence?.observed, 2);
+  const persistedBudgetStates = new Map([
+    [
+      stateFile,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.resource-budget-state.v1",
+        ultrafuzz_run_id: ultrafuzzRunId,
+        workflow_run_id: workflowRunId,
+        task_id: taskId,
+        counters: { requests: 1, turns: 0, context_bytes: 1, output_bytes: 1 },
+        attempts: []
+      })}\n`
+    ]
+  ]);
+  let providerCalls = 0;
+  const provider = {
+    async generate(): Promise<unknown> {
+      providerCalls += 1;
+      return generatedUsageResult({});
+    }
+  };
+
+  assert.throws(
+    () =>
+      loadArtifactAwareAgent({ persistedBudgetStates })(
+        {
+          id: taskId,
+          smithersRunId: workflowRunId,
+          runRoot: ".",
+          agentChain: [{}],
+          resourceBudget: {
+            maxCostUsd: 1,
+            unpricedTokenUsdPerMillion: 1,
+            maxTotalTokens: 100,
+            maxRequests: 10,
+            maxTurns: 10,
+            maxContextBytes: 10_000,
+            maxOutputBytes: 10_000,
+            maxAttemptTokens: 100,
+            maxAttemptRequests: 10,
+            maxAttemptTurns: 10,
+            maxAttemptContextBytes: 10_000,
+            maxAttemptOutputBytes: 10_000
+          },
+          resourceBudgetPartitioned: false,
+          metadata: { run: { ultrafuzzRunId } }
+        },
+        0,
+        "prompt",
+        provider
+      ),
+    /resource budget state v1 cannot resume/u
+  );
+  assert.equal(providerCalls, 0);
+});
+
+test("generated agent boundary durably restores priced v2 counters and the exhausting response", async () => {
+  const model = "gpt-durable-budget";
+  const modelPricing = new Map<string, ModelPricing>([
+    [model, { inputUsdPerMillion: 1, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 1 }]
+  ]);
+  const scenarios = [
+    {
+      id: "tokens",
+      resource: "total_tokens",
+      maxTotalTokens: 20,
+      maxCostUsd: 1,
+      secondTokens: 11,
+      expectedTokens: 21,
+      expectedCostUsd: 0.000021
+    },
+    {
+      id: "cost",
+      resource: "cost_usd",
+      maxTotalTokens: 100,
+      maxCostUsd: 0.000015,
+      secondTokens: 10,
+      expectedTokens: 20,
+      expectedCostUsd: 0.00002
+    }
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const persistedBudgetStates = new Map<string, string>();
+    const resourceBudget = {
+      maxCostUsd: scenario.maxCostUsd,
+      unpricedTokenUsdPerMillion: 100,
+      maxTotalTokens: scenario.maxTotalTokens,
+      maxRequests: 10,
+      maxTurns: 10,
+      maxContextBytes: 10_000,
+      maxOutputBytes: 10_000,
+      maxAttemptTokens: 100,
+      maxAttemptRequests: 10,
+      maxAttemptTurns: 10,
+      maxAttemptContextBytes: 10_000,
+      maxAttemptOutputBytes: 10_000
+    };
+    const task = (suffix: string) => ({
+      id: `node:durable-${scenario.id}:${suffix}`,
+      smithersRunId: `ultrafuzz-generated-durable-${scenario.id}`,
+      runRoot: ".",
+      agentChain: [{ modelName: model }],
+      resourceBudget,
+      resourceBudgetPartitioned: false,
+      metadata: { run: { ultrafuzzRunId: `generated-durable-${scenario.id}` } }
+    });
+    const result = (inputTokens: number) =>
+      generatedUsageResult({}, { model, usage: { inputTokens, outputTokens: 0, cacheReadTokens: 0 } });
+
+    const beforeRestart = loadArtifactAwareAgent({ persistedBudgetStates, modelPricing });
+    const firstResult = result(10);
+    const first = beforeRestart(task("first"), 0, "prompt", {
+      async generate(): Promise<unknown> {
+        return firstResult;
+      }
+    });
+    assert.equal(await first.generate({ prompt: "prompt", taskContext: { attempt: 1 } }), firstResult, scenario.id);
+    assert.equal(persistedBudgetStates.size, 1, scenario.id);
+    const firstState = JSON.parse([...persistedBudgetStates.values()][0]!) as {
+      schema_version: string;
+      counters: { total_tokens: number; priced_cost_usd: number; cost_complete: boolean };
+    };
+    assert.equal(firstState.schema_version, "ultrafuzz.resource-budget-state.v2", scenario.id);
+    assert.deepEqual(
+      {
+        total_tokens: firstState.counters.total_tokens,
+        priced_cost_usd: firstState.counters.priced_cost_usd,
+        cost_complete: firstState.counters.cost_complete
+      },
+      { total_tokens: 10, priced_cost_usd: 0.00001, cost_complete: true },
+      scenario.id
+    );
+
+    let callsCrossingLimit = 0;
+    const afterRestart = loadArtifactAwareAgent({ persistedBudgetStates, modelPricing });
+    const second = afterRestart(task("second"), 0, "prompt", {
+      async generate(): Promise<unknown> {
+        callsCrossingLimit += 1;
+        return result(scenario.secondTokens);
+      }
+    });
+    await assert.rejects(
+      () => second.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      new RegExp(`ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"${scenario.resource}"`, "u"),
+      scenario.id
+    );
+    assert.equal(callsCrossingLimit, 1, scenario.id);
+
+    const durableStates = [...persistedBudgetStates.values()].map(
+      (contents) =>
+        JSON.parse(contents) as {
+          counters: { total_tokens: number; priced_cost_usd: number; cost_complete: boolean };
+          exhaustion?: { resource: string; observed: number };
+        }
+    );
+    assert.equal(
+      durableStates.reduce((total, state) => total + state.counters.total_tokens, 0),
+      scenario.expectedTokens,
+      `${scenario.id}: the exhausting generation must remain charged`
+    );
+    assert.equal(
+      roundAccountingUsd(durableStates.reduce((total, state) => total + state.counters.priced_cost_usd, 0)),
+      scenario.expectedCostUsd,
+      scenario.id
+    );
+    assert.ok(
+      durableStates.every((state) => state.counters.cost_complete),
+      scenario.id
+    );
+    assert.equal(
+      durableStates.find((state) => state.exhaustion !== undefined)?.exhaustion?.resource,
+      scenario.resource
+    );
+
+    let callsAfterExhaustedRestart = 0;
+    const exhaustedRestart = loadArtifactAwareAgent({ persistedBudgetStates, modelPricing });
+    const blocked = exhaustedRestart(task("third"), 0, "prompt", {
+      async generate(): Promise<unknown> {
+        callsAfterExhaustedRestart += 1;
+        return result(1);
+      }
+    });
+    await assert.rejects(
+      () => blocked.generate({ prompt: "prompt", taskContext: { attempt: 1 } }),
+      new RegExp(`ULTRAFUZZ_RESOURCE_BUDGET_EXHAUSTED.*"resource":"${scenario.resource}"`, "u"),
+      scenario.id
+    );
+    assert.equal(callsAfterExhaustedRestart, 0, scenario.id);
+  }
 });
 
 test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
