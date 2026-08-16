@@ -31,6 +31,9 @@ interface PlannedMaterialization {
   sha256: string;
 }
 
+type PlannedCopyResult =
+  { status: "planned"; value: PlannedMaterialization } | { status: "invalid" } | { status: "snapshot-budget-exceeded" };
+
 interface OpenedMaterializeDirectory {
   descriptor: number;
   lexicalPath: string;
@@ -47,6 +50,8 @@ interface StagedMaterialization {
 }
 
 const MAX_MATERIALIZE_SOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_MATERIALIZE_COPY_SELECTIONS = 128;
+const MAX_MATERIALIZE_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 
 export async function materializeSelection(input: MaterializeInput): Promise<RuntimeResult<MaterializeValue>> {
   const projectRoot = path.resolve(input.projectRoot);
@@ -74,9 +79,22 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     ]);
   }
 
+  const copySelections = input.copies ?? [];
+  if (copySelections.length > MAX_MATERIALIZE_COPY_SELECTIONS) {
+    return runtimeFailure([
+      runtimeError(
+        "MATERIALIZE_COPY_SELECTION_LIMIT_EXCEEDED",
+        `materialize copy selection exceeds the ${MAX_MATERIALIZE_COPY_SELECTIONS}-entry limit`,
+        "materialize",
+        undefined,
+        { actual_entries: copySelections.length, limit_entries: MAX_MATERIALIZE_COPY_SELECTIONS }
+      )
+    ]);
+  }
+
   const policy = validateMaterializePolicy({
     patches: input.patches,
-    copies: input.copies,
+    copies: copySelections,
     confirmed: input.confirmed,
     dryRun: input.dryRun,
     allowOverwrite: input.allowOverwrite,
@@ -87,10 +105,29 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     return runtimeFailure(diagnostics);
   }
 
-  const plannedCopies = (input.copies ?? []).flatMap((copy) => {
-    const planned = planCopy(layout, projectRoot, copy, input.allowOverwrite === true, diagnostics);
-    return planned === undefined ? [] : [planned];
-  });
+  const plannedCopies: PlannedMaterialization[] = [];
+  let plannedSnapshotBytes = 0;
+  for (const copy of copySelections) {
+    const result = planCopy(
+      layout,
+      projectRoot,
+      copy,
+      input.allowOverwrite === true,
+      MAX_MATERIALIZE_SNAPSHOT_BYTES - plannedSnapshotBytes,
+      plannedSnapshotBytes,
+      diagnostics
+    );
+    if (result.status === "snapshot-budget-exceeded") break;
+    if (result.status === "invalid") continue;
+    const planned = result.value;
+    const nextSnapshotBytes = plannedSnapshotBytes + planned.sizeBytes;
+    if (!Number.isSafeInteger(nextSnapshotBytes) || nextSnapshotBytes > MAX_MATERIALIZE_SNAPSHOT_BYTES) {
+      diagnostics.push(materializeSnapshotBudgetDiagnostic(copy, nextSnapshotBytes));
+      break;
+    }
+    plannedSnapshotBytes = nextSnapshotBytes;
+    plannedCopies.push(planned);
+  }
   if (hasRuntimeErrors(diagnostics)) {
     return runtimeFailure(diagnostics);
   }
@@ -483,21 +520,36 @@ function planCopy(
   projectRoot: string,
   copy: MaterializeCopySelection,
   allowOverwrite: boolean,
+  remainingSnapshotBytes: number,
+  plannedSnapshotBytes: number,
   diagnostics: RuntimeDiagnostic[]
-): PlannedMaterialization | undefined {
+): PlannedCopyResult {
   const sourcePath = resolveSource(copy.source, layout, diagnostics);
   const destinationPath = resolveDestination(copy.destination, projectRoot, allowOverwrite, diagnostics);
   if (sourcePath === undefined || destinationPath === undefined) {
-    return undefined;
+    return { status: "invalid" };
   }
   try {
-    const bytes = readRegularFileSnapshot(sourcePath, MAX_MATERIALIZE_SOURCE_BYTES);
+    const expectedSize = fs.lstatSync(sourcePath).size;
+    if (
+      Number.isSafeInteger(expectedSize) &&
+      expectedSize >= 0 &&
+      expectedSize <= MAX_MATERIALIZE_SOURCE_BYTES &&
+      expectedSize > remainingSnapshotBytes
+    ) {
+      diagnostics.push(materializeSnapshotBudgetDiagnostic(copy, plannedSnapshotBytes + expectedSize));
+      return { status: "snapshot-budget-exceeded" };
+    }
+    const bytes = readRegularFileSnapshot(sourcePath, Math.min(MAX_MATERIALIZE_SOURCE_BYTES, remainingSnapshotBytes));
     return {
-      selection: copy,
-      destinationPath,
-      bytes,
-      sizeBytes: bytes.length,
-      sha256: sha256Bytes(bytes)
+      status: "planned",
+      value: {
+        selection: copy,
+        destinationPath,
+        bytes,
+        sizeBytes: bytes.length,
+        sha256: sha256Bytes(bytes)
+      }
     };
   } catch (error) {
     diagnostics.push(
@@ -509,8 +561,24 @@ function planCopy(
         { error: error instanceof Error ? error.message : String(error) }
       )
     );
-    return undefined;
+    return { status: "invalid" };
   }
+}
+
+function materializeSnapshotBudgetDiagnostic(
+  copy: MaterializeCopySelection,
+  attemptedBytes: number
+): RuntimeDiagnostic {
+  return runtimeError(
+    "MATERIALIZE_SNAPSHOT_BUDGET_EXCEEDED",
+    `materialize copy snapshots exceed the ${MAX_MATERIALIZE_SNAPSHOT_BYTES}-byte aggregate limit`,
+    "materialize",
+    copy.source,
+    {
+      attempted_bytes: Number.isSafeInteger(attemptedBytes) ? attemptedBytes : "unsafe-integer",
+      limit_bytes: MAX_MATERIALIZE_SNAPSHOT_BYTES
+    }
+  );
 }
 
 function resolveSource(selection: string, layout: RunLayout, diagnostics: RuntimeDiagnostic[]): string | undefined {

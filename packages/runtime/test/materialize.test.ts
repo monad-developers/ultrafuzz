@@ -563,6 +563,88 @@ test("materializeSelection rejects missing confirmation and implicit bulk select
   assert.equal(fs.existsSync(path.join(project, "test/wildcard.txt")), false);
 });
 
+test("materializeSelection rejects excessive copy selections before reading sources or writing destinations", async () => {
+  const project = tempProject();
+  const { runId, nodeId } = await plannedRunWithArtifact(project);
+  const copies = Array.from({ length: 129 }, (_, index) => ({
+    source: `artifacts/${nodeId}/missing-${index}.txt`,
+    destination: `test/limit-${index}.txt`
+  }));
+
+  const result = await materializeSelection({ projectRoot: project, runId, confirmed: true, copies });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(
+    result.diagnostics.map((diagnostic) => diagnostic.code),
+    ["MATERIALIZE_COPY_SELECTION_LIMIT_EXCEEDED"]
+  );
+  assert.deepEqual(result.diagnostics[0]?.details, { actual_entries: 129, limit_entries: 128 });
+  assert.equal(fs.existsSync(path.join(project, "test")), false);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "materialize-audit.jsonl")), false);
+});
+
+test(
+  "materializeSelection rejects aggregate snapshots over 64 MiB before reading excess sources or writing",
+  {
+    concurrency: false
+  },
+  async () => {
+    const project = tempProject();
+    const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
+    const artifactDirectory = path.join(runRoot, "artifacts", nodeId);
+    const firstSource = path.join(artifactDirectory, "first.bin");
+    const secondSource = path.join(artifactDirectory, "second.bin");
+    const finalSource = path.join(artifactDirectory, "final.bin");
+    fs.closeSync(fs.openSync(firstSource, "w"));
+    fs.closeSync(fs.openSync(secondSource, "w"));
+    fs.truncateSync(firstSource, 32 * 1024 * 1024);
+    fs.truncateSync(secondSource, 32 * 1024 * 1024);
+    fs.writeFileSync(finalSource, Buffer.from([1]));
+
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const originalOpenSync = fs.openSync;
+    let openedExcessSource = false;
+    Object.defineProperty(fs, "openSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (path.resolve(String(args[0])) === finalSource) {
+          openedExcessSource = true;
+          throw new Error("aggregate-budget regression opened the excess source");
+        }
+        return Reflect.apply(originalOpenSync, fs, args) as number;
+      }
+    });
+    let result: Awaited<ReturnType<typeof materializeSelection>>;
+    try {
+      result = await materializeSelection({
+        projectRoot: project,
+        runId,
+        confirmed: true,
+        copies: [
+          { source: `artifacts/${nodeId}/first.bin`, destination: "test/first.bin" },
+          { source: `artifacts/${nodeId}/second.bin`, destination: "test/second.bin" },
+          { source: `artifacts/${nodeId}/final.bin`, destination: "test/final.bin" }
+        ]
+      });
+    } finally {
+      Object.defineProperty(fs, "openSync", originalDescriptor);
+    }
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(
+      result.diagnostics.map((diagnostic) => diagnostic.code),
+      ["MATERIALIZE_SNAPSHOT_BUDGET_EXCEEDED"]
+    );
+    assert.deepEqual(result.diagnostics[0]?.details, {
+      attempted_bytes: 64 * 1024 * 1024 + 1,
+      limit_bytes: 64 * 1024 * 1024
+    });
+    assert.equal(openedExcessSource, false);
+    assert.equal(fs.existsSync(path.join(project, "test")), false);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "materialize-audit.jsonl")), false);
+  }
+);
+
 test("materializeSelection rejects malformed historical audit data before copying", async () => {
   const project = tempProject();
   const { runId, nodeId } = await plannedRunWithArtifact(project);
