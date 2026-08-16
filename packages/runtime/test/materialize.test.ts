@@ -1595,6 +1595,18 @@ test("publication classification uses authenticated policy roots and treats the 
   assert.ok(changedResult.diagnostics.some((entry) => entry.code === "MATERIALIZE_REVIEW_AUTHORITY_INVALID"));
   assert.equal(fs.existsSync(path.join(changedConfigProject, "src", "generated.txt")), false);
 
+  const caseVariantProject = tempProject();
+  const caseVariant = await plannedRunWithArtifact(caseVariantProject);
+  const caseVariantResult = await materializeSelection({
+    projectRoot: caseVariantProject,
+    runId: caseVariant.runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${caseVariant.nodeId}/stdout.txt`, destination: "SRC/generated.txt" }]
+  });
+  assert.equal(caseVariantResult.ok, false);
+  assert.ok(caseVariantResult.diagnostics.some((entry) => entry.code === "MATERIALIZE_REVIEW_AUTHORITY_INVALID"));
+  assert.equal(fs.existsSync(path.join(caseVariantProject, "SRC", "generated.txt")), false);
+
   const dotRootProject = tempProject();
   const dot = await plannedRunWithArtifact(dotRootProject, { productionSourceRoots: ["."] });
   const dotResult = await materializeSelection({

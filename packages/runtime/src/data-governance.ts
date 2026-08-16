@@ -708,10 +708,16 @@ function productionSourceRootList(value: unknown): string[] {
       return validated.value;
     })
     .sort();
-  if (new Set(roots).size !== roots.length) {
-    throw new Error(`${DATA_GOVERNANCE_POLICY_ENV}.production_source_roots must not contain duplicates`);
+  if (new Set(roots.map(governancePathPolicyKey)).size !== roots.length) {
+    throw new Error(
+      `${DATA_GOVERNANCE_POLICY_ENV}.production_source_roots must be unique after Unicode and case normalization`
+    );
   }
   return roots;
+}
+
+function governancePathPolicyKey(value: string): string {
+  return normalizeRelativePath(value).normalize("NFC").toLowerCase();
 }
 
 function normalizedConfiguredProductionSourceRoots(config: ResolvedConfig): string[] {

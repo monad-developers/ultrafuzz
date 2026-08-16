@@ -19,7 +19,12 @@ import {
   type StrictJsonlSnapshot
 } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, resolveConfig } from "@ultrafuzz/config";
-import { isPathInside, validateMaterializePolicy, type MaterializeCopySelection } from "@ultrafuzz/security";
+import {
+  isPathInside,
+  normalizeRelativePath,
+  validateMaterializePolicy,
+  type MaterializeCopySelection
+} from "@ultrafuzz/security";
 
 import {
   MATERIALIZE_AUDIT_SCHEMA_VERSION,
@@ -713,12 +718,14 @@ function publicationSensitiveMaterialization(
   productionSourceRoots: string[]
 ): boolean {
   if (
-    copies.some((copy) =>
-      productionSourceRoots.some(
-        (root) =>
-          root === "." || copy.selection.destination === root || copy.selection.destination.startsWith(`${root}/`)
-      )
-    )
+    copies.some((copy) => {
+      const destinationKey = materializationPathPolicyKey(copy.selection.destination);
+      return productionSourceRoots.some((root) => {
+        if (root === ".") return true;
+        const rootKey = materializationPathPolicyKey(root);
+        return destinationKey === rootKey || destinationKey.startsWith(`${rootKey}/`);
+      });
+    })
   ) {
     return true;
   }
@@ -734,7 +741,13 @@ function publicationSensitiveMaterialization(
   } catch {
     // Conventional final-report selections still enter the authenticated review path.
   }
-  return copies.some((copy) => /^artifacts\/[^/]*final-report(?:\/|$)/u.test(copy.selection.source));
+  return copies.some((copy) =>
+    /^artifacts\/[^/]*final-report(?:\/|$)/u.test(materializationPathPolicyKey(copy.selection.source))
+  );
+}
+
+function materializationPathPolicyKey(value: string): string {
+  return normalizeRelativePath(value).normalize("NFC").toLowerCase();
 }
 
 function appendExactMaterializeJournal<RecordType>(
