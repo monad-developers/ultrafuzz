@@ -560,7 +560,11 @@ test("dashboard records authenticated CSP violations for development and CI visi
 
 test("dashboard run launch requires a matching preview confirmation and appends an audit record", async () => {
   const projectRoot = makeProject();
-  const handle = await serveDashboard({ projectRoot, port: 0 });
+  const handle = await serveDashboard({
+    projectRoot,
+    port: 0,
+    env: { ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDashboardDataGovernancePolicy() }
+  });
   try {
     const commandRequest = (argumentsValue: Record<string, unknown>) =>
       dashboardRequest("command", { command: "run", arguments: argumentsValue });
@@ -1576,6 +1580,31 @@ function makeProject(): string {
   return projectRoot;
 }
 
+function syntheticDashboardDataGovernancePolicy(): string {
+  return JSON.stringify({
+    schema_version: "ultrafuzz.data-governance-policy.v1",
+    sensitivity: "public",
+    source_destinations: ["model:openai"],
+    artifact_destinations: [],
+    destination_policies: [
+      {
+        destination: "model:openai",
+        processor: "synthetic test process",
+        region: "local test process",
+        retention_policy: "synthetic test fixtures only",
+        training_policy: "not used for training",
+        dpa_status: "not applicable to synthetic fixtures",
+        minimization_policy: "synthetic fixture content only",
+        data_handling_basis: "synthetic public test fixtures"
+      }
+    ],
+    local_model_agents: [],
+    openrouter_model_allowlist: [],
+    production_source_roots: ["contracts", "src"],
+    review_signoff_keys: []
+  });
+}
+
 function fakeDashboardSmithersEnv(projectRoot: string): {
   env: Record<string, string | undefined>;
   logPath: string;
@@ -1600,7 +1629,8 @@ function fakeDashboardSmithersEnv(projectRoot: string): {
     env: {
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_BIN: smithers,
-      ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+      ULTRAFUZZ_PRICING_CATALOG_URL: "off",
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: syntheticDashboardDataGovernancePolicy()
     },
     logPath
   };

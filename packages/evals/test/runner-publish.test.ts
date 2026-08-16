@@ -515,6 +515,11 @@ describe("runner", () => {
   it("rejects a row missing its topology backend before creating an Ultrafuzz run", async () => {
     const project = mkdtempSync(path.join(tmpdir(), "ufz-evals-required-command-"));
     initProject({ projectRoot: project, force: true });
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const config = fs.readFileSync(configPath, "utf8");
+    const withoutReviewGate = config.replace("prompt_review_required = true", "prompt_review_required = false");
+    expect(withoutReviewGate).not.toBe(config);
+    fs.writeFileSync(configPath, withoutReviewGate, "utf8");
     const suite = testSuite(path.join(project, "ground-truth"));
     const row = testRow(suite, { target: { ...testRow(suite).target, path: project } });
 
