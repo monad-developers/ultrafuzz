@@ -5836,6 +5836,46 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
   }
 });
 
+test("planRun gives pre-materialization hooks immutable reviewed config and graph snapshots", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  let hookRan = false;
+  let reviewedCpu: number | undefined;
+  let reviewedNodeId: string | undefined;
+
+  const plan = await planRun(
+    { projectRoot: project, runId: "immutable-review-context", env: {} },
+    {
+      beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
+        hookRan = true;
+        reviewedCpu = resolvedConfig.execution.resources.cpu;
+        reviewedNodeId = expandedGraph.nodes[0]?.id;
+        assert.throws(() => {
+          resolvedConfig.execution.resources.cpu = 999;
+        }, TypeError);
+        assert.throws(() => {
+          expandedGraph.nodes[0]!.id = "mutated-task";
+        }, TypeError);
+        return [];
+      }
+    }
+  );
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(hookRan, true);
+  assert.equal(plan.value!.resolved_config.execution.resources.cpu, reviewedCpu);
+  assert.equal(plan.value!.expanded_graph.nodes[0]?.id, reviewedNodeId);
+  assert.notEqual(plan.value!.expanded_graph.nodes[0]?.id, "mutated-task");
+  const persistedGraph = JSON.parse(fs.readFileSync(plan.value!.layout.graphPath, "utf8")) as {
+    nodes?: Array<{ id?: string }>;
+  };
+  assert.equal(
+    persistedGraph.nodes?.some((node) => node.id === "mutated-task"),
+    false
+  );
+});
+
 test("plan materializes the exact reference catalog snapshot bound by launch review", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -7568,6 +7608,10 @@ test("launch review preview is immutable, exact, and stops before every launch s
     "unpriced_token_usd_per_million",
     "workflow_deadline_seconds"
   ]);
+  assert.equal(
+    preview.value.manifest.runtime_overrides.max_concurrency,
+    preview.value.summary.configured_budget.max_parallel_agents
+  );
   assert.equal(preflightCalls, 0);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
   assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
@@ -7608,7 +7652,7 @@ test("launch review digest binds the effective execution concurrency", async () 
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
 });
 
-test("launch seals canonical reviewed config instead of rereading mutable project TOML", async () => {
+test("launch rejects project TOML mutation after review instead of executing it", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   writeSmallTopology(project);
@@ -7629,14 +7673,88 @@ test("launch seals canonical reviewed config instead of rereading mutable projec
       fs.writeFileSync(configPath, hostileConfig, "utf8");
     }
   });
-  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.equal(launched.ok, false);
+  assert.equal(launched.diagnostics[0]?.code, "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT");
   assert.match(fs.readFileSync(configPath, "utf8"), /ATTACKER_KEY/u);
-  const evidence = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-  if (!evidence.ok) return;
-  const sealedConfig = fs.readFileSync(evidence.executionSnapshot.env.ULTRAFUZZ_CONFIG_PATH!, "utf8");
-  assert.match(sealedConfig, /api_key_env = "OPENAI_API_KEY"/u);
-  assert.doesNotMatch(sealedConfig, /ATTACKER_KEY/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+});
+
+test("launch review binds the effective max concurrency before materialization", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "launch concurrency review baseline");
+  const runId = "launch-review-concurrency";
+  const input: StartRunInput = withFakeCliEntrypoint({
+    projectRoot: project,
+    runId,
+    env: fakeSmithersEnv(project),
+    maxConcurrency: 1
+  });
+
+  const preview = await previewRunLaunchReview(input);
+  assert.equal(preview.ok, true, JSON.stringify(preview.diagnostics));
+  assert.ok(preview.value);
+  assert.equal(preview.value.manifest.runtime_overrides.max_concurrency, 1);
+
+  const stale = await runtimeStartRun({
+    ...input,
+    maxConcurrency: 2,
+    reviewAcknowledgement: preview.value.launch_review_digest
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_STALE");
+  assert.notEqual(stale.diagnostics[0]?.details?.expected_digest, preview.value.launch_review_digest);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+  assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+});
+
+test("startRun executes the immutable launch input captured before asynchronous preflight", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "immutable launch input baseline");
+  const runId = "immutable-launch-input";
+  const input: StartRunInput = withFakeCliEntrypoint({
+    projectRoot: project,
+    runId,
+    env: fakeSmithersEnv(project),
+    maxConcurrency: 1,
+    prompt: "reviewed operator prompt",
+    workflowInput: { nested: { value: "reviewed workflow input" } }
+  });
+
+  const missing = await runtimeStartRun(input);
+  assert.equal(missing.ok, false);
+  const digest = missing.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof digest, "string");
+
+  input.reviewAcknowledgement = String(digest);
+  input.requiredCommandProbe = async (commands) => {
+    input.maxConcurrency = 9;
+    input.prompt = "mutated operator prompt";
+    (input.workflowInput as { nested: { value: string } }).nested.value = "mutated workflow input";
+    return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+  };
+  const started = await runtimeStartRun(input);
+
+  assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
+  assert.equal(input.maxConcurrency, 9);
+  assert.equal(input.prompt, "mutated operator prompt");
+  assert.equal((input.workflowInput as { nested: { value: string } }).nested.value, "mutated workflow input");
+  const state = JSON.parse(fs.readFileSync(path.join(started.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(state.concurrency.requested_concurrency, 1);
+  const workflowInput = JSON.parse(
+    fs.readFileSync(path.join(started.value!.run_root, "smithers", "input.json"), "utf8")
+  ) as { operator_prompt?: string; operator_input?: { nested?: { value?: string } } };
+  assert.equal(workflowInput.operator_prompt, "reviewed operator prompt");
+  assert.equal(workflowInput.operator_input?.nested?.value, "reviewed workflow input");
+  const submission = JSON.parse(
+    fs.readFileSync(path.join(started.value!.run_root, "smithers", "submission.json"), "utf8")
+  ) as { command?: string[] };
+  const concurrencyIndex = submission.command?.indexOf("--max-concurrency") ?? -1;
+  assert.equal(concurrencyIndex >= 0, true);
+  assert.equal(submission.command?.[concurrencyIndex + 1], "1");
 });
 
 test("startRun requires a launch acknowledgement bound to prompts, config, topology, references, and commit", async () => {
@@ -7783,6 +7901,53 @@ test("startRun rechecks an acknowledged custom controller closure before importi
   );
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
   assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+});
+
+test("startRun rejects mutable project TOML instead of rereading it after review", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "reviewed config snapshot baseline");
+  const runId = "reviewed-config-snapshot";
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const input: StartRunInput = withFakeCliEntrypoint({
+    projectRoot: project,
+    runId,
+    env: fakeSmithersEnv(project)
+  });
+
+  const missing = await runtimeStartRun(input);
+  assert.equal(missing.ok, false);
+  const digest = missing.diagnostics[0]?.details?.expected_digest;
+  assert.equal(typeof digest, "string");
+
+  let mutated = false;
+  const started = await runtimeStartRun({
+    ...input,
+    reviewAcknowledgement: String(digest),
+    requiredCommandProbe: async (commands) => {
+      if (!mutated) {
+        const reviewedConfig = fs.readFileSync(configPath, "utf8");
+        assert.doesNotMatch(reviewedConfig, /target-controlled-home/u);
+        fs.writeFileSync(
+          configPath,
+          reviewedConfig.replace(
+            'api_key_env = "OPENAI_API_KEY"',
+            'api_key_env = "OPENAI_API_KEY"\nconfig_dir = "target-controlled-home"'
+          ),
+          "utf8"
+        );
+        mutated = true;
+      }
+      return commands.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+    }
+  });
+
+  assert.equal(started.ok, false);
+  assert.equal(started.diagnostics[0]?.code, "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT");
+  assert.equal(mutated, true);
+  assert.match(fs.readFileSync(configPath, "utf8"), /config_dir = "target-controlled-home"/u);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
 });
 
 test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {

@@ -117,6 +117,13 @@ const LAUNCH_REVIEW_PREVIEW_READY = "RUN_LAUNCH_REVIEW_PREVIEW_READY";
  * when this function returns.
  */
 export async function previewRunLaunchReview(input: PlanRunInput) {
+  try {
+    input = snapshotPlanRunInput(input);
+  } catch (error) {
+    return runtimeFailure<LaunchReviewPreviewValue>([
+      diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")
+    ]);
+  }
   const projectRoot = path.resolve(input.projectRoot);
   let captured:
     | {
@@ -169,6 +176,11 @@ export async function previewRunLaunchReview(input: PlanRunInput) {
 }
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
+  try {
+    input = snapshotPlanRunInput(input);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_REVIEW_INPUT_INVALID")]);
+  }
   const projectRoot = path.resolve(input.projectRoot);
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
@@ -347,16 +359,16 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   // acknowledgement before allowing that external side effect.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
-    preMaterializeDiagnostics =
-      (await hooks.beforeMaterialize?.({
-        resolvedConfig: resolved.config,
-        expandedGraph,
-        launchReviewDigest,
-        launchReviewManifest,
-        launchReviewSummary,
-        controllerSource,
-        targetCommit
-      })) ?? [];
+    const preMaterializeContext = snapshotLaunchData({
+      resolvedConfig: resolved.config,
+      expandedGraph,
+      launchReviewDigest,
+      launchReviewManifest,
+      launchReviewSummary,
+      controllerSource,
+      targetCommit
+    });
+    preMaterializeDiagnostics = (await hooks.beforeMaterialize?.(preMaterializeContext)) ?? [];
   } catch (error) {
     preMaterializeDiagnostics = [diagnosticFromError(error, "runtime", "RUN_PREFLIGHT_FAILED")];
   }
@@ -584,6 +596,47 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
 
 function immutableLaunchReviewPreview(value: LaunchReviewPreviewValue): LaunchReviewPreviewValue {
   return deepFreezeJson(JSON.parse(JSON.stringify(value)) as LaunchReviewPreviewValue);
+}
+
+/**
+ * Capture every current and future data field before the first asynchronous
+ * launch step. Callback fields retain their identity, while all data supplied
+ * by the caller is detached and frozen so a preflight callback cannot change
+ * what later materialization or submission consumes.
+ */
+export function snapshotPlanRunInput<T extends PlanRunInput>(input: T): T {
+  try {
+    const snapshot = Object.fromEntries(
+      Object.entries(input).map(([key, value]) => [
+        key,
+        typeof value === "function" ? value : snapshotLaunchData(value)
+      ])
+    ) as T;
+    return deepFreezeLaunchInput(snapshot);
+  } catch (error) {
+    throw new Error(
+      `launch input cannot be captured before review: ${error instanceof Error ? error.message : error}`,
+      {
+        cause: error
+      }
+    );
+  }
+}
+
+function snapshotLaunchData<T>(value: T): T {
+  return deepFreezeLaunchInput(structuredClone(value));
+}
+
+function deepFreezeLaunchInput<T>(value: T, seen = new Set<object>()): T {
+  if (value === null || typeof value !== "object") return value;
+  const object = value as object;
+  if (seen.has(object)) return value;
+  seen.add(object);
+  const prototype = Object.getPrototypeOf(object);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreezeLaunchInput(child, seen);
+  Object.freeze(object);
+  return value;
 }
 
 function launchReviewPlanSummary(

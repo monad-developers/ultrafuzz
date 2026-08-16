@@ -1095,8 +1095,8 @@ export interface CompiledSmithersWorkflow {
   evidenceWorkflowPath: string;
   expandedGraphPath: string;
   configPath: string;
-  executionConfigPath: string;
   resolvedConfigPath: string;
+  executionConfigPath: string;
   inputPath: string;
   tasksPath: string;
   logsDir: string;
@@ -1229,9 +1229,10 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
   const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
   const configPath = path.join(smithersDir, "config.fingerprint-input");
-  const executionConfigPath = path.join(smithersDir, "execution-config.toml");
   const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
   const resolvedConfigBytes = serializeResolvedConfigJsonBytes(input.config);
+  const executionConfigPath = path.join(smithersDir, "execution-config.toml");
+  const executionConfigToml = serializeResolvedConfigToml(input.config);
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -1260,8 +1261,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     evidenceWorkflowPath,
     expandedGraphPath,
     configPath,
-    executionConfigPath,
     resolvedConfigPath,
+    executionConfigPath,
     inputPath,
     tasksPath,
     logsDir,
@@ -1281,13 +1282,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     stableJson(input.config),
     "workflow config fingerprint input"
   );
+  writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
   writePreparedWorkflowFile(
     input.runLayout.root,
     executionConfigPath,
-    serializeResolvedConfigToml(input.config),
-    "canonical workflow execution config"
+    executionConfigToml,
+    "reviewed workflow execution config"
   );
-  writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
   const taskManifest: SmithersTaskManifestDocument = {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
