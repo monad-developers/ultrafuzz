@@ -1427,7 +1427,7 @@ export async function smithersExecutionControlFiles(
     const packageRoot = workflowPackageRoot(entryPath);
     if (modulesByRoot.has(packageRoot)) continue;
     const packageJsonPath = path.join(packageRoot, "package.json");
-    const manifest = readWorkflowPackageManifest(packageJsonPath);
+    const manifest = readWorkflowPackageManifest(packageJsonPath, true);
     if (typeof manifest.name !== "string" || !manifest.name.startsWith("@ultrafuzz/")) {
       throw new Error(`workflow module is not an Ultrafuzz runtime package: ${entryPath}`);
     }
@@ -1488,6 +1488,7 @@ interface WorkflowPackageManifest {
   optionalDependencies?: Readonly<Record<string, string>>;
   peerDependencies?: Readonly<Record<string, string>>;
   peerDependenciesMeta?: Readonly<Record<string, Readonly<{ optional?: boolean }>>>;
+  ultrafuzzWorkflowExecutionDependencies?: readonly string[];
 }
 
 interface WorkflowExecutionModule {
@@ -1542,7 +1543,7 @@ function collectWorkflowExecutionDependencies(input: {
     const dependencies: Record<string, string> = {};
     const requested =
       issuer.rootDependencies === undefined
-        ? workflowPackageDependencies(issuer.manifest)
+        ? workflowPackageDependencies(issuer.manifest, issuer.id.startsWith("module:"))
         : issuer.rootDependencies.map((name) => ({ name, optional: false }));
     for (const dependency of requested) {
       const module = modulesByName.get(dependency.name);
@@ -1622,7 +1623,10 @@ function collectWorkflowExecutionDependencies(input: {
   };
 }
 
-function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageManifest {
+function readWorkflowPackageManifest(
+  packageJsonPath: string,
+  allowExecutionProjection = false
+): WorkflowPackageManifest {
   const envelope = readPackageManagerOwnedManifestEnvelope(packageJsonPath, "workflow package manifest");
   return {
     ...projectOptionalPackageManifestString(envelope, "name", packageJsonPath),
@@ -1631,7 +1635,8 @@ function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageMa
     ...projectOptionalPackageManifestStringMap(envelope, "dependencies", packageJsonPath),
     ...projectOptionalPackageManifestStringMap(envelope, "optionalDependencies", packageJsonPath),
     ...projectOptionalPackageManifestStringMap(envelope, "peerDependencies", packageJsonPath),
-    ...projectOptionalPackageManifestPeerMetadata(envelope, packageJsonPath)
+    ...projectOptionalPackageManifestPeerMetadata(envelope, packageJsonPath),
+    ...(allowExecutionProjection ? projectOptionalWorkflowExecutionDependencies(envelope, packageJsonPath) : {})
   };
 }
 
@@ -1641,7 +1646,10 @@ function requiredWorkflowDependencies(manifest: WorkflowPackageManifest): string
     .map((dependency) => dependency.name);
 }
 
-function workflowPackageDependencies(manifest: WorkflowPackageManifest): Array<{ name: string; optional: boolean }> {
+function workflowPackageDependencies(
+  manifest: WorkflowPackageManifest,
+  allowExecutionProjection = false
+): Array<{ name: string; optional: boolean }> {
   const dependencies = new Map<string, boolean>();
   if (isObjectRecord(manifest.dependencies)) {
     for (const name of Object.keys(manifest.dependencies)) dependencies.set(name, false);
@@ -1657,9 +1665,18 @@ function workflowPackageDependencies(manifest: WorkflowPackageManifest): Array<{
       if (!dependencies.has(name) || !optional) dependencies.set(name, optional);
     }
   }
-  return [...dependencies]
+  const projected = [...dependencies]
     .map(([name, optional]) => ({ name, optional }))
     .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
+  if (!allowExecutionProjection || manifest.ultrafuzzWorkflowExecutionDependencies === undefined) return projected;
+  const byName = new Map(projected.map((dependency) => [dependency.name, dependency]));
+  return manifest.ultrafuzzWorkflowExecutionDependencies.map((name) => {
+    const dependency = byName.get(name);
+    if (dependency === undefined) {
+      throw new Error(`workflow execution dependency is not declared by the package: ${name}`);
+    }
+    return dependency;
+  });
 }
 
 function resolveWorkflowPackageDependency(issuerRoot: string, dependency: string): string | undefined {
@@ -3679,6 +3696,36 @@ function projectOptionalPackageManifestPeerMetadata(
     );
   }
   return { peerDependenciesMeta: projected };
+}
+
+function projectOptionalWorkflowExecutionDependencies(
+  manifest: Readonly<Record<string, unknown>>,
+  packageJsonPath: string
+): Pick<WorkflowPackageManifest, "ultrafuzzWorkflowExecutionDependencies"> | Record<never, never> {
+  const value = manifest.ultrafuzzWorkflowExecutionDependencies;
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.length > 256) {
+    throw new Error(
+      `package-manager manifest ultrafuzzWorkflowExecutionDependencies must be a bounded array: ${packageJsonPath}`
+    );
+  }
+  const dependencies = value.map((entry) => {
+    if (typeof entry !== "string" || !isWorkflowPackageName(entry)) {
+      throw new Error(
+        `package-manager manifest ultrafuzzWorkflowExecutionDependencies contains an invalid package name: ${packageJsonPath}`
+      );
+    }
+    return entry;
+  });
+  if (
+    new Set(dependencies).size !== dependencies.length ||
+    JSON.stringify(dependencies) !== JSON.stringify([...dependencies].sort(compareWorkflowExecutionStrings))
+  ) {
+    throw new Error(
+      `package-manager manifest ultrafuzzWorkflowExecutionDependencies must be unique and canonically ordered: ${packageJsonPath}`
+    );
+  }
+  return { ultrafuzzWorkflowExecutionDependencies: dependencies };
 }
 
 function nullPrototypeRecord<Value>(): Record<string, Value> {

@@ -618,6 +618,64 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   const cloudExecutionFiles = await smithersExecutionControlFiles(cloudCompiled, cloudPlan.value!.layout, {
     SMITHERS_BIN: "/bin/true"
   });
+  const cloudDependencyMapFile = cloudExecutionFiles.find((file) => file.snapshotPath === "dependencies/manifest.json");
+  assert.ok(cloudDependencyMapFile, "cloud execution must carry its sealed dependency map");
+  const cloudDependencyMap = JSON.parse(fs.readFileSync(cloudDependencyMapFile.sourcePath, "utf8")) as {
+    modules?: Array<{ id?: unknown; name?: unknown }>;
+    packages?: Array<{ id?: unknown; name?: unknown }>;
+    issuers?: Array<{ id?: unknown; dependencies?: Record<string, unknown> }>;
+  };
+  const cloudPackageNames = new Set(cloudDependencyMap.packages?.map((entry) => entry.name));
+  for (const dependency of ["@anthropic-ai/claude-code", "@openai/codex", "bun", "pnpm", "recon-generate"]) {
+    assert.equal(
+      cloudPackageNames.has(dependency),
+      false,
+      `cloud execution must not seal the Modal image-only dependency ${dependency}`
+    );
+  }
+  for (const dependency of ["modal", "proper-lockfile", "smol-toml", "tar-stream", "yaml", "zod"]) {
+    assert.equal(
+      cloudPackageNames.has(dependency),
+      true,
+      `cloud execution must retain the Modal runtime dependency ${dependency}`
+    );
+  }
+  const dependencyTargets = new Map(
+    [...(cloudDependencyMap.modules ?? []), ...(cloudDependencyMap.packages ?? [])].map((target) => [
+      target.id,
+      target.name
+    ])
+  );
+  const modalIssuer = cloudDependencyMap.issuers?.find((issuer) => issuer.id === "module:@ultrafuzz/modal");
+  const modalRuntimeDependencies = [
+    "@ultrafuzz/artifacts",
+    "@ultrafuzz/config",
+    "@ultrafuzz/evals",
+    "@ultrafuzz/runtime",
+    "@ultrafuzz/security",
+    "modal",
+    "proper-lockfile",
+    "smol-toml",
+    "tar-stream",
+    "yaml",
+    "zod"
+  ];
+  assert.deepEqual(Object.keys(modalIssuer?.dependencies ?? {}), modalRuntimeDependencies);
+  for (const dependency of modalRuntimeDependencies) {
+    assert.equal(
+      dependencyTargets.get(modalIssuer?.dependencies?.[dependency]),
+      dependency,
+      `the Modal issuer must bind ${dependency} to the matching sealed target`
+    );
+  }
+  const modalPackage = cloudDependencyMap.packages?.find((entry) => entry.name === "modal");
+  assert.equal(typeof modalPackage?.id, "string");
+  const modalPackageIssuer = cloudDependencyMap.issuers?.find((issuer) => issuer.id === modalPackage?.id);
+  assert.equal(
+    dependencyTargets.get(modalPackageIssuer?.dependencies?.["cbor-x"]),
+    "cbor-x",
+    "external packages must retain their real transitive runtime closure"
+  );
   const cloudPinnedPaths = cloudExecutionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
@@ -643,6 +701,22 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     executionFiles: cloudExecutionFiles
   });
   const cloudVerifiedControl = verifyWorkflowControlSnapshot(cloudCompiled.projectRoot, cloudPlan.value!.layout);
+  const cloudMaterialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: cloudCompiled.projectRoot,
+    layout: cloudPlan.value!.layout,
+    snapshot: cloudVerifiedControl
+  });
+  const modalImport = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const loaded = await import(${JSON.stringify(cloudMaterialized.env.ULTRAFUZZ_MODAL_MODULE)}); process.stdout.write(typeof loaded.createModalNodeSandboxProvider);`
+    ],
+    { cwd: cloudMaterialized.root, encoding: "utf8", env: {} }
+  );
+  assert.equal(modalImport.status, 0, modalImport.stderr);
+  assert.equal(modalImport.stdout, "function", "the sealed Modal module and projected dependency closure must load");
   const cloudExecutionSnapshotRoot = path.join(fixture.root, "verified-cloud-execution-snapshot");
   fs.mkdirSync(cloudExecutionSnapshotRoot);
   const sealedCloudPinnedFiles = cloudVerifiedControl.executionFiles.filter((file) =>

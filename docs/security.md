@@ -192,6 +192,17 @@ This signature authenticates the review decision; it does not sandbox agents,
 prevent an operator from trusting the wrong reviewer key, or make provider
 retention and deletion terms independently enforceable.
 
+## Cloud execution dependency closure
+
+Cloud workflows seal the package bytes needed by generated workflow modules
+before handing them to the provider. Internal modules may declare a canonical
+`ultrafuzzWorkflowExecutionDependencies` projection in their package manifest
+when their published package also carries image-build tools. Every projected
+entry must still be a declared dependency, and external packages cannot narrow
+their own transitive closure. This prevents Modal-only image-build dependency
+edges from enlarging workflow control snapshots without increasing the
+control-file size limits or changing the agents' unrestricted execution mode.
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,

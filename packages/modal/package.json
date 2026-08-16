@@ -22,6 +22,19 @@
     "toolchain-materials.json",
     "toolchain-materials.sha256"
   ],
+  "ultrafuzzWorkflowExecutionDependencies": [
+    "@ultrafuzz/artifacts",
+    "@ultrafuzz/config",
+    "@ultrafuzz/evals",
+    "@ultrafuzz/runtime",
+    "@ultrafuzz/security",
+    "modal",
+    "proper-lockfile",
+    "smol-toml",
+    "tar-stream",
+    "yaml",
+    "zod"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
     "smoke": "pnpm run build && node dist/cli.js smoke",
