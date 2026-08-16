@@ -119,6 +119,8 @@ export interface AppendNodeAttemptInput {
   agent?: NodeAttemptAgentProvenance;
   failureCategory?: NodeAttemptFailureCategory;
   failureMessage?: string;
+  /** Exact in-memory secrets to redact from the persisted failure message. */
+  forbiddenSecretValues?: readonly string[];
 }
 
 export interface AppendNodeAttemptResult {
@@ -445,13 +447,8 @@ export function normalizeNodeAttemptFailureMessage(
   value: string,
   forbiddenSecretValues: readonly string[] = []
 ): string | undefined {
-  let normalized = value;
-  for (const secret of [...new Set(forbiddenSecretValues.filter(Boolean))].sort(
-    (left, right) => right.length - left.length || (left < right ? -1 : left > right ? 1 : 0)
-  )) {
-    normalized = normalized.split(secret).join(SENSITIVE_REDACTION_PLACEHOLDER);
-  }
-  normalized = [...redactSecretsInText(normalized)]
+  const normalizedRedaction = redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues);
+  const normalized = [...normalizedRedaction]
     .map((character) => {
       const codePoint = character.codePointAt(0)!;
       return codePoint <= 31 || codePoint === 127 ? " " : character;
@@ -477,7 +474,9 @@ export function createNodeAttemptLedgerEntry(
   input: AppendNodeAttemptInput
 ): NodeAttemptLedgerEntry {
   const normalizedFailureMessage =
-    input.failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(input.failureMessage);
+    input.failureMessage === undefined
+      ? undefined
+      : normalizeNodeAttemptFailureMessage(input.failureMessage, input.forbiddenSecretValues);
   return assertNodeAttemptLedgerEntry({
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
     run_id: validateSafeId(input.runId ?? layout.runId, "run ID"),

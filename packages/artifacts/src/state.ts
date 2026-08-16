@@ -1,6 +1,6 @@
 import fs from "node:fs";
 
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 
 import type { ArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
@@ -456,11 +456,29 @@ export function createNodeState(input: NodeStateInput): NodeState {
   return state;
 }
 
-export function writeRunState(target: RunLayoutStateLike | string, state: RunState): void {
+export interface RunStateWriteOptions {
+  /** Exact in-memory secrets to redact from agent-controlled state diagnostics. */
+  forbiddenSecretValues?: readonly string[];
+}
+
+export function writeRunState(
+  target: RunLayoutStateLike | string,
+  state: RunState,
+  options: RunStateWriteOptions = {}
+): void {
   const nodes = Object.fromEntries(
     Object.entries(state.nodes).map(([nodeId, node]) => [
       nodeId,
-      node.last_error === undefined ? node : { ...node, last_error: redactSecretsInText(node.last_error) }
+      node.last_error === undefined
+        ? node
+        : {
+            ...node,
+            last_error: redactSecretsInText(
+              node.last_error,
+              SENSITIVE_REDACTION_PLACEHOLDER,
+              options.forbiddenSecretValues
+            )
+          }
     ])
   );
   const next = { ...state, nodes };
@@ -516,19 +534,24 @@ function assertCurrentRunState(value: unknown): asserts value is RunState {
   }
 }
 
-export function loadOrCreateRunState(target: RunLayoutStateLike | string, state: RunState): RunState {
+export function loadOrCreateRunState(
+  target: RunLayoutStateLike | string,
+  state: RunState,
+  options: RunStateWriteOptions = {}
+): RunState {
   const statePath = resolveStatePath(target);
   if (fs.existsSync(statePath)) {
     return readRunState(statePath);
   }
-  writeRunState(statePath, state);
+  writeRunState(statePath, state, options);
   return state;
 }
 
 export function updateRunStatus(
   target: RunLayoutStateLike | string,
   status: RunStatus,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  options: RunStateWriteOptions = {}
 ): RunState {
   const state = readRunState(target);
   if (state.status !== status) {
@@ -543,7 +566,7 @@ export function updateRunStatus(
   } else {
     delete state.finished_at;
   }
-  writeRunState(target, state);
+  writeRunState(target, state, options);
   return state;
 }
 
@@ -551,7 +574,8 @@ export function updateNodeState(
   target: RunLayoutStateLike | string,
   nodeId: string,
   patch: Partial<Omit<NodeState, "node_id">>,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  options: RunStateWriteOptions = {}
 ): RunState {
   const safeNodeId = validateSafeId(nodeId, "node ID");
   const state = readRunState(target);
@@ -589,7 +613,7 @@ export function updateNodeState(
     }
   }
   state.nodes[safeNodeId] = next;
-  writeRunState(target, state);
+  writeRunState(target, state, options);
   return state;
 }
 
