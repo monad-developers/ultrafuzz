@@ -82,6 +82,7 @@ import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
+const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
@@ -363,9 +364,20 @@ async function loadGeneratedOpenRouterAgent(
     initialDelayMs: number;
     maxDelayMs: number;
     jitterFraction: number;
+    provisionalCallbackLimit?: number;
+    actionSnapshotLimit?: number;
+    actionSnapshotBytes?: number;
   }
 ): Promise<{
-  decideOpenRouterInitial429Retry(input: {
+  OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+    generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+    buildCommand: (params: {
+      prompt: string;
+      cwd: string;
+      options: Record<string, unknown>;
+    }) => Promise<Record<string, unknown>>;
+  };
+  decideOpenRouter429Recovery(input: {
     retryAttempt: number;
     nowMs: number;
     retryDeadlineMs: number;
@@ -374,13 +386,14 @@ async function loadGeneratedOpenRouterAgent(
   }):
     | { kind: "rate-limit-exhausted" }
     | { kind: "total-timeout" }
-    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "final-retry" | "total-timeout" };
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
     generate(options?: {
       prompt?: unknown;
       onEvent?: (event: Record<string, unknown>) => unknown;
       onStderr?: (text: string) => void;
+      onProviderRetry?: () => void;
       abortSignal?: AbortSignal;
       [key: string]: unknown;
     }): Promise<{ text: string }>;
@@ -388,6 +401,7 @@ async function loadGeneratedOpenRouterAgent(
       prompt?: unknown;
       onEvent?: (event: Record<string, unknown>) => unknown;
       onStderr?: (text: string) => void;
+      onProviderRetry?: () => void;
       abortSignal?: AbortSignal;
       [key: string]: unknown;
     }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
@@ -428,24 +442,39 @@ async function loadGeneratedOpenRouterAgent(
   if (retryPolicy !== undefined) {
     for (const [from, to] of [
       [
-        "const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = 120_000;",
-        `const OPENROUTER_INITIAL_429_RETRY_WINDOW_MS = ${retryPolicy.retryWindowMs};`
+        "const OPENROUTER_429_RECOVERY_WINDOW_MS = 120_000;",
+        `const OPENROUTER_429_RECOVERY_WINDOW_MS = ${retryPolicy.retryWindowMs};`
       ],
       [
-        "const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = 1_000;",
-        `const OPENROUTER_INITIAL_429_INITIAL_DELAY_MS = ${retryPolicy.initialDelayMs};`
+        "const OPENROUTER_429_INITIAL_DELAY_MS = 1_000;",
+        `const OPENROUTER_429_INITIAL_DELAY_MS = ${retryPolicy.initialDelayMs};`
       ],
+      ["const OPENROUTER_429_MAX_DELAY_MS = 30_000;", `const OPENROUTER_429_MAX_DELAY_MS = ${retryPolicy.maxDelayMs};`],
       [
-        "const OPENROUTER_INITIAL_429_MAX_DELAY_MS = 30_000;",
-        `const OPENROUTER_INITIAL_429_MAX_DELAY_MS = ${retryPolicy.maxDelayMs};`
-      ],
-      [
-        "const OPENROUTER_INITIAL_429_JITTER_FRACTION = 0.25;",
-        `const OPENROUTER_INITIAL_429_JITTER_FRACTION = ${retryPolicy.jitterFraction};`
+        "const OPENROUTER_429_JITTER_FRACTION = 0.25;",
+        `const OPENROUTER_429_JITTER_FRACTION = ${retryPolicy.jitterFraction};`
       ]
     ] as const) {
       const replaced = openRouterSource.replace(from, to);
       assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter retry policy source: ${from}`);
+      openRouterSource = replaced;
+    }
+    if (retryPolicy.provisionalCallbackLimit !== undefined) {
+      const from = "const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = 256;";
+      const replaced = openRouterSource.replace(
+        from,
+        `const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = ${retryPolicy.provisionalCallbackLimit};`
+      );
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
+      openRouterSource = replaced;
+    }
+    for (const [from, value] of [
+      ["const OPENROUTER_ACTION_SNAPSHOT_LIMIT = 256;", retryPolicy.actionSnapshotLimit],
+      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes]
+    ] as const) {
+      if (value === undefined) continue;
+      const replaced = openRouterSource.replace(from, from.replace(/= .*;/u, `= ${value};`));
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
       openRouterSource = replaced;
     }
   }
@@ -462,7 +491,15 @@ async function loadGeneratedOpenRouterAgent(
     "utf8"
   );
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
-    decideOpenRouterInitial429Retry(input: {
+    OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+      generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+      buildCommand: (params: {
+        prompt: string;
+        cwd: string;
+        options: Record<string, unknown>;
+      }) => Promise<Record<string, unknown>>;
+    };
+    decideOpenRouter429Recovery(input: {
       retryAttempt: number;
       nowMs: number;
       retryDeadlineMs: number;
@@ -471,20 +508,26 @@ async function loadGeneratedOpenRouterAgent(
     }):
       | { kind: "rate-limit-exhausted" }
       | { kind: "total-timeout" }
-      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "final-retry" | "total-timeout" };
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
       generate(options?: {
         prompt?: unknown;
         onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
         onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
+        onProviderRetry?: () => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
       }): Promise<{ text: string }>;
       stream(options?: {
         prompt?: unknown;
         onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
         onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
+        onProviderRetry?: () => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
       }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
@@ -499,11 +542,21 @@ async function loadGeneratedOpenRouterAgent(
   };
 }
 
-function installOpenRouterRetryCodexFixture(project: string): { bin: string; counter: string } {
+function installOpenRouterRetryCodexFixture(project: string): {
+  bin: string;
+  counter: string;
+  journal: string;
+  sentinel: string;
+  warningAck: string;
+} {
   const bin = path.join(project, "openrouter-retry-bin");
   const counter = path.join(project, "openrouter-retry-count");
+  const journal = path.join(project, "openrouter-retry-journal.jsonl");
+  const sentinel = path.join(project, "openrouter-retry-sentinel");
+  const warningAck = path.join(project, "openrouter-retry-warning-ack");
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(counter, "0", "utf8");
+  fs.writeFileSync(journal, "", "utf8");
   const executable = path.join(bin, "codex");
   fs.writeFileSync(
     executable,
@@ -514,16 +567,294 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
+const journalPath = process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL;
+const sentinelPath = process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL;
+const warningAckPath = process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK;
 let count = 0;
 try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
 count += 1;
 fs.writeFileSync(counterPath, String(count), "utf8");
 const failureCount = Number(process.env.OPENROUTER_RETRY_FIXTURE_FAILURES ?? "1");
+const mode = process.env.OPENROUTER_RETRY_FIXTURE_MODE ?? "initial";
+const argv = process.argv.slice(2);
+const resumed = argv[0] === "exec" && argv[1] === "resume";
+const resumeSession = resumed ? argv.at(-2) : undefined;
+let stdin = "";
 process.stdin.resume();
+process.stdin.on("data", (chunk) => { stdin += chunk; });
 process.stdin.on("end", () => {
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fixture-" + count }) + "\\n");
+  const substantiveMode = mode.startsWith("substantive-") ||
+    [
+      "missing-session",
+      "conflicting-session",
+      "fresh-conflicting-session",
+      "late-conflicting-session",
+      "stderr-only",
+      "resume-hang"
+    ].includes(mode);
+  if (substantiveMode && !resumed) fs.appendFileSync(sentinelPath, "mutation\\n", "utf8");
+  fs.appendFileSync(journalPath, JSON.stringify({
+    count,
+    argv,
+    stdin,
+    invocation: resumed ? "resume" : "fresh",
+    resumeSession,
+    sentinel: fs.existsSync(sentinelPath) ? fs.readFileSync(sentinelPath, "utf8") : ""
+  }) + "\\n", "utf8");
+  const sessionId = mode === "conflicting-session" && resumed
+    ? "conflicting-session"
+    : mode === "initial"
+      ? "fixture-" + count
+      : "fixture-session";
+  if (!(mode === "missing-session" && count === 1)) {
+    process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");
+  }
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
-  if (count <= failureCount && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+  if (mode === "callback-hang") {
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stdout-callback-hang") {
+    // BaseCliAgent's onStdout contract carries extracted assistant text rather
+    // than raw Codex JSONL. Emit a recognized streaming-text envelope so this
+    // fixture exercises a live onStdout callback before the child exits.
+    process.stdout.write(JSON.stringify({
+      type: "message",
+      role: "assistant",
+      content: "live stdout before hang"
+    }) + "\\n");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-callback-hang") {
+    process.stderr.write("live stderr before hang");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-429-hang" && count <= failureCount) {
+    process.stderr.write("HTTP 429 request id: fixture-" + count + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-replay" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "fixture progress" }
+    }) + "\\n");
+  }
+  if (mode === "substantive-snapshot-overflow" && resumed) {
+    for (const snapshot of [1, 4]) {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+      }) + "\\n");
+    }
+  }
+  if (mode === "late-conflicting-session" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "late-before-conflict", type: "agent_message", text: "before conflict" }
+    }) + "\\n");
+    process.stdout.write(
+      JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) +
+        "\\n" +
+        JSON.stringify({ type: "message", role: "assistant", content: "must stay quarantined" }) +
+        "\\n"
+    );
+    setTimeout(() => {
+      fs.appendFileSync(sentinelPath, "wrong-session-mutation\\n", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "post-conflict", type: "agent_message", text: "must stay quarantined" }
+      }) + "\\n");
+      process.stderr.write("wrong-session-stderr must stay quarantined\\n");
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "WRONG", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 100);
+    return;
+  }
+  if (mode === "resume-hang" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "resume-message", type: "agent_message", text: "resume began" }
+    }) + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-updates" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "completed" }
+    }) + "\\n");
+  }
+  if (mode === "warning-burst") {
+    for (let warning = 0; warning < 256; warning += 1) {
+      process.stderr.write("ordinary warning " + warning + "\\n");
+    }
+    // stdout and stderr use separate pipes. Wait for an explicit parent
+    // acknowledgement so success cannot overtake the warning burst.
+    const warningAckDeadline = setTimeout(() => {
+      clearInterval(warningAckTimer);
+      process.stderr.write("warning-burst acknowledgement timed out\\n");
+      process.exitCode = 1;
+    }, 5_000);
+    const warningAckTimer = setInterval(() => {
+      if (!fs.existsSync(warningAckPath)) return;
+      clearInterval(warningAckTimer);
+      clearTimeout(warningAckDeadline);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 1);
+    return;
+  }
+  if (
+    mode === "stderr-left-boundary-negative" ||
+    mode === "stderr-right-boundary-negative" ||
+    mode === "stderr-long-s-boundary-negative"
+  ) {
+    const first =
+      mode === "stderr-left-boundary-negative"
+        ? "prefix"
+        : mode === "stderr-long-s-boundary-negative"
+          ? "HTTP ſtatus 429"
+          : "HTTP 429";
+    const second = mode === "stderr-left-boundary-negative" ? "HTTP 429 suffix\\n" : "suffix\\n";
+    process.stderr.write(first);
+    setTimeout(() => {
+      if (mode === "stderr-right-boundary-negative" || mode === "stderr-long-s-boundary-negative") {
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: mode + " boundary disproved"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "provisional-safe", type: "agent_message", text: mode + " event preserved" }
+        }) + "\\n");
+      }
+      process.stderr.write(second);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 10);
+    return;
+  }
+  if (count <= failureCount && mode !== "empty-success" && mode !== "warning-burst") {
+    const rateLimitMessage =
+      "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
+    if (mode === "stderr-provisional-post-terminal") {
+      process.stderr.write("HTTP 429");
+      setTimeout(() => {
+        fs.appendFileSync(sentinelPath, "provisional-post-terminal-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "provisional post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "provisional-post-terminal",
+            type: "command_execution",
+            command: "provisional post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        setTimeout(() => {
+          process.stderr.write("\\n");
+          process.exitCode = 1;
+        }, 10);
+      }, 10);
+      return;
+    }
+    if (mode === "stderr-post-terminal" || mode === "stdout-post-terminal") {
+      if (mode === "stderr-post-terminal") {
+        process.stderr.write(rateLimitMessage + "\\n");
+      } else {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+      }
+      setTimeout(() => {
+        fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "post-terminal",
+            type: "command_execution",
+            command: "post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
+        process.exitCode = 1;
+      }, 20);
+      return;
+    }
+    if (mode === "stderr-oversized") {
+      process.stderr.write(
+        "429 Too Many Requests request id: fixture-" + count + " " + "x".repeat(70 * 1024)
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (mode === "stderr-character-split") {
+      const splitMessage = "HTTP\\n429 Too Many Requests request id: fixture-" + count;
+      let splitIndex = 0;
+      const splitTimer = setInterval(() => {
+        process.stderr.write(splitMessage[splitIndex] ?? "");
+        splitIndex += 1;
+        if (splitIndex >= splitMessage.length) {
+          clearInterval(splitTimer);
+          process.exitCode = 1;
+        }
+      }, 1);
+      return;
+    }
+    if (mode === "stderr-unicode-prefix-split") {
+      process.stderr.write("İ\\nH");
+      setTimeout(() => {
+        process.stderr.write("TTP 429 request id: fixture-" + count + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
+    if (mode === "structured-429-partial-stderr") {
+      process.stderr.write("HTT");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
     const substantiveEvents = {
       "substantive-command": {
         type: "item.started",
@@ -552,13 +883,67 @@ process.stdin.on("end", () => {
       "substantive-todo": {
         type: "item.started",
         item: { id: "todo-1", type: "todo_list", items: [{ text: "fixture task", completed: false }] }
+      },
+      "substantive-429-message": {
+        type: "item.completed",
+        item: { id: "message-429", type: "agent_message", text: "Investigated HTTP 429 handling" }
       }
     };
-    const substantiveEvent = count === 1 ? substantiveEvents[process.env.OPENROUTER_RETRY_FIXTURE_MODE] : undefined;
+    if (mode === "substantive-updates" && count === 1) {
+      process.stdout.write(JSON.stringify({
+        type: "item.updated",
+        item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+      }) + "\\n");
+    }
+    if ((mode === "substantive-stdout-only" && count === 1) || mode === "substantive-stdout-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: mode === "substantive-stdout-replay" ? "replayed stdout progress" : "stdout-only substantive progress"
+      }) + "\\n");
+    }
+    if (mode === "substantive-stdout-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: "oversized-replay-" + "x".repeat(1_024)
+      }) + "\\n");
+    }
+    if (mode === "substantive-action-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "oversized-action", type: "agent_message", text: "x".repeat(1_024) }
+      }) + "\\n");
+    }
+    if (mode === "substantive-snapshot-overflow" && count === 1) {
+      for (const snapshot of [1, 2, 3, 4]) {
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+        }) + "\\n");
+      }
+    }
+    const substantiveEvent = count === 1
+      ? substantiveEvents[mode] ?? (substantiveMode && mode !== "substantive-updates" && mode !== "substantive-snapshot-overflow" && mode !== "substantive-stdout-only" && mode !== "substantive-stdout-replay" && mode !== "substantive-stdout-oversized-replay" && mode !== "substantive-action-oversized-replay"
+        ? { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "fixture progress" } }
+        : undefined)
+      : undefined;
     if (substantiveEvent) process.stdout.write(JSON.stringify(substantiveEvent) + "\\n");
-    const message = process.env.OPENROUTER_RETRY_FIXTURE_MODE === "unrelated"
+    if (mode === "fresh-conflicting-session" && count === 1) {
+      process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) + "\\n");
+    }
+    const message = mode === "unrelated"
       ? "fixture path /tmp/job-429 is unavailable"
-      : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
+      : rateLimitMessage;
+    if (mode === "stderr-only") {
+      const splitAt = Math.max(1, message.indexOf("429") + 2);
+      process.stderr.write(message.slice(0, splitAt));
+      setTimeout(() => {
+        process.stderr.write(message.slice(splitAt) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
     process.stdout.write(JSON.stringify({ type: "error", message }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message } }) + "\\n");
     process.exitCode = 1;
@@ -566,10 +951,10 @@ process.stdin.on("end", () => {
   }
   const outputIndex = process.argv.indexOf("--output-last-message");
   if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
-  if (process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+  if (mode !== "empty-success") {
     process.stdout.write(JSON.stringify({
       type: "item.completed",
-      item: { id: "message-1", type: "agent_message", text: "OK" }
+      item: { id: "final-message", type: "agent_message", text: "OK" }
     }) + "\\n");
   }
   process.stdout.write(JSON.stringify({
@@ -580,7 +965,21 @@ process.stdin.on("end", () => {
 `,
     { encoding: "utf8", mode: 0o755 }
   );
-  return { bin, counter };
+  return { bin, counter, journal, sentinel, warningAck };
+}
+
+type OpenRouterRetryFixtureEntry = {
+  count: number;
+  argv: string[];
+  stdin: string;
+  invocation: "fresh" | "resume";
+  resumeSession?: string;
+  sentinel: string;
+};
+
+function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFixtureEntry[] {
+  const text = fs.readFileSync(pathname, "utf8").trim();
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as OpenRouterRetryFixtureEntry);
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
@@ -2522,15 +2921,15 @@ test(
   }
 );
 
-test("generated OpenRouter adapter bounds its initial 429 retry policy independently from caller timeout", async () => {
+test("generated OpenRouter adapter bounds its 429 recovery policy independently from caller timeout", async () => {
   if (!runningUnderBun) return;
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  const { decideOpenRouterInitial429Retry } = await loadGeneratedOpenRouterAgent(project);
+  const { decideOpenRouter429Recovery } = await loadGeneratedOpenRouterAgent(project);
 
   const baseDelays = [0, 1, 2, 3, 4, 5, 6].map((retryAttempt) =>
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt,
       nowMs: 0,
       retryDeadlineMs: 120_000,
@@ -2542,7 +2941,7 @@ test("generated OpenRouter adapter bounds its initial 429 retry policy independe
     [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
   );
   assert.deepEqual(
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt: 5,
       nowMs: 0,
       retryDeadlineMs: 120_000,
@@ -2551,16 +2950,16 @@ test("generated OpenRouter adapter bounds its initial 429 retry policy independe
     { kind: "backoff", delayMs: 37_499, afterDelay: "retry" }
   );
   assert.deepEqual(
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt: 8,
       nowMs: 119_500,
       retryDeadlineMs: 120_000,
       random: 0
     }),
-    { kind: "backoff", delayMs: 500, afterDelay: "final-retry" }
+    { kind: "rate-limit-exhausted" }
   );
   assert.deepEqual(
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt: 0,
       nowMs: 0,
       retryDeadlineMs: 500,
@@ -2570,7 +2969,7 @@ test("generated OpenRouter adapter bounds its initial 429 retry policy independe
     { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
   );
   assert.deepEqual(
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt: 0,
       nowMs: 120_000,
       retryDeadlineMs: 120_000,
@@ -2579,7 +2978,7 @@ test("generated OpenRouter adapter bounds its initial 429 retry policy independe
     { kind: "rate-limit-exhausted" }
   );
   assert.deepEqual(
-    decideOpenRouterInitial429Retry({
+    decideOpenRouter429Recovery({
       retryAttempt: 0,
       nowMs: 1,
       retryDeadlineMs: 120_000,
@@ -2591,162 +2990,198 @@ test("generated OpenRouter adapter bounds its initial 429 retry policy independe
 });
 
 test(
-  "generated OpenRouter adapter retries an initial 429 but never replays substantive model work",
-  { skip: !runningUnderBun, timeout: 20_000 },
+  "generated OpenRouter adapter decreases one caller timeout across exact-session recovery",
+  { skip: !runningUnderBun, timeout: 10_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const configPath = path.join(project, "ultrafuzz.toml");
-    const fixture = installOpenRouterRetryCodexFixture(project);
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
-    const previous = {
-      config: process.env.ULTRAFUZZ_CONFIG_PATH,
-      key: process.env.OPENROUTER_API_KEY,
-      path: process.env.PATH,
-      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
-      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
-      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
-    };
-    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
-    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
-    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
-    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
-    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
-    try {
-      const retryEvents: Record<string, unknown>[] = [];
-      let retryStderr = "";
-      let providerRetries = 0;
-      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-        prompt: "Retry fixture",
-        onProviderRetry: () => {
-          providerRetries += 1;
-        },
-        onEvent: (event) => {
-          retryEvents.push(event);
-          return Promise.reject(new Error("fixture callback rejection"));
-        },
-        onStderr: (text) => {
-          retryStderr += text;
-        }
-      });
-      assert.equal(result.text, "OK");
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
-      assert.equal(providerRetries, 1, "each actual invocation after the first must reach the accounting hook");
-      assert.match(retryStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
-      assert.doesNotMatch(JSON.stringify(retryEvents), /fixture-1/u);
-      assert.match(JSON.stringify(retryEvents), /fixture-2/u);
-
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
-        prompt: "Retry stream fixture"
-      });
-      assert.equal(await streamResult.text, "OK");
-      const streamedText = await streamResult.textStream.getReader().read();
-      assert.deepEqual(streamedText, { value: "OK", done: false });
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
-
-      for (const [mode, eventKind] of [
-        ["substantive-command", "command"],
-        ["substantive-message", "note"],
-        ["substantive-reasoning", "reasoning"],
-        ["substantive-file", "file_change"],
-        ["substantive-tool", "tool"],
-        ["substantive-web", "web_search"],
-        ["substantive-todo", "todo_list"]
-      ] as const) {
-        fs.writeFileSync(fixture.counter, "0", "utf8");
-        process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
-        const substantiveEvents: Record<string, unknown>[] = [];
-        await assert.rejects(
-          createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-            prompt: `Do not replay ${eventKind} fixture`,
-            onEvent: (event) => substantiveEvents.push(event)
-          }),
-          /429 Too Many Requests/u
-        );
-        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1", eventKind);
-        assert.match(JSON.stringify(substantiveEvents), new RegExp(`"kind":"${eventKind}"`, "u"), eventKind);
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+    const observedTimeouts: number[] = [];
+    let invocation = 0;
+    agent.buildCommand = async (params) => {
+      invocation += 1;
+      const timeout = params.options.timeout;
+      const totalMs =
+        typeof timeout === "number"
+          ? timeout
+          : timeout !== null && typeof timeout === "object" && "totalMs" in timeout
+            ? (timeout as { totalMs?: unknown }).totalMs
+            : undefined;
+      assert.equal(typeof totalMs, "number");
+      observedTimeouts.push(totalMs as number);
+      const rateLimitMessage = `last status: 429 Too Many Requests, request id: timeout-${invocation}`;
+      const lines: Record<string, unknown>[] = [
+        { type: "thread.started", thread_id: "timeout-session" },
+        { type: "turn.started" }
+      ];
+      if (invocation === 1) {
+        lines.push({
+          type: "item.completed",
+          item: { id: "progress", type: "agent_message", text: "substantive progress" }
+        });
       }
+      if (invocation < 3) {
+        lines.push({ type: "error", message: rateLimitMessage });
+        lines.push({ type: "turn.failed", error: { message: rateLimitMessage } });
+      } else {
+        lines.push({ type: "item.completed", item: { id: "answer", type: "agent_message", text: "OK" } });
+        lines.push({ type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } });
+      }
+      const script = `${lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")} ${
+        invocation < 3 ? "process.exitCode = 1;" : ""
+      }`;
+      return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+    };
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "unrelated";
-      let unrelatedStderr = "";
-      await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Unrelated numeric error fixture",
-          onStderr: (text) => {
-            unrelatedStderr += text;
+    const result = await agent.generate({ prompt: "One total timeout", timeout: { totalMs: 2_000 } });
+
+    assert.equal(result.text, "OK");
+    assert.equal(invocation, 3);
+    assert.equal(observedTimeouts.length, 3);
+    assert.equal(observedTimeouts[0]! > observedTimeouts[1]!, true);
+    assert.equal(observedTimeouts[1]! > observedTimeouts[2]!, true);
+    assert.equal(
+      observedTimeouts.every((timeout) => timeout <= 2_000 && timeout > 0),
+      true
+    );
+  }
+);
+
+test(
+  "generated OpenRouter adapter does not start a request after event-loop delay crosses its recovery deadline",
+  { skip: !runningUnderBun, timeout: 5_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 500,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+    let invocation = 0;
+    let delayedPastDeadline = false;
+    agent.buildCommand = async () => {
+      invocation += 1;
+      const message = `last status: 429 Too Many Requests, request id: deadline-${invocation}`;
+      const lines = [
+        { type: "thread.started", thread_id: "deadline-session" },
+        { type: "turn.started" },
+        { type: "error", message },
+        { type: "turn.failed", error: { message } }
+      ];
+      const script = `${lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")} process.exitCode = 1;`;
+      return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+    };
+
+    await assert.rejects(
+      agent.generate({
+        prompt: "Do not cross the recovery deadline",
+        onStderr: (text: string) => {
+          if (!text.includes("[ultrafuzz]") || delayedPastDeadline) return;
+          delayedPastDeadline = true;
+          const unblockAt = performance.now() + 600;
+          while (performance.now() < unblockAt) {
+            // Deliberately delay the retry timer past its independently
+            // bounded window, as a busy host event loop can do in production.
           }
-        }),
-        /job-429/u
-      );
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.doesNotMatch(unrelatedStderr, /retrying/u);
-
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "empty-success";
-      let callbackStderr = "";
-      await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Successful empty turn callback fixture",
-          onEvent: () => {
-            throw new Error("HTTP 429 from caller callback");
-          },
-          onStderr: (text) => {
-            callbackStderr += text;
-          }
-        }),
-        /HTTP 429 from caller callback/u
-      );
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.doesNotMatch(callbackStderr, /retrying/u);
-
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
-      const preAbortedController = new AbortController();
-      preAbortedController.abort(new Error("fixture pre-aborted"));
-      await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Pre-aborted fixture",
-          abortSignal: preAbortedController.signal
-        }),
-        (error: unknown) => {
-          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
-          return true;
         }
-      );
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "0");
+      }),
+      /request id: deadline-1/u
+    );
+    assert.equal(delayedPastDeadline, true);
+    assert.equal(invocation, 1);
+  }
+);
 
-      const controller = new AbortController();
+test(
+  "generated OpenRouter adapter checks recovery and caller deadlines after asynchronous command construction",
+  { skip: !runningUnderBun, timeout: 5_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 500,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    type ParentBuildCommand = (params: unknown) => Promise<{ command: string; args: string[]; outputFormat: string }>;
+    const parentPrototype = Object.getPrototypeOf(OpenRouterCodexAgent.prototype) as {
+      buildCommand: ParentBuildCommand;
+    };
+    const originalParentBuildCommand = parentPrototype.buildCommand;
+    try {
+      let recoveryBuilds = 0;
+      let recoveryProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        recoveryBuilds += 1;
+        if (recoveryBuilds === 2) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));
+        }
+        const message = "last status: 429 Too Many Requests, request id: delayed-build-" + String(recoveryBuilds);
+        const lines =
+          recoveryBuilds === 1
+            ? [
+                { type: "thread.started", thread_id: "delayed-build-session" },
+                { type: "turn.started" },
+                { type: "error", message },
+                { type: "turn.failed", error: { message } }
+              ]
+            : [
+                { type: "thread.started", thread_id: "delayed-build-session" },
+                { type: "turn.started" },
+                { type: "item.completed", item: { id: "answer", type: "agent_message", text: "WRONG" } },
+                { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } }
+              ];
+        const script = lines.map((line) => "console.log(" + JSON.stringify(JSON.stringify(line)) + ");").join("");
+        return {
+          command: process.execPath,
+          args: ["-e", script + (recoveryBuilds === 1 ? "process.exitCode = 1;" : "")],
+          outputFormat: "stream-json"
+        };
+      };
+      const recoveryAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
       await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Abort backoff fixture",
-          abortSignal: controller.signal,
-          onStderr: (text) => {
-            if (text.includes("OpenRouter returned HTTP 429")) {
-              controller.abort(new Error("fixture cancelled during backoff"));
-            }
+        recoveryAgent.generate({
+          prompt: "Do not spawn after delayed recovery command construction",
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") recoveryProcessStarts += 1;
           }
         }),
-        (error: unknown) => {
-          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
-          assert.match(String(error), /OpenRouter retry aborted during initial HTTP 429 backoff/u);
-          return true;
-        }
+        /request id: delayed-build-1/u
       );
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.equal(recoveryBuilds, 2);
+      assert.equal(recoveryProcessStarts, 1);
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      let timeoutStderr = "";
-      const timeoutStartedAt = performance.now();
+      let totalBuilds = 0;
+      let totalProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        totalBuilds += 1;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        return {
+          command: process.execPath,
+          args: ["-e", 'console.log("must not start");'],
+          outputFormat: "stream-json"
+        };
+      };
+      const totalAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
       await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Bounded timeout fixture",
-          timeout: 500,
-          onStderr: (text) => {
-            timeoutStderr += text;
+        totalAgent.generate({
+          prompt: "Do not spawn after delayed caller timeout",
+          timeout: 50,
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") totalProcessStarts += 1;
           }
         }),
         (error: unknown) => {
@@ -2754,15 +3189,158 @@ test(
           return true;
         }
       );
-      assert.match(timeoutStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.equal(performance.now() - timeoutStartedAt < 1_500, true);
+      assert.equal(totalBuilds, 1);
+      assert.equal(totalProcessStarts, 0);
+
+      let absoluteBuilds = 0;
+      let absoluteProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        absoluteBuilds += 1;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 75));
+        const successLines = [
+          { type: "thread.started", thread_id: "late-success-session" },
+          { type: "turn.started" },
+          { type: "item.completed", item: { id: "answer", type: "agent_message", text: "LATE" } },
+          { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } }
+        ];
+        const script =
+          "setTimeout(() => {" +
+          successLines.map((line) => "console.log(" + JSON.stringify(JSON.stringify(line)) + ");").join("") +
+          "}, 100);";
+        return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+      };
+      const absoluteAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+      await assert.rejects(
+        absoluteAgent.generate({
+          prompt: "Carry the absolute caller deadline into a late-starting child",
+          timeout: 120,
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") absoluteProcessStarts += 1;
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+          return true;
+        }
+      );
+      assert.equal(absoluteBuilds, 1);
+      assert.equal(absoluteProcessStarts, 1);
+    } finally {
+      parentPrototype.buildCommand = originalParentBuildCommand;
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter bounds provisional callbacks and exact replay snapshots",
+  { skip: !runningUnderBun, timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0,
+      provisionalCallbackLimit: 1,
+      actionSnapshotLimit: 2,
+      actionSnapshotBytes: 512
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
+    try {
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-provisional-post-terminal";
+      const overflowEvents: Record<string, unknown>[] = [];
+      let overflowStdout = "";
+      const overflowResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Fail closed when provisional callbacks overflow",
+        onEvent: (event) => overflowEvents.push(event),
+        onStdout: (text: string) => {
+          overflowStdout += text;
+        }
+      });
+      assert.equal(overflowResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(JSON.stringify(overflowEvents), /provisional-post-terminal/u);
+      assert.doesNotMatch(overflowStdout, /provisional post-terminal/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-snapshot-overflow";
+      const snapshotEvents: Record<string, unknown>[] = [];
+      const snapshotResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Keep recent replay snapshots within a bounded LRU",
+        onEvent: (event) => snapshotEvents.push(event)
+      });
+      assert.equal(snapshotResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      const snapshotText = JSON.stringify(snapshotEvents);
+      assert.equal((snapshotText.match(/"id":"snapshot-1"/gu) ?? []).length, 2);
+      assert.equal((snapshotText.match(/"id":"snapshot-4"/gu) ?? []).length, 1);
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-stdout-oversized-replay";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "3";
+      let oversizedReplayStdout = "";
+      const oversizedReplayResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate an oversized stdout replay with a bounded digest",
+        onStdout: (text: string) => {
+          oversizedReplayStdout += text;
+        }
+      });
+      assert.equal(oversizedReplayResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "4");
+      assert.equal((oversizedReplayStdout.match(/oversized-replay-/gu) ?? []).length, 1);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-action-oversized-replay";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "3";
+      const oversizedReplayEvents: Record<string, unknown>[] = [];
+      const oversizedActionResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate an oversized action replay with a bounded digest",
+        onEvent: (event) => oversizedReplayEvents.push(event)
+      });
+      assert.equal(oversizedActionResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "4");
+      assert.equal(
+        oversizedReplayEvents.filter((event) => JSON.stringify(event).includes('"id":"oversized-action"')).length,
+        1
+      );
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         OPENROUTER_API_KEY: previous.key,
         PATH: previous.path,
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
@@ -2774,7 +3352,7 @@ test(
 );
 
 test(
-  "generated OpenRouter adapter recovers generate and stream after more than four initial 429s",
+  "generated OpenRouter adapter retries before output and resumes exact sessions after substantive work",
   { skip: !runningUnderBun, timeout: 20_000 },
   async () => {
     const project = tempProject();
@@ -2793,6 +3371,9 @@ test(
       key: process.env.OPENROUTER_API_KEY,
       path: process.env.PATH,
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      warningAck: process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK,
       mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
       failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
     };
@@ -2800,31 +3381,683 @@ test(
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
-    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
-    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "7";
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK = fixture.warningAck;
+    const resetFixture = (mode: string, failures = 1) => {
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      fs.rmSync(fixture.warningAck, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = String(failures);
+    };
+    const assertExactResume = (prompt: string) => {
+      const journal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(journal.length, 2);
+      assert.equal(journal[0]?.invocation, "fresh");
+      assert.equal(journal[1]?.invocation, "resume");
+      assert.equal(journal[1]?.resumeSession, "fixture-session");
+      assert.deepEqual(journal[1]?.argv.slice(0, 2), ["exec", "resume"]);
+      assert.equal(journal[1]?.argv.includes("--sandbox"), false);
+      assert.equal(journal[1]?.argv.includes("--add-dir"), false);
+      assert.equal(journal[0]?.stdin, prompt);
+      assert.match(journal[1]?.stdin ?? "", /Continue the existing task from the current session state/u);
+      assert.equal(journal.filter((entry) => entry.stdin.includes(prompt)).length, 1);
+      assert.deepEqual(
+        journal.map((entry) => entry.sentinel),
+        ["mutation\n", "mutation\n"]
+      );
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+    };
     try {
-      const longRetryEvents: Record<string, unknown>[] = [];
+      resetFixture("initial");
+      const retryEvents: Record<string, unknown>[] = [];
+      let retryStderr = "";
+      let providerRetries = 0;
       const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-        prompt: "Recover after more than four consecutive initial rate limits",
-        onEvent: (event) => longRetryEvents.push(event)
+        prompt: "Retry fixture",
+        onEvent: (event) => {
+          retryEvents.push(event);
+          return Promise.reject(new Error("fixture callback rejection"));
+        },
+        onStderr: (text) => {
+          retryStderr += text;
+        },
+        onProviderRetry: () => {
+          providerRetries += 1;
+        }
       });
       assert.equal(result.text, "OK");
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
-      assert.doesNotMatch(JSON.stringify(longRetryEvents), /fixture-[1-7]/u);
-      assert.match(JSON.stringify(longRetryEvents), /fixture-8/u);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(providerRetries, 1, "each provider invocation after the first must be charged");
+      assert.match(retryStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
+      assert.doesNotMatch(JSON.stringify(retryEvents), /fixture-1/u);
+      assert.match(JSON.stringify(retryEvents), /fixture-2/u);
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "fresh"]
+      );
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
+      resetFixture("initial");
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Do not start an unbudgeted retry",
+          onProviderRetry: () => {
+            throw new Error("provider retry budget exhausted");
+          }
+        }),
+        /provider retry budget exhausted/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.equal(readOpenRouterRetryFixtureJournal(fixture.journal).length, 1);
+
+      for (const [mode, eventKind] of [
+        ["substantive-command", "command"],
+        ["substantive-message", "note"],
+        ["substantive-reasoning", "reasoning"],
+        ["substantive-file", "file_change"],
+        ["substantive-tool", "tool"],
+        ["substantive-web", "web_search"],
+        ["substantive-todo", "todo_list"]
+      ] as const) {
+        resetFixture(mode);
+        const prompt = `Do not replay ${eventKind} fixture`;
+        const events: Record<string, unknown>[] = [];
+        const recovered = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt,
+          onEvent: (event) => events.push(event)
+        });
+        assert.equal(recovered.text, "OK", eventKind);
+        assertExactResume(prompt);
+        assert.match(JSON.stringify(events), new RegExp(`"kind":"${eventKind}"`, "u"), eventKind);
+        assert.equal(events.filter((event) => event.type === "started").length, 1, eventKind);
+        assert.equal(events.filter((event) => event.type === "completed" && event.ok === true).length, 1, eventKind);
+        assert.equal(
+          events.some((event) => event.type === "completed" && event.ok === false),
+          false,
+          eventKind
+        );
+        assert.doesNotMatch(JSON.stringify(events), /request id: fixture-1/u, eventKind);
+      }
+
+      resetFixture("substantive-stdout-only");
+      const stdoutOnlyPrompt = "Resume stdout-only substantive progress without replay";
+      const stdoutOnlyEvents: Record<string, unknown>[] = [];
+      let stdoutOnlyText = "";
+      const stdoutOnlyResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: stdoutOnlyPrompt,
+        onEvent: (event) => stdoutOnlyEvents.push(event),
+        onStdout: (text: string) => {
+          stdoutOnlyText += text;
+        }
+      });
+      assert.equal(stdoutOnlyResult.text, "OK");
+      assertExactResume(stdoutOnlyPrompt);
+      assert.equal((stdoutOnlyText.match(/stdout-only substantive progress/gu) ?? []).length, 1);
+      assert.equal(stdoutOnlyEvents.filter((event) => event.type === "started").length, 1);
+
+      resetFixture("substantive-stdout-replay", 7);
+      let replayedStdoutText = "";
+      const replayedStdoutResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate replayed stdout across repeated recovery",
+        onStdout: (text: string) => {
+          replayedStdoutText += text;
+        }
+      });
+      assert.equal(replayedStdoutResult.text, "OK");
+      assert.equal((replayedStdoutText.match(/replayed stdout progress/gu) ?? []).length, 1);
+      const replayedStdoutJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(replayedStdoutJournal.length, 8);
+      assert.equal(replayedStdoutJournal.filter((entry) => entry.invocation === "fresh").length, 1);
+      const replayedStdoutMarkers = replayedStdoutJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(replayedStdoutMarkers).size, 1);
+
+      resetFixture("substantive-command");
+      const streamPrompt = "Resume the stream fixture without replay";
+      const streamEvents: Record<string, unknown>[] = [];
       const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
-        prompt: "Stream after more than four consecutive initial rate limits"
+        prompt: streamPrompt,
+        onEvent: (event) => streamEvents.push(event)
       });
       assert.equal(await streamResult.text, "OK");
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      const streamedText = await streamResult.textStream.getReader().read();
+      assert.deepEqual(streamedText, { value: "OK", done: false });
+      assertExactResume(streamPrompt);
+      assert.equal(streamEvents.filter((event) => event.type === "started").length, 1);
+      assert.equal(
+        streamEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+
+      resetFixture("substantive-replay");
+      const replayEvents: Record<string, unknown>[] = [];
+      const replayResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate replayed action fixture",
+        onEvent: (event) => replayEvents.push(event)
+      });
+      assert.equal(replayResult.text, "OK");
+      assert.equal((JSON.stringify(replayEvents).match(/"id":"message-1"/gu) ?? []).length, 1);
+
+      resetFixture("substantive-updates");
+      const updateEvents: Record<string, unknown>[] = [];
+      const updateResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve evolving action updates",
+        onEvent: (event) => updateEvents.push(event)
+      });
+      assert.equal(updateResult.text, "OK");
+      const updateStatuses = updateEvents
+        .filter((event) => JSON.stringify(event).includes('"id":"update-1"'))
+        .map((event) => (event.action as { detail?: { status?: unknown } }).detail?.status);
+      assert.deepEqual(updateStatuses, ["in_progress", "completed"]);
+
+      resetFixture("substantive-429-message");
+      const substantive429Events: Record<string, unknown>[] = [];
+      const substantive429Result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve a substantive message that mentions HTTP 429",
+        onEvent: (event) => substantive429Events.push(event)
+      });
+      assert.equal(substantive429Result.text, "OK");
+      assert.equal(
+        substantive429Events.filter((event) => JSON.stringify(event).includes("Investigated HTTP 429 handling")).length,
+        1
+      );
+
+      resetFixture("stderr-only");
+      const stderrOnlyEvents: Record<string, unknown>[] = [];
+      let stderrOnlyStderr = "";
+      const stderrOnlyResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover a stderr-only rate limit",
+        onEvent: (event) => stderrOnlyEvents.push(event),
+        onStderr: (text) => {
+          stderrOnlyStderr += text;
+        }
+      });
+      assert.equal(stderrOnlyResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(
+        stderrOnlyEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+      assert.doesNotMatch(stderrOnlyStderr, /request id: fixture-1/u);
+
+      resetFixture("structured-429-partial-stderr");
+      const classifiedPartialChunks: string[] = [];
+      const classifiedPartialResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Do not release partial stderr while classifying a structured rate limit",
+        onStderr: (text) => {
+          classifiedPartialChunks.push(text);
+        }
+      });
+      assert.equal(classifiedPartialResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(classifiedPartialChunks.includes("HTT"), false);
+
+      resetFixture("stderr-429-hang");
+      let idleTimeoutRecoveryStderr = "";
+      const idleTimeoutRecoveryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover a latched stderr rate limit after the child idles",
+        timeout: { idleMs: 100, totalMs: 2_000 },
+        onStderr: (text) => {
+          idleTimeoutRecoveryStderr += text;
+        }
+      });
+      assert.equal(idleTimeoutRecoveryResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(idleTimeoutRecoveryStderr, /request id: fixture-1/u);
+
+      for (const terminalMode of ["stderr-post-terminal", "stdout-post-terminal"] as const) {
+        resetFixture(terminalMode);
+        const postTerminalEvents: Record<string, unknown>[] = [];
+        let postTerminalStdout = "";
+        let postTerminalStderr = "";
+        const postTerminalResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: `Quarantine ${terminalMode} trailing output`,
+          onEvent: (event) => postTerminalEvents.push(event),
+          onStdout: (text: string) => {
+            postTerminalStdout += text;
+          },
+          onStderr: (text: string) => {
+            postTerminalStderr += text;
+          }
+        });
+        assert.equal(postTerminalResult.text, "OK");
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+        const postTerminalJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+        assert.deepEqual(
+          postTerminalJournal.map((entry) => entry.invocation),
+          ["fresh", "resume"]
+        );
+        assert.equal(postTerminalJournal[1]?.resumeSession, "fixture-session");
+        assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "post-terminal-observed-mutation\n");
+        assert.doesNotMatch(JSON.stringify(postTerminalEvents), /post-terminal/u);
+        assert.doesNotMatch(postTerminalStdout, /post-terminal/u);
+        assert.doesNotMatch(postTerminalStderr, /post-terminal/u);
+      }
+
+      resetFixture("stderr-post-terminal");
+      const noStderrCallbackEvents: Record<string, unknown>[] = [];
+      let noStderrCallbackStdout = "";
+      const noStderrCallbackResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine a stderr terminal without an onStderr callback",
+        onEvent: (event) => noStderrCallbackEvents.push(event),
+        onStdout: (text: string) => {
+          noStderrCallbackStdout += text;
+        }
+      });
+      assert.equal(noStderrCallbackResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(JSON.stringify(noStderrCallbackEvents), /post-terminal/u);
+      assert.doesNotMatch(noStderrCallbackStdout, /post-terminal/u);
+
+      resetFixture("stderr-provisional-post-terminal");
+      const provisionalTerminalEvents: Record<string, unknown>[] = [];
+      const provisionalTerminalProcessEvents: Array<{ phase: "started" | "exited"; pid: number | undefined }> = [];
+      let provisionalTerminalStdout = "";
+      const provisionalTerminalResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine cross-channel output while a stderr terminal is provisional",
+        onEvent: (event) => provisionalTerminalEvents.push(event),
+        onProcess: (event: { phase: "started" | "exited"; pid: number | undefined }) =>
+          provisionalTerminalProcessEvents.push(event),
+        onStdout: (text: string) => {
+          provisionalTerminalStdout += text;
+        }
+      });
+      assert.equal(provisionalTerminalResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+      assert.doesNotMatch(JSON.stringify(provisionalTerminalEvents), /provisional-post-terminal/u);
+      assert.doesNotMatch(provisionalTerminalStdout, /provisional post-terminal/u);
+      assert.equal(provisionalTerminalProcessEvents.filter((event) => event.phase === "started").length, 2);
+      assert.equal(provisionalTerminalProcessEvents.filter((event) => event.phase === "exited").length, 1);
+
+      for (const boundaryMode of [
+        "stderr-left-boundary-negative",
+        "stderr-right-boundary-negative",
+        "stderr-long-s-boundary-negative"
+      ] as const) {
+        resetFixture(boundaryMode, 0);
+        const boundaryEvents: Record<string, unknown>[] = [];
+        let boundaryStderr = "";
+        let boundaryStdout = "";
+        const boundaryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: `Do not latch ${boundaryMode}`,
+          onEvent: (event) => boundaryEvents.push(event),
+          onStdout: (text: string) => {
+            boundaryStdout += text;
+          },
+          onStderr: (text) => {
+            boundaryStderr += text;
+          }
+        });
+        assert.equal(boundaryResult.text, "OK", boundaryMode);
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1", boundaryMode);
+        assert.match(boundaryStderr, /prefixHTTP 429 suffix|HTTP 429suffix|HTTP ſtatus 429suffix/u, boundaryMode);
+        assert.equal(
+          boundaryEvents.some((event) => event.type === "completed" && event.ok === true),
+          true,
+          boundaryMode
+        );
+        if (boundaryMode !== "stderr-left-boundary-negative") {
+          assert.match(boundaryStdout, new RegExp(boundaryMode + " boundary disproved", "u"));
+          assert.match(JSON.stringify(boundaryEvents), new RegExp(boundaryMode + " event preserved", "u"));
+          const lifecycleStartedIndex = boundaryEvents.findIndex((event) => event.type === "started");
+          const lifecycleTurnIndex = boundaryEvents.findIndex(
+            (event) => event.type === "action" && (event.action as { kind?: unknown }).kind === "turn"
+          );
+          const provisionalEventIndex = boundaryEvents.findIndex((event) =>
+            JSON.stringify(event).includes(boundaryMode + " event preserved")
+          );
+          assert.equal(lifecycleStartedIndex >= 0, true);
+          assert.equal(lifecycleTurnIndex > lifecycleStartedIndex, true);
+          assert.equal(provisionalEventIndex > lifecycleTurnIndex, true);
+        }
+      }
+
+      resetFixture("stderr-oversized");
+      let oversizedRetryStderr = "";
+      const oversizedRetryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine an oversized unterminated rate limit",
+        onStderr: (text) => {
+          oversizedRetryStderr += text;
+        }
+      });
+      assert.equal(oversizedRetryResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(oversizedRetryStderr, /request id: fixture-1/u);
+
+      resetFixture("stderr-character-split");
+      let characterSplitStderr = "";
+      const characterSplitResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine a character-split multiline rate limit",
+        onStderr: (text) => {
+          characterSplitStderr += text;
+        }
+      });
+      assert.equal(characterSplitResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(characterSplitStderr, /request id: fixture-1/u);
+
+      resetFixture("stderr-unicode-prefix-split");
+      let unicodePrefixStderr = "";
+      const unicodePrefixResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve source indexes across a Unicode prefix",
+        onStderr: (text) => {
+          unicodePrefixStderr += text;
+        }
+      });
+      assert.equal(unicodePrefixResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(unicodePrefixStderr, /request id: fixture-1/u);
+
+      resetFixture("warning-burst", 0);
+      const warningBurstEvents: Record<string, unknown>[] = [];
+      let warningBurstStderr = "";
+      const warningBurstResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Bound pre-substantive warning retention",
+        onEvent: (event) => warningBurstEvents.push(event),
+        onStderr: (text) => {
+          warningBurstStderr += text;
+          if (!warningBurstStderr.includes("ordinary warning 255")) return;
+          // The underlying adapter parses warning events after invoking its
+          // raw stderr callback. A microtask acknowledges only after that
+          // synchronous parser has staged the complete burst.
+          queueMicrotask(() => fs.writeFileSync(fixture.warningAck, "observed\n", "utf8"));
+        }
+      });
+      assert.equal(warningBurstResult.text, "OK");
+      assert.equal(
+        warningBurstEvents.filter(
+          (event) => event.type === "action" && (event.action as { kind?: unknown }).kind === "warning"
+        ).length,
+        1
+      );
+      assert.match(JSON.stringify(warningBurstEvents), /ordinary warning 255/u);
+
+      resetFixture("missing-session");
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({ prompt: "Missing session fixture" }),
+        /429 Too Many Requests/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+
+      resetFixture("missing-session");
+      const explicitResume = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Continue an explicit known session",
+        resumeSession: "fixture-session"
+      });
+      assert.equal(explicitResume.text, "OK");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["resume", "resume"]
+      );
+
+      resetFixture("fresh-conflicting-session");
+      const freshConflictEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Fresh session conflict fixture",
+          onEvent: (event) => freshConflictEvents.push(event)
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(JSON.stringify(freshConflictEvents), /conflicting-session/u);
+
+      resetFixture("conflicting-session");
+      const conflictEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Conflicting session fixture",
+          onEvent: (event) => conflictEvents.push(event)
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(JSON.stringify(conflictEvents), /"answer":"OK"|"text":"OK"/u);
+
+      resetFixture("late-conflicting-session");
+      const lateConflictEvents: Record<string, unknown>[] = [];
+      let lateConflictStdout = "";
+      let lateConflictStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Late session conflict fixture",
+          onEvent: (event) => lateConflictEvents.push(event),
+          onStdout: (text: string) => {
+            lateConflictStdout += text;
+          },
+          onStderr: (text) => {
+            lateConflictStderr += text;
+          }
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.match(JSON.stringify(lateConflictEvents), /before conflict/u);
+      assert.doesNotMatch(JSON.stringify(lateConflictEvents), /must stay quarantined|"answer":"OK"|"text":"OK"/u);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+      assert.doesNotMatch(lateConflictStdout, /must stay quarantined|WRONG/u);
+      assert.doesNotMatch(lateConflictStderr, /must stay quarantined/u);
+
+      resetFixture("unrelated");
+      let unrelatedStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Unrelated numeric error fixture",
+          onStderr: (text) => {
+            unrelatedStderr += text;
+          }
+        }),
+        /job-429/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(unrelatedStderr, /retrying|resuming/u);
+
+      resetFixture("empty-success");
+      let callbackStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Successful empty turn callback fixture",
+          onEvent: () => {
+            throw new Error("HTTP 429 from caller callback");
+          },
+          onStderr: (text) => {
+            callbackStderr += text;
+          }
+        }),
+        /HTTP 429 from caller callback/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(callbackStderr, /retrying|resuming/u);
+
+      resetFixture("callback-hang");
+      let processCallbackStderr = "";
+      const processCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Successful process callback fixture",
+          onProcess: () => {
+            throw new Error("HTTP 429 from caller process callback");
+          },
+          onStderr: (text) => {
+            processCallbackStderr += text;
+          }
+        }),
+        /HTTP 429 from caller process callback/u
+      );
+      assert.equal(performance.now() - processCallbackStartedAt < 400, true);
+      assert.equal(Number(fs.readFileSync(fixture.counter, "utf8")) <= 1, true);
+      assert.doesNotMatch(processCallbackStderr, /retrying|resuming/u);
+
+      resetFixture("stdout-callback-hang");
+      const stdoutCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a hanging process from stdout",
+          onStdout: (_text: string) => {
+            throw new Error("caller stdout callback stopped process");
+          }
+        }),
+        /caller stdout callback stopped process/u
+      );
+      assert.equal(performance.now() - stdoutCallbackStartedAt < 400, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("stderr-callback-hang");
+      const stderrCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a hanging process from stderr",
+          onStderr: () => {
+            throw new Error("caller stderr callback stopped process");
+          }
+        }),
+        /caller stderr callback stopped process/u
+      );
+      assert.equal(performance.now() - stderrCallbackStartedAt < 400, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("initial", 0);
+      let rejectedWithUndefined = false;
+      try {
+        await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Caller throws undefined",
+          onEvent: () => {
+            throw undefined;
+          }
+        });
+      } catch (error) {
+        rejectedWithUndefined = true;
+        assert.equal(error, undefined);
+      }
+      assert.equal(rejectedWithUndefined, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("substantive-command");
+      let substantiveCallbackStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Substantive caller callback fixture",
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes('"kind":"command"')) {
+              throw new Error("HTTP 429 from substantive caller callback");
+            }
+          },
+          onStderr: (text) => {
+            substantiveCallbackStderr += text;
+          }
+        }),
+        /HTTP 429 from substantive caller callback/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(substantiveCallbackStderr, /retrying|resuming/u);
+
+      resetFixture("resume-hang");
+      const hangingCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a resumed process after a callback failure",
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("resume began")) {
+              throw new Error("caller callback stopped resumed process");
+            }
+          }
+        }),
+        /caller callback stopped resumed process/u
+      );
+      assert.equal(performance.now() - hangingCallbackStartedAt < 1_000, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+
+      resetFixture("initial");
+      const preAbortedController = new AbortController();
+      preAbortedController.abort(new Error("fixture pre-aborted"));
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Pre-aborted fixture",
+          abortSignal: preAbortedController.signal
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "0");
+
+      const backoffController = new AbortController();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Abort backoff fixture",
+          abortSignal: backoffController.signal,
+          onStderr: (text) => {
+            if (text.includes("OpenRouter returned HTTP 429")) {
+              backoffController.abort(new Error("fixture cancelled during backoff"));
+            }
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          assert.match(String(error), /OpenRouter retry aborted during HTTP 429 recovery/u);
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("resume-hang");
+      const resumeController = new AbortController();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Abort resumed process fixture",
+          abortSignal: resumeController.signal,
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("resume began")) {
+              resumeController.abort(new Error("fixture cancelled inside resume"));
+            }
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+
+      resetFixture("resume-hang");
+      const timeoutStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Bounded resume timeout fixture",
+          timeout: 250
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(performance.now() - timeoutStartedAt < 1_000, true);
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         OPENROUTER_API_KEY: previous.key,
         PATH: previous.path,
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_WARNING_ACK: previous.warningAck,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
@@ -2836,7 +4069,125 @@ test(
 );
 
 test(
-  "generated OpenRouter adapter rethrows only the final 429 when its retry window is exhausted",
+  "generated OpenRouter adapter resumes generate and stream through seven same-session 429s",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 2,
+      jitterFraction: 0
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-command";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "7";
+    try {
+      const longRetryEvents: Record<string, unknown>[] = [];
+      let generateProviderRetries = 0;
+      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover after seven same-session rate limits",
+        onEvent: (event) => longRetryEvents.push(event),
+        onProviderRetry: () => {
+          generateProviderRetries += 1;
+        }
+      });
+      assert.equal(result.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      assert.equal(generateProviderRetries, 7);
+      assert.equal(longRetryEvents.filter((event) => event.type === "started").length, 1);
+      assert.equal(
+        longRetryEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+      assert.doesNotMatch(JSON.stringify(longRetryEvents), /request id: fixture-[1-7]/u);
+      const generateJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      const generatePrompt = "Recover after seven same-session rate limits";
+      assert.deepEqual(
+        generateJournal.map((entry) => entry.invocation),
+        ["fresh", "resume", "resume", "resume", "resume", "resume", "resume", "resume"]
+      );
+      assert.equal(
+        generateJournal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(generateJournal.filter((entry) => entry.stdin.includes(generatePrompt)).length, 1);
+      const generateRecoveryMarkers = generateJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(generateRecoveryMarkers).size, 1);
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      let streamProviderRetries = 0;
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: "Stream after seven same-session rate limits",
+        onProviderRetry: () => {
+          streamProviderRetries += 1;
+        }
+      });
+      assert.equal(await streamResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      assert.equal(streamProviderRetries, 7);
+      const streamJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      const streamPrompt = "Stream after seven same-session rate limits";
+      assert.equal(streamJournal.filter((entry) => entry.invocation === "fresh").length, 1);
+      assert.equal(streamJournal.filter((entry) => entry.invocation === "resume").length, 7);
+      assert.equal(
+        streamJournal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(streamJournal.filter((entry) => entry.stdin.includes(streamPrompt)).length, 1);
+      const streamRecoveryMarkers = streamJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(streamRecoveryMarkers).size, 1);
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter rethrows the last 429 without starting an attempt at its retry deadline",
   { skip: !runningUnderBun, timeout: 20_000 },
   async () => {
     const project = tempProject();
@@ -2855,6 +4206,8 @@ test(
       key: process.env.OPENROUTER_API_KEY,
       path: process.env.PATH,
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
       mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
       failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
     };
@@ -2862,13 +4215,15 @@ test(
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
-    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-command";
     process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
     try {
       const finalEvents: Record<string, unknown>[] = [];
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Exhaust the bounded initial rate-limit window",
+          prompt: "Exhaust the bounded same-session recovery window",
           onEvent: (event) => finalEvents.push(event)
         }),
         (error: unknown) => {
@@ -2877,21 +4232,128 @@ test(
           assert.match(String(error), new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
           const finalEventText = JSON.stringify(finalEvents);
           for (let attempt = 1; attempt < finalAttempt; attempt += 1) {
-            assert.doesNotMatch(finalEventText, new RegExp(`fixture-${attempt}\\b`, "u"));
+            assert.doesNotMatch(finalEventText, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
           }
-          assert.match(finalEventText, new RegExp(`fixture-${finalAttempt}\\b`, "u"));
+          assert.match(finalEventText, new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
           return true;
         }
       );
+      const journal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(journal[0]?.invocation, "fresh");
+      assert.equal(
+        journal.slice(1).every((entry) => entry.invocation === "resume"),
+        true
+      );
+      assert.equal(
+        journal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
       const settledAttemptCount = fs.readFileSync(fixture.counter, "utf8");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), settledAttemptCount);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-only";
+      let finalStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Expose only the final exhausted stderr rate limit",
+          onStderr: (text) => {
+            finalStderr += text;
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      const finalStderrAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(finalStderrAttempt > 1, true);
+      for (let attempt = 1; attempt < finalStderrAttempt; attempt += 1) {
+        assert.doesNotMatch(finalStderr, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
+      }
+      assert.equal(
+        (finalStderr.match(new RegExp(`request id: fixture-${finalStderrAttempt}\\b`, "gu")) ?? []).length,
+        1
+      );
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-oversized";
+      let finalOversizedStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Retain one bounded oversized final diagnostic",
+          onStderr: (text) => {
+            finalOversizedStderr += text;
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      const finalOversizedAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(finalOversizedAttempt > 1, true);
+      for (let attempt = 1; attempt < finalOversizedAttempt; attempt += 1) {
+        assert.doesNotMatch(finalOversizedStderr, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
+      }
+      assert.equal(
+        (finalOversizedStderr.match(new RegExp(`request id: fixture-${finalOversizedAttempt}\\b`, "gu")) ?? []).length,
+        1
+      );
+      assert.equal(finalOversizedStderr.length <= OPENROUTER_TEST_STDERR_PENDING_LIMIT * 2, true);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-429-hang";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+      let idleExhaustionStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Preserve the provider 429 when idle-timeout recovery exhausts",
+          timeout: { idleMs: 100, totalMs: 5_000 },
+          onStderr: (text) => {
+            idleExhaustionStderr += text;
+          }
+        }),
+        /HTTP 429 request id: fixture-/u
+      );
+      const idleExhaustionAttempts = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(idleExhaustionAttempts > 1 && idleExhaustionAttempts < 100, true);
+      assert.match(idleExhaustionStderr, new RegExp("request id: fixture-" + String(idleExhaustionAttempts), "u"));
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stdout-post-terminal";
+      const finalReleaseOrder: string[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Release final trailing evidence before completion",
+          onStdout: (text: string) => {
+            if (text.includes("post-terminal")) finalReleaseOrder.push("stdout");
+          },
+          onStderr: (text: string) => {
+            if (text.includes("post-terminal")) finalReleaseOrder.push("stderr");
+          },
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("post-terminal")) finalReleaseOrder.push("event");
+            if (event.type === "completed") finalReleaseOrder.push("completion");
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      assert.equal(finalReleaseOrder.includes("stdout"), true);
+      assert.equal(finalReleaseOrder.includes("stderr"), true);
+      assert.equal(finalReleaseOrder.includes("event"), true);
+      assert.equal(finalReleaseOrder.at(-1), "completion");
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         OPENROUTER_API_KEY: previous.key,
         PATH: previous.path,
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
