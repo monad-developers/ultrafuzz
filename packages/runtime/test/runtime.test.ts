@@ -89,6 +89,7 @@ const runningUnderBun = typeof process.versions.bun === "string";
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_ALREADY_PAUSED",
+  "SMITHERS_FAKE_CANCEL_STATUS",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
@@ -1517,7 +1518,8 @@ function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string 
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_PS: psPath
+    SMITHERS_FAKE_PS: psPath,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_PS"
   };
 }
 
@@ -17130,7 +17132,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     UFZ_PROVIDER_ONE: "provider-one",
     UFZ_PROVIDER_TWO: "provider-two",
-    SMITHERS_FAKE_MARKER: markerPath
+    SMITHERS_FAKE_MARKER: markerPath,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST
   };
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
