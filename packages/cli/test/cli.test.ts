@@ -1879,9 +1879,9 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
 
 test("status --watch --json keeps a failing poll on one NDJSON line", async () => {
   const project = tempProject();
-  const env = fakeSmithersEnv(project);
-  const init = await cli(project, ["init", "--json"], env);
+  const init = await cli(project, ["init", "--json"]);
   assert.equal(init.code, 0, init.stderr);
+  const env = fakeSmithersEnv(project);
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", "watch-failure-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
@@ -1903,8 +1903,8 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
 
 test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async () => {
   const project = tempProject();
+  assert.equal((await cli(project, ["init", "--json"])).code, 0);
   const env = fakeSmithersEnv(project);
-  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", "watch-degraded-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
