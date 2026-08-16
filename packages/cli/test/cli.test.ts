@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -28,7 +29,17 @@ import {
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
 import { NodeTelemetryPump, type EvalArtifactUpload, type EvalMatrixRow, type EvalReporter } from "@ultrafuzz/evals";
-import { loadVerifiedRunOutputSnapshots, projectCanonicalFinalReport, syncRun } from "@ultrafuzz/runtime";
+import {
+  canonicalMaterializeRecordDigest,
+  loadAuthenticatedDataGovernanceProvenance,
+  loadOperatorAuthenticatedMaterializeReviewAuthorities,
+  loadVerifiedRunOutputSnapshots,
+  materializeReviewSignoffSigningPayload,
+  projectCanonicalFinalReport,
+  recordedMaterializeReviewSignoffRequest,
+  syncRun,
+  type MaterializeReviewSignoff
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
@@ -47,6 +58,20 @@ function tempProject(): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function sha256Stable(value: unknown): string {
+  const stableJson = (entry: unknown): string => {
+    if (Array.isArray(entry)) return `[${entry.map((item) => stableJson(item)).join(",")}]`;
+    if (entry !== null && typeof entry === "object") {
+      return `{${Object.entries(entry)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(entry);
+  };
+  return crypto.createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
 function fakeStatusEnvelope(verdict = "running-healthy"): Record<string, unknown> {
@@ -96,7 +121,12 @@ function fakeWorkflowEventPrintf(event: Record<string, unknown>): string {
 function fakeSmithersEnv(
   project: string,
   includeFinalReport = false,
-  additionalTerminalNodeIds: readonly string[] = []
+  additionalTerminalNodeIds: readonly string[] = [],
+  reviewSignoffKeys: ReadonlyArray<{
+    key_id: string;
+    algorithm: "ed25519";
+    public_key_spki_base64: string;
+  }> = []
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -267,7 +297,7 @@ function fakeSmithersEnv(
       local_model_agents: [],
       openrouter_model_allowlist: [],
       production_source_roots: ["contracts", "src"],
-      review_signoff_keys: []
+      review_signoff_keys: reviewSignoffKeys
     })
   };
 }
@@ -1059,7 +1089,20 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
 
-  const env = fakeSmithersEnv(project, true);
+  const { publicKey: reviewerPublicKey, privateKey: reviewerPrivateKey } = crypto.generateKeyPairSync("ed25519");
+  const reviewerPublicKeyBytes = Buffer.from(reviewerPublicKey.export({ format: "der", type: "spki" }));
+  const reviewerKey = {
+    key_id: "cli-security-reviewer",
+    algorithm: "ed25519" as const,
+    public_key_spki_base64: reviewerPublicKeyBytes.toString("base64")
+  };
+  const env = fakeSmithersEnv(project, true, [], [reviewerKey]);
+  env.SMITHERS_FAKE_LOG = path.join(project, ".ultrafuzz", "smithers-commands.log");
+  execFileSync("git", ["init", "-q"], { cwd: project });
+  execFileSync("git", ["config", "user.email", "tester@example.invalid"], { cwd: project });
+  execFileSync("git", ["config", "user.name", "Ultrafuzz Tester"], { cwd: project });
+  execFileSync("git", ["add", "."], { cwd: project });
+  execFileSync("git", ["commit", "-qm", "sealed CLI fixture"], { cwd: project });
   const run = await cli(
     project,
     [
@@ -1269,24 +1312,69 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     partialPricing: true,
     unpricedEventCount: 1
   });
+  const acceptedDestinationBytes = Buffer.from("genuine reviewed output\n", "utf8");
   const forgedCopy = {
     source: "artifacts/project-discovery/stdout.txt",
     destination: "materialized/stdout.txt",
-    size_bytes: 17,
-    sha256: "e".repeat(64)
+    size_bytes: acceptedDestinationBytes.byteLength,
+    sha256: crypto.createHash("sha256").update(acceptedDestinationBytes).digest("hex")
   };
+  const intentId = crypto.randomUUID();
+  const intentTimestamp = new Date().toISOString();
+  const commitNonce = crypto.randomBytes(32).toString("hex");
+  const commitNonceSha256 = crypto.createHash("sha256").update(commitNonce, "utf8").digest("hex");
+  const commitWitnessDirectory = path.join(project, ".ultrafuzz", "materialize-commits");
+  const commitWitnessPath = path.join(commitWitnessDirectory, `${intentId}.json`);
+  fs.mkdirSync(commitWitnessDirectory, { recursive: true });
+  fs.writeFileSync(commitWitnessPath, "", { flag: "wx", mode: 0o600 });
+  const commitWitnessIdentity = fs.statSync(commitWitnessPath, { bigint: true });
+  const commitWitnessBinding = {
+    commit_nonce_sha256: commitNonceSha256,
+    commit_witness_device: commitWitnessIdentity.dev.toString(),
+    commit_witness_inode: commitWitnessIdentity.ino.toString()
+  };
+  const materializeIntent = {
+    schema_version: "ultrafuzz.materialize.intent.v1" as const,
+    intent_id: intentId,
+    run_id: runData.run_id,
+    timestamp: intentTimestamp,
+    operation: "materializeSelection" as const,
+    mode: "unstaged-working-tree" as const,
+    unstaged: true as const,
+    confirmed: true as const,
+    allow_overwrite: false as const,
+    ...commitWitnessBinding,
+    copies: [forgedCopy],
+    patches: []
+  };
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "materialize-intent.jsonl"),
+    `${JSON.stringify(materializeIntent)}\n`,
+    "utf8"
+  );
+  const intentOnlyReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(intentOnlyReport.code, 0, intentOnlyReport.stderr);
+  assert.deepEqual((parseJson(intentOnlyReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "not-recorded",
+    review_signoff: "not-present"
+  });
+
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "materialize-audit.jsonl"),
     `${JSON.stringify({
       schema_version: "ultrafuzz.materialize.audit.v1",
-      audit_id: crypto.randomUUID(),
+      audit_id: intentId,
       run_id: runData.run_id,
-      timestamp: new Date().toISOString(),
+      timestamp: intentTimestamp,
       operation: "materializeSelection",
       mode: "unstaged-working-tree",
       unstaged: true,
       confirmed: true,
       allow_overwrite: false,
+      ...commitWitnessBinding,
       copies: [forgedCopy],
       patches: [],
       review_signoff: {
@@ -1312,6 +1400,20 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     })}\n`,
     "utf8"
   );
+  const intentJournalPath = path.join(project, ".ultrafuzz", "materialize-intent.jsonl");
+  const displacedIntentJournalPath = `${intentJournalPath}.displaced`;
+  fs.renameSync(intentJournalPath, displacedIntentJournalPath);
+  const auditOnlyReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(auditOnlyReport.code, 0, auditOnlyReport.stderr);
+  assert.deepEqual((parseJson(auditOnlyReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  fs.renameSync(displacedIntentJournalPath, intentJournalPath);
+
   const report = await cli(project, ["report", runData.run_id, "--json"], env);
   assert.equal(report.code, 0, report.stderr);
   const reportBody = parseJson(report);
@@ -1347,11 +1449,264 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(reportMarkdown, /- Estimated spend: `\$0\.46\+`/u);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 
+  const reportLayout = layoutForRunRoot(runData.run_root, runData.run_id);
+  const operatorPolicyJson = env.ULTRAFUZZ_DATA_GOVERNANCE_POLICY;
+  const authorities = loadOperatorAuthenticatedMaterializeReviewAuthorities({
+    projectRoot: project,
+    layout: reportLayout,
+    operatorPolicyJson
+  });
+  const provenance = loadAuthenticatedDataGovernanceProvenance(project, reportLayout);
+  assert.ok(provenance.target.commit);
+  assert.ok(provenance.target.tree);
+  assert.ok(provenance.target.worktree_digest);
+  const expectedSignoff = recordedMaterializeReviewSignoffRequest({
+    projectRoot: project,
+    layout: reportLayout,
+    selections: [
+      {
+        source: forgedCopy.source,
+        destination: forgedCopy.destination,
+        sha256: forgedCopy.sha256
+      }
+    ],
+    authorities,
+    signoff: {
+      target_commit: provenance.target.commit,
+      target_tree: provenance.target.tree,
+      target_worktree_digest: provenance.target.worktree_digest
+    } as MaterializeReviewSignoff
+  });
+  const unsignedSignoff = {
+    ...expectedSignoff,
+    reviewer: "cli-security-reviewer@example.invalid",
+    reviewed_at: "2026-08-16T00:00:00.000Z",
+    signing_key_id: reviewerKey.key_id
+  };
+  const canonicalSignedSignoff = {
+    ...unsignedSignoff,
+    signature: crypto
+      .sign(null, materializeReviewSignoffSigningPayload(unsignedSignoff), reviewerPrivateKey)
+      .toString("base64")
+  };
+  const completedSignoff = {
+    ...canonicalSignedSignoff,
+    signoff_sha256: sha256Stable(canonicalSignedSignoff)
+  };
+  const acceptedDestination = path.join(project, forgedCopy.destination);
+  const acceptedMaterializeCompletion = {
+    schema_version: "ultrafuzz.materialize.audit.v1" as const,
+    audit_id: intentId,
+    run_id: runData.run_id,
+    timestamp: intentTimestamp,
+    operation: "materializeSelection" as const,
+    mode: "unstaged-working-tree" as const,
+    unstaged: true as const,
+    confirmed: true,
+    allow_overwrite: false,
+    ...commitWitnessBinding,
+    copies: [forgedCopy],
+    patches: [],
+    review_signoff: completedSignoff
+  };
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "materialize-audit.jsonl"),
+    `${JSON.stringify(acceptedMaterializeCompletion)}\n`,
+    "utf8"
+  );
+  const absentDestinationReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(absentDestinationReport.code, 0, absentDestinationReport.stderr);
+  assert.deepEqual((parseJson(absentDestinationReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+
+  fs.mkdirSync(path.dirname(acceptedDestination), { recursive: true });
+  fs.writeFileSync(acceptedDestination, acceptedDestinationBytes, { mode: 0o600 });
+  const missingWitnessReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(missingWitnessReport.code, 0, missingWitnessReport.stderr);
+  assert.deepEqual((parseJson(missingWitnessReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+
+  const commitWitness = {
+    schema_version: "ultrafuzz.materialize.commit-witness.v1" as const,
+    witness_id: crypto.randomUUID(),
+    audit_id: intentId,
+    intent_id: intentId,
+    run_id: runData.run_id,
+    committed_at: "2026-08-16T00:00:00.000Z",
+    commit_nonce: commitNonce,
+    commit_witness_device: commitWitnessBinding.commit_witness_device,
+    commit_witness_inode: commitWitnessBinding.commit_witness_inode,
+    intent_sha256: canonicalMaterializeRecordDigest(materializeIntent),
+    completion_sha256: canonicalMaterializeRecordDigest(acceptedMaterializeCompletion),
+    copies_sha256: canonicalMaterializeRecordDigest(materializeIntent.copies)
+  };
+  fs.writeFileSync(commitWitnessPath, `${JSON.stringify(commitWitness)}\n`, { mode: 0o600 });
+  const acceptedReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(acceptedReport.code, 0, acceptedReport.stderr);
+  assert.deepEqual((parseJson(acceptedReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "accepted",
+    review_signoff: "verified"
+  });
+
+  const exactCommitWitness = fs.readFileSync(commitWitnessPath);
+  fs.writeFileSync(commitWitnessPath, Buffer.concat([exactCommitWitness, Buffer.from(" ")]), { mode: 0o600 });
+  const tamperedWitnessReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(tamperedWitnessReport.code, 0, tamperedWitnessReport.stderr);
+  assert.deepEqual((parseJson(tamperedWitnessReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  fs.writeFileSync(commitWitnessPath, exactCommitWitness, { mode: 0o600 });
+
+  const displacedCommitWitnessPath = `${commitWitnessPath}.displaced`;
+  fs.renameSync(commitWitnessPath, displacedCommitWitnessPath);
+  fs.writeFileSync(commitWitnessPath, exactCommitWitness, { flag: "wx", mode: 0o600 });
+  const replacedWitnessReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(replacedWitnessReport.code, 0, replacedWitnessReport.stderr);
+  assert.deepEqual((parseJson(replacedWitnessReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  fs.unlinkSync(commitWitnessPath);
+  fs.renameSync(displacedCommitWitnessPath, commitWitnessPath);
+
+  const tamperedDestinationBytes = Buffer.alloc(acceptedDestinationBytes.byteLength, 0x78);
+  const descriptorTargets = (descriptor: number, target: string): boolean => {
+    for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+      try {
+        if (fs.readlinkSync(candidate) === target) return true;
+      } catch {
+        // Continue to the next descriptor filesystem.
+      }
+    }
+    return false;
+  };
+  const destinationFstatDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
+  const originalDestinationFstatSync = fs.fstatSync;
+  let destinationStats = 0;
+  let postDigestDestinationTampered = false;
+  Object.defineProperty(fs, "fstatSync", {
+    ...destinationFstatDescriptor,
+    value: (...args: unknown[]) => {
+      const result = Reflect.apply(originalDestinationFstatSync, fs, args) as fs.Stats | fs.BigIntStats;
+      if (!postDigestDestinationTampered && descriptorTargets(Number(args[0]), acceptedDestination)) {
+        destinationStats += 1;
+        if (destinationStats === 3) {
+          postDigestDestinationTampered = true;
+          fs.writeFileSync(acceptedDestination, tamperedDestinationBytes, { mode: 0o600 });
+        }
+      }
+      return result;
+    }
+  });
+  let postDigestDestinationReport: Capture;
+  try {
+    postDigestDestinationReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  } finally {
+    Object.defineProperty(fs, "fstatSync", destinationFstatDescriptor);
+  }
+  assert.equal(postDigestDestinationTampered, true);
+  assert.equal(postDigestDestinationReport.code, 0, postDigestDestinationReport.stderr);
+  assert.deepEqual((parseJson(postDigestDestinationReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  fs.writeFileSync(acceptedDestination, acceptedDestinationBytes, { mode: 0o600 });
+
+  const exactIntentJournal = fs.readFileSync(intentJournalPath);
+  const intentFstatDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
+  const originalIntentFstatSync = fs.fstatSync;
+  let intentStats = 0;
+  let postCaptureIntentTampered = false;
+  Object.defineProperty(fs, "fstatSync", {
+    ...intentFstatDescriptor,
+    value: (...args: unknown[]) => {
+      const result = Reflect.apply(originalIntentFstatSync, fs, args) as fs.Stats | fs.BigIntStats;
+      if (!postCaptureIntentTampered && descriptorTargets(Number(args[0]), intentJournalPath)) {
+        intentStats += 1;
+        if (intentStats === 3) {
+          postCaptureIntentTampered = true;
+          fs.appendFileSync(intentJournalPath, " ");
+        }
+      }
+      return result;
+    }
+  });
+  let postCaptureIntentReport: Capture;
+  try {
+    postCaptureIntentReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  } finally {
+    Object.defineProperty(fs, "fstatSync", intentFstatDescriptor);
+  }
+  assert.equal(postCaptureIntentTampered, true);
+  assert.equal(postCaptureIntentReport.code, 0, postCaptureIntentReport.stderr);
+  assert.deepEqual((parseJson(postCaptureIntentReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "audit-unavailable"
+  });
+  fs.writeFileSync(intentJournalPath, exactIntentJournal);
+
+  fs.writeFileSync(acceptedDestination, tamperedDestinationBytes, { mode: 0o600 });
+  const tamperedDestinationReport = await cli(project, ["report", runData.run_id, "--json"], env);
+  assert.equal(tamperedDestinationReport.code, 0, tamperedDestinationReport.stderr);
+  assert.deepEqual((parseJson(tamperedDestinationReport).data as { assurance?: unknown }).assurance, {
+    structural_verification: "passed",
+    model_consensus: "agent-produced",
+    executable_reproduction: "not-replayed",
+    human_acceptance: "unverified",
+    review_signoff: "invalid"
+  });
+  fs.unlinkSync(acceptedDestination);
+
   const escapedReport = await cli(project, ["report", "../../outside", "--json"]);
   const escapedReportBody = parseJson(escapedReport);
   assert.equal(escapedReportBody.ok, false);
   assertNoSmithersSurface(escapedReportBody);
   assert.match(JSON.stringify(escapedReportBody.diagnostics), /run ID/);
+
+  fs.writeFileSync(acceptedDestination, "operator-owned destination\n", { flag: "wx", mode: 0o600 });
+  const forcedMaterialize = await cli(
+    project,
+    [
+      "materialize",
+      runData.run_id,
+      "--copy",
+      "artifacts/project-discovery/stdout.txt:materialized/stdout.txt",
+      "--yes",
+      "--force",
+      "--json"
+    ],
+    env
+  );
+  assert.equal(forcedMaterialize.code, 1, `${forcedMaterialize.stderr}\n${forcedMaterialize.stdout}`);
+  assert.match(JSON.stringify(parseJson(forcedMaterialize).diagnostics), /MATERIALIZE_OVERWRITE_UNSUPPORTED/u);
+  assert.equal(fs.readFileSync(acceptedDestination, "utf8"), "operator-owned destination\n");
+  fs.unlinkSync(acceptedDestination);
 
   const materialize = await cli(
     project,

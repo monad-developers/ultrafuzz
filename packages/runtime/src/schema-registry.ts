@@ -34,6 +34,9 @@ import { RUNTIME_SEMANTIC_GATES_BY_SCHEMA_ID } from "./runtime-semantic-gates.js
 const MAX_RUNTIME_SCHEMA_BYTES = 2 * 1024 * 1024;
 
 export const MATERIALIZE_AUDIT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:materialize-audit:1" as const;
+export const MATERIALIZE_COMMIT_WITNESS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:runtime:materialize-commit-witness:1" as const;
+export const MATERIALIZE_INTENT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:materialize-intent:1" as const;
 export const CLEAN_AUDIT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:clean-audit:1" as const;
 
 export interface RuntimeSchemaMetadata {
@@ -75,6 +78,8 @@ export const invariantSuiteBaselineJsonSchema = loadSchemaDocument("invariant-su
 export const invariantSuiteHandoffJsonSchema = loadSchemaDocument("invariant-suite-handoff.schema.json");
 export const invariantWorkspaceSnapshotJsonSchema = loadSchemaDocument("invariant-workspace-snapshot.schema.json");
 export const materializeAuditJsonSchema = loadSchemaDocument("materialize-audit.schema.json");
+export const materializeCommitWitnessJsonSchema = loadSchemaDocument("materialize-commit-witness.schema.json");
+export const materializeIntentJsonSchema = loadSchemaDocument("materialize-intent.schema.json");
 export const pinnedSubmoduleExpectationJsonSchema = loadSchemaDocument("pinned-submodule-expectation.schema.json");
 export const pinnedSubmoduleSnapshotJsonSchema = loadSchemaDocument("pinned-submodule-snapshot.schema.json");
 export const smithersResetNodeJsonSchema = loadSchemaDocument("smithers-reset-node.schema.json");
@@ -94,6 +99,8 @@ export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   invariantSuiteHandoffJsonSchema,
   invariantWorkspaceSnapshotJsonSchema,
   materializeAuditJsonSchema,
+  materializeCommitWitnessJsonSchema,
+  materializeIntentJsonSchema,
   pinnedSubmoduleExpectationJsonSchema,
   pinnedSubmoduleSnapshotJsonSchema,
   smithersResetNodeJsonSchema,
@@ -144,6 +151,25 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
       "materialize-audit-copy-source-uniqueness",
       "materialize-audit-copy-destination-uniqueness",
       "materialize-audit-patch-source-uniqueness",
+      "audit-history-ordering"
+    ])
+  },
+  "materialize-commit-witness.schema.json": {
+    id: MATERIALIZE_COMMIT_WITNESS_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "materializeCommitWitnessJsonSchema",
+    semanticGates: Object.freeze(["materialize-commit-witness-canonical-timestamp"])
+  },
+  "materialize-intent.schema.json": {
+    id: MATERIALIZE_INTENT_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "materializeIntentJsonSchema",
+    semanticGates: Object.freeze([
+      "materialize-intent-copy-source-uniqueness",
+      "materialize-intent-copy-destination-uniqueness",
+      "materialize-intent-copy-aggregate-budget",
+      "materialize-intent-create-only",
+      "materialize-intent-patch-source-uniqueness",
       "audit-history-ordering"
     ])
   },

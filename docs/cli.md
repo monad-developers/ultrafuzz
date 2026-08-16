@@ -166,7 +166,8 @@ run artifacts receive normalized Markdown handoffs plus
 - `--copy <source:destination>`
 - `--yes` or `--confirm`
 - `--dry-run`
-- `--force`
+- `--force` (legacy compatibility flag; explicitly rejected because
+  materialization is create-only)
 
 Patch artifacts are not materialized until Ultrafuzz can apply them safely. Use
 explicit `--copy` selections for files you have reviewed.

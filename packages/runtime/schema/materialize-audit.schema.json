@@ -48,6 +48,15 @@
     "allow_overwrite": {
       "type": "boolean"
     },
+    "commit_nonce_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "commit_witness_device": {
+      "$ref": "#/$defs/decimalIdentity"
+    },
+    "commit_witness_inode": {
+      "$ref": "#/$defs/decimalIdentity"
+    },
     "copies": {
       "type": "array",
       "uniqueItems": true,
@@ -95,7 +104,31 @@
       "$ref": "#/$defs/reviewSignoff"
     }
   },
+  "dependentRequired": {
+    "commit_nonce_sha256": ["commit_witness_device", "commit_witness_inode"],
+    "commit_witness_device": ["commit_nonce_sha256", "commit_witness_inode"],
+    "commit_witness_inode": ["commit_nonce_sha256", "commit_witness_device"]
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "mode": { "const": "dry-run" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "commit_nonce_sha256": false,
+          "commit_witness_device": false,
+          "commit_witness_inode": false
+        }
+      }
+    }
+  ],
   "$defs": {
+    "decimalIdentity": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
     "reviewSignoff": {
       "type": "object",
       "additionalProperties": false,

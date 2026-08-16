@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:materialize-intent:1",
+  "title": "Ultrafuzz materialization write-ahead intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "intent_id",
+    "run_id",
+    "timestamp",
+    "operation",
+    "mode",
+    "unstaged",
+    "confirmed",
+    "allow_overwrite",
+    "commit_nonce_sha256",
+    "commit_witness_device",
+    "commit_witness_inode",
+    "copies",
+    "patches"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.materialize.intent.v1"
+    },
+    "intent_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "operation": {
+      "const": "materializeSelection"
+    },
+    "mode": {
+      "const": "unstaged-working-tree"
+    },
+    "unstaged": {
+      "const": true
+    },
+    "confirmed": {
+      "const": true
+    },
+    "allow_overwrite": {
+      "const": false
+    },
+    "commit_nonce_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "commit_witness_device": {
+      "$ref": "#/$defs/decimalIdentity"
+    },
+    "commit_witness_inode": {
+      "$ref": "#/$defs/decimalIdentity"
+    },
+    "copies": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "destination", "size_bytes", "sha256"],
+        "properties": {
+          "source": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "destination": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "size_bytes": {
+            "$ref": "#/$defs/materializeSize"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "patches": {
+      "type": "array",
+      "maxItems": 0,
+      "items": false
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "materializeSize": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 67108864
+    },
+    "decimalIdentity": {
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}
