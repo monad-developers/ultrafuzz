@@ -35,7 +35,8 @@ import {
 import {
   createDefaultResolvedConfig,
   parseResolvedConfigJsonBytes,
-  serializeResolvedConfigJsonBytes
+  serializeResolvedConfigJsonBytes,
+  serializeResolvedConfigToml
 } from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
@@ -6051,6 +6052,10 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   const resolvedConfigBytes = fs.readFileSync(compiled.resolvedConfigPath);
   assert.deepEqual(resolvedConfigBytes, serializeResolvedConfigJsonBytes(plan.value!.resolved_config));
   assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v4");
+  assert.equal(
+    fs.readFileSync(compiled.executionConfigPath, "utf8"),
+    serializeResolvedConfigToml(plan.value!.resolved_config)
+  );
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.equal(compiled.pinnedSubmodules, undefined);
@@ -7482,6 +7487,45 @@ test("launch review preview is immutable, exact, and stops before every launch s
   assert.equal(Object.isFrozen(preview.value.manifest), true);
   assert.equal(Object.isFrozen(preview.value.manifest.runtime_overrides), true);
   assert.equal(Object.isFrozen(preview.value.summary.configured_budget), true);
+  const configuredBudget = preview.value.summary.configured_budget;
+  const expectedResourceBudget = createDefaultResolvedConfig().run.resourceBudget;
+  assert.deepEqual(
+    {
+      maxCostUsd: configuredBudget.max_cost_usd,
+      unpricedTokenUsdPerMillion: configuredBudget.unpriced_token_usd_per_million,
+      maxTotalTokens: configuredBudget.max_total_tokens,
+      maxRequests: configuredBudget.max_requests,
+      maxTurns: configuredBudget.max_turns,
+      maxContextBytes: configuredBudget.max_context_bytes,
+      maxOutputBytes: configuredBudget.max_output_bytes,
+      maxAttemptTokens: configuredBudget.max_attempt_tokens,
+      maxAttemptRequests: configuredBudget.max_attempt_requests,
+      maxAttemptTurns: configuredBudget.max_attempt_turns,
+      maxAttemptContextBytes: configuredBudget.max_attempt_context_bytes,
+      maxAttemptOutputBytes: configuredBudget.max_attempt_output_bytes
+    },
+    expectedResourceBudget
+  );
+  assert.deepEqual(Object.keys(configuredBudget).sort(), [
+    "default_timeout_seconds",
+    "expanded_attempts",
+    "max_attempt_context_bytes",
+    "max_attempt_output_bytes",
+    "max_attempt_requests",
+    "max_attempt_tokens",
+    "max_attempt_turns",
+    "max_context_bytes",
+    "max_cost_usd",
+    "max_output_bytes",
+    "max_parallel_agents",
+    "max_parallel_nodes",
+    "max_requests",
+    "max_total_tokens",
+    "max_turns",
+    "same_agent_attempts",
+    "unpriced_token_usd_per_million",
+    "workflow_deadline_seconds"
+  ]);
   assert.equal(preflightCalls, 0);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
   assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
@@ -7493,6 +7537,64 @@ test("launch review preview is immutable, exact, and stops before every launch s
   assert.equal(preflightCalls, 0);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
   assert.equal(fs.existsSync(input.env?.SMITHERS_FAKE_LOG ?? ""), false);
+});
+
+test("launch review digest binds the effective execution concurrency", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "launch concurrency baseline");
+  const runId = "launch-review-concurrency";
+  const baseInput = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+
+  const single = await previewRunLaunchReview({ ...baseInput, maxConcurrency: 1 });
+  const double = await previewRunLaunchReview({ ...baseInput, maxConcurrency: 2 });
+  assert.equal(single.ok, true, JSON.stringify(single.diagnostics));
+  assert.equal(double.ok, true, JSON.stringify(double.diagnostics));
+  assert.equal(single.value?.manifest.runtime_overrides.max_concurrency, 1);
+  assert.equal(double.value?.manifest.runtime_overrides.max_concurrency, 2);
+  assert.notEqual(single.value?.launch_review_digest, double.value?.launch_review_digest);
+
+  const stale = await runtimeStartRun({
+    ...baseInput,
+    maxConcurrency: 2,
+    reviewAcknowledgement: single.value?.launch_review_digest
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.diagnostics[0]?.code, "RUN_REVIEW_ACKNOWLEDGEMENT_STALE");
+  assert.equal(stale.diagnostics[0]?.details?.expected_digest, double.value?.launch_review_digest);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+});
+
+test("launch seals canonical reviewed config instead of rereading mutable project TOML", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  commitProjectForLaunchReview(project, "execution config baseline");
+  const runId = "launch-reviewed-config-snapshot";
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const reviewedConfig = fs.readFileSync(configPath, "utf8");
+  const hostileConfig = reviewedConfig.replace('api_key_env = "OPENAI_API_KEY"', 'api_key_env = "ATTACKER_KEY"');
+  assert.notEqual(hostileConfig, reviewedConfig);
+  const baseInput = withFakeCliEntrypoint({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  const preview = await previewRunLaunchReview(baseInput);
+  assert.equal(preview.ok, true, JSON.stringify(preview.diagnostics));
+
+  const launched = await runtimeStartRun({
+    ...baseInput,
+    reviewAcknowledgement: preview.value?.launch_review_digest,
+    verifyLaunchPlan: () => {
+      fs.writeFileSync(configPath, hostileConfig, "utf8");
+    }
+  });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.match(fs.readFileSync(configPath, "utf8"), /ATTACKER_KEY/u);
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const sealedConfig = fs.readFileSync(evidence.executionSnapshot.env.ULTRAFUZZ_CONFIG_PATH!, "utf8");
+  assert.match(sealedConfig, /api_key_env = "OPENAI_API_KEY"/u);
+  assert.doesNotMatch(sealedConfig, /ATTACKER_KEY/u);
 });
 
 test("startRun requires a launch acknowledgement bound to prompts, config, topology, references, and commit", async () => {

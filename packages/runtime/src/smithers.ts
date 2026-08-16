@@ -29,7 +29,12 @@ import {
   type SmithersTaskManifestMetadata,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { resolveExecutionResources, serializeResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
+import {
+  resolveExecutionResources,
+  serializeResolvedConfigJsonBytes,
+  serializeResolvedConfigToml,
+  type ResolvedConfig
+} from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -1089,6 +1094,7 @@ export interface CompiledSmithersWorkflow {
   evidenceWorkflowPath: string;
   expandedGraphPath: string;
   configPath: string;
+  executionConfigPath: string;
   resolvedConfigPath: string;
   inputPath: string;
   tasksPath: string;
@@ -1222,6 +1228,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
   const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
   const configPath = path.join(smithersDir, "config.fingerprint-input");
+  const executionConfigPath = path.join(smithersDir, "execution-config.toml");
   const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
   const resolvedConfigBytes = serializeResolvedConfigJsonBytes(input.config);
   const workflowPath = path.join(
@@ -1252,6 +1259,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     evidenceWorkflowPath,
     expandedGraphPath,
     configPath,
+    executionConfigPath,
     resolvedConfigPath,
     inputPath,
     tasksPath,
@@ -1271,6 +1279,12 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     configPath,
     stableJson(input.config),
     "workflow config fingerprint input"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    executionConfigPath,
+    serializeResolvedConfigToml(input.config),
+    "canonical workflow execution config"
   );
   writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
   const taskManifest: SmithersTaskManifestDocument = {
@@ -1381,8 +1395,7 @@ export async function smithersExecutionControlFiles(
     );
   }
 
-  const projectConfigPath = path.join(compiled.projectRoot, "ultrafuzz.toml");
-  if (fs.existsSync(projectConfigPath)) add(projectConfigPath, "controls/ultrafuzz.toml");
+  add(compiled.executionConfigPath, "controls/ultrafuzz.toml");
   add(compiled.resolvedConfigPath, "controls/resolved-config.json");
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
   assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);

@@ -177,6 +177,18 @@ interface DashboardLaunchPreview extends JsonObject {
     workflowDeadlineSeconds: number;
     sameAgentAttempts: number;
     expandedAttempts: number;
+    maxCostUsd: number;
+    unpricedTokenUsdPerMillion: number;
+    maxTotalTokens: number;
+    maxRequests: number;
+    maxTurns: number;
+    maxContextBytes: number;
+    maxOutputBytes: number;
+    maxAttemptTokens: number;
+    maxAttemptRequests: number;
+    maxAttemptTurns: number;
+    maxAttemptContextBytes: number;
+    maxAttemptOutputBytes: number;
   };
   reviewRequired: boolean;
   review: LaunchReviewManifest;
@@ -1455,7 +1467,19 @@ class DashboardApp {
         defaultTimeoutSeconds: budget.default_timeout_seconds,
         workflowDeadlineSeconds: budget.workflow_deadline_seconds,
         sameAgentAttempts: budget.same_agent_attempts,
-        expandedAttempts: budget.expanded_attempts
+        expandedAttempts: budget.expanded_attempts,
+        maxCostUsd: budget.max_cost_usd,
+        unpricedTokenUsdPerMillion: budget.unpriced_token_usd_per_million,
+        maxTotalTokens: budget.max_total_tokens,
+        maxRequests: budget.max_requests,
+        maxTurns: budget.max_turns,
+        maxContextBytes: budget.max_context_bytes,
+        maxOutputBytes: budget.max_output_bytes,
+        maxAttemptTokens: budget.max_attempt_tokens,
+        maxAttemptRequests: budget.max_attempt_requests,
+        maxAttemptTurns: budget.max_attempt_turns,
+        maxAttemptContextBytes: budget.max_attempt_context_bytes,
+        maxAttemptOutputBytes: budget.max_attempt_output_bytes
       },
       reviewRequired: input.reviewRequired,
       review: input.launchReviewManifest,
@@ -2724,7 +2748,19 @@ function launchBudgetAudit(budget: DashboardLaunchPreview["configuredBudget"]): 
     default_timeout_seconds: budget.defaultTimeoutSeconds,
     workflow_deadline_seconds: budget.workflowDeadlineSeconds,
     same_agent_attempts: budget.sameAgentAttempts,
-    expanded_attempts: budget.expandedAttempts
+    expanded_attempts: budget.expandedAttempts,
+    max_cost_usd: budget.maxCostUsd,
+    unpriced_token_usd_per_million: budget.unpricedTokenUsdPerMillion,
+    max_total_tokens: budget.maxTotalTokens,
+    max_requests: budget.maxRequests,
+    max_turns: budget.maxTurns,
+    max_context_bytes: budget.maxContextBytes,
+    max_output_bytes: budget.maxOutputBytes,
+    max_attempt_tokens: budget.maxAttemptTokens,
+    max_attempt_requests: budget.maxAttemptRequests,
+    max_attempt_turns: budget.maxAttemptTurns,
+    max_attempt_context_bytes: budget.maxAttemptContextBytes,
+    max_attempt_output_bytes: budget.maxAttemptOutputBytes
   };
 }
 

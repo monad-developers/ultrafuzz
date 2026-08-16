@@ -137,6 +137,18 @@ test("dashboard preview binds confirmation to the comprehensive runtime launch r
     for (const field of ["config_fingerprint", "prompt_digest", "topology_digest", "controller_source_digest"]) {
       assert.match(String(review[field]), /^[a-f0-9]{64}$/u, field);
     }
+    assert.equal((review.runtime_overrides as Record<string, unknown>).max_concurrency, 2);
+    assert.equal(fs.existsSync(path.join(projectRoot, ".ultrafuzz", "runs", runId)), false);
+    assert.equal(fs.existsSync(fakeRunner.logPath), false);
+
+    const staleConcurrency = await post("/api/commands/run", {
+      runId,
+      maxConcurrency: 3,
+      confirmed: true,
+      confirmationDigest: preview.confirmationDigest
+    });
+    assert.equal(staleConcurrency.status, 409);
+    assert.match(String((await parseHttpResponse(staleConcurrency, "errorResponse")).error), /stale/u);
     assert.equal(fs.existsSync(path.join(projectRoot, ".ultrafuzz", "runs", runId)), false);
     assert.equal(fs.existsSync(fakeRunner.logPath), false);
 
@@ -571,7 +583,28 @@ test("dashboard run launch requires a matching preview confirmation and appends 
     assert.equal(typeof preview.target, "string");
     assert.ok(Array.isArray(preview.providers));
     assert.ok(preview.providers.length > 0);
-    assert.equal((preview.configuredBudget as Record<string, unknown>).maxParallelAgents, 2);
+    const previewBudget = preview.configuredBudget as Record<string, number>;
+    assert.equal(previewBudget.maxParallelAgents, 2);
+    assert.deepEqual(Object.keys(previewBudget).sort(), [
+      "defaultTimeoutSeconds",
+      "expandedAttempts",
+      "maxAttemptContextBytes",
+      "maxAttemptOutputBytes",
+      "maxAttemptRequests",
+      "maxAttemptTokens",
+      "maxAttemptTurns",
+      "maxContextBytes",
+      "maxCostUsd",
+      "maxOutputBytes",
+      "maxParallelAgents",
+      "maxParallelNodes",
+      "maxRequests",
+      "maxTotalTokens",
+      "maxTurns",
+      "sameAgentAttempts",
+      "unpricedTokenUsdPerMillion",
+      "workflowDeadlineSeconds"
+    ]);
     assert.match(String(preview.confirmationDigest), /^[a-f0-9]{64}$/u);
 
     const configPath = path.join(projectRoot, "ultrafuzz.toml");
@@ -620,7 +653,26 @@ test("dashboard run launch requires a matching preview confirmation and appends 
     if (launch?.kind !== "run-launch") assert.fail("expected a run-launch audit record");
     assert.equal(launch.target, preview.target);
     assert.deepEqual(launch.providers, preview.providers);
-    assert.equal(launch.configured_budget.max_parallel_agents, 2);
+    assert.deepEqual(launch.configured_budget, {
+      max_parallel_agents: previewBudget.maxParallelAgents,
+      max_parallel_nodes: previewBudget.maxParallelNodes,
+      default_timeout_seconds: previewBudget.defaultTimeoutSeconds,
+      workflow_deadline_seconds: previewBudget.workflowDeadlineSeconds,
+      same_agent_attempts: previewBudget.sameAgentAttempts,
+      expanded_attempts: previewBudget.expandedAttempts,
+      max_cost_usd: previewBudget.maxCostUsd,
+      unpriced_token_usd_per_million: previewBudget.unpricedTokenUsdPerMillion,
+      max_total_tokens: previewBudget.maxTotalTokens,
+      max_requests: previewBudget.maxRequests,
+      max_turns: previewBudget.maxTurns,
+      max_context_bytes: previewBudget.maxContextBytes,
+      max_output_bytes: previewBudget.maxOutputBytes,
+      max_attempt_tokens: previewBudget.maxAttemptTokens,
+      max_attempt_requests: previewBudget.maxAttemptRequests,
+      max_attempt_turns: previewBudget.maxAttemptTurns,
+      max_attempt_context_bytes: previewBudget.maxAttemptContextBytes,
+      max_attempt_output_bytes: previewBudget.maxAttemptOutputBytes
+    });
     assert.equal(launch.confirmation_digest, preview.confirmationDigest);
   } finally {
     await handle.close();
@@ -1132,6 +1184,22 @@ test("dashboard frontend does not use native EventSource for authenticated strea
   assert.doesNotMatch(source, /\bEventSource\b/u);
   assert.match(source, /connectAuthenticatedEventStream/u);
   assert.match(source, /window\.confirm\(launchConfirmationMessage\(preview\)\)/u);
+  for (const label of [
+    "Maximum spend",
+    "Unpriced-token fallback",
+    "Total tokens",
+    "Total requests",
+    "Total turns",
+    "Total context bytes",
+    "Total output bytes",
+    "Per-attempt tokens",
+    "Per-attempt requests",
+    "Per-attempt turns",
+    "Per-attempt context bytes",
+    "Per-attempt output bytes"
+  ]) {
+    assert.match(source, new RegExp(label, "u"));
+  }
 });
 
 test("dashboard refuses malformed historical audit data before changing project files", async () => {

@@ -302,7 +302,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       .filter((entry) => entry.source === "project")
       .map((entry) => entry.relativePath)
       .sort(),
-    runtime_overrides: launchReviewOverrides(input),
+    runtime_overrides: launchReviewOverrides(input, resolved.config.run.maxParallelAgents),
     operator_prompt_digest: input.prompt === undefined ? null : sha256Stable(input.prompt),
     workflow_input_digest: input.workflowInput === undefined ? null : sha256Stable(input.workflowInput)
   };
@@ -525,7 +525,19 @@ function launchReviewPlanSummary(
       default_timeout_seconds: config.run.defaultTimeoutSeconds,
       workflow_deadline_seconds: config.run.workflowDeadlineSeconds,
       same_agent_attempts: config.retry.sameAgentAttempts,
-      expanded_attempts: expandedGraph.nodes.length
+      expanded_attempts: expandedGraph.nodes.length,
+      max_cost_usd: config.run.resourceBudget.maxCostUsd,
+      unpriced_token_usd_per_million: config.run.resourceBudget.unpricedTokenUsdPerMillion,
+      max_total_tokens: config.run.resourceBudget.maxTotalTokens,
+      max_requests: config.run.resourceBudget.maxRequests,
+      max_turns: config.run.resourceBudget.maxTurns,
+      max_context_bytes: config.run.resourceBudget.maxContextBytes,
+      max_output_bytes: config.run.resourceBudget.maxOutputBytes,
+      max_attempt_tokens: config.run.resourceBudget.maxAttemptTokens,
+      max_attempt_requests: config.run.resourceBudget.maxAttemptRequests,
+      max_attempt_turns: config.run.resourceBudget.maxAttemptTurns,
+      max_attempt_context_bytes: config.run.resourceBudget.maxAttemptContextBytes,
+      max_attempt_output_bytes: config.run.resourceBudget.maxAttemptOutputBytes
     }
   };
 }
@@ -612,8 +624,9 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value;
 }
 
-function launchReviewOverrides(input: PlanRunInput): Record<string, unknown> {
+function launchReviewOverrides(input: PlanRunInput, configuredMaxConcurrency: number): Record<string, unknown> {
   return {
+    max_concurrency: input.maxConcurrency ?? configuredMaxConcurrency,
     ...(input.agent === undefined ? {} : { agent: input.agent }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.reasoning === undefined ? {} : { reasoning: input.reasoning }),

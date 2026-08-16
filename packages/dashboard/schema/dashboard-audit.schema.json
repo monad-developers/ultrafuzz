@@ -152,7 +152,19 @@
             "default_timeout_seconds",
             "workflow_deadline_seconds",
             "same_agent_attempts",
-            "expanded_attempts"
+            "expanded_attempts",
+            "max_cost_usd",
+            "unpriced_token_usd_per_million",
+            "max_total_tokens",
+            "max_requests",
+            "max_turns",
+            "max_context_bytes",
+            "max_output_bytes",
+            "max_attempt_tokens",
+            "max_attempt_requests",
+            "max_attempt_turns",
+            "max_attempt_context_bytes",
+            "max_attempt_output_bytes"
           ],
           "properties": {
             "max_parallel_agents": { "type": "integer", "minimum": 1 },
@@ -160,7 +172,19 @@
             "default_timeout_seconds": { "type": "integer", "minimum": 1 },
             "workflow_deadline_seconds": { "type": "integer", "minimum": 1 },
             "same_agent_attempts": { "type": "integer", "minimum": 1 },
-            "expanded_attempts": { "type": "integer", "minimum": 0 }
+            "expanded_attempts": { "type": "integer", "minimum": 0 },
+            "max_cost_usd": { "type": "number", "exclusiveMinimum": 0 },
+            "unpriced_token_usd_per_million": { "type": "number", "exclusiveMinimum": 0 },
+            "max_total_tokens": { "type": "integer", "minimum": 1 },
+            "max_requests": { "type": "integer", "minimum": 1 },
+            "max_turns": { "type": "integer", "minimum": 1 },
+            "max_context_bytes": { "type": "integer", "minimum": 1 },
+            "max_output_bytes": { "type": "integer", "minimum": 1 },
+            "max_attempt_tokens": { "type": "integer", "minimum": 1 },
+            "max_attempt_requests": { "type": "integer", "minimum": 1 },
+            "max_attempt_turns": { "type": "integer", "minimum": 1 },
+            "max_attempt_context_bytes": { "type": "integer", "minimum": 1 },
+            "max_attempt_output_bytes": { "type": "integer", "minimum": 1 }
           }
         },
         "confirmation_digest": {

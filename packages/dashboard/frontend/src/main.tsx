@@ -301,6 +301,18 @@ type LaunchPreview = {
     workflowDeadlineSeconds: number;
     sameAgentAttempts: number;
     expandedAttempts: number;
+    maxCostUsd: number;
+    unpricedTokenUsdPerMillion: number;
+    maxTotalTokens: number;
+    maxRequests: number;
+    maxTurns: number;
+    maxContextBytes: number;
+    maxOutputBytes: number;
+    maxAttemptTokens: number;
+    maxAttemptRequests: number;
+    maxAttemptTurns: number;
+    maxAttemptContextBytes: number;
+    maxAttemptOutputBytes: number;
   };
   reviewRequired: boolean;
   review: LaunchReviewManifest;
@@ -3088,6 +3100,18 @@ export function launchConfirmationMessage(preview: LaunchPreview): string {
     `- Workflow deadline: ${budget.workflowDeadlineSeconds}s`,
     `- Attempts per agent: ${budget.sameAgentAttempts}`,
     `- Expanded attempts: ${budget.expandedAttempts}`,
+    `- Maximum spend: $${budget.maxCostUsd}`,
+    `- Unpriced-token fallback: $${budget.unpricedTokenUsdPerMillion}/million tokens`,
+    `- Total tokens: ${budget.maxTotalTokens}`,
+    `- Total requests: ${budget.maxRequests}`,
+    `- Total turns: ${budget.maxTurns}`,
+    `- Total context bytes: ${budget.maxContextBytes}`,
+    `- Total output bytes: ${budget.maxOutputBytes}`,
+    `- Per-attempt tokens: ${budget.maxAttemptTokens}`,
+    `- Per-attempt requests: ${budget.maxAttemptRequests}`,
+    `- Per-attempt turns: ${budget.maxAttemptTurns}`,
+    `- Per-attempt context bytes: ${budget.maxAttemptContextBytes}`,
+    `- Per-attempt output bytes: ${budget.maxAttemptOutputBytes}`,
     "",
     "Comprehensive launch review:",
     `- Confirmation digest: ${preview.confirmationDigest}`,

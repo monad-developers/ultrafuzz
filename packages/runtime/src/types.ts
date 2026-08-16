@@ -179,6 +179,18 @@ export interface LaunchReviewPlanSummary {
     readonly workflow_deadline_seconds: number;
     readonly same_agent_attempts: number;
     readonly expanded_attempts: number;
+    readonly max_cost_usd: number;
+    readonly unpriced_token_usd_per_million: number;
+    readonly max_total_tokens: number;
+    readonly max_requests: number;
+    readonly max_turns: number;
+    readonly max_context_bytes: number;
+    readonly max_output_bytes: number;
+    readonly max_attempt_tokens: number;
+    readonly max_attempt_requests: number;
+    readonly max_attempt_turns: number;
+    readonly max_attempt_context_bytes: number;
+    readonly max_attempt_output_bytes: number;
   };
 }
 

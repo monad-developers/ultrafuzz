@@ -57,6 +57,10 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
+    "positiveFiniteNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
     "operatorWorkflowInput": {
       "$comment": "Intentionally application-defined operator data. The dashboard preserves this RFC 8259 JSON value exactly and does not infer, repair, normalize, or reinterpret its contents. The HTTP reader enforces a 1 MiB request limit, depth 128, 100000 items, and 100000 properties before schema validation.",
       "oneOf": [
@@ -530,7 +534,19 @@
         "defaultTimeoutSeconds",
         "workflowDeadlineSeconds",
         "sameAgentAttempts",
-        "expandedAttempts"
+        "expandedAttempts",
+        "maxCostUsd",
+        "unpricedTokenUsdPerMillion",
+        "maxTotalTokens",
+        "maxRequests",
+        "maxTurns",
+        "maxContextBytes",
+        "maxOutputBytes",
+        "maxAttemptTokens",
+        "maxAttemptRequests",
+        "maxAttemptTurns",
+        "maxAttemptContextBytes",
+        "maxAttemptOutputBytes"
       ],
       "properties": {
         "maxParallelAgents": { "$ref": "#/$defs/positiveSafeInteger" },
@@ -538,7 +554,19 @@
         "defaultTimeoutSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
         "workflowDeadlineSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
         "sameAgentAttempts": { "$ref": "#/$defs/positiveSafeInteger" },
-        "expandedAttempts": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+        "expandedAttempts": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "maxCostUsd": { "$ref": "#/$defs/positiveFiniteNumber" },
+        "unpricedTokenUsdPerMillion": { "$ref": "#/$defs/positiveFiniteNumber" },
+        "maxTotalTokens": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxRequests": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxTurns": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxContextBytes": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxOutputBytes": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxAttemptTokens": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxAttemptRequests": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxAttemptTurns": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxAttemptContextBytes": { "$ref": "#/$defs/positiveSafeInteger" },
+        "maxAttemptOutputBytes": { "$ref": "#/$defs/positiveSafeInteger" }
       }
     },
     "launchReviewManifest": {

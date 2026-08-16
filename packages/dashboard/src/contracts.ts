@@ -67,6 +67,18 @@ export interface DashboardLaunchBudgetAudit {
   workflow_deadline_seconds: number;
   same_agent_attempts: number;
   expanded_attempts: number;
+  max_cost_usd: number;
+  unpriced_token_usd_per_million: number;
+  max_total_tokens: number;
+  max_requests: number;
+  max_turns: number;
+  max_context_bytes: number;
+  max_output_bytes: number;
+  max_attempt_tokens: number;
+  max_attempt_requests: number;
+  max_attempt_turns: number;
+  max_attempt_context_bytes: number;
+  max_attempt_output_bytes: number;
 }
 
 type DashboardEditAuditInput = {
