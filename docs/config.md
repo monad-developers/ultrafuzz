@@ -272,12 +272,17 @@ Competing provider credentials and ambient endpoint overrides are cleared from
 the model subprocess.
 
 Codex does not apply its provider request retry count to an HTTP 429 response.
-The adapter therefore retries an initial OpenRouter 429 for up to two minutes
-with exponential backoff, a 30-second base-delay cap, and up to 25% jitter. A
-shorter caller timeout still bounds the whole operation. It stops retrying as
-soon as Codex emits any substantive model, tool, command, or file event, so
-work that may have changed the workspace is never replayed. If the retry
-window expires, the last provider rate-limit error is returned unchanged.
+The adapter therefore recovers from OpenRouter 429s for up to two minutes with
+exponential backoff, a 30-second base-delay cap, and up to 25% jitter. Before
+Codex emits substantive model, tool, command, or file activity, it starts a
+fresh attempt. After substantive activity, it captures Codex's exact thread ID
+and continues only with `codex exec resume` and a continuation prompt; it never
+replays the original task prompt or starts the task fresh against a workspace
+that may already have changed. Substantive progress in the resumed session
+starts a new recovery window, while the caller's total timeout continues to
+bound the whole operation. A missing or conflicting thread ID fails closed.
+If another complete backoff does not fit in the recovery window, no request is
+started at its deadline and the last provider rate-limit error is returned.
 
 The `model` value is an opaque OpenRouter catalogue ID. Ultrafuzz preserves it
 exactly through CLI overrides, resolved config, Codex `--model`, Modal launch
