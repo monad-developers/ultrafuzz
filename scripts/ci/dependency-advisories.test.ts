@@ -1,15 +1,18 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+  APPROVED_AUDIT_ENDPOINT,
   evaluateDependencyAdvisoryPolicy,
-  parseAuditCommandResult
+  fetchApprovedProductionAudit,
+  parseProductionDependencyListCommandResult,
+  productionAuditRequestFromPnpmList,
+  strictProductionAuditFromBulkResponse
 } from "../check-production-dependency-advisories.mjs";
 
 const highAdvisory = {
-  github_advisory_id: "GHSA-2345-6789-cfgh",
-  module_name: "synthetic-package",
-  severity: "high",
-  findings: [{ version: "1.0.0", paths: ["app>synthetic-package"], dev: false }]
+  advisory: "GHSA-2345-6789-cfgh",
+  package: "synthetic-package",
+  severity: "high"
 };
 
 describe("production dependency advisory policy", () => {
@@ -24,8 +27,8 @@ describe("production dependency advisory policy", () => {
   it("blocks uncovered High and Critical production advisories but not Moderate advisories", () => {
     const audit = auditWith([
       highAdvisory,
-      { ...highAdvisory, github_advisory_id: "GHSA-3456-789c-fghj", severity: "critical" },
-      { ...highAdvisory, github_advisory_id: "GHSA-4567-89cf-ghjm", severity: "moderate" }
+      { ...highAdvisory, advisory: "GHSA-3456-789c-fghj", severity: "critical" },
+      { ...highAdvisory, advisory: "GHSA-4567-89cf-ghjm", severity: "moderate" }
     ]);
     const result = evaluateDependencyAdvisoryPolicy(audit, exceptions([]), "2026-08-17");
 
@@ -105,69 +108,210 @@ describe("production dependency advisory policy", () => {
     ).toContain("stale dependency advisory exception GHSA-2345-6789-cfgh for synthetic-package");
   });
 
-  it("fails closed on changed audit schemas, malformed findings, and inconsistent counts", () => {
+  it("fails closed on partial, error-bearing, and unknown audit schemas", () => {
     expect(evaluateDependencyAdvisoryPolicy({}, exceptions([]), "2026-08-17").errors).toContain(
-      "pnpm audit uses an unsupported JSON schema (expected an advisories object)"
+      "production dependency audit uses an unsupported schema version"
+    );
+    const errorBearing = { ...auditWith([]), error: "registry returned partial results" };
+    expect(evaluateDependencyAdvisoryPolicy(errorBearing, exceptions([]), "2026-08-17").errors).toContain(
+      "production dependency audit contains unknown field error"
     );
     expect(
       evaluateDependencyAdvisoryPolicy(
-        auditWith([{ ...highAdvisory, findings: [{ dev: true }] }]),
+        { ...auditWith([]), source: "https://attacker.invalid/-/npm/v1/security/advisories/bulk" },
         exceptions([]),
         "2026-08-17"
       ).errors
-    ).toContain("pnpm audit advisory 1 finding 1 must explicitly be a production dependency");
-    const inconsistent = auditWith([highAdvisory]);
-    inconsistent.metadata.vulnerabilities.high = 0;
-    expect(evaluateDependencyAdvisoryPolicy(inconsistent, exceptions([]), "2026-08-17").errors).toContain(
-      "pnpm audit metadata reports 0 high advisories but the advisory map contains 1"
-    );
+    ).toContain("production dependency audit source is not approved");
+    expect(
+      evaluateDependencyAdvisoryPolicy(auditWith([{ ...highAdvisory, unexpected: true }]), exceptions([]), "2026-08-17")
+        .errors
+    ).toContain("production dependency advisory 1 contains unknown field unexpected");
   });
 
-  it("reports audit process, exit, and JSON failures explicitly", () => {
+  it("builds an exact approved-registry request from installed production dependencies", () => {
+    const request = productionAuditRequestFromPnpmList([
+      {
+        name: "@ultrafuzz/runtime",
+        dependencies: {
+          "@ultrafuzz/security": { version: "link:../security" },
+          zod: {
+            from: "zod",
+            version: "4.4.3",
+            resolved: "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz",
+            dependencies: {
+              nested: {
+                from: "nested",
+                version: "1.2.3",
+                resolved: "https://registry.npmjs.org/nested/-/nested-1.2.3.tgz"
+              }
+            }
+          }
+        }
+      }
+    ]);
+
+    expect(request).toEqual({ nested: ["1.2.3"], zod: ["4.4.3"] });
     expect(() =>
-      parseAuditCommandResult({ status: 2, signal: null, stdout: "", stderr: "registry unavailable" })
-    ).toThrow("pnpm audit --prod failed with exit code 2: registry unavailable");
+      productionAuditRequestFromPnpmList([
+        { dependencies: { zod: { from: "zod", version: "latest", resolved: "https://registry.npmjs.org/zod/latest" } } }
+      ])
+    ).toThrow("not resolved to one exact registry version");
     expect(() =>
-      parseAuditCommandResult({
+      productionAuditRequestFromPnpmList([
+        {
+          dependencies: {
+            zod: { from: "zod", version: "4.4.3", resolved: "https://attacker.invalid/zod-4.4.3.tgz" }
+          }
+        }
+      ])
+    ).toThrow("not resolved from the approved registry");
+    expect(() =>
+      productionAuditRequestFromPnpmList([{ dependencies: { zod: { from: "zod", version: "4.4.3" } } }])
+    ).toThrow("not resolved from the approved registry");
+    expect(
+      productionAuditRequestFromPnpmList([
+        {
+          dependencies: {
+            "renamed-zod": {
+              from: "zod@4.4.3",
+              version: "4.4.3",
+              resolved: "https://registry.npmjs.org/zod/-/zod-4.4.3.tgz"
+            }
+          }
+        }
+      ])
+    ).toEqual({ zod: ["4.4.3"] });
+  });
+
+  it("strictly validates raw bulk advisories before policy evaluation", () => {
+    const request = { "synthetic-package": ["1.0.0"] };
+    expect(strictProductionAuditFromBulkResponse({ "synthetic-package": [rawAdvisory()] }, request)).toEqual(
+      auditWith([highAdvisory])
+    );
+    expect(() =>
+      strictProductionAuditFromBulkResponse({ "synthetic-package": [{ ...rawAdvisory(), id: undefined }] }, request)
+    ).toThrow("invalid id");
+    expect(() => strictProductionAuditFromBulkResponse({ "unrequested-package": [rawAdvisory()] }, request)).toThrow(
+      "unrequested package"
+    );
+    expect(() =>
+      strictProductionAuditFromBulkResponse({ "synthetic-package": [{ ...rawAdvisory(), extra: true }] }, request)
+    ).toThrow("unsupported schema");
+    expect(
+      strictProductionAuditFromBulkResponse(
+        { "synthetic-package": [{ ...rawAdvisory(), cvss: { score: 0, vectorString: null } }] },
+        request
+      )
+    ).toEqual(auditWith([highAdvisory]));
+  });
+
+  it("always posts to the approved endpoint and rejects registry errors", async () => {
+    const request = { "synthetic-package": ["1.0.0"] };
+    let observedUrl = "";
+    const audit = await fetchApprovedProductionAudit(request, async (url) => {
+      observedUrl = String(url);
+      return new Response(JSON.stringify({ "synthetic-package": [rawAdvisory()] }), { status: 200 });
+    });
+    expect(observedUrl).toBe(APPROVED_AUDIT_ENDPOINT);
+    expect(audit).toEqual(auditWith([highAdvisory]));
+    await expect(
+      fetchApprovedProductionAudit(request, async () => new Response("unavailable", { status: 503 }))
+    ).rejects.toThrow("HTTP 503");
+    await expect(
+      fetchApprovedProductionAudit(request, async () => new Response("not-json", { status: 200 }))
+    ).rejects.toThrow("not strict JSON");
+    const duplicateSeverity = JSON.stringify({ "synthetic-package": [rawAdvisory()] }).replace(
+      '"severity":"high"',
+      '"severity":"high","severity":"low"'
+    );
+    await expect(
+      fetchApprovedProductionAudit(request, async () => new Response(duplicateSeverity, { status: 200 }))
+    ).rejects.toThrow("not strict JSON");
+    const invalidUtf8 = Buffer.concat([
+      Buffer.from(
+        '{"synthetic-package":[{"id":12345,"url":"https://github.com/advisories/GHSA-2345-6789-cfgh","title":"'
+      ),
+      Buffer.from([0xff]),
+      Buffer.from(
+        '","severity":"high","vulnerable_versions":"<=1.0.0","cwe":["CWE-400"],"cvss":{"score":8.1,"vectorString":"CVSS:3.1/AV:N"}}]}'
+      )
+    ]);
+    await expect(
+      fetchApprovedProductionAudit(request, async () => new Response(invalidUtf8, { status: 200 }))
+    ).rejects.toThrow("not strict JSON");
+  });
+
+  it("reports production dependency enumeration process, exit, and JSON failures explicitly", () => {
+    expect(() =>
+      parseProductionDependencyListCommandResult({
+        status: 2,
+        signal: null,
+        stdout: Buffer.from(""),
+        stderr: Buffer.from("list failed")
+      })
+    ).toThrow("production dependency enumeration failed with exit code 2: list failed");
+    expect(() =>
+      parseProductionDependencyListCommandResult({
         status: null,
         signal: "SIGTERM",
-        stdout: "",
-        stderr: ""
+        stdout: Buffer.from(""),
+        stderr: Buffer.from("")
       })
-    ).toThrow("pnpm audit --prod terminated without an exit code (SIGTERM)");
+    ).toThrow("production dependency enumeration terminated without an exit code (SIGTERM)");
     expect(() =>
-      parseAuditCommandResult({
+      parseProductionDependencyListCommandResult({
         status: null,
         signal: null,
-        stdout: "",
-        stderr: "",
+        stdout: Buffer.from(""),
+        stderr: Buffer.from(""),
         error: new Error("spawn failed")
       })
-    ).toThrow("could not run pnpm audit --prod: spawn failed");
+    ).toThrow("could not enumerate production dependencies: spawn failed");
     expect(() =>
-      parseAuditCommandResult({ status: 1, signal: null, stdout: "not-json", stderr: "bad response" })
-    ).toThrow("pnpm audit --prod did not return valid JSON: bad response");
+      parseProductionDependencyListCommandResult({
+        status: 0,
+        signal: null,
+        stdout: Buffer.from("not-json"),
+        stderr: Buffer.from("bad output")
+      })
+    ).toThrow("production dependency enumeration did not return strict JSON: bad output");
     expect(
-      parseAuditCommandResult({ status: 1, signal: null, stdout: JSON.stringify(auditWith([])), stderr: "" })
-    ).toEqual(auditWith([]));
+      parseProductionDependencyListCommandResult({
+        status: 0,
+        signal: null,
+        stdout: Buffer.from("[]"),
+        stderr: Buffer.from("")
+      })
+    ).toEqual([]);
+    expect(() =>
+      parseProductionDependencyListCommandResult({
+        status: 0,
+        signal: null,
+        stdout: Buffer.from('[{"dependencies":{}},{"dependencies":{},"dependencies":{"hidden":{}}}]'),
+        stderr: Buffer.from("")
+      })
+    ).toThrow("strict JSON");
   });
 });
 
 function auditWith(advisories: Array<Record<string, unknown>>) {
-  const counts = { info: 0, low: 0, moderate: 0, high: 0, critical: 0 };
-  for (const advisory of advisories) {
-    const severity = advisory.severity;
-    if (typeof severity === "string" && severity in counts) counts[severity as keyof typeof counts] += 1;
-  }
   return {
-    advisories: Object.fromEntries(advisories.map((advisory, index) => [String(index + 1), advisory])),
-    metadata: {
-      vulnerabilities: counts,
-      dependencies: 1,
-      devDependencies: 0,
-      optionalDependencies: 0,
-      totalDependencies: 1
-    }
+    schema_version: "ultrafuzz.production-dependency-audit.v1",
+    source: APPROVED_AUDIT_ENDPOINT,
+    advisories
+  };
+}
+
+function rawAdvisory() {
+  return {
+    id: 12345,
+    url: "https://github.com/advisories/GHSA-2345-6789-cfgh",
+    title: "Synthetic production advisory",
+    severity: "high",
+    vulnerable_versions: "<=1.0.0",
+    cwe: ["CWE-400"],
+    cvss: { score: 8.1, vectorString: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H" }
   };
 }
 

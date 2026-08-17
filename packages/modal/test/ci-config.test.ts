@@ -713,7 +713,7 @@ describe("public Modal benchmark configuration", () => {
             "max-parallel": number;
             matrix: { include: Array<{ lane: string; gates: string; timeout_minutes: number }> };
           };
-          steps: Array<{ name?: string; if?: string; run?: string }>;
+          steps: Array<{ name?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown> }>;
         }
       >;
     };
@@ -731,9 +731,19 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
 
     const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
-    for (const name of ["Enforce production dependency advisory policy", "Check formatting", "Lint", "Build"]) {
+    const bunSetup = steps.find((step) => step.name === "Set up Bun");
+    expect(bunSetup?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+    expect(bunSetup?.with?.["bun-version"]).toBe("1.3.14");
+    for (const name of [
+      "Test CI policy scripts",
+      "Enforce production dependency advisory policy",
+      "Check formatting",
+      "Lint",
+      "Build"
+    ]) {
       expect(steps.find((step) => step.name === name)?.if, `${name} must run for drafts`).toBeUndefined();
     }
+    expect(steps.find((step) => step.name === "Test CI policy scripts")?.run).toBe("pnpm -w test:ci-scripts");
     expect(steps.find((step) => step.name === "Enforce production dependency advisory policy")?.run).toBe(
       "pnpm -w security:dependency-advisories"
     );
@@ -748,7 +758,7 @@ describe("public Modal benchmark configuration", () => {
           {
             lane: "package-gates",
             gates:
-              "dependency-advisories,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
+              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
             timeout_minutes: 30,
             build_modal_dependencies: true
           },

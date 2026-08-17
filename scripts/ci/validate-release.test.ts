@@ -9,6 +9,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const roots: string[] = [];
 const gateIds = [
   "dependency-advisories",
+  "ci-scripts",
   "docs",
   "config",
   "audit-profile-package",

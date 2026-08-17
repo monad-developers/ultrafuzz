@@ -19,9 +19,9 @@
     "format:check": "prettier --check .",
     "lint": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\"",
     "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\" --fix",
-    "security:dependency-advisories": "node scripts/check-production-dependency-advisories.mjs",
+    "security:dependency-advisories": "pnpm --filter @ultrafuzz/artifacts... build && node scripts/check-production-dependency-advisories.mjs",
     "test": "pnpm run test:ci-scripts && pnpm -r test",
-    "test:ci-scripts": "pnpm --filter @ultrafuzz/evals... build && bun test scripts/ci/*.test.ts",
+    "test:ci-scripts": "pnpm --filter @ultrafuzz/modal... build && bun test scripts/ci/*.test.ts",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r --workspace-concurrency=1 typecheck"
   },
