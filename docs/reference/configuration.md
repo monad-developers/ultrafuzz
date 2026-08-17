@@ -337,8 +337,15 @@ rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.                                       |
 | `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                                                     |
 | `ULTRAFUZZ_EVAL_CONFIG`         | Override for `eval.eval_config`.                                                  |
+| `ULTRAFUZZ_PRICING_CATALOG_URL` | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                  |
+| `ULTRAFUZZ_PRICING_TIMEOUT_MS`  | Positive catalog request timeout in milliseconds, capped at 60 seconds.           |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
+
+Custom pricing catalogs must use HTTPS without credentials, query parameters,
+or fragments and must resolve entirely to public addresses. The validated DNS
+address is pinned for the request, redirects are rejected, and response bodies
+are streamed with a 25 MiB limit before strict JSON parsing.
 
 ## Resolution Order
 

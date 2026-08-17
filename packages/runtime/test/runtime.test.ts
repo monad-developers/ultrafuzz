@@ -65,7 +65,7 @@ import {
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
-  syncRun,
+  syncRun as runtimeSyncRun,
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
@@ -181,6 +181,27 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
       }
     })
   );
+}
+
+const testPricingCatalogs = new Map<string, string>();
+let testPricingCatalogSequence = 0;
+
+const testPricingFetch: typeof fetch = async (input) => {
+  const url = input instanceof Request ? input.url : String(input);
+  const catalog = testPricingCatalogs.get(url);
+  if (catalog === undefined) throw new Error(`unexpected pricing catalog URL in test: ${url}`);
+  return new Response(catalog, { headers: { "content-type": "application/json" } });
+};
+
+function syncRun(
+  input: Parameters<typeof runtimeSyncRun>[0],
+  control: NonNullable<Parameters<typeof runtimeSyncRun>[1]> = {}
+): ReturnType<typeof runtimeSyncRun> {
+  return runtimeSyncRun(input, {
+    ...control,
+    pricingFetch: testPricingFetch,
+    pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }]
+  });
 }
 
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
@@ -1685,7 +1706,9 @@ function fakeLifecycleSmithersEnv(
 }
 
 function pricingCatalogDataUrl(catalog: unknown): string {
-  return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
+  const url = `https://pricing.test/catalog-${testPricingCatalogSequence++}.json`;
+  testPricingCatalogs.set(url, JSON.stringify(catalog));
+  return url;
 }
 
 type TestSmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];

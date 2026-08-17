@@ -81,7 +81,9 @@ import {
   pricingForContext,
   resolveLiveModelPricing,
   type ModelPricing,
-  type PricingCatalogMetadata
+  type PricingCatalogFetch,
+  type PricingCatalogMetadata,
+  type PricingHostnameLookup
 } from "./model-pricing.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import {
@@ -339,6 +341,9 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  /** Trusted transport seams for hermetic embedders and tests. */
+  pricingFetch?: PricingCatalogFetch;
+  pricingLookupHostname?: PricingHostnameLookup;
   /**
    * Observational callers may retain the last coherent local snapshot when a
    * Smithers event stream is malformed. Mutation-capable synchronization stays
@@ -1221,6 +1226,8 @@ async function synchronizeWorkflowAccounting(input: {
           models: missingModels,
           env: input.env,
           signal: input.control.signal,
+          fetchImpl: input.control.pricingFetch,
+          lookupHostname: input.control.pricingLookupHostname,
           timeoutMs:
             input.control.deadlineMs === undefined
               ? undefined
