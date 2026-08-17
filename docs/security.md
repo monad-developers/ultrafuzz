@@ -46,6 +46,60 @@ an isolation boundary.
 
 Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY` to strict JSON with one complete policy row per declared destination, for example: `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"private","source_destinations":["model:openai"],"artifact_destinations":[],"destination_policies":[{"destination":"model:openai","processor":"OpenAI","region":"operator-approved","retention_policy":"operator-approved","training_policy":"operator-approved","dpa_status":"operator-approved","minimization_policy":"required inputs only","data_handling_basis":"operator-approved"}],"openrouter_model_allowlist":[]}`. Each row requires exactly `destination`, `processor`, `region`, `retention_policy`, `training_policy`, `dpa_status`, `minimization_policy`, and `data_handling_basis`. The first failed private launch reports the exact route IDs plus policy/input digests. Put reviewed records in `ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS`, for example: `[{"schema_version":"ultrafuzz.data-disclosure-acknowledgement.v1","destination":"model:openai","policy_digest":"<64 lowercase hex>","input_digest":"<64 lowercase hex>","acknowledged_by":"reviewer@example.com","acknowledged_at":"2026-08-17T00:00:00.000Z"}]`. Acknowledgements bind policy, effective inputs, prompt, routes, and Git/worktree identity; any change makes them stale. Credential values are never persisted. Private standalone Modal evals remain fail-closed pending the separate R-26 disclosure authorization. Public Modal runs record `cloud:modal`. These controls are not a sandbox or egress filter: YOLO agents remain unrestricted.
 
+## Production dependency advisories
+
+CI and release validation run `pnpm security:dependency-advisories`. The gate
+enumerates the installed production graph with the repository-pinned pnpm,
+requires exact package versions resolved from `registry.npmjs.org`, and posts
+that bounded inventory directly to the fixed npm advisory bulk endpoint. It
+does not honor a configurable package-registry URL for security decisions. The
+raw response is size-bounded and parsed with the repository's strict JSON
+reader before validating every package, advisory ID, GitHub advisory URL,
+severity, range, CWE, and CVSS field. Aliased dependencies are audited under
+their registry package names. Invalid UTF-8 and unknown, missing, duplicate,
+partial, or error-bearing fields fail closed instead of relying on pnpm
+normalization, which can discard malformed registry records.
+
+The gate blocks every High or Critical production advisory unless
+`.github/dependency-advisory-exceptions.json` contains a current exception for
+that exact GHSA and package. Enumeration, registry, HTTP, response-size, schema,
+and JSON failures are blocking; an unavailable or malformed registry response
+is never treated as a clean audit. CI and release validation also run the policy
+fixture suite that exercises these fail-closed cases.
+
+Exceptions are temporary dispositions, not permanent suppressions. Each entry
+must record the severity, status, review date, expiry, accountable GitHub owner,
+tracking issue, reachability analysis, and rationale. An exception may last at
+most 30 days from `reviewed_on` and is valid through its `expires` date in UTC.
+CI rejects future-dated reviews, expired or overlong exceptions, severity
+mismatches, duplicate entries, unknown fields, and entries for advisories that
+no longer appear. Remove a stale entry in the same change that remediates its
+advisory.
+
+Allowed statuses are `not-reachable`, `remediation-in-progress`, and
+`risk-accepted`. A renewal requires a new review date and updated evidence in
+the tracking issue. Security owners should fix Critical advisories within seven
+days and High advisories within 30 days; use an exception only when the tracking
+issue documents why that target cannot be met and what compensating controls
+apply.
+
+The committed exception file starts empty. A complete entry has this shape:
+
+```json
+{
+  "advisory": "GHSA-2345-6789-cfgh",
+  "package": "example-package",
+  "severity": "high",
+  "status": "not-reachable",
+  "reviewed_on": "2026-08-17",
+  "expires": "2026-09-16",
+  "owner": "@security-owner",
+  "tracking_issue": "#123",
+  "reachability": "The vulnerable parser is not called by production inputs.",
+  "rationale": "Retained while the tracked upstream upgrade is validated."
+}
+```
+
 ## Agent process environment
 
 The workflow controller receives only the active agents' configured API-key
