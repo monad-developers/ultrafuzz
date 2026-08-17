@@ -39,10 +39,20 @@ Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY` to strict
 
 ## Agent process environment
 
-Workflow processes receive the active agents' configured API-key variables,
-normal process essentials, and `SMITHERS_*` variables. Other host variables are
-not inherited automatically. This reduces accidental credential disclosure but
-does not isolate an unrestricted agent from the host.
+The workflow controller receives only the active agents' configured API-key
+variables, normal process essentials, and a named allowlist of controller
+variables. There is no wildcard `SMITHERS_*` forwarding. Before each model
+process starts, the generated adapter blanks every inactive built-in or
+dynamically configured provider credential and provider home, then restores
+only that invocation's credential and home. Other host variables are not
+inherited automatically.
+
+`HOME` remains a normal process essential and is intentionally forwarded.
+Subscription-backed CLIs may keep credential-rich state beneath it, and a
+same-UID YOLO agent can read files available to the operator regardless of
+environment filtering. Per-child credential scoping reduces accidental and
+cross-provider disclosure; it is not an OS isolation boundary or a promise that
+subscription credentials are inaccessible to an unrestricted local agent.
 
 Schema-backed tasks also receive a host-managed `ultrafuzz` launcher before
 target-controlled `PATH` entries. Its pinned CLI, schema-bundle, and validator
