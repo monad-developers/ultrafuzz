@@ -138,8 +138,17 @@ agents = ["sol-xhigh", "gpt55-xhigh"]
     });
     expect(unknown.ok).toBe(false);
     if (!unknown.ok) expect(unknown.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_UNKNOWN");
-    // prettier-ignore
-    for (const inherited of ["constructor", "toString"]) { const result = resolveConfig({ env: {}, projectConfig: { models: { default: inherited }, retry: { agents: ["default", inherited] } } }); expect(result.ok).toBe(false); if (!result.ok) expect(result.diagnostics.map(({ code }) => code)).toEqual(expect.arrayContaining(["CONFIG_MODEL_DEFAULT_UNKNOWN", "CONFIG_RETRY_AGENT_UNKNOWN"])); }
+    for (const inherited of ["constructor", "toString"]) {
+      const result = resolveConfig({
+        env: {},
+        projectConfig: { models: { default: inherited }, retry: { agents: ["default", inherited] } }
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.diagnostics.map(({ code }) => code)).toEqual(
+          expect.arrayContaining(["CONFIG_MODEL_DEFAULT_UNKNOWN", "CONFIG_RETRY_AGENT_UNKNOWN"])
+        );
+    }
 
     const duplicate = resolveConfig({
       env: {},
@@ -528,19 +537,36 @@ config_dir = "kimi-code"
       configDir: "kimi-code"
     });
 
-    // prettier-ignore
-    for (const [agent, canonical] of Object.entries({ ClaudeAgent: "ANTHROPIC_API_KEY", CodexAgent: "OPENAI_API_KEY", DeepSeekAgent: "DEEPSEEK_API_KEY", KimiAgent: "KIMI_API_KEY", OpenRouterAgent: "OPENROUTER_API_KEY" })) {
-      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code).toBe("CONFIG_AGENT_API_KEY_ENV_NONCANONICAL");
+    for (const [agent, canonical] of Object.entries({
+      ClaudeAgent: "ANTHROPIC_API_KEY",
+      CodexAgent: "OPENAI_API_KEY",
+      DeepSeekAgent: "DEEPSEEK_API_KEY",
+      KimiAgent: "KIMI_API_KEY",
+      OpenRouterAgent: "OPENROUTER_API_KEY"
+    })) {
+      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code).toBe(
+        "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL"
+      );
       expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: canonical } })).toEqual([]);
     }
     expect(
       validateAgentConfigs({ constructor: { auth: "api-key" as const, apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code
     ).toBe("CONFIG_AGENT_ID_INVALID");
-    // prettier-ignore
-    { const polluted = parseProjectConfigToml('[agents.__proto__]\nauth = "api-key"\napi_key_env = "AWS_SECRET_ACCESS_KEY"\n'); expect(polluted.ok).toBe(true); if (polluted.ok) { const result = resolveConfig({ env: {}, projectConfig: polluted.value }); expect(result.ok).toBe(false); if (!result.ok) expect(result.diagnostics.map(({ code }) => code)).toContain("CONFIG_AGENT_ID_INVALID"); } }
-    // prettier-ignore
+    {
+      const polluted = parseProjectConfigToml(
+        '[agents.__proto__]\nauth = "api-key"\napi_key_env = "AWS_SECRET_ACCESS_KEY"\n'
+      );
+      expect(polluted.ok).toBe(true);
+      if (polluted.ok) {
+        const result = resolveConfig({ env: {}, projectConfig: polluted.value });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.diagnostics.map(({ code }) => code)).toContain("CONFIG_AGENT_ID_INVALID");
+      }
+    }
     for (const configDir of ["", "/tmp/provider", "../provider", ".codex", "team\\codex", "team/../codex"])
-      expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir } })[0]?.code).toBe("CONFIG_AGENT_CONFIG_DIR_UNSAFE");
+      expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir } })[0]?.code).toBe(
+        "CONFIG_AGENT_CONFIG_DIR_UNSAFE"
+      );
     expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir: "teams/codex" } })).toEqual([]);
 
     const invalid = resolveConfig({

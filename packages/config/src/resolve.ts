@@ -526,8 +526,11 @@ function applyProjectConfigLayer(
   }
   if (layer.agents) {
     for (const [id, agent] of Object.entries(layer.agents).sort()) {
-      // prettier-ignore
-      setOwn(config.agents, id, normalizeAgentConfig(agent, Object.hasOwn(config.agents, id) ? config.agents[id] : undefined));
+      setOwn(
+        config.agents,
+        id,
+        normalizeAgentConfig(agent, Object.hasOwn(config.agents, id) ? config.agents[id] : undefined)
+      );
     }
   }
   if (layer.permissions) {
@@ -664,8 +667,9 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
   };
 }
 
-// prettier-ignore
-function setOwn<T>(record: Record<string, T>, id: string, value: T): void { Object.defineProperty(record, id, { configurable: true, enumerable: true, value, writable: true }); }
+function setOwn<T>(record: Record<string, T>, id: string, value: T): void {
+  Object.defineProperty(record, id, { configurable: true, enumerable: true, value, writable: true });
+}
 
 function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
   const diagnostics: ConfigDiagnostic[] = [];

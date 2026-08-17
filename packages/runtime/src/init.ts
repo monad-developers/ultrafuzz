@@ -170,8 +170,15 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
-    // prettier-ignore
-    writeProjectFile(projectRoot, ".smithers/agents/provider-home.ts", loadRuntimeTemplate("smithers/agents/provider-home.tsx"), input.force === true, created, preserved, overwritten);
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/provider-home.ts",
+      loadRuntimeTemplate("smithers/agents/provider-home.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
     writeProjectFile(
       projectRoot,
       ".smithers/agents/strict-json.ts",

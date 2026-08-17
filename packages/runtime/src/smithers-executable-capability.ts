@@ -54,27 +54,40 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
   executable: string,
   forbiddenRoot?: string
 ): T {
-  // prettier-ignore
-  const forbidden = forbiddenRoot === undefined ? undefined : { lexical: path.resolve(forbiddenRoot), real: fs.realpathSync(path.resolve(forbiddenRoot)) };
+  const forbidden =
+    forbiddenRoot === undefined
+      ? undefined
+      : { lexical: path.resolve(forbiddenRoot), real: fs.realpathSync(path.resolve(forbiddenRoot)) };
   const runner = verifiedRegularFile(executable, true, "workflow runner");
-  // prettier-ignore
-  if (readVerifiedFile(runner, "workflow runner").includes(TARGET_LOCAL_DELEGATION_ANCHOR)) throw new Error("workflow runner can delegate controller authority to target code");
+  if (readVerifiedFile(runner, "workflow runner").includes(TARGET_LOCAL_DELEGATION_ANCHOR))
+    throw new Error("workflow runner can delegate controller authority to target code");
   const interpreter = verifiedInterpreter(runner, forbidden);
-  // prettier-ignore
-  const bunStartup = interpreter.runtime === "bun" && env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT ? verifiedBunStartupControls(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT, runner) : undefined;
+  const bunStartup =
+    interpreter.runtime === "bun" && env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT
+      ? verifiedBunStartupControls(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT, runner)
+      : undefined;
   (env as Record<string, string | undefined>).SMITHERS_BIN = runner.path;
   Object.defineProperty(env, SMITHERS_EXECUTABLE_CAPABILITY, {
     configurable: false,
     enumerable: true,
     writable: false,
-    // prettier-ignore
-    value: Object.freeze({ runner: Object.freeze(runner), interpreter: Object.freeze(interpreter), ...(bunStartup === undefined ? {} : { bunStartup: Object.freeze(bunStartup) }) })
+    value: Object.freeze({
+      runner: Object.freeze(runner),
+      interpreter: Object.freeze(interpreter),
+      ...(bunStartup === undefined ? {} : { bunStartup: Object.freeze(bunStartup) })
+    })
   });
   return env;
 }
 
-// prettier-ignore
-export function assertExecutableOutsideRoot(executable: string, forbiddenRoot: string): void { const forbidden = { lexical: path.resolve(forbiddenRoot), real: fs.realpathSync(path.resolve(forbiddenRoot)) }; if (!path.isAbsolute(executable)) throw new Error("workflow runner capability requires an absolute path"); if (pathInside(forbidden.lexical, path.resolve(executable))) throw new Error("workflow runner cannot be inside the target project"); if (pathInside(forbidden.real, fs.realpathSync(executable))) throw new Error("workflow runner cannot resolve inside the target project"); }
+export function assertExecutableOutsideRoot(executable: string, forbiddenRoot: string): void {
+  const forbidden = { lexical: path.resolve(forbiddenRoot), real: fs.realpathSync(path.resolve(forbiddenRoot)) };
+  if (!path.isAbsolute(executable)) throw new Error("workflow runner capability requires an absolute path");
+  if (pathInside(forbidden.lexical, path.resolve(executable)))
+    throw new Error("workflow runner cannot be inside the target project");
+  if (pathInside(forbidden.real, fs.realpathSync(executable)))
+    throw new Error("workflow runner cannot resolve inside the target project");
+}
 
 export function smithersExecutableCapability(
   env: Record<string, string | undefined> | undefined
@@ -122,16 +135,31 @@ export function acquireSmithersExecutableAnchor(
     const useDescriptorPaths = runnerDescriptorPath !== undefined && interpreterDescriptorPath !== undefined;
     const snapshotRunner = requested !== capability.runner.path;
     const bunModuleConfinement = env?.ULTRAFUZZ_BUN_MODULE_CONFINEMENT?.trim();
-    // prettier-ignore
-    if (capability.interpreter.runtime === "bun" && (!snapshotRunner || !bunModuleConfinement || capability.bunStartup === undefined)) {
+    if (
+      capability.interpreter.runtime === "bun" &&
+      (!snapshotRunner || !bunModuleConfinement || capability.bunStartup === undefined)
+    ) {
       throw new Error("Bun workflow runner execution requires a sealed snapshot path");
     }
-    // prettier-ignore
-    const bunControls = capability.bunStartup === undefined ? undefined : { confinement: bunModuleConfinement!, config: path.join(path.dirname(bunModuleConfinement!), "bunfig.toml") };
-    // prettier-ignore
-    if (bunControls !== undefined) for (const [name, identity] of Object.entries(capability.bunStartup!)) assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
-    // prettier-ignore
-    const interpreterArguments = capability.interpreter.runtime === "bun" ? [`--config=${bunControls!.config}`, "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", `--preload=${bunControls!.confinement}`] : [];
+    const bunControls =
+      capability.bunStartup === undefined
+        ? undefined
+        : { confinement: bunModuleConfinement!, config: path.join(path.dirname(bunModuleConfinement!), "bunfig.toml") };
+    if (bunControls !== undefined)
+      for (const [name, identity] of Object.entries(capability.bunStartup!))
+        assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
+    const interpreterArguments =
+      capability.interpreter.runtime === "bun"
+        ? [
+            `--config=${bunControls!.config}`,
+            "--no-env-file",
+            "--no-install",
+            "--no-addons",
+            "--preserve-symlinks",
+            "--preserve-symlinks-main",
+            `--preload=${bunControls!.confinement}`
+          ]
+        : [];
     let closed = false;
     const assertCurrent = (): void => {
       if (closed) throw new Error("workflow runner executable anchor is already closed");
@@ -140,8 +168,9 @@ export function acquireSmithersExecutableAnchor(
       assertPathIdentity(requested, capability.runner, "workflow runner");
       assertPathIdentity(capability.runner.path, capability.runner, "workflow runner");
       assertPathIdentity(capability.interpreter.path, capability.interpreter, "workflow runner interpreter");
-      // prettier-ignore
-      if (bunControls !== undefined) for (const [name, identity] of Object.entries(capability.bunStartup!)) assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
+      if (bunControls !== undefined)
+        for (const [name, identity] of Object.entries(capability.bunStartup!))
+          assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
     };
     assertCurrent();
     return {
@@ -167,8 +196,24 @@ export function acquireSmithersExecutableAnchor(
   }
 }
 
-// prettier-ignore
-function verifiedBunStartupControls(confinementPath: string, runner: FileIdentity): NonNullable<SmithersExecutableIdentity["bunStartup"]> { const confinement = verifiedRegularFile(confinementPath, false, "Bun workflow runner confinement"), controls = path.dirname(confinement.path), root = path.dirname(controls); if (path.basename(controls) !== "controls" || path.basename(confinement.path) !== "bun-module-confinement.js" || !pathInside(root, runner.path)) throw new Error("Bun workflow runner startup controls must share its sealed snapshot"); return { confinement, config: verifiedRegularFile(path.join(controls, "bunfig.toml"), false, "Bun workflow runner config") }; }
+function verifiedBunStartupControls(
+  confinementPath: string,
+  runner: FileIdentity
+): NonNullable<SmithersExecutableIdentity["bunStartup"]> {
+  const confinement = verifiedRegularFile(confinementPath, false, "Bun workflow runner confinement"),
+    controls = path.dirname(confinement.path),
+    root = path.dirname(controls);
+  if (
+    path.basename(controls) !== "controls" ||
+    path.basename(confinement.path) !== "bun-module-confinement.js" ||
+    !pathInside(root, runner.path)
+  )
+    throw new Error("Bun workflow runner startup controls must share its sealed snapshot");
+  return {
+    confinement,
+    config: verifiedRegularFile(path.join(controls, "bunfig.toml"), false, "Bun workflow runner config")
+  };
+}
 
 function closeFileDescriptors(descriptors: readonly number[]): void {
   let failed = false;
@@ -186,8 +231,12 @@ function closeFileDescriptors(descriptors: readonly number[]): void {
   if (failed) throw failure;
 }
 
-// prettier-ignore
-function verifiedRegularFile(executable: string, requireExecutable: boolean, label: string, forbidden?: Forbidden): FileIdentity {
+function verifiedRegularFile(
+  executable: string,
+  requireExecutable: boolean,
+  label: string,
+  forbidden?: Forbidden
+): FileIdentity {
   if (!path.isAbsolute(executable)) throw new Error(`${label} capability requires an absolute path`);
   if (forbidden !== undefined && pathInside(forbidden.lexical, path.resolve(executable)))
     throw new Error(`${label} cannot be inside the target project`);
@@ -229,8 +278,13 @@ function verifiedInterpreter(runner: FileIdentity, forbidden?: Forbidden): FileI
       throw new Error("workflow runner executable requires one absolute interpreter");
     }
     interpreter = words[0]!;
-    // prettier-ignore
-    runtime = path.basename(interpreter).replace(/\.exe$/iu, "").toLowerCase() === "bun" ? "bun" : "other";
+    runtime =
+      path
+        .basename(interpreter)
+        .replace(/\.exe$/iu, "")
+        .toLowerCase() === "bun"
+        ? "bun"
+        : "other";
   }
   return { ...verifiedRegularFile(interpreter, true, "workflow runner interpreter", forbidden), runtime };
 }
@@ -251,11 +305,23 @@ function resolveTrustedCommand(command: string, forbidden?: Forbidden): string {
   throw new Error(`workflow runner interpreter is unavailable: ${command}`);
 }
 
-// prettier-ignore
-function trustedCommandCandidate(candidate: string, forbidden?: Forbidden): string | undefined { if (forbidden !== undefined && pathInside(forbidden.lexical, candidate)) return undefined; try { const stat = fs.statSync(candidate); if (!stat.isFile()) return undefined; fs.accessSync(candidate, fs.constants.X_OK); const real = fs.realpathSync(candidate); return forbidden !== undefined && pathInside(forbidden.real, real) ? undefined : real; } catch { return undefined; } }
+function trustedCommandCandidate(candidate: string, forbidden?: Forbidden): string | undefined {
+  if (forbidden !== undefined && pathInside(forbidden.lexical, candidate)) return undefined;
+  try {
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile()) return undefined;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    const real = fs.realpathSync(candidate);
+    return forbidden !== undefined && pathInside(forbidden.real, real) ? undefined : real;
+  } catch {
+    return undefined;
+  }
+}
 
-// prettier-ignore
-function pathInside(root: string, candidate: string): boolean { const relative = path.relative(root, candidate); return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)); }
+function pathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
 
 function openRegularFileNoFollow(filePath: string): number {
   // O_NONBLOCK makes a hostile FIFO fail the regular-file check instead of

@@ -107,8 +107,15 @@ export interface RunMetadataAuditProfile extends Omit<RunAuditProfileSummary, "i
   declared_topology_path?: string;
 }
 
-// prettier-ignore
-export interface RunDataGovernanceReference { schema_version: "ultrafuzz.data-governance-provenance.v1"; path: "data-governance.json"; sha256: string; policy_digest: string; input_digest: string; sensitivity: "public" | "private"; acknowledgement_status: "approved" | "not-required" | "pending"; }
+export interface RunDataGovernanceReference {
+  schema_version: "ultrafuzz.data-governance-provenance.v1";
+  path: "data-governance.json";
+  sha256: string;
+  policy_digest: string;
+  input_digest: string;
+  sensitivity: "public" | "private";
+  acknowledgement_status: "approved" | "not-required" | "pending";
+}
 
 export interface RunPlanDocument {
   schema_version: typeof RUN_PLAN_SCHEMA_VERSION;

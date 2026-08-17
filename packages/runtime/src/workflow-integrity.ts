@@ -40,10 +40,11 @@ const WORKFLOW_CONTROL_LOCK = ".workflow-control";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const BUN_MODULE_CONFINEMENT_PATH = "controls/bun-module-confinement.js";
-// prettier-ignore
 export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot, descriptorRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"); plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: outside, namespace: "file" }, () => { if (fs.realpathSync(sourceRoot) !== physicalRoot || fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); throw new Error("workflow controller module resolved outside its sealed snapshot"); }); } });\n`;
-// prettier-ignore
-const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = { [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE), "controls/bunfig.toml": Buffer.from("\n") };
+const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
+  [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE),
+  "controls/bunfig.toml": Buffer.from("\n")
+};
 
 const WORKFLOW_CONTROL_FILE_KEYS = [
   "graph",
@@ -594,8 +595,9 @@ export function materializeWorkflowExecutionSnapshot(input: {
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
-  // prettier-ignore
-  for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) if (!expectedFiles.get(controlPath)?.equals(contents)) throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
+  for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS))
+    if (!expectedFiles.get(controlPath)?.equals(contents))
+      throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
   if (expectedFiles.has(workflowRelativePath)) {
     throw new Error("workflow execution snapshot collides with its generated workflow");
   }
@@ -651,8 +653,19 @@ export function materializeWorkflowExecutionSnapshot(input: {
     );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     assertExactDirectoryIdentity(snapshotRoot, snapshotStat.dev, snapshotStat.ino, "workflow execution snapshot");
-    // prettier-ignore
-    const env = workflowSnapshotEnvironment(input.projectRoot, snapshotRoot, workflowRelativePath, dependencyMap, protectedEntries, { snapshotsRootDevice: snapshots.device, snapshotsRootInode: snapshots.inode, snapshotDevice: snapshotStat.dev, snapshotInode: snapshotStat.ino });
+    const env = workflowSnapshotEnvironment(
+      input.projectRoot,
+      snapshotRoot,
+      workflowRelativePath,
+      dependencyMap,
+      protectedEntries,
+      {
+        snapshotsRootDevice: snapshots.device,
+        snapshotsRootInode: snapshots.inode,
+        snapshotDevice: snapshotStat.dev,
+        snapshotInode: snapshotStat.ino
+      }
+    );
     return {
       root: snapshotRoot,
       workflowPath: path.join(snapshotRoot, ...workflowRelativePath.split("/")),
@@ -1251,8 +1264,12 @@ function workflowSnapshotEnvironment(
   };
   const configPath = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
   const governancePath = path.join(snapshotRoot, "controls", "data-governance.json");
-  // prettier-ignore
-  if (moduleUrl("artifacts") === "" || moduleUrl("runtime") === "" || !pathEntryExists(configPath) || !pathEntryExists(governancePath)) {
+  if (
+    moduleUrl("artifacts") === "" ||
+    moduleUrl("runtime") === "" ||
+    !pathEntryExists(configPath) ||
+    !pathEntryExists(governancePath)
+  ) {
     throw new Error("workflow execution snapshot is missing a required sealed module or config");
   }
   let env: Record<string, string> = {
@@ -1265,8 +1282,11 @@ function workflowSnapshotEnvironment(
     ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ...workflowRelativePath.split("/"))
   };
   if (dependencies.smithers_bin !== null) {
-    // prettier-ignore
-    env = bindSmithersExecutableCapability(env, snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable"), projectRoot);
+    env = bindSmithersExecutableCapability(
+      env,
+      snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable"),
+      projectRoot
+    );
   }
   return bindWorkflowExecutionSnapshotCapability(env, {
     root: snapshotRoot,
@@ -1573,8 +1593,24 @@ function executionFileEntries(files: readonly WorkflowExecutionControlFile[]): W
     });
 }
 
-// prettier-ignore
-function withBunStartupControls(layout: RunLayout, files: readonly WorkflowExecutionControlFile[]): WorkflowExecutionControlFile[] { const result = [...files], snapshots = new Set(files.map((file) => validateSnapshotPath(file.snapshotPath))), sourceRoot = ensureSafeDirectory(layout.root, "smithers/bun-startup-controls"); for (const [snapshotPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) { if (snapshots.has(snapshotPath)) throw new Error("workflow execution files collide with Bun startup controls"); const sourcePath = safeResolveInside(sourceRoot, path.basename(snapshotPath), "Bun startup control source"); if (pathEntryExists(sourcePath)) { if (!readBoundedRegularFile(layout.root, sourcePath, `Bun startup control ${snapshotPath}`).equals(contents)) throw new Error("workflow Bun startup control source changed before sealing"); } else writeFileDurable(sourcePath, contents); result.push({ sourcePath, snapshotPath }); } return result; }
+function withBunStartupControls(
+  layout: RunLayout,
+  files: readonly WorkflowExecutionControlFile[]
+): WorkflowExecutionControlFile[] {
+  const result = [...files],
+    snapshots = new Set(files.map((file) => validateSnapshotPath(file.snapshotPath))),
+    sourceRoot = ensureSafeDirectory(layout.root, "smithers/bun-startup-controls");
+  for (const [snapshotPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) {
+    if (snapshots.has(snapshotPath)) throw new Error("workflow execution files collide with Bun startup controls");
+    const sourcePath = safeResolveInside(sourceRoot, path.basename(snapshotPath), "Bun startup control source");
+    if (pathEntryExists(sourcePath)) {
+      if (!readBoundedRegularFile(layout.root, sourcePath, `Bun startup control ${snapshotPath}`).equals(contents))
+        throw new Error("workflow Bun startup control source changed before sealing");
+    } else writeFileDurable(sourcePath, contents);
+    result.push({ sourcePath, snapshotPath });
+  }
+  return result;
+}
 
 function readBoundedRegularFile(root: string, filePath: string, label: string): Buffer {
   const trustedRoot = path.resolve(root);

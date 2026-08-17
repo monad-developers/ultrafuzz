@@ -130,8 +130,26 @@ function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntr
 }
 
 function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
-  // prettier-ignore
-  return runtimeStartRun(withFakeCliEntrypoint({ ...input, env: { ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY, ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")), ALL_PROXY: undefined, HTTP_PROXY: undefined, HTTPS_PROXY: undefined, NO_PROXY: undefined, all_proxy: undefined, http_proxy: undefined, https_proxy: undefined, no_proxy: undefined, OPENAI_BASE_URL: undefined, KIMI_BASE_URL: undefined, ...input.env } }));
+  return runtimeStartRun(
+    withFakeCliEntrypoint({
+      ...input,
+      env: {
+        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
+        ALL_PROXY: undefined,
+        HTTP_PROXY: undefined,
+        HTTPS_PROXY: undefined,
+        NO_PROXY: undefined,
+        all_proxy: undefined,
+        http_proxy: undefined,
+        https_proxy: undefined,
+        no_proxy: undefined,
+        OPENAI_BASE_URL: undefined,
+        KIMI_BASE_URL: undefined,
+        ...input.env
+      }
+    })
+  );
 }
 
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
@@ -222,8 +240,11 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "provider-home.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
@@ -299,15 +320,21 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "provider-home.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "strict-json.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
@@ -461,15 +488,21 @@ async function loadGeneratedOpenRouterAgent(
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "provider-home.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "strict-json.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
     OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
@@ -961,9 +994,14 @@ function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFix
   return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as OpenRouterRetryFixtureEntry);
 }
 
-// prettier-ignore
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
-  CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => { buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{ args: string[] }> };
+  CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
+    buildCommand(params: {
+      prompt: string;
+      cwd: string;
+      options: Record<string, unknown>;
+    }): Promise<{ args: string[] }>;
+  };
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
     stream(options: Record<string, unknown>): Promise<{
@@ -1004,15 +1042,23 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     .replace('from "./environment"', 'from "./environment.mjs"')
     .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
-  const claudeSource = fs.readFileSync(path.join(agentsDir, "claude.ts"), "utf8").replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`).replace('from "./toml"', 'from "./toml.mjs"').replace('from "./environment"', 'from "./environment.mjs"').replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  const claudeSource = fs
+    .readFileSync(path.join(agentsDir, "claude.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "claude.mjs"), transpile(claudeSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
     "utf8"
   );
-  // prettier-ignore
-  fs.writeFileSync(path.join(fixture, "provider-home.mjs"), transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
@@ -1043,8 +1089,19 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
       };
     };
   };
-  const claudeModule = (await import(pathToFileURL(path.join(fixture, "claude.mjs")).href)) as { CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => { buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{ args: string[] }> } };
-  return { CompatibleClaudeCodeAgent: claudeModule.CompatibleClaudeCodeAgent, DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent };
+  const claudeModule = (await import(pathToFileURL(path.join(fixture, "claude.mjs")).href)) as {
+    CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
+      buildCommand(params: {
+        prompt: string;
+        cwd: string;
+        options: Record<string, unknown>;
+      }): Promise<{ args: string[] }>;
+    };
+  };
+  return {
+    CompatibleClaudeCodeAgent: claudeModule.CompatibleClaudeCodeAgent,
+    DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent
+  };
 }
 
 function shellQuote(value: string): string {
@@ -1145,10 +1202,16 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
 
 // `failures` makes the fake npm exit non-zero for its first N invocations, so a test
 // can drive the install retry loop. The npm log doubles as the attempt counter.
-// prettier-ignore
 function writeFakeNpmInstaller(
   project: string,
-  failures: { count: number; stderr: readonly string[]; integrity?: string; imported?: string; optional?: string; required?: string } = { count: 0, stderr: [] }
+  failures: {
+    count: number;
+    stderr: readonly string[];
+    integrity?: string;
+    imported?: string;
+    optional?: string;
+    required?: string;
+  } = { count: 0, stderr: [] }
 ): {
   binDir: string;
   npmLogPath: string;
@@ -1158,13 +1221,43 @@ function writeFakeNpmInstaller(
   const npm = path.join(binDir, "npm");
   const npmLogPath = path.join(project, "npm-install.log");
   const smithersLogPath = path.join(project, "local-smithers.log");
-  // prettier-ignore
-  const dependencies = [["@moonshot-ai/kimi-code", KIMI_CODE_VERSION], ["@smthrs/tool-context", SMITHERS_VERSION], ["react", "19.2.4"], ["smthrs", SMITHERS_VERSION], ["zod", "4.4.3"]];
-  // prettier-ignore
-  fs.writeFileSync(npm, ['import fs from "node:fs";', 'import path from "node:path";', `const args = process.argv.slice(2), log = ${JSON.stringify(npmLogPath)};`, 'fs.appendFileSync(log, `${args.join(" ")}\\n`);', `if (fs.readFileSync(log, "utf8").trimEnd().split("\\n").length <= ${failures.count}) { ${failures.stderr.map((line) => `process.stderr.write(${JSON.stringify(`${line}\n`)});`).join(" ")} process.exit(1); }`, `const prefix = args[args.indexOf("--prefix") + 1], dependencies = ${JSON.stringify(dependencies)}, packages = { '': JSON.parse(fs.readFileSync(path.join(prefix, 'package.json'), 'utf8')) };`, `const integrity = ${JSON.stringify(failures.integrity ?? `sha512-${Buffer.alloc(64).toString("base64")}`)};`, "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." + JSON.stringify({ ...(failures.optional === undefined ? {} : { optionalDependencies: { [failures.optional]: "1.0.0" } }), ...(failures.required === undefined ? {} : { dependencies: { [failures.required]: "1.0.0" } }) }) + " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }", "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });", `fs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n')});`, "fs.chmodSync(target, 0o755);", "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);", "fs.writeFileSync(path.join(prefix, 'package-lock.json'), `${JSON.stringify({ name: 'ultrafuzz-smithers', lockfileVersion: 3, requires: true, packages })}\\n`);"].join("\n"), "utf8");
-  // prettier-ignore
-  const optionalRunner = (failures.imported ?? failures.optional) === undefined ? undefined : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_CLOUD_ENV_LOG) fs.writeFileSync(process.env.SMITHERS_FAKE_CLOUD_ENV_LOG, (process.env.MODAL_TOKEN_ID ?? "") + "|" + (process.env.MODAL_TOKEN_SECRET ?? "") + "\\n");\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
-  if (optionalRunner !== undefined) fs.appendFileSync(npm, `\nfs.writeFileSync(target, ${JSON.stringify(optionalRunner)});\n`);
+  const dependencies = [
+    ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
+    ["@smthrs/tool-context", SMITHERS_VERSION],
+    ["react", "19.2.4"],
+    ["smthrs", SMITHERS_VERSION],
+    ["zod", "4.4.3"]
+  ];
+  fs.writeFileSync(
+    npm,
+    [
+      'import fs from "node:fs";',
+      'import path from "node:path";',
+      `const args = process.argv.slice(2), log = ${JSON.stringify(npmLogPath)};`,
+      'fs.appendFileSync(log, `${args.join(" ")}\\n`);',
+      `if (fs.readFileSync(log, "utf8").trimEnd().split("\\n").length <= ${failures.count}) { ${failures.stderr.map((line) => `process.stderr.write(${JSON.stringify(`${line}\n`)});`).join(" ")} process.exit(1); }`,
+      `const prefix = args[args.indexOf("--prefix") + 1], dependencies = ${JSON.stringify(dependencies)}, packages = { '': JSON.parse(fs.readFileSync(path.join(prefix, 'package.json'), 'utf8')) };`,
+      `const integrity = ${JSON.stringify(failures.integrity ?? `sha512-${Buffer.alloc(64).toString("base64")}`)};`,
+      "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." +
+        JSON.stringify({
+          ...(failures.optional === undefined ? {} : { optionalDependencies: { [failures.optional]: "1.0.0" } }),
+          ...(failures.required === undefined ? {} : { dependencies: { [failures.required]: "1.0.0" } })
+        }) +
+        " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }",
+      "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
+      `fs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n')});`,
+      "fs.chmodSync(target, 0o755);",
+      "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);",
+      "fs.writeFileSync(path.join(prefix, 'package-lock.json'), `${JSON.stringify({ name: 'ultrafuzz-smithers', lockfileVersion: 3, requires: true, packages })}\\n`);"
+    ].join("\n"),
+    "utf8"
+  );
+  const optionalRunner =
+    (failures.imported ?? failures.optional) === undefined
+      ? undefined
+      : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_CLOUD_ENV_LOG) fs.writeFileSync(process.env.SMITHERS_FAKE_CLOUD_ENV_LOG, (process.env.MODAL_TOKEN_ID ?? "") + "|" + (process.env.MODAL_TOKEN_SECRET ?? "") + "\\n");\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
+  if (optionalRunner !== undefined)
+    fs.appendFileSync(npm, `\nfs.writeFileSync(target, ${JSON.stringify(optionalRunner)});\n`);
   fs.chmodSync(npm, 0o500);
   return { binDir, npmLogPath, smithersLogPath };
 }
@@ -2624,20 +2717,211 @@ test("init does not modify a regular file swapped after the anchored open", { co
   assert.equal(fs.readFileSync(`${environmentPath}.old`, "utf8"), originalContents);
 });
 
-// prettier-ignore
-test("generated Codex commands accept a sealed ambient proxy and reject drift", { skip: !runningUnderBun }, async () => {
-  const project = tempProject(); assert.equal(initProject({ projectRoot: project, force: true }).ok, true); const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
-  const snapshot = path.join(project, "execution-snapshot"), authority = path.join(snapshot, "controls/data-governance.json"); fs.mkdirSync(path.dirname(authority), { recursive: true });
-  const names = ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy", "ULTRAFUZZ_DATA_GOVERNANCE_PATH", "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"], saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  for (const name of names) delete process.env[name]; process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority; process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
-  try { process.env.HTTPS_PROXY = "https://proxy.a.invalid"; const hash = crypto.createHash("sha256").update(JSON.stringify({ agent: "CodexAgent", config: null, route: [["HTTPS_PROXY", process.env.HTTPS_PROXY]] })).digest("hex"); fs.writeFileSync(authority, `{"required_source_destinations":["model:codex-route-${hash}"]}`, "utf8"); const build = () => new CompatibleCodexAgent().buildCommand({ prompt: "Contract only", cwd: project, options: {} }); const accepted = await build(); await accepted.cleanup?.(); assert.throws(() => workflowControlChildEnvironment({ HTTPS_PROXY: "https://proxy.b.invalid", ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json") }, process.env, { agent: "CodexAgent" }), /provider route changed/u); process.env.HTTPS_PROXY = "https://proxy.b.invalid"; await assert.rejects(build(), /provider route changed/u); } finally { for (const name of names) { const value = saved[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+test(
+  "generated Codex commands accept a sealed ambient proxy and reject drift",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const snapshot = path.join(project, "execution-snapshot"),
+      authority = path.join(snapshot, "controls/data-governance.json");
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const names = [
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+      ],
+      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    for (const name of names) delete process.env[name];
+    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+    try {
+      process.env.HTTPS_PROXY = "https://proxy.a.invalid";
+      const hash = crypto
+        .createHash("sha256")
+        .update(
+          JSON.stringify({ agent: "CodexAgent", config: null, route: [["HTTPS_PROXY", process.env.HTTPS_PROXY]] })
+        )
+        .digest("hex");
+      fs.writeFileSync(authority, `{"required_source_destinations":["model:codex-route-${hash}"]}`, "utf8");
+      const build = () =>
+        new CompatibleCodexAgent().buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      const accepted = await build();
+      await accepted.cleanup?.();
+      assert.throws(
+        () =>
+          workflowControlChildEnvironment(
+            {
+              HTTPS_PROXY: "https://proxy.b.invalid",
+              ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json")
+            },
+            process.env,
+            { agent: "CodexAgent" }
+          ),
+        /provider route changed/u
+      );
+      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      await assert.rejects(build(), /provider route changed/u);
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test("planned routes equal final generated-adapter validation", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-route-equivalence-")),
+    codexHome = path.join(homes, "codex", "configured"),
+    openRouterHome = path.join(homes, "openrouter", "managed"),
+    snapshot = path.join(project, "route-snapshot"),
+    authority = path.join(snapshot, "controls/data-governance.json");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(openRouterHome, { recursive: true });
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.writeFileSync(
+    path.join(codexHome, "config.toml"),
+    'model_provider = "gateway"\n[model_providers.gateway]\nbase_url = "https://gateway.invalid/v1"\n'
+  );
+  fs.writeFileSync(
+    path.join(openRouterHome, "config.toml"),
+    'model_provider = "openrouter"\n[model_providers.openrouter]\nbase_url = "https://openrouter.ai/api/v1"\n'
+  );
+  const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+    names = [
+      "ALL_PROXY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "OPENAI_BASE_URL",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+    ],
+    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+  try {
+    const codexDestination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [codexDestination] }));
+    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project),
+      codex = await new CompatibleCodexAgent({
+        configDir: codexHome,
+        env: { OPENAI_BASE_URL: "https://gateway.invalid/v1" }
+      }).buildCommand({ prompt: "route", cwd: project, options: {} });
+    await codex.cleanup?.();
+    const openRouterDestination = modelDestination("OpenRouterAgent", config, {});
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [openRouterDestination] }));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project),
+      openrouter = await new OpenRouterCodexAgent({
+        configDir: openRouterHome,
+        env: { OPENAI_BASE_URL: "https://openrouter.ai/api/v1" }
+      }).buildCommand({ prompt: "route", cwd: project, options: {} });
+    await (openrouter.cleanup as (() => Promise<void>) | undefined)?.();
+    const claudeEnv = {
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: homes,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_REGION",
+        AWS_REGION: "us-east-1",
+        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
+      },
+      claudeDestination = modelDestination("ClaudeAgent", config, claudeEnv);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [claudeDestination] }));
+    assert.doesNotThrow(() => workflowControlChildEnvironment({}, claudeEnv, { agent: "ClaudeAgent" }));
+    assert.throws(
+      () =>
+        workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
+    assert.equal(codexDestination.startsWith("model:codex-route-"), true);
+    assert.equal(openRouterDestination, "model:openrouter");
+    assert.equal(claudeDestination.startsWith("model:claude-route-"), true);
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
-// prettier-ignore
-test("planned routes equal final generated-adapter validation", { skip: !runningUnderBun }, async () => { const project = tempProject(); assert.equal(initProject({ projectRoot: project, force: true }).ok, true); const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-route-equivalence-")), codexHome = path.join(homes, "codex", "configured"), openRouterHome = path.join(homes, "openrouter", "managed"), snapshot = path.join(project, "route-snapshot"), authority = path.join(snapshot, "controls/data-governance.json"); fs.mkdirSync(codexHome, { recursive: true }); fs.mkdirSync(openRouterHome, { recursive: true }); fs.mkdirSync(path.dirname(authority), { recursive: true }); fs.writeFileSync(path.join(codexHome, "config.toml"), 'model_provider = "gateway"\n[model_providers.gateway]\nbase_url = "https://gateway.invalid/v1"\n'); fs.writeFileSync(path.join(openRouterHome, "config.toml"), 'model_provider = "openrouter"\n[model_providers.openrouter]\nbase_url = "https://openrouter.ai/api/v1"\n'); const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never, names = ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy", "OPENAI_BASE_URL", "ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "ULTRAFUZZ_DATA_GOVERNANCE_PATH", "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"], saved = Object.fromEntries(names.map((name) => [name, process.env[name]])); for (const name of names) delete process.env[name]; process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority; process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx"); try { const codexDestination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes }); fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [codexDestination] })); const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project), codex = await new CompatibleCodexAgent({ configDir: codexHome, env: { OPENAI_BASE_URL: "https://gateway.invalid/v1" } }).buildCommand({ prompt: "route", cwd: project, options: {} }); await codex.cleanup?.(); const openRouterDestination = modelDestination("OpenRouterAgent", config, {}); fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [openRouterDestination] })); const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project), openrouter = await new OpenRouterCodexAgent({ configDir: openRouterHome, env: { OPENAI_BASE_URL: "https://openrouter.ai/api/v1" } }).buildCommand({ prompt: "route", cwd: project, options: {} }); await (openrouter.cleanup as (() => Promise<void>) | undefined)?.(); const claudeEnv = { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes, ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_REGION", AWS_REGION: "us-east-1", ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority, ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH }, claudeDestination = modelDestination("ClaudeAgent", config, claudeEnv); fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [claudeDestination] })); assert.doesNotThrow(() => workflowControlChildEnvironment({}, claudeEnv, { agent: "ClaudeAgent" })); assert.throws(() => workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }), /provider route changed/u); assert.equal(codexDestination.startsWith("model:codex-route-"), true); assert.equal(openRouterDestination, "model:openrouter"); assert.equal(claudeDestination.startsWith("model:claude-route-"), true); } finally { for (const name of names) { const value = saved[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; } } });
-
-// prettier-ignore
-test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => { const project = tempProject(); assert.equal(initProject({ projectRoot: project, force: true }).ok, true); const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-quoted-route-")), codexHome = path.join(homes, "codex", "configured"), configPath = path.join(codexHome, "config.toml"), snapshot = path.join(project, "route-snapshot"), authority = path.join(snapshot, "controls/data-governance.json"), names = ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy", "OPENAI_BASE_URL", "ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "ULTRAFUZZ_DATA_GOVERNANCE_PATH", "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"], saved = Object.fromEntries(names.map((name) => [name, process.env[name]])); fs.mkdirSync(codexHome, { recursive: true }); fs.mkdirSync(path.dirname(authority), { recursive: true }); fs.writeFileSync(configPath, '"model_provider" = "gateway"\n["model_providers"."gateway"]\n"base_url" = "https://gateway.invalid/v1"\n'); for (const name of names) delete process.env[name]; process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority; process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx"); try { const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never, destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes }); assert.match(destination, /^model:codex-route-/u); fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] })); const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project), accepted = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({ prompt: "route", cwd: project, options: {} }); await accepted.cleanup?.(); fs.writeFileSync(configPath, '"model_provider" = "drifted"\n["model_providers"."drifted"]\n"base_url" = "https://drifted.invalid/v1"\n'); await assert.rejects(new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({ prompt: "route", cwd: project, options: {} }), /provider route changed/u); } finally { for (const name of names) { const value = saved[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; } } });
+test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-quoted-route-")),
+    codexHome = path.join(homes, "codex", "configured"),
+    configPath = path.join(codexHome, "config.toml"),
+    snapshot = path.join(project, "route-snapshot"),
+    authority = path.join(snapshot, "controls/data-governance.json"),
+    names = [
+      "ALL_PROXY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "OPENAI_BASE_URL",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+    ],
+    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.writeFileSync(
+    configPath,
+    '"model_provider" = "gateway"\n["model_providers"."gateway"]\n"base_url" = "https://gateway.invalid/v1"\n'
+  );
+  for (const name of names) delete process.env[name];
+  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+  try {
+    const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+      destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+    assert.match(destination, /^model:codex-route-/u);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project),
+      accepted = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
+        prompt: "route",
+        cwd: project,
+        options: {}
+      });
+    await accepted.cleanup?.();
+    fs.writeFileSync(
+      configPath,
+      '"model_provider" = "drifted"\n["model_providers"."drifted"]\n"base_url" = "https://drifted.invalid/v1"\n'
+    );
+    await assert.rejects(
+      new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({ prompt: "route", cwd: project, options: {} }),
+      /provider route changed/u
+    );
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 
 test(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
@@ -4391,7 +4675,6 @@ test(
   }
 );
 
-// prettier-ignore
 test(
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
   { skip: !runningUnderBun },
@@ -4401,7 +4684,10 @@ test(
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { CompatibleClaudeCodeAgent, DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
     fs.mkdirSync(path.join(project, ".claude"));
-    fs.writeFileSync(path.join(project, ".claude", "settings.json"), '{"env":{"ANTHROPIC_BASE_URL":"https://target.invalid"}}');
+    fs.writeFileSync(
+      path.join(project, ".claude", "settings.json"),
+      '{"env":{"ANTHROPIC_BASE_URL":"https://target.invalid"}}'
+    );
     fs.writeFileSync(path.join(project, ".claude", "settings.local.json"), '{"permissions":{"allow":["Bash(*)"]}}');
     const agent = new DeepSeekClaudeCodeAgent({
       model: "deepseek-v4-pro",
@@ -4416,8 +4702,18 @@ test(
     assert.equal(command.args.includes("deepseek-v4-pro"), true);
     const claude = new CompatibleClaudeCodeAgent({ permissionMode: "bypassPermissions", settingSources: "project" });
     const claudeCommand = await claude.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
-    assert.deepEqual(command.args.flatMap((value, index) => value === "--setting-sources" ? command.args.slice(index, index + 2) : []), ["--setting-sources", ""]);
-    assert.deepEqual(claudeCommand.args.flatMap((value, index) => value === "--setting-sources" ? claudeCommand.args.slice(index, index + 2) : []), ["--setting-sources", "user"]);
+    assert.deepEqual(
+      command.args.flatMap((value, index) =>
+        value === "--setting-sources" ? command.args.slice(index, index + 2) : []
+      ),
+      ["--setting-sources", ""]
+    );
+    assert.deepEqual(
+      claudeCommand.args.flatMap((value, index) =>
+        value === "--setting-sources" ? claudeCommand.args.slice(index, index + 2) : []
+      ),
+      ["--setting-sources", "user"]
+    );
     for (const args of [command.args, claudeCommand.args]) {
       assert.equal(args.includes("--dangerously-skip-permissions"), true);
     }
@@ -7234,8 +7530,13 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
-    // prettier-ignore
-    env: { ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "claude_code_use_bedrock,AWS_REGION,AWS_SESSION_TOKEN,MAINNET_RPC_URL", CLAUDE_CODE_USE_BEDROCK: "1", AWS_REGION: "us-east-1", AWS_SESSION_TOKEN: "secret", MAINNET_RPC_URL: "https://rpc.invalid" },
+    env: {
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "claude_code_use_bedrock,AWS_REGION,AWS_SESSION_TOKEN,MAINNET_RPC_URL",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_REGION: "us-east-1",
+      AWS_SESSION_TOKEN: "secret",
+      MAINNET_RPC_URL: "https://rpc.invalid"
+    },
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-cloud-nodes",
@@ -7250,10 +7551,21 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     memoryMiB: 16384,
     timeoutSeconds: 1800
   });
-  // prettier-ignore
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY", "CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_SESSION_TOKEN", "MAINNET_RPC_URL", "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"]);
-  // prettier-ignore
-  assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, ["AWS_REGION", "CLAUDE_CODE_USE_BEDROCK", "AWS_SESSION_TOKEN", "MAINNET_RPC_URL", "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"]);
+  assert.deepEqual(discovery.execution.agentCredentialEnv, [
+    "OPENAI_API_KEY",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "AWS_REGION",
+    "AWS_SESSION_TOKEN",
+    "MAINNET_RPC_URL",
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
+  ]);
+  assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
+    "AWS_REGION",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "AWS_SESSION_TOKEN",
+    "MAINNET_RPC_URL",
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
+  ]);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
@@ -9832,8 +10144,23 @@ test("compatibility patcher rewrites every described workaround", async () => {
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
   }
 
-  // prettier-ignore
-  { for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) { const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id); assert.ok(startup); assert.match(startup.patched, /"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u); } const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch"); assert.ok(relaunch); assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su); assert.throws(() => bindSmithersExecutableCapability({}, stockRunner), /delegate controller authority to target code/u); }
+  {
+    for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
+      const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
+      assert.ok(startup);
+      assert.match(
+        startup.patched,
+        /"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u
+      );
+    }
+    const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
+    assert.ok(relaunch);
+    assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
+    assert.throws(
+      () => bindSmithersExecutableCapability({}, stockRunner),
+      /delegate controller authority to target code/u
+    );
+  }
   applySmithersCompatibilityPatches(project);
   for (const { patch, source } of sources) {
     // `patched` is the whole replacement text, so its presence is exactly the
@@ -9844,8 +10171,48 @@ test("compatibility patcher rewrites every described workaround", async () => {
       `${patch.id} is described but was never applied to ${source}`
     );
   }
-  // prettier-ignore
-  { const delegation = sources.find(({ patch }) => patch.id === "local_delegation"); assert.ok(delegation); const target = path.join(project, "hostile-target"), targetRunner = path.join(target, ".smithers", "node_modules", "smthrs", ...SMITHERS_BIN_PATH.split("/")), trustedMarker = path.join(project, "operator-cli-ran"), hostileMarker = path.join(project, "target-cli-ran"), cliRoot = path.join(nodeModules, "@smthrs", "cli"); fs.mkdirSync(path.dirname(targetRunner), { recursive: true }); fs.writeFileSync(path.join(cliRoot, "package.json"), `${JSON.stringify({ name: "@smthrs/cli", version: SMITHERS_VERSION, type: "module", exports: "./index.js" })}\n`, "utf8"); fs.writeFileSync(path.join(cliRoot, "index.js"), `await Bun.write(process.env.ULTRAFUZZ_TRUSTED_MARKER, "trusted");\n`, "utf8"); fs.writeFileSync(path.join(target, ".smithers", "node_modules", "smthrs", "package.json"), `${JSON.stringify({ name: "smthrs", version: SMITHERS_VERSION, type: "module", bin: { smithers: SMITHERS_BIN_PATH } })}\n`, "utf8"); fs.writeFileSync(targetRunner, `await Bun.write(process.env.ULTRAFUZZ_HOSTILE_MARKER, "hostile");\n`, "utf8"); execFileSync("bun", [`--config=${process.platform === "win32" ? "NUL" : "/dev/null"}`, "--no-env-file", "--no-install", delegation.source, "inspect"], { cwd: target, env: { ...process.env, ULTRAFUZZ_TRUSTED_MARKER: trustedMarker, ULTRAFUZZ_HOSTILE_MARKER: hostileMarker } }); assert.equal(fs.existsSync(trustedMarker), true); assert.equal(fs.existsSync(hostileMarker), false); }
+  {
+    const delegation = sources.find(({ patch }) => patch.id === "local_delegation");
+    assert.ok(delegation);
+    const target = path.join(project, "hostile-target"),
+      targetRunner = path.join(target, ".smithers", "node_modules", "smthrs", ...SMITHERS_BIN_PATH.split("/")),
+      trustedMarker = path.join(project, "operator-cli-ran"),
+      hostileMarker = path.join(project, "target-cli-ran"),
+      cliRoot = path.join(nodeModules, "@smthrs", "cli");
+    fs.mkdirSync(path.dirname(targetRunner), { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRoot, "package.json"),
+      `${JSON.stringify({ name: "@smthrs/cli", version: SMITHERS_VERSION, type: "module", exports: "./index.js" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(cliRoot, "index.js"),
+      `await Bun.write(process.env.ULTRAFUZZ_TRUSTED_MARKER, "trusted");\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(target, ".smithers", "node_modules", "smthrs", "package.json"),
+      `${JSON.stringify({ name: "smthrs", version: SMITHERS_VERSION, type: "module", bin: { smithers: SMITHERS_BIN_PATH } })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(targetRunner, `await Bun.write(process.env.ULTRAFUZZ_HOSTILE_MARKER, "hostile");\n`, "utf8");
+    execFileSync(
+      "bun",
+      [
+        `--config=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+        "--no-env-file",
+        "--no-install",
+        delegation.source,
+        "inspect"
+      ],
+      {
+        cwd: target,
+        env: { ...process.env, ULTRAFUZZ_TRUSTED_MARKER: trustedMarker, ULTRAFUZZ_HOSTILE_MARKER: hostileMarker }
+      }
+    );
+    assert.equal(fs.existsSync(trustedMarker), true);
+    assert.equal(fs.existsSync(hostileMarker), false);
+  }
 });
 
 test(
@@ -10130,14 +10497,28 @@ test(
     const ignoredResumeResultPath = path.join(coordinationRoot, "resume-ignored.json");
     const goPath = path.join(coordinationRoot, "go");
     const replacementPath = path.join(coordinationRoot, "replacement.txt");
-    // prettier-ignore
-    const ambientName = `ufz-ambient-${path.basename(root)}`, ambientRoot = path.join(os.tmpdir(), "node_modules", ambientName), ambientMarker = path.join(coordinationRoot, "ambient-ran");
+    const ambientName = `ufz-ambient-${path.basename(root)}`,
+      ambientRoot = path.join(os.tmpdir(), "node_modules", ambientName),
+      ambientMarker = path.join(coordinationRoot, "ambient-ran");
     fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(workflowPath, "sealed-workflow\n", "utf8");
     fs.writeFileSync(configPath, "sealed-config\n", "utf8");
-    // prettier-ignore
-    { fs.writeFileSync(path.join(root, "tsconfig.json"), "{}\n", "utf8"); fs.writeFileSync(path.join(root, "controls", "bunfig.toml"), "\n", "utf8"); fs.writeFileSync(path.join(root, "controls", "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8"); fs.writeFileSync(path.join(root, "sealed-relative.mjs"), 'export default "sealed-relative";\n', "utf8"); fs.mkdirSync(ambientRoot, { recursive: true }); fs.writeFileSync(path.join(ambientRoot, "package.json"), `${JSON.stringify({ name: ambientName, type: "module", exports: "./index.js" })}\n`); fs.writeFileSync(path.join(ambientRoot, "index.js"), `await Bun.write(${JSON.stringify(ambientMarker)}, "hostile");\n`); }
+    {
+      fs.writeFileSync(path.join(root, "tsconfig.json"), "{}\n", "utf8");
+      fs.writeFileSync(path.join(root, "controls", "bunfig.toml"), "\n", "utf8");
+      fs.writeFileSync(path.join(root, "controls", "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
+      fs.writeFileSync(path.join(root, "sealed-relative.mjs"), 'export default "sealed-relative";\n', "utf8");
+      fs.mkdirSync(ambientRoot, { recursive: true });
+      fs.writeFileSync(
+        path.join(ambientRoot, "package.json"),
+        `${JSON.stringify({ name: ambientName, type: "module", exports: "./index.js" })}\n`
+      );
+      fs.writeFileSync(
+        path.join(ambientRoot, "index.js"),
+        `await Bun.write(${JSON.stringify(ambientMarker)}, "hostile");\n`
+      );
+    }
     fs.writeFileSync(replacementPath, "regular-file-replacement\n", "utf8");
     fs.writeFileSync(
       scriptPath,
@@ -10396,8 +10777,22 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       assert.equal(anchoredProbe.status, 0, anchoredProbe.stderr);
       assertInheritedSnapshotEvidence(JSON.parse(anchoredProbe.stdout) as TransferEvidence);
 
-      // prettier-ignore
-      const launcher = spawnSync("bun", [`--config=${path.join(controllerRoot, "controls", "bunfig.toml")}`, "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", `--preload=${path.join(controllerRoot, "controls", "bun-module-confinement.js")}`, path.join(controllerRoot, path.basename(scriptPath)), "launcher", controllerWorkflowPath], { cwd: root, encoding: "utf8", timeout: 10_000, env: fixtureEnvironment });
+      const launcher = spawnSync(
+        "bun",
+        [
+          `--config=${path.join(controllerRoot, "controls", "bunfig.toml")}`,
+          "--no-env-file",
+          "--no-install",
+          "--no-addons",
+          "--preserve-symlinks",
+          "--preserve-symlinks-main",
+          `--preload=${path.join(controllerRoot, "controls", "bun-module-confinement.js")}`,
+          path.join(controllerRoot, path.basename(scriptPath)),
+          "launcher",
+          controllerWorkflowPath
+        ],
+        { cwd: root, encoding: "utf8", timeout: 10_000, env: fixtureEnvironment }
+      );
       assert.equal(launcher.status, 0, launcher.stderr);
       const launcherEvidence = readTransferEvidence(launcherRecordPath);
       assertProcessOwnedSnapshotEvidence(launcherEvidence);
@@ -10514,8 +10909,11 @@ function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
   assert.equal(evidence.autopsy_suppressed, "0");
 }
 
-// prettier-ignore
-function assertInheritedSnapshotEvidence(evidence: TransferEvidence): void { assertProcessOwnedSnapshotEvidence(evidence); assert.equal(evidence.process_descriptor, 3); assert.equal(evidence.source_root, "/proc/self/fd/3"); }
+function assertInheritedSnapshotEvidence(evidence: TransferEvidence): void {
+  assertProcessOwnedSnapshotEvidence(evidence);
+  assert.equal(evidence.process_descriptor, 3);
+  assert.equal(evidence.source_root, "/proc/self/fd/3");
+}
 
 function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys: string[]): void {
   if (evidence.pid !== undefined) pids.add(evidence.pid);
@@ -10734,13 +11132,24 @@ test("startRun rejects an explicitly selected project-local package-manager entr
   assert.equal(fs.existsSync(logPath), false);
 });
 
-// prettier-ignore
 test("startRun installs, seals, and revalidates operator-owned Smithers", async (t) => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const injectedName = `ufz-parent-${path.basename(project)}`, injectedRoot = path.join(os.tmpdir(), "node_modules", injectedName), injectedMarker = path.join(injectedRoot, "executed"); fs.mkdirSync(injectedRoot, { recursive: true }); fs.writeFileSync(path.join(injectedRoot, "package.json"), `${JSON.stringify({ name: injectedName, version: "1.0.0", main: "index.js" })}\n`); fs.writeFileSync(path.join(injectedRoot, "index.js"), `require("node:fs").writeFileSync(${JSON.stringify(injectedMarker)}, "executed");\n`); t.after(() => fs.rmSync(injectedRoot, { recursive: true, force: true }));
+  const injectedName = `ufz-parent-${path.basename(project)}`,
+    injectedRoot = path.join(os.tmpdir(), "node_modules", injectedName),
+    injectedMarker = path.join(injectedRoot, "executed");
+  fs.mkdirSync(injectedRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(injectedRoot, "package.json"),
+    `${JSON.stringify({ name: injectedName, version: "1.0.0", main: "index.js" })}\n`
+  );
+  fs.writeFileSync(
+    path.join(injectedRoot, "index.js"),
+    `require("node:fs").writeFileSync(${JSON.stringify(injectedMarker)}, "executed");\n`
+  );
+  t.after(() => fs.rmSync(injectedRoot, { recursive: true, force: true }));
   const installer = writeFakeNpmInstaller(project, { count: 0, stderr: [], imported: injectedName });
 
   const run = await startRun({
@@ -10760,12 +11169,43 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").includes(project), false);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
   assert.equal(fs.existsSync(injectedMarker), false);
-  { const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }), missing = await startRun({ projectRoot: project, runId: "controller-parent-required", env: { ULTRAFUZZ_TRUSTED_BIN: requiredInstaller.binDir, SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath } }); assert.equal(missing.ok, false); assert.match(JSON.stringify(missing.diagnostics), /dependency is unavailable/u); }
-  { const packageRoot = fs.readFileSync(installer.npmLogPath, "utf8").match(/--prefix (\S+)/u)?.[1]; assert.ok(packageRoot); fs.appendFileSync(path.join(packageRoot, "node_modules", "smthrs", "index.js"), "// hostile\n"); const tampered = await startRun({ projectRoot: project, runId: "controller-cache-tamper", env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath } }); assert.equal(tampered.ok, false); assert.match(JSON.stringify(tampered.diagnostics), /operator controller changed after installation/u); }
+  {
+    const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
+      missing = await startRun({
+        projectRoot: project,
+        runId: "controller-parent-required",
+        env: { ULTRAFUZZ_TRUSTED_BIN: requiredInstaller.binDir, SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
+      });
+    assert.equal(missing.ok, false);
+    assert.match(JSON.stringify(missing.diagnostics), /dependency is unavailable/u);
+  }
+  {
+    const packageRoot = fs.readFileSync(installer.npmLogPath, "utf8").match(/--prefix (\S+)/u)?.[1];
+    assert.ok(packageRoot);
+    fs.appendFileSync(path.join(packageRoot, "node_modules", "smthrs", "index.js"), "// hostile\n");
+    const tampered = await startRun({
+      projectRoot: project,
+      runId: "controller-cache-tamper",
+      env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+    });
+    assert.equal(tampered.ok, false);
+    assert.match(JSON.stringify(tampered.diagnostics), /operator controller changed after installation/u);
+  }
 });
 
-// prettier-ignore
-test("operator controller locks require a canonical 64-byte SHA-512 integrity", async () => { const project = tempProject(); initProject({ projectRoot: project, force: true }); writeSmallTopology(project); const installer = writeFakeNpmInstaller(project, { count: 0, stderr: [], integrity: "sha512-A" }); const run = await startRun({ projectRoot: project, runId: "short-controller-integrity", env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath } }); assert.equal(run.ok, false); assert.match(JSON.stringify(run.diagnostics), /not registry-integrity bound/u); });
+test("operator controller locks require a canonical 64-byte SHA-512 integrity", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const installer = writeFakeNpmInstaller(project, { count: 0, stderr: [], integrity: "sha512-A" });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "short-controller-integrity",
+    env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+  });
+  assert.equal(run.ok, false);
+  assert.match(JSON.stringify(run.diagnostics), /not registry-integrity bound/u);
+});
 
 // R54 died 90 seconds in, before its first task node: npm resolved a transitive
 // dependency to a version published two minutes earlier and 404ed on the tarball,
@@ -15751,8 +16191,10 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   const installer = writeFakeNpmInstaller(project);
   const npmFixture = path.join(installer.binDir, "npm");
   fs.chmodSync(npmFixture, 0o700);
-  // prettier-ignore
-  fs.appendFileSync(npmFixture, `\nfs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nif [ "$1" = "inspect" ]; then printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}\'; exit 4; fi\nif [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then : > "$SMITHERS_FAKE_MARKER"; exit 42; fi\nprintf \'%s\\n\' \'{"ok":true}\'\n')});\n`);
+  fs.appendFileSync(
+    npmFixture,
+    `\nfs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nif [ "$1" = "inspect" ]; then printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}\'; exit 4; fi\nif [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then : > "$SMITHERS_FAKE_MARKER"; exit 42; fi\nprintf \'%s\\n\' \'{"ok":true}\'\n')});\n`
+  );
   fs.chmodSync(npmFixture, 0o500);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(

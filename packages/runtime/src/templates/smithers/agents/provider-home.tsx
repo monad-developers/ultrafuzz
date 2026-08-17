@@ -1,1 +1,64 @@
-import { lstatSync, mkdirSync, realpathSync } from "node:fs"; import os from "node:os"; import path from "node:path"; const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u, CANONICAL_HOMES: Readonly<Record<string, { env: readonly string[]; relative: string }>> = { claude: { env: ["CLAUDE_CONFIG_DIR"], relative: ".claude" }, codex: { env: ["CODEX_HOME"], relative: ".codex" }, kimi: { env: ["KIMI_CODE_HOME", "KIMI_SHARE_DIR"], relative: ".kimi-code" } }; export function resolveProviderHome(provider: string, configured?: string): string { const selectedRoot = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(); if (configured === undefined && !selectedRoot) { const canonical = CANONICAL_HOMES[provider]; if (canonical !== undefined) { const envHome = canonical.env.map((name) => process.env[name]?.trim()).find(Boolean); return prepareProviderHome(envHome ?? path.join(os.homedir(), canonical.relative)); } } const relative = configured ?? "", components = configured === undefined ? [] : relative.split("/"); if (configured !== undefined && (relative.length === 0 || relative.length > 1024 || path.isAbsolute(relative) || relative.includes("\\") || components.some((component) => component === "." || component === ".." || !SAFE_COMPONENT.test(component)))) throw new Error("agent config_dir must be a safe relative path beneath the Ultrafuzz provider-home root"); const root = selectedRoot || defaultProviderRoot(); if (!path.isAbsolute(root)) throw new Error("ULTRAFUZZ_PROVIDER_HOME_ROOT must be an absolute operator-owned path"); return prepareProviderHome(path.join(prepareProviderHome(root), provider, ...components)); } function prepareProviderHome(candidate: string): string { if (!path.isAbsolute(candidate)) throw new Error("operator-owned provider-home paths must be absolute"); const lexical = path.resolve(candidate); let current = path.parse(lexical).root; for (const component of lexical.slice(current.length).split(path.sep).filter(Boolean)) { current = path.join(current, component); try { assertSafeDirectory(current); } catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; mkdirSync(current, { mode: 0o700 }); assertSafeDirectory(current, false); } } if (realpathSync(lexical) !== lexical) throw new Error("operator-owned provider home cannot cross symbolic links"); const final = lstatSync(lexical); if ((final.mode & 0o777) !== 0o700 || (typeof process.getuid === "function" && final.uid !== process.getuid())) throw new Error("provider homes must be operator-owned with private 0700 permissions"); return lexical; } function assertSafeDirectory(candidate: string, checkPermissions = true): void { const stat = lstatSync(candidate); if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("unsafe provider-home component"); if (checkPermissions && (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) throw new Error("provider-home ancestors cannot be group/world writable"); } const defaultProviderRoot = (): string => path.join(process.env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state"), "ultrafuzz/provider-homes");
+import { lstatSync, mkdirSync, realpathSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
+  CANONICAL_HOMES: Readonly<Record<string, { env: readonly string[]; relative: string }>> = {
+    claude: { env: ["CLAUDE_CONFIG_DIR"], relative: ".claude" },
+    codex: { env: ["CODEX_HOME"], relative: ".codex" },
+    kimi: { env: ["KIMI_CODE_HOME", "KIMI_SHARE_DIR"], relative: ".kimi-code" }
+  };
+export function resolveProviderHome(provider: string, configured?: string): string {
+  const selectedRoot = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim();
+  if (configured === undefined && !selectedRoot) {
+    const canonical = CANONICAL_HOMES[provider];
+    if (canonical !== undefined) {
+      const envHome = canonical.env.map((name) => process.env[name]?.trim()).find(Boolean);
+      return prepareProviderHome(envHome ?? path.join(os.homedir(), canonical.relative));
+    }
+  }
+  const relative = configured ?? "",
+    components = configured === undefined ? [] : relative.split("/");
+  if (
+    configured !== undefined &&
+    (relative.length === 0 ||
+      relative.length > 1024 ||
+      path.isAbsolute(relative) ||
+      relative.includes("\\") ||
+      components.some((component) => component === "." || component === ".." || !SAFE_COMPONENT.test(component)))
+  )
+    throw new Error("agent config_dir must be a safe relative path beneath the Ultrafuzz provider-home root");
+  const root = selectedRoot || defaultProviderRoot();
+  if (!path.isAbsolute(root)) throw new Error("ULTRAFUZZ_PROVIDER_HOME_ROOT must be an absolute operator-owned path");
+  return prepareProviderHome(path.join(prepareProviderHome(root), provider, ...components));
+}
+function prepareProviderHome(candidate: string): string {
+  if (!path.isAbsolute(candidate)) throw new Error("operator-owned provider-home paths must be absolute");
+  const lexical = path.resolve(candidate);
+  let current = path.parse(lexical).root;
+  for (const component of lexical.slice(current.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    try {
+      assertSafeDirectory(current);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      mkdirSync(current, { mode: 0o700 });
+      assertSafeDirectory(current, false);
+    }
+  }
+  if (realpathSync(lexical) !== lexical) throw new Error("operator-owned provider home cannot cross symbolic links");
+  const final = lstatSync(lexical);
+  if ((final.mode & 0o777) !== 0o700 || (typeof process.getuid === "function" && final.uid !== process.getuid()))
+    throw new Error("provider homes must be operator-owned with private 0700 permissions");
+  return lexical;
+}
+function assertSafeDirectory(candidate: string, checkPermissions = true): void {
+  const stat = lstatSync(candidate);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("unsafe provider-home component");
+  if (checkPermissions && (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0)
+    throw new Error("provider-home ancestors cannot be group/world writable");
+}
+const defaultProviderRoot = (): string =>
+  path.join(
+    process.env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state"),
+    "ultrafuzz/provider-homes"
+  );

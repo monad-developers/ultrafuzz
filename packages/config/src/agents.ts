@@ -34,8 +34,15 @@ const agentConfigsSchema = z.partialRecord(agentIdSchema, agentConfigSchema);
 
 export function validateAgentConfigs(agents: Record<string, AgentConfig>): ConfigDiagnostic[] {
   const unsupported = Object.keys(agents).filter((agent) => !(STOCK_AGENT_IDS as readonly string[]).includes(agent));
-  // prettier-ignore
-  if (unsupported.length > 0) return unsupported.map((agent) => diagnostic("CONFIG_AGENT_ID_INVALID", `agent config id \`${agent}\` must name a packaged stock agent`, ["agents", agent], "validation"));
+  if (unsupported.length > 0)
+    return unsupported.map((agent) =>
+      diagnostic(
+        "CONFIG_AGENT_ID_INVALID",
+        `agent config id \`${agent}\` must name a packaged stock agent`,
+        ["agents", agent],
+        "validation"
+      )
+    );
   const parsed = agentConfigsSchema.safeParse(agents);
   if (parsed.success) {
     return validateProviderAgentConfigs(parsed.data);
@@ -123,8 +130,19 @@ function agentConfigDiagnosticMessage(code: string, issue: ZodIssue): string {
   }
 }
 
-// prettier-ignore
-function safeProviderHomeRelativePath(value: string): boolean { if (value.length === 0 || value.length > 1024 || value.trim() !== value || value.includes("\\") || value.startsWith("/")) return false; return value.split("/").every((component) => component !== "." && component !== ".." && PROVIDER_HOME_COMPONENT_PATTERN.test(component)); }
+function safeProviderHomeRelativePath(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 1024 ||
+    value.trim() !== value ||
+    value.includes("\\") ||
+    value.startsWith("/")
+  )
+    return false;
+  return value
+    .split("/")
+    .every((component) => component !== "." && component !== ".." && PROVIDER_HOME_COMPONENT_PATTERN.test(component));
+}
 
 function agentConfigPath(issue: ZodIssue): string[] {
   if (issue.code === "invalid_key") {

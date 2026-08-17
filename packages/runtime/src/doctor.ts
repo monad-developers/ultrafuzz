@@ -157,12 +157,20 @@ export async function diagnoseProject(input: DoctorInput) {
 
   const engineCheck = workflowEngineCheck(installation);
   const observedEngineStatus = engineCheck.check.status;
-  // prettier-ignore
-  checks.push({ ...engineCheck.check, status: "unknown" as const, summary: "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch" });
+  checks.push({
+    ...engineCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
+  });
 
   const patchCheck = compatibilityPatchCheck(installation);
-  // prettier-ignore
-  checks.push({ ...patchCheck.check, status: "unknown" as const, summary: "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch" });
+  checks.push({
+    ...patchCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
+  });
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);

@@ -92,8 +92,15 @@ function canonicalRunPlan(): RunPlanDocument {
       overridden_settings: [],
       topology_overridden: false
     },
-    // prettier-ignore
-    data_governance: { schema_version: "ultrafuzz.data-governance-provenance.v1", path: "data-governance.json", sha256: DIGEST_A, policy_digest: DIGEST_B, input_digest: DIGEST_A, sensitivity: "private", acknowledgement_status: "approved" },
+    data_governance: {
+      schema_version: "ultrafuzz.data-governance-provenance.v1",
+      path: "data-governance.json",
+      sha256: DIGEST_A,
+      policy_digest: DIGEST_B,
+      input_digest: DIGEST_A,
+      sensitivity: "private",
+      acknowledgement_status: "approved"
+    },
     rendered_prompts: [
       {
         node_id: "node-a-0",

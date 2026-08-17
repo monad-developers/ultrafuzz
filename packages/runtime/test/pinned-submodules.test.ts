@@ -563,8 +563,12 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, plan.value!.layout);
-  // prettier-ignore
-  assert.deepEqual(verifiedControl.executionFiles.filter((file) => file.snapshotPath.startsWith("controls/bun")).map((file) => file.snapshotPath), ["controls/bun-module-confinement.js", "controls/bunfig.toml"]);
+  assert.deepEqual(
+    verifiedControl.executionFiles
+      .filter((file) => file.snapshotPath.startsWith("controls/bun"))
+      .map((file) => file.snapshotPath),
+    ["controls/bun-module-confinement.js", "controls/bunfig.toml"]
+  );
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,

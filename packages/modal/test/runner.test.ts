@@ -1249,8 +1249,31 @@ model = "k3"
 }
 
 function privateBenchmarkConfig() {
-  // prettier-ignore
-  return parseModalBenchmarkConfig({ schema_version: "ultrafuzz.modal.benchmark.v2", run_id: "immutable-run", app_name: "ultrafuzz-evals", image_name: "ultrafuzz-security-runner:latest", target: { repo: "https://github.com/example/target", ref: "main" }, ground_truth: { repo: "https://github.com/example/ground-truth", ref: "main", file: "findings.yml", format: "ultrafuzz" }, braintrust: { project: "termination-test", api_key_env: "BRAINTRUST_API_KEY", judge_api_key_env: "OPENAI_API_KEY", judge_url: "https://api.openai.com/v1/chat/completions", judge_credential_ttl_seconds: 57_600 }, node_timeout_seconds: 7_200, loops: 3, models: [MODEL], benchmark_execution: { excluded_node_ids: [] }, eval_reporting: { provider: "braintrust" } });
+  return parseModalBenchmarkConfig({
+    schema_version: "ultrafuzz.modal.benchmark.v2",
+    run_id: "immutable-run",
+    app_name: "ultrafuzz-evals",
+    image_name: "ultrafuzz-security-runner:latest",
+    target: { repo: "https://github.com/example/target", ref: "main" },
+    ground_truth: {
+      repo: "https://github.com/example/ground-truth",
+      ref: "main",
+      file: "findings.yml",
+      format: "ultrafuzz"
+    },
+    braintrust: {
+      project: "termination-test",
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_api_key_env: "OPENAI_API_KEY",
+      judge_url: "https://api.openai.com/v1/chat/completions",
+      judge_credential_ttl_seconds: 57_600
+    },
+    node_timeout_seconds: 7_200,
+    loops: 3,
+    models: [MODEL],
+    benchmark_execution: { excluded_node_ids: [] },
+    eval_reporting: { provider: "braintrust" }
+  });
 }
 
 function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundleLineage>[0] {

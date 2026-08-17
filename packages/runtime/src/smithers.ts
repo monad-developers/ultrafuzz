@@ -108,14 +108,16 @@ const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
-// prettier-ignore
-interface OperatorControllerProject { root: string; seal: string }
+interface OperatorControllerProject {
+  root: string;
+  seal: string;
+}
 
 const operatorControllerProjects = new Map<string, Promise<OperatorControllerProject>>(),
   operatorControllerRoots = new Set<string>();
 let operatorControllerCleanupRegistered = false;
-// prettier-ignore
-const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {", SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
+const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {",
+  SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
 const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        child = spawn("bun", [cliPath, ...childArgs], {
           detached: true,
           stdio: ["ignore", fd, fd],
@@ -274,9 +276,7 @@ const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resol
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
   "process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));";
-// prettier-ignore
 const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
-// prettier-ignore
 const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
 const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
@@ -821,8 +821,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
     upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
   },
-  // prettier-ignore
-  { id: "manifest_relaunch", packageName: "@smthrs/cli", sourceRelativePath: "src/index.js", patchable: SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE, patched: SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH, upstreamAbsent: ["relaunchSnapshotTransfer"] },
+  {
+    id: "manifest_relaunch",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE,
+    patched: SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH,
+    upstreamAbsent: ["relaunchSnapshotTransfer"]
+  },
   {
     id: "post_failure_workflow_path",
     packageName: "@smthrs/cli",
@@ -1329,8 +1335,12 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     "workflow config fingerprint input"
   );
   writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
-  // prettier-ignore
-  writePreparedWorkflowFile(input.runLayout.root, executionConfigPath, serializeResolvedConfigToml(input.config), "reviewed workflow execution config");
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    executionConfigPath,
+    serializeResolvedConfigToml(input.config),
+    "reviewed workflow execution config"
+  );
   const taskManifest: SmithersTaskManifestDocument = {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
@@ -1407,8 +1417,11 @@ export async function smithersExecutionControlFiles(
   const dependencyProjectRoot = useExternalRunnerForExecutionClosure
     ? compiled.projectRoot
     : await operatorControllerProjectRoot(compiled.projectRoot, env);
-  // prettier-ignore
-  (() => { const candidate = path.join(layout.root, "smithers", "execution-tsconfig.json"); writeFileDurable(candidate, "{}\n"); add(candidate, "tsconfig.json"); })();
+  (() => {
+    const candidate = path.join(layout.root, "smithers", "execution-tsconfig.json");
+    writeFileDurable(candidate, "{}\n");
+    add(candidate, "tsconfig.json");
+  })();
 
   for (const file of pinnedSubmoduleExecutionFiles(compiled.projectRoot, compiled.pinnedSubmodules)) {
     add(file.sourcePath, file.snapshotPath);
@@ -1417,8 +1430,13 @@ export async function smithersExecutionControlFiles(
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
   const plan = readRunPlanDocument(planPath, layout.runId);
-  // prettier-ignore
-  const governancePath = (() => { const candidate = path.join(layout.root, plan.data_governance.path), bytes = readRegularFileSnapshot(candidate, 1024 * 1024); if (sha256Bytes(bytes) !== plan.data_governance.sha256) throw new Error("campaign data-governance provenance does not match the immutable run plan"); return candidate; })();
+  const governancePath = (() => {
+    const candidate = path.join(layout.root, plan.data_governance.path),
+      bytes = readRegularFileSnapshot(candidate, 1024 * 1024);
+    if (sha256Bytes(bytes) !== plan.data_governance.sha256)
+      throw new Error("campaign data-governance provenance does not match the immutable run plan");
+    return candidate;
+  })();
   add(governancePath, `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
   const plannedPrompts = new Map<string, Record<string, unknown>>();
   for (const value of plan.rendered_prompts) {
@@ -1518,8 +1536,21 @@ export async function smithersExecutionControlFiles(
   );
 }
 
-// prettier-ignore
-export function assertSealedDataGovernance(executionFiles: readonly { snapshotPath: string; contents: Buffer }[], expected: RunDataGovernanceReference, runId: string): void { const planFile = executionFiles.find((file) => file.snapshotPath === "controls/plan.json"), governanceFile = executionFiles.find((file) => file.snapshotPath === `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`); if (planFile === undefined || governanceFile === undefined) throw new Error("sealed data governance is incomplete"); const plan = assertRunPlanDocument(parseStrictJsonBytes(planFile.contents), runId); if (JSON.stringify(plan.data_governance) !== JSON.stringify(expected) || sha256Bytes(governanceFile.contents) !== expected.sha256) throw new Error("sealed data governance differs from the authenticated launch decision"); }
+export function assertSealedDataGovernance(
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
+  expected: RunDataGovernanceReference,
+  runId: string
+): void {
+  const planFile = executionFiles.find((file) => file.snapshotPath === "controls/plan.json"),
+    governanceFile = executionFiles.find((file) => file.snapshotPath === `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
+  if (planFile === undefined || governanceFile === undefined) throw new Error("sealed data governance is incomplete");
+  const plan = assertRunPlanDocument(parseStrictJsonBytes(planFile.contents), runId);
+  if (
+    JSON.stringify(plan.data_governance) !== JSON.stringify(expected) ||
+    sha256Bytes(governanceFile.contents) !== expected.sha256
+  )
+    throw new Error("sealed data governance differs from the authenticated launch decision");
+}
 
 interface WorkflowPackageManifest {
   name?: string;
@@ -1594,10 +1625,17 @@ function collectWorkflowExecutionDependencies(input: {
         dependencies[dependency.name] = module.id;
         continue;
       }
-      // prettier-ignore
-      const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name, issuer.id === "root" || isPathInside(path.join(smithersRoot, "node_modules"), issuer.root) ? smithersRoot : undefined);
-      // prettier-ignore
-      if (dependencyRoot === undefined) { if (dependency.optional) continue; throw new Error(`workflow dependency is unavailable for snapshot: ${issuer.id} -> ${dependency.name}`); }
+      const dependencyRoot = resolveWorkflowPackageDependency(
+        issuer.root,
+        dependency.name,
+        issuer.id === "root" || isPathInside(path.join(smithersRoot, "node_modules"), issuer.root)
+          ? smithersRoot
+          : undefined
+      );
+      if (dependencyRoot === undefined) {
+        if (dependency.optional) continue;
+        throw new Error(`workflow dependency is unavailable for snapshot: ${issuer.id} -> ${dependency.name}`);
+      }
       const internalTarget = input.modules.find((candidate) => candidate.root === dependencyRoot);
       if (internalTarget !== undefined) {
         dependencies[dependency.name] = internalTarget.id;
@@ -3399,30 +3437,153 @@ async function ensureSmithersDependencies(
 // permanently unpatchable tree fails fast instead of reinstalling on every command.
 const repairedSmithersInstalls = new Set<string>();
 
-// prettier-ignore
-async function operatorControllerProjectRoot(targetRoot: string, env: Record<string, string | undefined> | undefined, control: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<string> {
-  const npmCli = trustedOperatorNpmCli(targetRoot, env); let project = operatorControllerProjects.get(npmCli); const fresh = project === undefined; if (project === undefined) { project = (async () => { const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-controller-")); registerOperatorControllerRoot(root); try { const timeoutMs = Math.min(control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS, SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS), packageRoot = path.join(root, ".smithers"); fs.mkdirSync(packageRoot, { mode: 0o700 }); writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson()); await ensureSmithersDependencies(root, env, { signal: control.signal, timeoutMs, requirePinnedRunner: true, packageLock: true, npmCli }); return { root, seal: operatorControllerProjectSeal(root) }; } catch (error) { disposeOperatorControllerRoot(root); throw error; } })(); operatorControllerProjects.set(npmCli, project); } let resolved: OperatorControllerProject | undefined; try { resolved = await project; if (!fresh && operatorControllerProjectSeal(resolved.root) !== resolved.seal) throw new Error("operator controller changed after installation"); return resolved.root; } catch (error) { if (operatorControllerProjects.get(npmCli) === project) operatorControllerProjects.delete(npmCli); if (resolved !== undefined) disposeOperatorControllerRoot(resolved.root); throw error; }
+async function operatorControllerProjectRoot(
+  targetRoot: string,
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number } = {}
+): Promise<string> {
+  const npmCli = trustedOperatorNpmCli(targetRoot, env);
+  let project = operatorControllerProjects.get(npmCli);
+  const fresh = project === undefined;
+  if (project === undefined) {
+    project = (async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-controller-"));
+      registerOperatorControllerRoot(root);
+      try {
+        const timeoutMs = Math.min(
+            control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
+            SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
+          ),
+          packageRoot = path.join(root, ".smithers");
+        fs.mkdirSync(packageRoot, { mode: 0o700 });
+        writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson());
+        await ensureSmithersDependencies(root, env, {
+          signal: control.signal,
+          timeoutMs,
+          requirePinnedRunner: true,
+          packageLock: true,
+          npmCli
+        });
+        return { root, seal: operatorControllerProjectSeal(root) };
+      } catch (error) {
+        disposeOperatorControllerRoot(root);
+        throw error;
+      }
+    })();
+    operatorControllerProjects.set(npmCli, project);
+  }
+  let resolved: OperatorControllerProject | undefined;
+  try {
+    resolved = await project;
+    if (!fresh && operatorControllerProjectSeal(resolved.root) !== resolved.seal)
+      throw new Error("operator controller changed after installation");
+    return resolved.root;
+  } catch (error) {
+    if (operatorControllerProjects.get(npmCli) === project) operatorControllerProjects.delete(npmCli);
+    if (resolved !== undefined) disposeOperatorControllerRoot(resolved.root);
+    throw error;
+  }
 }
 
-// prettier-ignore
 function operatorControllerProjectSeal(projectRoot: string): string {
-  const files = new Map<string, string>(); collectWorkflowExecutionDependencies({ projectRoot, modules: [], externalRunner: false, add: (sourcePath, snapshotPath) => { if (files.has(snapshotPath)) throw new Error(`operator controller has a duplicate path: ${snapshotPath}`); files.set(snapshotPath, fs.realpathSync(sourcePath)); } }); const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v1\0"); for (const [snapshotPath, sourcePath] of [...files].sort(([left], [right]) => compareWorkflowExecutionStrings(left, right))) { const stat = fs.lstatSync(sourcePath, { bigint: true }); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("operator controller contains a non-regular file"); hash.update(snapshotPath).update("\0").update(`${stat.dev}:${stat.ino}:${stat.mode}:${stat.nlink}:${stat.size}\0`).update(fs.readFileSync(sourcePath)); } return hash.digest("hex");
+  const files = new Map<string, string>();
+  collectWorkflowExecutionDependencies({
+    projectRoot,
+    modules: [],
+    externalRunner: false,
+    add: (sourcePath, snapshotPath) => {
+      if (files.has(snapshotPath)) throw new Error(`operator controller has a duplicate path: ${snapshotPath}`);
+      files.set(snapshotPath, fs.realpathSync(sourcePath));
+    }
+  });
+  const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v1\0");
+  for (const [snapshotPath, sourcePath] of [...files].sort(([left], [right]) =>
+    compareWorkflowExecutionStrings(left, right)
+  )) {
+    const stat = fs.lstatSync(sourcePath, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("operator controller contains a non-regular file");
+    hash
+      .update(snapshotPath)
+      .update("\0")
+      .update(`${stat.dev}:${stat.ino}:${stat.mode}:${stat.nlink}:${stat.size}\0`)
+      .update(fs.readFileSync(sourcePath));
+  }
+  return hash.digest("hex");
 }
 
-// prettier-ignore
-function registerOperatorControllerRoot(root: string): void { operatorControllerRoots.add(root); if (operatorControllerCleanupRegistered) return; operatorControllerCleanupRegistered = true; process.once("exit", () => { for (const candidate of operatorControllerRoots) { try { fs.rmSync(candidate, { recursive: true, force: true }); } catch { continue; } } operatorControllerRoots.clear(); }); }
+function registerOperatorControllerRoot(root: string): void {
+  operatorControllerRoots.add(root);
+  if (operatorControllerCleanupRegistered) return;
+  operatorControllerCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const candidate of operatorControllerRoots) {
+      try {
+        fs.rmSync(candidate, { recursive: true, force: true });
+      } catch {
+        continue;
+      }
+    }
+    operatorControllerRoots.clear();
+  });
+}
 
-// prettier-ignore
-function disposeOperatorControllerRoot(root: string): void { operatorControllerRoots.delete(root); fs.rmSync(root, { recursive: true, force: true }); }
+function disposeOperatorControllerRoot(root: string): void {
+  operatorControllerRoots.delete(root);
+  fs.rmSync(root, { recursive: true, force: true });
+}
 
-// prettier-ignore
 function trustedOperatorNpmCli(targetRoot: string, env: Record<string, string | undefined> | undefined): string {
-  const trustedBin = env?.[ULTRAFUZZ_TRUSTED_BIN_ENV] ?? process.env[ULTRAFUZZ_TRUSTED_BIN_ENV]; if (trustedBin !== undefined && !path.isAbsolute(trustedBin)) throw new Error("operator trusted-bin path must be absolute"); const launcher = trustedBin === undefined ? path.join(path.dirname(process.execPath), ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])) : path.join(trustedBin, process.platform === "win32" ? "npm-cli.js" : "npm"), npmCli = fs.realpathSync(launcher), relative = path.relative(path.resolve(targetRoot), npmCli), stat = fs.lstatSync(npmCli); if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..") || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o022) !== 0) throw new Error("operator npm CLI must be a non-writable regular file outside the target repository"); return npmCli;
+  const trustedBin = env?.[ULTRAFUZZ_TRUSTED_BIN_ENV] ?? process.env[ULTRAFUZZ_TRUSTED_BIN_ENV];
+  if (trustedBin !== undefined && !path.isAbsolute(trustedBin))
+    throw new Error("operator trusted-bin path must be absolute");
+  const launcher =
+      trustedBin === undefined
+        ? path.join(
+            path.dirname(process.execPath),
+            ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
+          )
+        : path.join(trustedBin, process.platform === "win32" ? "npm-cli.js" : "npm"),
+    npmCli = fs.realpathSync(launcher),
+    relative = path.relative(path.resolve(targetRoot), npmCli),
+    stat = fs.lstatSync(npmCli);
+  if (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== "..") ||
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    (stat.mode & 0o022) !== 0
+  )
+    throw new Error("operator npm CLI must be a non-writable regular file outside the target repository");
+  return npmCli;
 }
 
-// prettier-ignore
 function assertOperatorPackageLock(packageRoot: string): void {
-  const lockPath = path.join(packageRoot, "package-lock.json"), lock = parseStrictJsonBytes(readRegularFileSnapshot(lockPath, MAX_PACKAGE_MANAGER_MANIFEST_BYTES), { maxBytes: MAX_PACKAGE_MANAGER_MANIFEST_BYTES, maxDepth: MAX_PACKAGE_MANAGER_MANIFEST_DEPTH, maxItems: MAX_PACKAGE_MANAGER_MANIFEST_ITEMS, maxProperties: MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES }); if (!isObjectRecord(lock) || lock.lockfileVersion !== 3 || !isObjectRecord(lock.packages)) throw new Error("operator controller install requires a current package lock"); for (const [location, value] of Object.entries(lock.packages)) { if (location === "") continue; const encodedIntegrity = isObjectRecord(value) && typeof value.integrity === "string" ? value.integrity.slice("sha512-".length) : "", decodedIntegrity = Buffer.from(encodedIntegrity, "base64"); if (!isObjectRecord(value) || typeof value.resolved !== "string" || !value.resolved.startsWith("https://registry.npmjs.org/") || typeof value.integrity !== "string" || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(value.integrity) || decodedIntegrity.byteLength !== 64 || decodedIntegrity.toString("base64") !== encodedIntegrity) throw new Error(`operator controller lock entry is not registry-integrity bound: ${location}`); }
+  const lockPath = path.join(packageRoot, "package-lock.json"),
+    lock = parseStrictJsonBytes(readRegularFileSnapshot(lockPath, MAX_PACKAGE_MANAGER_MANIFEST_BYTES), {
+      maxBytes: MAX_PACKAGE_MANAGER_MANIFEST_BYTES,
+      maxDepth: MAX_PACKAGE_MANAGER_MANIFEST_DEPTH,
+      maxItems: MAX_PACKAGE_MANAGER_MANIFEST_ITEMS,
+      maxProperties: MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES
+    });
+  if (!isObjectRecord(lock) || lock.lockfileVersion !== 3 || !isObjectRecord(lock.packages))
+    throw new Error("operator controller install requires a current package lock");
+  for (const [location, value] of Object.entries(lock.packages)) {
+    if (location === "") continue;
+    const encodedIntegrity =
+        isObjectRecord(value) && typeof value.integrity === "string" ? value.integrity.slice("sha512-".length) : "",
+      decodedIntegrity = Buffer.from(encodedIntegrity, "base64");
+    if (
+      !isObjectRecord(value) ||
+      typeof value.resolved !== "string" ||
+      !value.resolved.startsWith("https://registry.npmjs.org/") ||
+      typeof value.integrity !== "string" ||
+      !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(value.integrity) ||
+      decodedIntegrity.byteLength !== 64 ||
+      decodedIntegrity.toString("base64") !== encodedIntegrity
+    )
+      throw new Error(`operator controller lock entry is not registry-integrity bound: ${location}`);
+  }
 }
 
 export function applySmithersCompatibilityPatches(projectRoot: string): void {
@@ -3457,8 +3618,15 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_VERSION}`);
   }
-  // prettier-ignore
-  writeFileDurable(runnerSource, applyRequiredSmithersPatch(fs.readFileSync(runnerSource, "utf8"), SMITHERS_BIN_LOCAL_DELEGATION_SOURCE, SMITHERS_BIN_LOCAL_DELEGATION_PATCH, "target-local runner delegation"));
+  writeFileDurable(
+    runnerSource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(runnerSource, "utf8"),
+      SMITHERS_BIN_LOCAL_DELEGATION_SOURCE,
+      SMITHERS_BIN_LOCAL_DELEGATION_PATCH,
+      "target-local runner delegation"
+    )
+  );
   let cliContents = fs.readFileSync(cliSource, "utf8");
   for (const [source, patched, label] of [
     [
@@ -3949,8 +4117,12 @@ function compileTask(input: {
   const agentCredentialEnv = [
     ...new Set(
       agentChain.flatMap((entry) =>
-        // prettier-ignore
-        cloudAgentCredentialEnv(input.config.execution.mode, entry.agentRef, input.config.agents[entry.agentRef], input.env)
+        cloudAgentCredentialEnv(
+          input.config.execution.mode,
+          entry.agentRef,
+          input.config.agents[entry.agentRef],
+          input.env
+        )
       )
     )
   ];
@@ -4120,13 +4292,20 @@ function assertInvariantCampaignTimeoutBudget(
   );
 }
 
-// prettier-ignore
-function cloudAgentCredentialEnv(executionMode: ResolvedConfig["execution"]["mode"], agentRef: string, agent: ResolvedConfig["agents"][string] | undefined, env: NodeJS.ProcessEnv): string[] {
+function cloudAgentCredentialEnv(
+  executionMode: ResolvedConfig["execution"]["mode"],
+  agentRef: string,
+  agent: ResolvedConfig["agents"][string] | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
   if (executionMode !== "cloud" || agent === undefined) return [];
   const names = agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : [];
   if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
   const routes = effectiveRouteEnvironment(agentRef, env);
-  const extra = (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",").map((name) => name.trim().toUpperCase()).filter((name) => env[name]?.trim());
+  const extra = (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "")
+    .split(",")
+    .map((name) => name.trim().toUpperCase())
+    .filter((name) => env[name]?.trim());
   names.push(...routes.map(([name]) => name), ...extra);
   if (extra.length > 0) names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
   return names;

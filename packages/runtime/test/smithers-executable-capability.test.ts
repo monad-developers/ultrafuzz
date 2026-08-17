@@ -28,8 +28,9 @@ function nodeRunner(root: string, source = "console.log(JSON.stringify({ trusted
   return runner;
 }
 
-// prettier-ignore
-const bunAvailable = (process.env.PATH ?? "").split(path.delimiter).some((entry) => fs.existsSync(path.join(entry, process.platform === "win32" ? "bun.exe" : "bun")));
+const bunAvailable = (process.env.PATH ?? "")
+  .split(path.delimiter)
+  .some((entry) => fs.existsSync(path.join(entry, process.platform === "win32" ? "bun.exe" : "bun")));
 
 test("environment strings cannot manufacture a Smithers executable capability", () => {
   const env = { SMITHERS_BIN: process.execPath };
@@ -72,10 +73,85 @@ test("Smithers commands invoke the bound interpreter instead of a substituted PA
   assert.equal(fs.existsSync(hostileMarker), false);
 });
 
-// prettier-ignore
-test("Bun anchors ignore target startup and module resolution", { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") }, async () => {
-  const root = temporaryDirectory("ufz-runner-bun-startup-"), snapshot = path.join(root, "snapshot"), trusted = path.join(snapshot, "node_modules", "@smthrs", "cli"), runner = path.join(snapshot, "dependencies", "smthrs", "runner.ts"), guard = path.join(snapshot, "controls", "bun-module-confinement.js"), marker = path.join(root, "preload-ran"); fs.mkdirSync(path.dirname(runner), { recursive: true }); fs.mkdirSync(trusted, { recursive: true }); fs.mkdirSync(path.dirname(guard), { recursive: true }); fs.writeFileSync(guard, "export {};\n"); fs.writeFileSync(path.join(path.dirname(guard), "bunfig.toml"), "\n"); writeExecutable(runner, "#!/usr/bin/env bun\nimport '@smthrs/cli'; console.log(JSON.stringify({ dotenv: process.env.ULTRAFUZZ_HOSTILE_DOTENV ?? null, injections: ['BUN_OPTIONS', 'BUN_INSPECT_PRELOAD', 'NODE_PATH', 'NODE_OPTIONS'].map((name) => process.env[name] ?? null) }));\n"); for (const [file, contents] of [[path.join(root, "bunfig.toml"), 'preload = ["./preload.ts"]\n'], [path.join(root, "preload.ts"), `await Bun.write(${JSON.stringify(marker)}, "hostile");\n`], [path.join(root, "attacker.ts"), `await Bun.write(${JSON.stringify(marker)}, "hostile");\n`], [path.join(root, "tsconfig.json"), '{"compilerOptions":{"paths":{"@smthrs/cli":["./attacker.ts"]}}}\n'], [path.join(snapshot, "tsconfig.json"), "{}\n"], [path.join(trusted, "package.json"), '{"name":"@smthrs/cli","type":"module","exports":"./index.ts"}\n'], [path.join(trusted, "index.ts"), "export {};\n"], [path.join(root, ".env"), "ULTRAFUZZ_HOSTILE_DOTENV=hostile\n"]] as const) fs.writeFileSync(file, contents, "utf8"); const injectionNames = ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_PATH", "NODE_OPTIONS"] as const, env: Record<string, string | undefined> = bindSmithersExecutableCapability({ ...Object.fromEntries(injectionNames.map((name) => [name, "hostile"])), ULTRAFUZZ_BUN_MODULE_CONFINEMENT: guard }, runner), snapshotDescriptor = fs.openSync(snapshot, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0)); assert.throws(() => acquireSmithersExecutableAnchor(env), /requires a sealed snapshot path/u); env.SMITHERS_BIN = `/proc/${process.pid}/fd/${snapshotDescriptor}/dependencies/smthrs/runner.ts`; env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT = `/proc/${process.pid}/fd/${snapshotDescriptor}/controls/bun-module-confinement.js`; const anchor = acquireSmithersExecutableAnchor(env); assert.ok(anchor); try { const expected = [`--config=${path.join(path.dirname(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT!), "bunfig.toml")}`, "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"]; assert.deepEqual(anchor.argumentPrefix.slice(0, 6), expected); assert.equal(anchor.argumentPrefix[6], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`); } finally { anchor.close(); } try { const result = await runSmithersInspectionCommand({ args: ["inspect", "fixture"], projectRoot: root, env, environmentVariableNames: injectionNames }); assert.equal(result.ok, true, result.error); assert.deepEqual(result.json, { dotenv: null, injections: [null, null, null, null] }); assert.equal(fs.existsSync(marker), false); const sealedGuard = env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT; delete env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT; assert.throws(() => acquireSmithersExecutableAnchor(env), /requires a sealed snapshot path/u); env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT = sealedGuard; fs.writeFileSync(guard, "malformed"); assert.throws(() => acquireSmithersExecutableAnchor(env), /changed at the controller command boundary/u); } finally { fs.closeSync(snapshotDescriptor); }
-});
+test(
+  "Bun anchors ignore target startup and module resolution",
+  { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const root = temporaryDirectory("ufz-runner-bun-startup-"),
+      snapshot = path.join(root, "snapshot"),
+      trusted = path.join(snapshot, "node_modules", "@smthrs", "cli"),
+      runner = path.join(snapshot, "dependencies", "smthrs", "runner.ts"),
+      guard = path.join(snapshot, "controls", "bun-module-confinement.js"),
+      marker = path.join(root, "preload-ran");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.mkdirSync(trusted, { recursive: true });
+    fs.mkdirSync(path.dirname(guard), { recursive: true });
+    fs.writeFileSync(guard, "export {};\n");
+    fs.writeFileSync(path.join(path.dirname(guard), "bunfig.toml"), "\n");
+    writeExecutable(
+      runner,
+      "#!/usr/bin/env bun\nimport '@smthrs/cli'; console.log(JSON.stringify({ dotenv: process.env.ULTRAFUZZ_HOSTILE_DOTENV ?? null, injections: ['BUN_OPTIONS', 'BUN_INSPECT_PRELOAD', 'NODE_PATH', 'NODE_OPTIONS'].map((name) => process.env[name] ?? null) }));\n"
+    );
+    for (const [file, contents] of [
+      [path.join(root, "bunfig.toml"), 'preload = ["./preload.ts"]\n'],
+      [path.join(root, "preload.ts"), `await Bun.write(${JSON.stringify(marker)}, "hostile");\n`],
+      [path.join(root, "attacker.ts"), `await Bun.write(${JSON.stringify(marker)}, "hostile");\n`],
+      [path.join(root, "tsconfig.json"), '{"compilerOptions":{"paths":{"@smthrs/cli":["./attacker.ts"]}}}\n'],
+      [path.join(snapshot, "tsconfig.json"), "{}\n"],
+      [path.join(trusted, "package.json"), '{"name":"@smthrs/cli","type":"module","exports":"./index.ts"}\n'],
+      [path.join(trusted, "index.ts"), "export {};\n"],
+      [path.join(root, ".env"), "ULTRAFUZZ_HOSTILE_DOTENV=hostile\n"]
+    ] as const)
+      fs.writeFileSync(file, contents, "utf8");
+    const injectionNames = ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_PATH", "NODE_OPTIONS"] as const,
+      env: Record<string, string | undefined> = bindSmithersExecutableCapability(
+        {
+          ...Object.fromEntries(injectionNames.map((name) => [name, "hostile"])),
+          ULTRAFUZZ_BUN_MODULE_CONFINEMENT: guard
+        },
+        runner
+      ),
+      snapshotDescriptor = fs.openSync(snapshot, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
+    assert.throws(() => acquireSmithersExecutableAnchor(env), /requires a sealed snapshot path/u);
+    env.SMITHERS_BIN = `/proc/${process.pid}/fd/${snapshotDescriptor}/dependencies/smthrs/runner.ts`;
+    env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT = `/proc/${process.pid}/fd/${snapshotDescriptor}/controls/bun-module-confinement.js`;
+    const anchor = acquireSmithersExecutableAnchor(env);
+    assert.ok(anchor);
+    try {
+      const expected = [
+        `--config=${path.join(path.dirname(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT!), "bunfig.toml")}`,
+        "--no-env-file",
+        "--no-install",
+        "--no-addons",
+        "--preserve-symlinks",
+        "--preserve-symlinks-main"
+      ];
+      assert.deepEqual(anchor.argumentPrefix.slice(0, 6), expected);
+      assert.equal(anchor.argumentPrefix[6], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`);
+    } finally {
+      anchor.close();
+    }
+    try {
+      const result = await runSmithersInspectionCommand({
+        args: ["inspect", "fixture"],
+        projectRoot: root,
+        env,
+        environmentVariableNames: injectionNames
+      });
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.json, { dotenv: null, injections: [null, null, null, null] });
+      assert.equal(fs.existsSync(marker), false);
+      const sealedGuard = env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT;
+      delete env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT;
+      assert.throws(() => acquireSmithersExecutableAnchor(env), /requires a sealed snapshot path/u);
+      env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT = sealedGuard;
+      fs.writeFileSync(guard, "malformed");
+      assert.throws(() => acquireSmithersExecutableAnchor(env), /changed at the controller command boundary/u);
+    } finally {
+      fs.closeSync(snapshotDescriptor);
+    }
+  }
+);
 
 test("streaming Smithers commands keep the executable anchor through child close", async () => {
   const root = temporaryDirectory("ufz-runner-stream-");
@@ -280,10 +356,44 @@ test("capability binding rejects ambiguous or relative shebang authority", () =>
   );
 });
 
-// prettier-ignore
-test("capability binding rejects target-contained runner and interpreter paths", { skip: process.platform === "win32" }, () => {
-  const target = temporaryDirectory("ufz-runner-target-"), outside = temporaryDirectory("ufz-runner-outside-"), local = nodeRunner(target), external = path.join(outside, "absolute.sh"), insideLink = path.join(target, "external-link"), outsideLink = path.join(outside, "local-link"); writeExecutable(external, "#!/bin/sh\nexit 0\n"); fs.symlinkSync(external, insideLink); fs.symlinkSync(local, outsideLink); for (const runner of [local, insideLink, outsideLink]) assert.throws(() => assertExecutableOutsideRoot(runner, target), /inside the target project/u); const localInterpreter = path.join(target, "sh"), insideInterpreterLink = path.join(target, "external-sh"), outsideInterpreterLink = path.join(outside, "local-sh"); fs.copyFileSync("/bin/sh", localInterpreter); fs.chmodSync(localInterpreter, 0o700); fs.symlinkSync("/bin/sh", insideInterpreterLink); fs.symlinkSync(localInterpreter, outsideInterpreterLink); for (const [name, interpreter] of [["local", localInterpreter], ["lexical-link", insideInterpreterLink], ["real-link", outsideInterpreterLink]] as const) { const runner = path.join(outside, `${name}.sh`); writeExecutable(runner, `#!${interpreter}\nexit 0\n`); assert.throws(() => bindSmithersExecutableCapability({}, runner, target), /interpreter cannot (?:be|resolve) inside the target project/u); } assert.equal(assertExecutableOutsideRoot(external, target), undefined); assert.ok(smithersExecutableCapability(bindSmithersExecutableCapability({}, external, target)));
-});
+test(
+  "capability binding rejects target-contained runner and interpreter paths",
+  { skip: process.platform === "win32" },
+  () => {
+    const target = temporaryDirectory("ufz-runner-target-"),
+      outside = temporaryDirectory("ufz-runner-outside-"),
+      local = nodeRunner(target),
+      external = path.join(outside, "absolute.sh"),
+      insideLink = path.join(target, "external-link"),
+      outsideLink = path.join(outside, "local-link");
+    writeExecutable(external, "#!/bin/sh\nexit 0\n");
+    fs.symlinkSync(external, insideLink);
+    fs.symlinkSync(local, outsideLink);
+    for (const runner of [local, insideLink, outsideLink])
+      assert.throws(() => assertExecutableOutsideRoot(runner, target), /inside the target project/u);
+    const localInterpreter = path.join(target, "sh"),
+      insideInterpreterLink = path.join(target, "external-sh"),
+      outsideInterpreterLink = path.join(outside, "local-sh");
+    fs.copyFileSync("/bin/sh", localInterpreter);
+    fs.chmodSync(localInterpreter, 0o700);
+    fs.symlinkSync("/bin/sh", insideInterpreterLink);
+    fs.symlinkSync(localInterpreter, outsideInterpreterLink);
+    for (const [name, interpreter] of [
+      ["local", localInterpreter],
+      ["lexical-link", insideInterpreterLink],
+      ["real-link", outsideInterpreterLink]
+    ] as const) {
+      const runner = path.join(outside, `${name}.sh`);
+      writeExecutable(runner, `#!${interpreter}\nexit 0\n`);
+      assert.throws(
+        () => bindSmithersExecutableCapability({}, runner, target),
+        /interpreter cannot (?:be|resolve) inside the target project/u
+      );
+    }
+    assert.equal(assertExecutableOutsideRoot(external, target), undefined);
+    assert.ok(smithersExecutableCapability(bindSmithersExecutableCapability({}, external, target)));
+  }
+);
 
 test(
   "capability binding rejects a workflow-runner FIFO without blocking",

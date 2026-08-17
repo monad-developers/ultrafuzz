@@ -804,11 +804,16 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       startupPreload,
       `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(startupMarker)}, "hostile");\n`
     );
-    // prettier-ignore
-    const injectionNames = ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_OPTIONS", "NODE_PATH"] as const, previousInjections = Object.fromEntries(injectionNames.map((name) => [name, process.env[name]])), previousPath = process.env.PATH;
+    const injectionNames = ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_OPTIONS", "NODE_PATH"] as const,
+      previousInjections = Object.fromEntries(injectionNames.map((name) => [name, process.env[name]])),
+      previousPath = process.env.PATH;
     process.env.PATH = [shadowBin, previousPath ?? ""].filter((entry) => entry.length > 0).join(path.delimiter);
-    // prettier-ignore
-    { process.env.BUN_OPTIONS = `--preload=${startupPreload}`; process.env.BUN_INSPECT_PRELOAD = startupPreload; process.env.NODE_OPTIONS = `--import=${startupPreload}`; process.env.NODE_PATH = path.dirname(startupPreload); }
+    {
+      process.env.BUN_OPTIONS = `--preload=${startupPreload}`;
+      process.env.BUN_INSPECT_PRELOAD = startupPreload;
+      process.env.NODE_OPTIONS = `--import=${startupPreload}`;
+      process.env.NODE_PATH = path.dirname(startupPreload);
+    }
     try {
       await runDurableWorkflow(fixture.root, "inner-run", fixture.input, testBunExecutable);
       const commands = fs
@@ -841,16 +846,20 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect((environment as unknown as { injections: unknown }).injections).toEqual([null, null, null, null]);
       expect(fs.existsSync(ambientMarker)).toBe(false);
       expect(fs.existsSync(startupMarker)).toBe(false);
-      // prettier-ignore
-      expect(environment.governance).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/data-governance\\.json$`, "u"));
+      expect(environment.governance).toMatch(
+        new RegExp(`^${childVisibleRoot}[0-9]+/controls/data-governance\\.json$`, "u")
+      );
       expect(environment.workflow).toMatch(
         new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
       );
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
-      // prettier-ignore
-      for (const name of injectionNames) { const value = previousInjections[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      for (const name of injectionNames) {
+        const value = previousInjections[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
     }
@@ -2367,8 +2376,9 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
   };
 }
 
-// prettier-ignore
-function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?: boolean; committedSymlink?: boolean } = {}) {
+function createProjectFixture(
+  options: { smithersCli?: string; pinnedSubmodules?: boolean; committedSymlink?: boolean } = {}
+) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
@@ -2431,8 +2441,9 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
-  // prettier-ignore
-  execFileSync("git", ["add", "source.txt", ...(options.committedSymlink === true ? ["source-link.txt"] : [])], { cwd: root });
+  execFileSync("git", ["add", "source.txt", ...(options.committedSymlink === true ? ["source-link.txt"] : [])], {
+    cwd: root
+  });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   if (options.pinnedSubmodules === true) {
     execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${"d".repeat(40)},vendor/dependency`], {
@@ -2451,8 +2462,10 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     ["controls/bunfig.toml", "\n"],
     ["controls/bun-module-confinement.js", BUN_MODULE_CONFINEMENT_SOURCE],
     ["controls/ultrafuzz.toml", '[models]\ndefault = "sealed"\n'],
-    // prettier-ignore
-    ["controls/data-governance.json", `${JSON.stringify({ policy: { sensitivity: "private" }, target: { commit: governedCommit, tree: governedTree, dirty: false }, required_source_destinations: [] })}\n`],
+    [
+      "controls/data-governance.json",
+      `${JSON.stringify({ policy: { sensitivity: "private" }, target: { commit: governedCommit, tree: governedTree, dirty: false }, required_source_destinations: [] })}\n`
+    ],
     [".smithers/agents/index.ts", 'export * from "./kimi.ts";\n'],
     [".smithers/agents/codex.ts", "export const sealedCodex = true;\n"],
     [".smithers/agents/claude.ts", "export const sealedClaude = true;\n"],

@@ -99,47 +99,50 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     this.opts.settingSources = "";
     const command = await super.buildCommand(params);
     const opts = this.opts as DeepSeekAgentOptions;
-    // prettier-ignore
     return {
       ...command,
-      env: workflowControlChildEnvironment({
-        ...command.env,
-        // Claude Code's documented custom-provider credential is
-        // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
-        // Anthropic credential can never win over the DeepSeek route.
-        ANTHROPIC_API_KEY: "",
-        ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
-        ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
-        // Keep first-party Claude auth, alternate provider routing, and host
-        // proxies from competing with the explicit DeepSeek endpoint/token.
-        ANTHROPIC_CONFIG_DIR: "",
-        ANTHROPIC_CUSTOM_HEADERS: "",
-        ANTHROPIC_FEDERATION_RULE_ID: "",
-        ANTHROPIC_IDENTITY_TOKEN: "",
-        ANTHROPIC_IDENTITY_TOKEN_FILE: "",
-        ANTHROPIC_ORGANIZATION_ID: "",
-        ANTHROPIC_PROFILE: "",
-        ANTHROPIC_UNIX_SOCKET: "",
-        CCR_OAUTH_TOKEN_FILE: "",
-        CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: "",
-        CLAUDE_CODE_HOST_AUTH_ENV_VAR: "",
-        CLAUDE_CODE_HOST_CREDS_FILE: "",
-        CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
-        CLAUDE_CODE_OAUTH_TOKEN: "",
-        CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "",
-        CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "",
-        CLAUDE_CODE_REMOTE_SETTINGS_PATH: "",
-        CLAUDE_CODE_USE_ANTHROPIC_AWS: "",
-        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "",
-        CLAUDE_CODE_USE_BEDROCK: "",
-        CLAUDE_CODE_USE_FOUNDRY: "",
-        CLAUDE_CODE_USE_GATEWAY: "",
-        CLAUDE_CODE_USE_MANTLE: "",
-        CLAUDE_CODE_USE_VERTEX: "",
-        // Claude treats an empty secure-storage override as "use the default".
-        // Point it at the same isolated root as the rest of its session state.
-        CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
-      }, process.env, { agent: "DeepSeekAgent" })
+      env: workflowControlChildEnvironment(
+        {
+          ...command.env,
+          // Claude Code's documented custom-provider credential is
+          // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
+          // Anthropic credential can never win over the DeepSeek route.
+          ANTHROPIC_API_KEY: "",
+          ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
+          ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
+          // Keep first-party Claude auth, alternate provider routing, and host
+          // proxies from competing with the explicit DeepSeek endpoint/token.
+          ANTHROPIC_CONFIG_DIR: "",
+          ANTHROPIC_CUSTOM_HEADERS: "",
+          ANTHROPIC_FEDERATION_RULE_ID: "",
+          ANTHROPIC_IDENTITY_TOKEN: "",
+          ANTHROPIC_IDENTITY_TOKEN_FILE: "",
+          ANTHROPIC_ORGANIZATION_ID: "",
+          ANTHROPIC_PROFILE: "",
+          ANTHROPIC_UNIX_SOCKET: "",
+          CCR_OAUTH_TOKEN_FILE: "",
+          CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: "",
+          CLAUDE_CODE_HOST_AUTH_ENV_VAR: "",
+          CLAUDE_CODE_HOST_CREDS_FILE: "",
+          CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
+          CLAUDE_CODE_OAUTH_TOKEN: "",
+          CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "",
+          CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "",
+          CLAUDE_CODE_REMOTE_SETTINGS_PATH: "",
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "",
+          CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "",
+          CLAUDE_CODE_USE_BEDROCK: "",
+          CLAUDE_CODE_USE_FOUNDRY: "",
+          CLAUDE_CODE_USE_GATEWAY: "",
+          CLAUDE_CODE_USE_MANTLE: "",
+          CLAUDE_CODE_USE_VERTEX: "",
+          // Claude treats an empty secure-storage override as "use the default".
+          // Point it at the same isolated root as the rest of its session state.
+          CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
+        },
+        process.env,
+        { agent: "DeepSeekAgent" }
+      )
     };
   }
 

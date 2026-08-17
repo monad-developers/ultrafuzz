@@ -32,8 +32,18 @@ import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
 const TEST_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:openai"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":[]}`;
-// prettier-ignore
-const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> => runtimeStartRun({ ...input, env: { ULTRAFUZZ_PROVIDER_HOME_ROOT: path.join(path.dirname(input.projectRoot), `${path.basename(input.projectRoot)}-provider-homes`), ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_GOVERNANCE_POLICY, ...input.env } });
+const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> =>
+  runtimeStartRun({
+    ...input,
+    env: {
+      ULTRAFUZZ_PROVIDER_HOME_ROOT: path.join(
+        path.dirname(input.projectRoot),
+        `${path.basename(input.projectRoot)}-provider-homes`
+      ),
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_GOVERNANCE_POLICY,
+      ...input.env
+    }
+  });
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-inspect-"));

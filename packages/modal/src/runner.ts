@@ -1393,8 +1393,9 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
           'ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"'
         ]
       : [];
-  // prettier-ignore
-  const providerHomeRoot = subscriptionProvider === undefined ? undefined : path.posix.dirname(remoteAuthDir(subscriptionProvider)), providerHomeEnv = providerHomeRoot === undefined ? [] : [`ULTRAFUZZ_PROVIDER_HOME_ROOT='${providerHomeRoot}'`];
+  const providerHomeRoot =
+      subscriptionProvider === undefined ? undefined : path.posix.dirname(remoteAuthDir(subscriptionProvider)),
+    providerHomeEnv = providerHomeRoot === undefined ? [] : [`ULTRAFUZZ_PROVIDER_HOME_ROOT='${providerHomeRoot}'`];
   return [
     "set -euo pipefail",
     `staging_deadline=$((SECONDS + ${MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS}))`,
@@ -1407,8 +1408,9 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     'data_root="$volume_root/$ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT"',
     `install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} "$data_root"`,
     `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} "$data_root"`,
-    // prettier-ignore
-    ...(providerHomeRoot === undefined ? [] : [`install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} '${providerHomeRoot}'`]),
+    ...(providerHomeRoot === undefined
+      ? []
+      : [`install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} '${providerHomeRoot}'`]),
     ...ownedRuntimeDirectories.map(
       (directory) => `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} '${directory}'`
     ),

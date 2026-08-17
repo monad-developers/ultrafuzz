@@ -235,8 +235,11 @@ function sealedSmithersExecutable(snapshotRoot: string): string {
   return smithers;
 }
 
-// prettier-ignore
-function trustedCloudBunExecutable(): string { const executable = "/usr/local/bin/bun"; assertRootOwnedReadOnlyFile(executable, "Modal Bun interpreter"); return executable; }
+function trustedCloudBunExecutable(): string {
+  const executable = "/usr/local/bin/bun";
+  assertRootOwnedReadOnlyFile(executable, "Modal Bun interpreter");
+  return executable;
+}
 
 function sealedSnapshotModuleUrl(snapshotRoot: string, name: "artifacts" | "runtime"): string {
   return pathToFileURL(
@@ -619,8 +622,16 @@ export async function runDurableWorkflow(
       "controls/bun-module-confinement.js",
       "sealed Bun module confinement"
     );
-    // prettier-ignore
-    const bunArguments = [`--config=${regularSnapshotFile(snapshotAccessRoot, "controls/bunfig.toml", "sealed Bun config")}`, "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", `--preload=${confinement}`, smithers];
+    const bunArguments = [
+      `--config=${regularSnapshotFile(snapshotAccessRoot, "controls/bunfig.toml", "sealed Bun config")}`,
+      "--no-env-file",
+      "--no-install",
+      "--no-addons",
+      "--preserve-symlinks",
+      "--preserve-symlinks-main",
+      `--preload=${confinement}`,
+      smithers
+    ];
     const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
     const environment = {
       PATH: ["/usr/local/bin", process.env.PATH ?? ""].filter((entry) => entry.length > 0).join(path.delimiter),
@@ -629,8 +640,11 @@ export async function runDurableWorkflow(
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
       ULTRAFUZZ_CONFIG_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/ultrafuzz.toml", "sealed cloud config"),
       ULTRAFUZZ_BUN_MODULE_CONFINEMENT: confinement,
-      // prettier-ignore
-      ULTRAFUZZ_DATA_GOVERNANCE_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/data-governance.json", "sealed cloud data governance"),
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: regularSnapshotFile(
+        snapshotAccessRoot,
+        "controls/data-governance.json",
+        "sealed cloud data governance"
+      ),
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     try {

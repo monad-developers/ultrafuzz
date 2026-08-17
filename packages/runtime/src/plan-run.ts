@@ -196,17 +196,41 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
   let controllerSource: ReturnType<typeof inspectControllerSource>;
-  // prettier-ignore
-  try { controllerSource = inspectControllerSource(projectRoot); } catch (error) { return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_UNTRUSTED")]); }
+  try {
+    controllerSource = inspectControllerSource(projectRoot);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_UNTRUSTED")]);
+  }
   const graphFingerprint = fingerprintGraph(expandedGraph);
   const governanceConfig = resolved.config;
-  // prettier-ignore
-  const prepareGovernance = () => prepareDataGovernance({ projectRoot, config: governanceConfig, graph, graphFingerprint, configFingerprint, promptDigest, sourceRunId: input.sourceRunId, referenceExpectationsDigest: referenceExpectationsSource?.sourceDigest, operatorPrompt: input.prompt, workflowInput: input.workflowInput, env: input.env, controllerOwnedPaths: [runRoot, path.join(projectRoot, ".ultrafuzz", "runs"), path.join(projectRoot, ".smithers", "node_modules"), path.join(projectRoot, ".smithers", "workflows")] });
+  const prepareGovernance = () =>
+    prepareDataGovernance({
+      projectRoot,
+      config: governanceConfig,
+      graph,
+      graphFingerprint,
+      configFingerprint,
+      promptDigest,
+      sourceRunId: input.sourceRunId,
+      referenceExpectationsDigest: referenceExpectationsSource?.sourceDigest,
+      operatorPrompt: input.prompt,
+      workflowInput: input.workflowInput,
+      env: input.env,
+      controllerOwnedPaths: [
+        runRoot,
+        path.join(projectRoot, ".ultrafuzz", "runs"),
+        path.join(projectRoot, ".smithers", "node_modules"),
+        path.join(projectRoot, ".smithers", "workflows")
+      ]
+    });
   let governance: ReturnType<typeof prepareDataGovernance>;
-  // prettier-ignore
-  try { governance = prepareGovernance(); } catch (error) { return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]); }
-  // prettier-ignore
-  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics)) return runtimeFailure<PlanRunValue>(governance.diagnostics);
+  try {
+    governance = prepareGovernance();
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]);
+  }
+  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics))
+    return runtimeFailure<PlanRunValue>(governance.diagnostics);
   // Authenticate disclosure before provider preflight can create a cloud app
   // or otherwise contact an external execution environment.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
@@ -219,20 +243,46 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(preMaterializeDiagnostics)) {
     return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
   }
-  // prettier-ignore
-  try { assertControllerSourceDigest(projectRoot, controllerSource.digest); } catch (error) { return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_CHANGED_DURING_PREFLIGHT")]); }
+  try {
+    assertControllerSourceDigest(projectRoot, controllerSource.digest);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_CHANGED_DURING_PREFLIGHT")
+    ]);
+  }
   if (hooks.enforceDataGovernance === true && hooks.beforeMaterialize !== undefined) {
     let current: ReturnType<typeof prepareDataGovernance>;
-    // prettier-ignore
-    try { current = prepareGovernance(); } catch (error) { return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")]); }
-    // prettier-ignore
-    if (current.provenance.policy_digest !== governance.provenance.policy_digest || current.provenance.input_digest !== governance.provenance.input_digest) { const changed = new Error("campaign policy or effective input changed during preflight; review and acknowledge it again"); return runtimeFailure<PlanRunValue>([diagnosticFromError(changed, "governance", "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT")]); }
+    try {
+      current = prepareGovernance();
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")
+      ]);
+    }
+    if (
+      current.provenance.policy_digest !== governance.provenance.policy_digest ||
+      current.provenance.input_digest !== governance.provenance.input_digest
+    ) {
+      const changed = new Error(
+        "campaign policy or effective input changed during preflight; review and acknowledge it again"
+      );
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(changed, "governance", "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT")
+      ]);
+    }
     if (hasRuntimeErrors(current.diagnostics)) return runtimeFailure<PlanRunValue>(current.diagnostics);
     governance = current;
   }
   const governanceBytes = Buffer.from(`${JSON.stringify(governance.provenance, null, 2)}\n`, "utf8");
-  // prettier-ignore
-  const governanceReference = { schema_version: governance.provenance.schema_version, path: DATA_GOVERNANCE_PROVENANCE_PATH, sha256: sha256Bytes(governanceBytes), policy_digest: governance.provenance.policy_digest, input_digest: governance.provenance.input_digest, sensitivity: governance.provenance.policy.sensitivity, acknowledgement_status: governance.provenance.acknowledgement_status };
+  const governanceReference = {
+    schema_version: governance.provenance.schema_version,
+    path: DATA_GOVERNANCE_PROVENANCE_PATH,
+    sha256: sha256Bytes(governanceBytes),
+    policy_digest: governance.provenance.policy_digest,
+    input_digest: governance.provenance.input_digest,
+    sensitivity: governance.provenance.policy.sensitivity,
+    acknowledgement_status: governance.provenance.acknowledgement_status
+  };
   const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,

@@ -541,21 +541,53 @@ export async function createModalNodeHandoffArchive(
   }
 }
 
-// prettier-ignore
-function readGovernedSourceIdentity(projectRoot: string, runRoot: string, snapshotRoot: string, workflowPath: string, gitExecutable: string): { commit: string; tree: string } {
+function readGovernedSourceIdentity(
+  projectRoot: string,
+  runRoot: string,
+  snapshotRoot: string,
+  workflowPath: string,
+  gitExecutable: string
+): { commit: string; tree: string } {
   const contents = readRegularFileSnapshot(path.join(snapshotRoot, "controls", "data-governance.json"), 1024 * 1024);
-  const expected = readExpectedExecutionSnapshotFiles(runRoot, snapshotRoot, workflowPath).get("controls/data-governance.json");
-  if (expected === undefined || expected.size !== BigInt(contents.byteLength) || expected.sha256 !== crypto.createHash("sha256").update(contents).digest("hex")) throw new Error("cloud source governance is not sealed by the execution snapshot");
-  const governance = parseStrictJsonBytes(contents), target = isRecord(governance) && isRecord(governance.target) ? governance.target : {}, commit = target.commit, tree = target.tree;
-  if (typeof commit !== "string" || typeof tree !== "string" || !/^[a-f0-9]{40,64}$/u.test(commit) || !/^[a-f0-9]{40,64}$/u.test(tree)) throw new Error("cloud source governance has an invalid Git identity");
-  const actualTree = execFileSync(gitExecutable, ["rev-parse", "--verify", `${commit}^{tree}`], { cwd: projectRoot, env: deterministicGitEnvironment(gitExecutable), encoding: "utf8" }).trim().toLowerCase();
+  const expected = readExpectedExecutionSnapshotFiles(runRoot, snapshotRoot, workflowPath).get(
+    "controls/data-governance.json"
+  );
+  if (
+    expected === undefined ||
+    expected.size !== BigInt(contents.byteLength) ||
+    expected.sha256 !== crypto.createHash("sha256").update(contents).digest("hex")
+  )
+    throw new Error("cloud source governance is not sealed by the execution snapshot");
+  const governance = parseStrictJsonBytes(contents),
+    target = isRecord(governance) && isRecord(governance.target) ? governance.target : {},
+    commit = target.commit,
+    tree = target.tree;
+  if (
+    typeof commit !== "string" ||
+    typeof tree !== "string" ||
+    !/^[a-f0-9]{40,64}$/u.test(commit) ||
+    !/^[a-f0-9]{40,64}$/u.test(tree)
+  )
+    throw new Error("cloud source governance has an invalid Git identity");
+  const actualTree = execFileSync(gitExecutable, ["rev-parse", "--verify", `${commit}^{tree}`], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(gitExecutable),
+    encoding: "utf8"
+  })
+    .trim()
+    .toLowerCase();
   if (actualTree !== tree) throw new Error("cloud source differs from the acknowledged Git tree");
   return { commit, tree };
 }
 
-// prettier-ignore
 function pinnedSourceHasGitlinks(projectRoot: string, gitExecutable: string, commit: string): boolean {
-  const entries = execFileSync(gitExecutable, ["ls-tree", "-r", "--full-tree", commit], { cwd: projectRoot, env: deterministicGitEnvironment(gitExecutable), encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+  const entries = execFileSync(gitExecutable, ["ls-tree", "-r", "--full-tree", commit], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(gitExecutable),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
   return entries.split("\n").some((entry) => entry.startsWith("160000 commit "));
 }
 

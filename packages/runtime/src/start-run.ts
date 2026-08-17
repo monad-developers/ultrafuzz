@@ -114,8 +114,16 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT",
   "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
 ]);
-// prettier-ignore
-const MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES = ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "all_proxy", "http_proxy", "https_proxy", "no_proxy"] as const;
+const MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES = [
+  "ALL_PROXY",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "all_proxy",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy"
+] as const;
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
@@ -190,8 +198,17 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
-    // prettier-ignore
-    assertCurrentDataGovernanceTarget(plan.validation.project_root, prepared.verifiedControl.executionFiles, plan.data_governance.path, [plan.layout.root, path.join(plan.validation.project_root, ".ultrafuzz", "runs"), path.join(plan.validation.project_root, ".smithers", "node_modules"), path.join(plan.validation.project_root, ".smithers", "workflows")]);
+    assertCurrentDataGovernanceTarget(
+      plan.validation.project_root,
+      prepared.verifiedControl.executionFiles,
+      plan.data_governance.path,
+      [
+        plan.layout.root,
+        path.join(plan.validation.project_root, ".ultrafuzz", "runs"),
+        path.join(plan.validation.project_root, ".smithers", "node_modules"),
+        path.join(plan.validation.project_root, ".smithers", "workflows")
+      ]
+    );
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -1394,8 +1411,17 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-// prettier-ignore
-function assertCurrentDataGovernanceTarget(projectRoot: string, executionFiles: readonly { snapshotPath: string; contents: Buffer }[], governancePath: string, controllerOwnedPaths: string[]): void { const sealed = executionFiles.find((file) => file.snapshotPath === `controls/${governancePath}`), expected = objectRecord(objectRecord(parseStrictJsonBytes(sealed?.contents ?? Buffer.alloc(0))).target); if (JSON.stringify(targetIdentity(projectRoot, controllerOwnedPaths)) !== JSON.stringify(expected)) throw new Error("campaign source changed after its data-disclosure acknowledgement"); }
+function assertCurrentDataGovernanceTarget(
+  projectRoot: string,
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
+  governancePath: string,
+  controllerOwnedPaths: string[]
+): void {
+  const sealed = executionFiles.find((file) => file.snapshotPath === `controls/${governancePath}`),
+    expected = objectRecord(objectRecord(parseStrictJsonBytes(sealed?.contents ?? Buffer.alloc(0))).target);
+  if (JSON.stringify(targetIdentity(projectRoot, controllerOwnedPaths)) !== JSON.stringify(expected))
+    throw new Error("campaign source changed after its data-disclosure acknowledgement");
+}
 
 function parseSealedResolvedConfig(
   executionFiles: readonly { snapshotPath: string; contents: Buffer }[]
