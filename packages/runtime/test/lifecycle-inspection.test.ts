@@ -27,6 +27,7 @@ import {
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
@@ -238,12 +239,16 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  return {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
-  };
+  return bindSmithersExecutableCapability(
+    {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers,
+      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+      ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
+    },
+    smithers,
+    project
+  );
 }
 
 async function launchedProject(
