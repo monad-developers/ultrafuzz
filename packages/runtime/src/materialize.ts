@@ -36,14 +36,37 @@ import { loadVerifiedFinalReportSnapshot } from "./verified-output.js";
 
 interface PlannedMaterialization {
   selection: MaterializeCopySelection;
-  sourcePath: string;
   destinationPath: string;
   bytes: Buffer;
   sizeBytes: number;
   sha256: string;
 }
 
+<<<<<<< ours
 const MAX_MATERIALIZE_SOURCE_BYTES = 64 * 1024 * 1024;
+=======
+type PlannedCopyResult =
+  { status: "planned"; value: PlannedMaterialization } | { status: "invalid" } | { status: "snapshot-budget-exceeded" };
+
+interface OpenedMaterializeDirectory {
+  descriptor: number;
+  lexicalPath: string;
+  accessPath: string;
+  identity: fs.BigIntStats;
+}
+
+interface StagedMaterialization {
+  descriptor: number;
+  accessPath: string;
+  device: bigint;
+  inode: bigint;
+  sizeBytes: number;
+}
+
+const MAX_MATERIALIZE_SOURCE_BYTES = 64 * 1024 * 1024;
+const MAX_MATERIALIZE_COPY_SELECTIONS = 128;
+const MAX_MATERIALIZE_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+>>>>>>> theirs
 
 export async function materializeSelection(input: MaterializeInput): Promise<RuntimeResult<MaterializeValue>> {
   const projectRoot = path.resolve(input.projectRoot);
@@ -71,9 +94,22 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     ]);
   }
 
+  const copySelections = input.copies ?? [];
+  if (copySelections.length > MAX_MATERIALIZE_COPY_SELECTIONS) {
+    return runtimeFailure([
+      runtimeError(
+        "MATERIALIZE_COPY_SELECTION_LIMIT_EXCEEDED",
+        `materialize copy selection exceeds the ${MAX_MATERIALIZE_COPY_SELECTIONS}-entry limit`,
+        "materialize",
+        undefined,
+        { actual_entries: copySelections.length, limit_entries: MAX_MATERIALIZE_COPY_SELECTIONS }
+      )
+    ]);
+  }
+
   const policy = validateMaterializePolicy({
     patches: input.patches,
-    copies: input.copies,
+    copies: copySelections,
     confirmed: input.confirmed,
     dryRun: input.dryRun,
     allowOverwrite: input.allowOverwrite,
@@ -84,10 +120,29 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
     return runtimeFailure(diagnostics);
   }
 
-  const plannedCopies = (input.copies ?? []).flatMap((copy) => {
-    const planned = planCopy(layout, projectRoot, copy, input.allowOverwrite === true, diagnostics);
-    return planned === undefined ? [] : [planned];
-  });
+  const plannedCopies: PlannedMaterialization[] = [];
+  let plannedSnapshotBytes = 0;
+  for (const copy of copySelections) {
+    const result = planCopy(
+      layout,
+      projectRoot,
+      copy,
+      input.allowOverwrite === true,
+      MAX_MATERIALIZE_SNAPSHOT_BYTES - plannedSnapshotBytes,
+      plannedSnapshotBytes,
+      diagnostics
+    );
+    if (result.status === "snapshot-budget-exceeded") break;
+    if (result.status === "invalid") continue;
+    const planned = result.value;
+    const nextSnapshotBytes = plannedSnapshotBytes + planned.sizeBytes;
+    if (!Number.isSafeInteger(nextSnapshotBytes) || nextSnapshotBytes > MAX_MATERIALIZE_SNAPSHOT_BYTES) {
+      diagnostics.push(materializeSnapshotBudgetDiagnostic(copy, nextSnapshotBytes));
+      break;
+    }
+    plannedSnapshotBytes = nextSnapshotBytes;
+    plannedCopies.push(planned);
+  }
   if (hasRuntimeErrors(diagnostics)) {
     return runtimeFailure(diagnostics);
   }
@@ -212,7 +267,6 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
       }
     }
     for (const copy of plannedCopies) {
-      fs.mkdirSync(path.dirname(copy.destinationPath), { recursive: true });
       const destinationCheck = resolveDestination(
         copy.selection.destination,
         projectRoot,
@@ -343,6 +397,7 @@ function writeMaterializationSnapshot(
   allowOverwrite: boolean
 ): void {
   const destinationDirectory = path.dirname(copy.destinationPath);
+<<<<<<< ours
   assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
   if (!allowOverwrite) {
     fs.writeFileSync(copy.destinationPath, copy.bytes, { flag: "wx", mode: 0o600 });
@@ -351,8 +406,81 @@ function writeMaterializationSnapshot(
   const temporaryPath = path.join(
     destinationDirectory,
     `.${path.basename(copy.destinationPath)}.ultrafuzz-materialize-${process.pid}-${crypto.randomUUID()}.tmp`
-  );
+=======
+  const openedDirectory = openMaterializeDestinationDirectory(projectRoot, destinationDirectory);
+  let committed = false;
+  let failure: unknown;
+  let staged: StagedMaterialization | undefined;
   try {
+    assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
+    const destinationAccessPath = path.join(openedDirectory.accessPath, path.basename(copy.destinationPath));
+    const stageAccessPath = allowOverwrite
+      ? path.join(
+          openedDirectory.accessPath,
+          `.${path.basename(copy.destinationPath)}.ultrafuzz-materialize-${process.pid}-${crypto.randomUUID()}.tmp`
+        )
+      : destinationAccessPath;
+    staged = createStagedMaterialization(openedDirectory, stageAccessPath, copy);
+    assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
+    if (allowOverwrite) {
+      // Both names resolve below the same opened parent descriptor. A lexical
+      // parent swap can therefore make the operation fail its identity recheck,
+      // but it cannot redirect the replacement to the attacker's directory.
+      fs.renameSync(staged.accessPath, destinationAccessPath);
+    }
+    assertStagedMaterializationAt(destinationAccessPath, staged);
+    assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
+    fs.fsyncSync(openedDirectory.descriptor);
+    assertMaterializeDirectoryCurrent(projectRoot, openedDirectory);
+    committed = true;
+  } catch (error) {
+    failure = error;
+  }
+  if (!committed && staged !== undefined) {
+    try {
+      // Node does not expose unlinkat-by-descriptor. Truncate only the inode we
+      // own and leave any uncertain pathname in place; deleting by basename
+      // here would reintroduce an lstat-to-unlink race against unrelated files.
+      fs.ftruncateSync(staged.descriptor, 0);
+      fs.fsyncSync(staged.descriptor);
+      fs.fsyncSync(openedDirectory.descriptor);
+    } catch (error) {
+      failure ??= error;
+    }
+  }
+  if (staged !== undefined) {
+    try {
+      closeStagedMaterialization(staged);
+    } catch (error) {
+      if (!committed) failure ??= error;
+    }
+  }
+  try {
+    closeMaterializeDirectory(openedDirectory);
+  } catch (error) {
+    // Publication is already committed and identity-verified at this point.
+    // A close error cannot be rolled back safely, so it must not turn a
+    // successful materialization into a reported failure.
+    if (!committed) failure ??= error;
+  }
+  if (!committed) throw failure;
+}
+
+function createStagedMaterialization(
+  directory: OpenedMaterializeDirectory,
+  accessPath: string,
+  copy: PlannedMaterialization
+): StagedMaterialization {
+  const descriptor = fs.openSync(
+    accessPath,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0),
+    0o600
+>>>>>>> theirs
+  );
+  let staged: StagedMaterialization | undefined;
+  let failure: unknown;
+  try {
+<<<<<<< ours
     fs.writeFileSync(temporaryPath, copy.bytes, { flag: "wx", mode: 0o600 });
     const temporaryStat = fs.lstatSync(temporaryPath);
     if (temporaryStat.isSymbolicLink() || !temporaryStat.isFile() || temporaryStat.nlink !== 1) {
@@ -360,17 +488,206 @@ function writeMaterializationSnapshot(
     }
     if (temporaryStat.size !== copy.sizeBytes || !fs.readFileSync(temporaryPath).equals(copy.bytes)) {
       throw new Error("temporary materialization does not match the reviewed source snapshot");
+=======
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    staged = {
+      descriptor,
+      accessPath,
+      device: opened.dev,
+      inode: opened.ino,
+      sizeBytes: copy.bytes.length
+    };
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size !== 0n) {
+      throw new Error("materialization stage is not a new singly linked regular file");
     }
-    assertNoSymlinkComponents(projectRoot, destinationDirectory, "materialize destination directory");
-
-    // POSIX rename replaces the destination directory entry itself. If an attacker swaps the checked
-    // destination for a symlink, the symlink is replaced rather than followed, so its target is never
-    // opened for writing. Keeping the temporary file in the same directory also makes the replacement
-    // atomic and avoids an EXDEV fallback with weaker semantics.
-    fs.renameSync(temporaryPath, copy.destinationPath);
-  } finally {
-    fs.rmSync(temporaryPath, { force: true });
+    writeMaterializationDescriptor(descriptor, copy.bytes);
+    fs.fsyncSync(descriptor);
+    assertStagedMaterializationAt(accessPath, staged);
+    return staged;
+  } catch (error) {
+    failure = error;
   }
+  if (staged === undefined) {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      failure ??= error;
+    }
+  } else {
+    try {
+      fs.ftruncateSync(descriptor, 0);
+      fs.fsyncSync(descriptor);
+      fs.fsyncSync(directory.descriptor);
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      closeStagedMaterialization(staged);
+    } catch (error) {
+      failure ??= error;
+>>>>>>> theirs
+    }
+  }
+  throw failure;
+}
+
+function writeMaterializationDescriptor(descriptor: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = fs.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (written === 0) throw new Error("materialization stage stopped accepting bytes");
+    offset += written;
+  }
+}
+
+function assertStagedMaterializationAt(accessPath: string, staged: StagedMaterialization): void {
+  const opened = fs.fstatSync(staged.descriptor, { bigint: true });
+  const lexical = fs.lstatSync(accessPath, { bigint: true });
+  if (
+    !opened.isFile() ||
+    !lexical.isFile() ||
+    opened.dev !== staged.device ||
+    opened.ino !== staged.inode ||
+    lexical.dev !== staged.device ||
+    lexical.ino !== staged.inode ||
+    opened.nlink !== 1n ||
+    lexical.nlink !== 1n ||
+    opened.size !== BigInt(staged.sizeBytes) ||
+    lexical.size !== BigInt(staged.sizeBytes)
+  ) {
+    throw new Error("materialization stage changed while it was published");
+  }
+}
+
+function closeStagedMaterialization(staged: StagedMaterialization): void {
+  if (staged.descriptor < 0) return;
+  const descriptor = staged.descriptor;
+  staged.descriptor = -1;
+  fs.closeSync(descriptor);
+}
+
+function openMaterializeDestinationDirectory(
+  projectRoot: string,
+  destinationDirectory: string
+): OpenedMaterializeDirectory {
+  const relativeDirectory = path.relative(projectRoot, destinationDirectory);
+  if (
+    relativeDirectory === ".." ||
+    relativeDirectory.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeDirectory)
+  ) {
+    throw new Error("materialize destination directory escapes the project root");
+  }
+
+  let current = openVerifiedMaterializeDirectory(projectRoot, projectRoot, "materialize project root");
+  try {
+    const components = relativeDirectory === "" ? [] : relativeDirectory.split(path.sep);
+    for (const component of components) {
+      assertMaterializeDirectoryCurrent(projectRoot, current);
+      const childLexicalPath = path.join(current.lexicalPath, component);
+      const childAccessPath = path.join(current.accessPath, component);
+      let child: OpenedMaterializeDirectory;
+      try {
+        child = openVerifiedMaterializeDirectory(
+          projectRoot,
+          childLexicalPath,
+          "materialize destination directory",
+          childAccessPath
+        );
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+        assertMaterializeDirectoryCurrent(projectRoot, current);
+        fs.mkdirSync(childAccessPath);
+        assertMaterializeDirectoryCurrent(projectRoot, current);
+        child = openVerifiedMaterializeDirectory(
+          projectRoot,
+          childLexicalPath,
+          "materialize destination directory",
+          childAccessPath
+        );
+      }
+      try {
+        assertMaterializeDirectoryCurrent(projectRoot, current);
+        assertMaterializeDirectoryCurrent(projectRoot, child);
+        closeMaterializeDirectory(current);
+      } catch (error) {
+        closeMaterializeDirectory(child);
+        throw error;
+      }
+      current = child;
+    }
+    return current;
+  } catch (error) {
+    closeMaterializeDirectory(current);
+    throw error;
+  }
+}
+
+function openVerifiedMaterializeDirectory(
+  projectRoot: string,
+  lexicalPath: string,
+  label: string,
+  openPath = lexicalPath
+): OpenedMaterializeDirectory {
+  assertNoSymlinkComponents(projectRoot, lexicalPath, label);
+  const descriptor = fs.openSync(
+    openPath,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    const identity = fs.fstatSync(descriptor, { bigint: true });
+    if (!identity.isDirectory()) throw new Error(`${label} is not a physical directory`);
+    const accessPath = materializeDirectoryDescriptorPath(descriptor, identity);
+    const opened = { descriptor, lexicalPath, accessPath, identity };
+    assertMaterializeDirectoryCurrent(projectRoot, opened);
+    return opened;
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
+  }
+}
+
+function materializeDirectoryDescriptorPath(descriptor: number, identity: fs.BigIntStats): string {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+    try {
+      const accessed = fs.statSync(candidate, { bigint: true });
+      if (accessed.isDirectory() && accessed.dev === identity.dev && accessed.ino === identity.ino) return candidate;
+    } catch {
+      // Continue to the next descriptor filesystem.
+    }
+  }
+  throw new Error("materialize destination directory has no verifiable descriptor path");
+}
+
+function assertMaterializeDirectoryCurrent(projectRoot: string, opened: OpenedMaterializeDirectory): void {
+  assertNoSymlinkComponents(projectRoot, opened.lexicalPath, "materialize destination directory");
+  const descriptor = fs.fstatSync(opened.descriptor, { bigint: true });
+  const lexical = fs.lstatSync(opened.lexicalPath, { bigint: true });
+  const accessed = fs.statSync(opened.accessPath, { bigint: true });
+  if (
+    !descriptor.isDirectory() ||
+    !lexical.isDirectory() ||
+    !accessed.isDirectory() ||
+    descriptor.dev !== opened.identity.dev ||
+    descriptor.ino !== opened.identity.ino ||
+    lexical.dev !== opened.identity.dev ||
+    lexical.ino !== opened.identity.ino ||
+    accessed.dev !== opened.identity.dev ||
+    accessed.ino !== opened.identity.ino
+  ) {
+    throw new Error("materialize destination directory changed while it was opened");
+  }
+}
+
+function closeMaterializeDirectory(opened: OpenedMaterializeDirectory): void {
+  if (opened.descriptor < 0) return;
+  const descriptor = opened.descriptor;
+  opened.descriptor = -1;
+  fs.closeSync(descriptor);
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function planCopy(
@@ -378,14 +695,17 @@ function planCopy(
   projectRoot: string,
   copy: MaterializeCopySelection,
   allowOverwrite: boolean,
+  remainingSnapshotBytes: number,
+  plannedSnapshotBytes: number,
   diagnostics: RuntimeDiagnostic[]
-): PlannedMaterialization | undefined {
+): PlannedCopyResult {
   const sourcePath = resolveSource(copy.source, layout, diagnostics);
   const destinationPath = resolveDestination(copy.destination, projectRoot, allowOverwrite, diagnostics);
   if (sourcePath === undefined || destinationPath === undefined) {
-    return undefined;
+    return { status: "invalid" };
   }
   try {
+<<<<<<< ours
     const bytes = readRegularFileSnapshot(sourcePath, MAX_MATERIALIZE_SOURCE_BYTES);
     return {
       selection: copy,
@@ -394,6 +714,28 @@ function planCopy(
       bytes,
       sizeBytes: bytes.length,
       sha256: sha256Bytes(bytes)
+=======
+    const expectedSize = fs.lstatSync(sourcePath).size;
+    if (
+      Number.isSafeInteger(expectedSize) &&
+      expectedSize >= 0 &&
+      expectedSize <= MAX_MATERIALIZE_SOURCE_BYTES &&
+      expectedSize > remainingSnapshotBytes
+    ) {
+      diagnostics.push(materializeSnapshotBudgetDiagnostic(copy, plannedSnapshotBytes + expectedSize));
+      return { status: "snapshot-budget-exceeded" };
+    }
+    const bytes = readRegularFileSnapshot(sourcePath, Math.min(MAX_MATERIALIZE_SOURCE_BYTES, remainingSnapshotBytes));
+    return {
+      status: "planned",
+      value: {
+        selection: copy,
+        destinationPath,
+        bytes,
+        sizeBytes: bytes.length,
+        sha256: sha256Bytes(bytes)
+      }
+>>>>>>> theirs
     };
   } catch (error) {
     diagnostics.push(
@@ -405,8 +747,29 @@ function planCopy(
         { error: error instanceof Error ? error.message : String(error) }
       )
     );
+<<<<<<< ours
     return undefined;
   }
+=======
+    return { status: "invalid" };
+  }
+}
+
+function materializeSnapshotBudgetDiagnostic(
+  copy: MaterializeCopySelection,
+  attemptedBytes: number
+): RuntimeDiagnostic {
+  return runtimeError(
+    "MATERIALIZE_SNAPSHOT_BUDGET_EXCEEDED",
+    `materialize copy snapshots exceed the ${MAX_MATERIALIZE_SNAPSHOT_BYTES}-byte aggregate limit`,
+    "materialize",
+    copy.source,
+    {
+      attempted_bytes: Number.isSafeInteger(attemptedBytes) ? attemptedBytes : "unsafe-integer",
+      limit_bytes: MAX_MATERIALIZE_SNAPSHOT_BYTES
+    }
+  );
+>>>>>>> theirs
 }
 
 function resolveSource(selection: string, layout: RunLayout, diagnostics: RuntimeDiagnostic[]): string | undefined {

@@ -72,7 +72,7 @@ export function validateMaterializePolicy(input: MaterializePolicyInput): Policy
   for (const copy of copies) {
     diagnostics.push(...validateSelectedRunOutput("copy source", copy.source).diagnostics);
     diagnostics.push(...validateRepoDestination(copy.destination).diagnostics);
-    const destinationKey = normalizeRelativePath(copy.destination);
+    const destinationKey = materializePathPolicyKey(copy.destination);
     if (destinations.has(destinationKey)) {
       diagnostics.push(
         policyError(
@@ -142,14 +142,15 @@ function validateSelectedRunOutput(label: string, selectedPath: string): PolicyR
 
 function validateRepoDestination(destination: string): PolicyResult<string> {
   const normalized = normalizeRelativePath(destination);
+  const policyKey = materializePathPolicyKey(normalized);
   const diagnostics = [
     ...validateSafeRelativePath(destination).diagnostics,
     ...validateExplicitRelativeSelection("copy destination", destination).diagnostics
   ];
-  if (normalized.startsWith(".git/") || normalized === ".git") {
+  if (policyKey.startsWith(".git/") || policyKey === ".git") {
     diagnostics.push(policyError("MATERIALIZE_GIT_DESTINATION", "materialization must not write git metadata"));
   }
-  if (normalized.startsWith(".ultrafuzz/") || normalized === ".ultrafuzz") {
+  if (policyKey.startsWith(".ultrafuzz/") || policyKey === ".ultrafuzz") {
     diagnostics.push(
       policyError("MATERIALIZE_PRODUCT_SURFACE_DESTINATION", "materialization must not write product run surfaces")
     );
@@ -162,13 +163,13 @@ function validateRepoDestination(destination: string): PolicyResult<string> {
 }
 
 function isSensitiveMaterializeDestination(normalized: string): boolean {
-  const components = splitPathComponents(normalized);
+  const components = splitPathComponents(materializePathPolicyKey(normalized));
   const [root] = components;
   const basename = components.at(-1) ?? normalized;
   if (basename === ".env" || basename.startsWith(".env.")) {
     return true;
   }
-  if (/^secrets?\.[A-Za-z0-9._-]+$/i.test(basename)) {
+  if (/^secrets?\.[a-z0-9._-]+$/u.test(basename)) {
     return true;
   }
   if (basename.endsWith(".pem") || basename.endsWith(".key")) {
@@ -178,6 +179,10 @@ function isSensitiveMaterializeDestination(normalized: string): boolean {
 }
 
 const SENSITIVE_MATERIALIZE_ROOTS = new Set(["secrets", ".secrets", ".ssh", ".aws", ".gcloud", ".azure"]);
+
+function materializePathPolicyKey(value: string): string {
+  return normalizeRelativePath(value).normalize("NFC").toLowerCase();
+}
 
 function isRunOutputPath(value: string): boolean {
   const components = splitPathComponents(value);

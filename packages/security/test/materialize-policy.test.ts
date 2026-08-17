@@ -61,6 +61,42 @@ test("materialize policy rejects denied destinations, duplicate destinations, an
   assert.equal(duplicate.ok, false);
   assert.ok(duplicate.diagnostics.some((diagnostic) => diagnostic.code === "MATERIALIZE_DUPLICATE_DESTINATION"));
 
+  const portableAliases = validateMaterializePolicy({
+    confirmed: true,
+    copies: [
+      { source: "artifacts/node-1/one.txt", destination: "test/Generated.t.sol" },
+      { source: "artifacts/node-1/two.txt", destination: "TEST/generated.t.sol" }
+    ]
+  });
+  assert.equal(portableAliases.ok, false);
+  assert.ok(portableAliases.diagnostics.some((diagnostic) => diagnostic.code === "MATERIALIZE_DUPLICATE_DESTINATION"));
+
+  for (const destination of [
+    ".GIT/config",
+    ".ULTRAFUZZ/runs/output.txt",
+    "SECRETS/key.txt",
+    ".SSH/config",
+    "nested/CERT.PEM",
+    "nested/SIGNING.KEY",
+    ".ENV.LOCAL"
+  ]) {
+    const denied = validateMaterializePolicy({
+      confirmed: true,
+      copies: [{ source: "artifacts/node-1/output.txt", destination }]
+    });
+    assert.equal(denied.ok, false, destination);
+    assert.ok(
+      denied.diagnostics.some((diagnostic) =>
+        [
+          "MATERIALIZE_GIT_DESTINATION",
+          "MATERIALIZE_PRODUCT_SURFACE_DESTINATION",
+          "MATERIALIZE_SENSITIVE_DESTINATION"
+        ].includes(diagnostic.code)
+      ),
+      `${destination}: ${JSON.stringify(denied.diagnostics)}`
+    );
+  }
+
   const publishingMode = validateMaterializePolicy({
     confirmed: true,
     mode: "push",
