@@ -14,6 +14,7 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
   "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
   "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
+  "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
@@ -27,6 +28,25 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT",
   "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
 ] as const;
+
+const BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "AZURE_OPENAI_API_KEY",
+  "CODEX_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "KIMI_API_KEY",
+  "MOONSHOT_API_KEY",
+  "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY"
+] as const;
+const BUILT_IN_PROVIDER_HOME_ENVIRONMENT_VARIABLES = [
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "KIMI_CODE_HOME",
+  "KIMI_SHARE_DIR"
+] as const;
+const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 type WorkflowRouteAgent = "ClaudeAgent" | "CodexAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
 type WorkflowDataRoute = { agent: WorkflowRouteAgent; configDir?: string };
@@ -58,7 +78,11 @@ export function workflowControlChildEnvironment(
   route?: WorkflowDataRoute
 ): Record<string, string> {
   const child: Record<string, string> = Object.fromEntries(
-    CONTROLLER_ONLY_ENVIRONMENT_VARIABLES.map((name) => [name, ""])
+    [
+      ...CONTROLLER_ONLY_ENVIRONMENT_VARIABLES,
+      ...BUILT_IN_PROVIDER_HOME_ENVIRONMENT_VARIABLES,
+      ...providerCredentialEnvironmentVariables(source)
+    ].map((name) => [name, ""])
   );
   const roots = workflowExecutionSnapshotRoots(source);
   for (const [name, value] of Object.entries(source)) {
@@ -73,6 +97,19 @@ export function workflowControlChildEnvironment(
   }
   if (route !== undefined) assertWorkflowDataRoute(route, { ...source, ...child }, source);
   return child;
+}
+
+function providerCredentialEnvironmentVariables(source: Record<string, string | undefined>): string[] {
+  const names = new Set<string>(BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES);
+  for (const name of (source.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES ?? "").split(",")) {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) continue;
+    if (!ENVIRONMENT_VARIABLE_PATTERN.test(trimmed)) {
+      throw new Error("controller provider credential environment list is invalid");
+    }
+    names.add(trimmed);
+  }
+  return [...names].sort();
 }
 
 function assertWorkflowDataRoute(
