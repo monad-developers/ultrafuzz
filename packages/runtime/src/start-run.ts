@@ -209,6 +209,8 @@ export async function startRun(input: StartRunInput) {
         path.join(plan.validation.project_root, ".smithers", "workflows")
       ]
     );
+    const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -216,13 +218,13 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: { ...trustedCli.env, ...prepared.executionSnapshot.env },
+      env: providerScopedControllerEnvironment(
+        { ...trustedCli.env, ...prepared.executionSnapshot.env },
+        providerCredentialNames
+      ),
       environmentVariableNames: mergeEnvironmentVariableNames(
-        agentEnvironmentVariableNames(
-          plan.resolved_config,
-          compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
-          forgeGuard.env
-        ),
+        agentEnvironmentVariableNames(plan.resolved_config, activeAgentRefs, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       ),
@@ -587,6 +589,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
       });
     }
+    const linkedAgentRefs = linkedWorkflowAgentRefs(evidence.verifiedControl.contents.tasks);
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -608,9 +612,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env),
+      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames),
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
@@ -1315,11 +1320,12 @@ function linkedWorkflowEnvironmentVariableNames(
   taskContents: Buffer,
   env: Record<string, string | undefined> | undefined
 ): string[] {
-  const tasks = parseSmithersTaskManifestBytes(taskContents).tasks;
-  return agentEnvironmentVariableNames(
-    config,
-    tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
-    env
+  return agentEnvironmentVariableNames(config, linkedWorkflowAgentRefs(taskContents), env);
+}
+
+function linkedWorkflowAgentRefs(taskContents: Buffer): string[] {
+  return parseSmithersTaskManifestBytes(taskContents).tasks.flatMap((task) =>
+    task.agentChain.map((profile) => profile.agentRef)
   );
 }
 
@@ -1337,11 +1343,46 @@ function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]
 
 export function linkedWorkflowExecutionEnvironment(
   evidence: LinkedWorkflowEvidence,
-  credentials: Record<string, string | undefined> | undefined
+  credentials: Record<string, string | undefined> | undefined,
+  providerCredentialNames: readonly string[] = []
 ): Record<string, string | undefined> {
   // Snapshot-controlled paths are applied last so caller credentials can add
   // secrets but cannot redirect any verified workflow input.
-  return { ...(credentials ?? {}), ...evidence.executionSnapshot.env };
+  return providerScopedControllerEnvironment(
+    { ...(credentials ?? {}), ...evidence.executionSnapshot.env },
+    providerCredentialNames
+  );
+}
+
+function providerScopedControllerEnvironment(
+  source: Record<string, string | undefined>,
+  providerCredentialNames: readonly string[]
+): Record<string, string | undefined> {
+  return {
+    ...source,
+    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: [...new Set(providerCredentialNames)].sort().join(",")
+  };
+}
+
+function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {
+  const activeAgentRefs = new Set(agentRefs);
+  const names: string[] = [];
+  for (const [agentRef, agent] of Object.entries(config.agents)) {
+    if (!activeAgentRefs.has(agentRef) || agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
+    assertCredentialEnvironmentVariableName(agent.apiKeyEnv);
+    names.push(agent.apiKeyEnv);
+    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+  }
+  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
+    const provider = config.execution.providers[config.execution.provider];
+    if (provider !== undefined) {
+      for (const name of provider.credentialEnv) {
+        assertCredentialEnvironmentVariableName(name);
+        names.push(name);
+      }
+    }
+  }
+  return [...new Set(names)].sort();
 }
 
 function agentEnvironmentVariableNames(
