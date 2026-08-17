@@ -21,6 +21,7 @@ const gates = [
     ["-w", "security:dependency-advisories"],
     ["G-SECURITY"]
   ),
+  gate("ci-scripts", "CI policy script tests", "pnpm", ["-w", "test:ci-scripts"], ["G-SECURITY"]),
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
   gate("config", "Config package tests", "pnpm", ["--filter", "@ultrafuzz/config", "test"], ["G-CONFIG"]),
   gate(
