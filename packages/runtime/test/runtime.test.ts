@@ -80,37 +80,26 @@ import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 const runningUnderBun = typeof process.versions.bun === "string";
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
-  "SMITHERS_FAKE_ALREADY_PAUSED",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
-  "SMITHERS_FAKE_EVENTS",
   "SMITHERS_FAKE_EXECUTED_AS_LOG",
   "SMITHERS_FAKE_FAIL_UP",
   "SMITHERS_FAKE_FORGE_GUARD_LOG",
   "SMITHERS_FAKE_FORKED_RUN_ID",
   "SMITHERS_FAKE_INPUT_LOG",
-  "SMITHERS_FAKE_INSPECT",
   "SMITHERS_FAKE_KEEP_WORKTREES_LOG",
   "SMITHERS_FAKE_KIMI_ENV_LOG",
   "SMITHERS_FAKE_LOG",
   "SMITHERS_FAKE_MARKER",
-  "SMITHERS_FAKE_NODE_DETAILS",
   "SMITHERS_FAKE_OPENROUTER_ENV_LOG",
   "SMITHERS_FAKE_PATH_LOG",
   "SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS",
-  "SMITHERS_FAKE_PS",
   "SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG",
   "SMITHERS_FAKE_RUN_EXISTS",
   "SMITHERS_FAKE_SNAPSHOT_ATTEMPT",
-  "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG",
-  "SMITHERS_FAKE_STATUS",
-  "SMITHERS_FAKE_STATUS_EVENTS",
-  "SMITHERS_FAKE_STATUS_JSON",
-  "SMITHERS_FAKE_TIMELINE",
-  "SMITHERS_FAKE_TOKEN_EVENTS",
-  "SMITHERS_FAKE_WHY"
+  "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
 ] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
 const TEST_DATA_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:anthropic","model:deepseek","model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","model:moonshot","model:openai","model:openrouter"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:anthropic","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:deepseek","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:moonshot","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openrouter","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":["~anthropic/claude-sonnet-latest:free","~vendor/model.latest:free+preview@2026"]}`;
@@ -1319,13 +1308,14 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const statusOverride = path.join(project, "fake-smithers-status-override.json");
+  const alreadyPausedMarker = path.join(project, "fake-smithers-already-paused");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ] && [ -n "$SMITHERS_FAKE_SNAPSHOT_ATTEMPT" ]; then',
       '  case "$2" in',
       "    */.smithers/workflows/*.tsx)",
@@ -1380,7 +1370,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
       "      exit 0",
-      '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
+      `    elif [ -f ${shellQuote(alreadyPausedMarker)} ]; then`,
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"paused"}}\'',
       "    else",
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"pause-requested"}}\'',
@@ -1402,8 +1392,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    esac",
       "    ;;",
       "  status)",
-      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
-      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      `    if [ -f ${shellQuote(statusOverride)} ]; then`,
+      `      cat ${shellQuote(statusOverride)}`,
       "    else",
       // The runner emits its envelope only under --full-output, and emits the bare
       // document otherwise. A fake that always enveloped hid a caller that never
@@ -1426,9 +1416,17 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_LOG: commandLog,
     ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST.join(",")
   };
+}
+
+function setFakeSmithersStatus(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function markFakeSmithersAlreadyPaused(project: string): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-already-paused"), "\n", "utf8");
 }
 
 function currentPsEnvelope(runs: unknown[]): unknown {
@@ -1484,15 +1482,14 @@ function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string 
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
-    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', '  cat "$SMITHERS_FAKE_PS"', "  exit 0", "fi", "exit 1", ""].join("\n"),
+    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', `  cat ${shellQuote(psPath)}`, "  exit 0", "fi", "exit 1", ""].join("\n"),
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_PS: psPath,
-    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_PS"
+    SMITHERS_FAKE_PS: psPath
   };
 }
 
@@ -1598,20 +1595,19 @@ function fakeLifecycleSmithersEnv(
     );
   }
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  inspect)",
       ...(input.inspectMarkerPath === undefined ? [] : [`    touch ${shellQuote(input.inspectMarkerPath)}`]),
-      '    cat "$SMITHERS_FAKE_INSPECT"',
+      `    cat ${shellQuote(inspectPath)}`,
       "    ;;",
       "  node)",
-      '    cat "$SMITHERS_FAKE_NODE_DETAILS/$2.json"',
+      `    cat ${shellQuote(nodeDetailsDirectory)}/"$2.json"`,
       "    ;;",
       "  cancel)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
@@ -1619,22 +1615,22 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    case "$*" in',
-      '      *--full-output*) cat "$SMITHERS_FAKE_STATUS_EVENTS" ;;',
+      `      *--full-output*) cat ${shellQuote(statusEventsPath)} ;;`,
       '      *) if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
-      '           cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      `           cat ${shellQuote(tokenEventsPath)}`,
       "         else",
-      '           cat "$SMITHERS_FAKE_EVENTS"',
+      `           cat ${shellQuote(eventsPath)}`,
       "         fi ;;",
       "    esac",
       "    ;;",
       "  timeline)",
-      '    cat "$SMITHERS_FAKE_TIMELINE"',
+      `    cat ${shellQuote(timelinePath)}`,
       "    ;;",
       "  status)",
-      '    cat "$SMITHERS_FAKE_STATUS"',
+      `    cat ${shellQuote(statusPath)}`,
       "    ;;",
       "  why)",
-      '    cat "$SMITHERS_FAKE_WHY"',
+      `    cat ${shellQuote(whyPath)}`,
       "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -1674,7 +1670,7 @@ function fakeLifecycleSmithersEnv(
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_LOG: commandLog,
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
@@ -8719,7 +8715,7 @@ test("getRunHealth accepts the terminal degraded verdict without converting it t
 
   const envelope = currentStatusEnvelope("ultrafuzz-degraded-health-run");
   const data = envelope.data as Record<string, unknown>;
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...data,
@@ -8747,7 +8743,7 @@ test("getRunHealth binds the workflow health summary to the run it asked about",
   const run = await startRun({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(currentStatusEnvelope("ultrafuzz-another-run"));
+  setFakeSmithersStatus(project, currentStatusEnvelope("ultrafuzz-another-run"));
   const foreign = await getRunHealth({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(foreign.ok, false);
   assert.deepEqual(
@@ -8784,7 +8780,7 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
   ];
 
   for (const invalid of invalidDocuments) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(invalid.value);
+    setFakeSmithersStatus(project, invalid.value);
     const health = await getRunHealth({ projectRoot: project, runId: "strict-health-run", env });
     assert.equal(health.ok, false, invalid.label);
     assert.equal(health.value, undefined, invalid.label);
@@ -8807,7 +8803,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
   const base = envelope.data as Record<string, unknown>;
 
   for (const verdict of ["orphaned", "cancel-pending"] as const) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+    setFakeSmithersStatus(project, {
       ...envelope,
       data: {
         ...base,
@@ -8841,7 +8837,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
   }
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...base,
@@ -8877,7 +8873,7 @@ test("pauseRun accepts the workflow runner pause-request exit and is idempotent 
   assert.equal(requested.value?.status, "pause-requested");
   assert.equal(requested.value?.submitted, true);
 
-  env.SMITHERS_FAKE_ALREADY_PAUSED = "1";
+  markFakeSmithersAlreadyPaused(project);
   const paused = await pauseRun({ projectRoot: project, runId: "pause-run", env });
   assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
   assert.equal(paused.value?.status, "paused");
