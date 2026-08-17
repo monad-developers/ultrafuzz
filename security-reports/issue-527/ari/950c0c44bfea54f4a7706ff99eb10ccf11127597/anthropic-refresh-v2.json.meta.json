@@ -1,0 +1,273 @@
+{
+  "status": "succeeded",
+  "error": null,
+  "lane": "anthropic",
+  "intended_model": "claude-fable-5",
+  "primary_model": "claude-fable-5",
+  "fallback_model": "claude-opus-4-8",
+  "actual_model": "claude-opus-4-8",
+  "effort": "max",
+  "degradation": "claude-fable-5 was unavailable; approved direct fallback claude-opus-4-8 served the assessment",
+  "cli_version": "2.1.233 (Claude Code)",
+  "generation_schema": {
+    "purpose": "generation_only",
+    "canonical_verification_authoritative": true,
+    "transform": "omit unsupported top-level $schema declaration and lane-conditional allOf",
+    "omitted_dialect": "https://json-schema.org/draft/2020-12/schema",
+    "omitted_top_level_all_of_sha256": "1500b0d775e03201ce72f165e0ab28c2128ef3d18ec0407be5a3cffe9e91ddc3",
+    "sha256": "a76d88ad92b35a1b8e460956de3ed584d832a895a344e36fdf3f9270f56d350a"
+  },
+  "forced_explicit_fallback": true,
+  "auxiliary_model_environment_policy": {
+    "ANTHROPIC_SMALL_FAST_MODEL": "commanded_model",
+    "CLAUDE_CODE_AUTO_MODE_MODEL": "commanded_model",
+    "CLAUDE_CODE_BG_CLASSIFIER_MODEL": "commanded_model",
+    "CLAUDE_CONTEXT_COLLAPSE_MODEL": "commanded_model"
+  },
+  "limits": {
+    "codex_deadline_ms": 5400000,
+    "claude_attempt_deadline_ms": 5400000,
+    "term_grace_ms": 10000,
+    "claude_stdout_max_bytes": 8388608,
+    "codex_event_max_bytes": 134217728,
+    "structured_output_max_bytes": 8388608
+  },
+  "structured_output": {
+    "max_bytes": 8388608,
+    "bytes": 51122,
+    "limit_exceeded": false
+  },
+  "used_models": [
+    "claude-opus-4-8"
+  ],
+  "fallback_used": true,
+  "explicit_retry": false,
+  "selected_attempt": "explicit_fallback",
+  "model_usage": {
+    "claude-opus-4-8": {
+      "inputTokens": 3208,
+      "outputTokens": 117795,
+      "cacheReadInputTokens": 1604842,
+      "cacheCreationInputTokens": 195092,
+      "webSearchRequests": 0,
+      "costUSD": 5.714256000000001,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 64000,
+      "canonicalModel": "claude-opus-4-8",
+      "provider": "firstParty"
+    }
+  },
+  "attempts": [
+    {
+      "label": "explicit_fallback",
+      "commanded_model": "claude-opus-4-8",
+      "automatic_fallback_model": null,
+      "exit_code": 0,
+      "signal": null,
+      "spawn_error": null,
+      "termination_reason": null,
+      "timed_out": false,
+      "output_limit_exceeded": false,
+      "term_sent": false,
+      "kill_sent": false,
+      "deadline_ms": 5400000,
+      "term_grace_ms": 10000,
+      "wall_time_ms": 1393443,
+      "stdout_max_bytes": 8388608,
+      "stdout_observed_bytes": 83477,
+      "stdout_captured_bytes": 83477,
+      "stdout_limit_exceeded": false,
+      "stdout_stream_error": null,
+      "raw_bytes": 83477,
+      "json_envelope_parsed": true,
+      "json_envelope_object": true,
+      "envelope_parse_error": null,
+      "retry_reason": null,
+      "used_models": [
+        "claude-opus-4-8"
+      ],
+      "model_usage": {
+        "claude-opus-4-8": {
+          "inputTokens": 3208,
+          "outputTokens": 117795,
+          "cacheReadInputTokens": 1604842,
+          "cacheCreationInputTokens": 195092,
+          "webSearchRequests": 0,
+          "costUSD": 5.714256000000001,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "canonicalModel": "claude-opus-4-8",
+          "provider": "firstParty"
+        }
+      },
+      "structured_output_present": true,
+      "raw_sha256": "dfdf0e3dd08371dedcfd04b52f1289652029ddca0e93d439f314954f582a51f9",
+      "duration_ms": 1392614,
+      "duration_api_ms": 1393661,
+      "total_cost_usd": 5.714256000000001,
+      "num_turns": 23,
+      "session_id": "3eb8097c-42cf-4efa-9777-6f061a24554c"
+    }
+  ],
+  "skill_commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+  "ari_commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+  "baseline_commit": "a634d948038f502e5e677477138dca0c763e2380",
+  "reports_commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+  "final_commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+  "final_base": "e0b872e387307128cc6fbf049e7623b031c5ff22",
+  "reviewed_remediation_heads": [
+    "8c6a7985df4cc38404a577a0977f85e9f3e629a2",
+    "6c0f71dedb5580c9285d928ddd66056ee868de67",
+    "62ad4e58f2691bbf55a038f7ae3e7942eafe2a34",
+    "38ebd41573a9400ba2c0452defbf26c1e662d2d4",
+    "bc345d86ef5f4a29e5cd35524387946ec6cec1e0"
+  ],
+  "repositories_before": {
+    "final": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/aggregate-final-frozen-20260817",
+      "commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+      "clean": true
+    },
+    "baseline": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/ari-baseline",
+      "commit": "a634d948038f502e5e677477138dca0c763e2380",
+      "clean": true
+    },
+    "skill": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/claude-sec-skills",
+      "commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+      "clean": true
+    },
+    "ari": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ari",
+      "commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+      "clean": true
+    },
+    "reports": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ultrafuzz-sec-skills-reports",
+      "commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+      "clean": true
+    }
+  },
+  "repositories_after": {
+    "final": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/aggregate-final-frozen-20260817",
+      "commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+      "clean": true
+    },
+    "baseline": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/ari-baseline",
+      "commit": "a634d948038f502e5e677477138dca0c763e2380",
+      "clean": true
+    },
+    "skill": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/claude-sec-skills",
+      "commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+      "clean": true
+    },
+    "ari": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ari",
+      "commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+      "clean": true
+    },
+    "reports": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ultrafuzz-sec-skills-reports",
+      "commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+      "clean": true
+    }
+  },
+  "assessor_inputs_before": {
+    "prompt_sha256": "ee8bbb2b99b5cb0fbfdda05cfdf41e9701c564a3e4c9e1055a71cfc34de3eebf",
+    "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+    "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+    "orchestration": {
+      "root": "/home/ubuntu/ultrafuzz-527-ari-refresh/950c0c44bfea54f4a7706ff99eb10ccf11127597/runner",
+      "files": {
+        "ari-refresh-common.mjs": {
+          "sha256": "95455888d757c836e9ef97a80cd7eedcaf57671223e091002274fc6fc369085f",
+          "bytes": 17274,
+          "mode": "600"
+        },
+        "ari-refresh.schema.json": {
+          "sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+          "bytes": 8432,
+          "mode": "600"
+        },
+        "run-claude-structured.mjs": {
+          "sha256": "e68f18a326a2e42b53576b9704ed835f3c6f2b1336148da174bc21fb65cb3d3e",
+          "bytes": 20762,
+          "mode": "600"
+        },
+        "run-codex-structured.mjs": {
+          "sha256": "dd5da2d4da402e8a9846056d5202ae70074a83a9c90c5ffa472ef2ae0e219dc5",
+          "bytes": 10958,
+          "mode": "600"
+        },
+        "verify-ari-selftest.mjs": {
+          "sha256": "40c37eebd48dad29e1ee4f40e3c97b5b10e3b84d9f845eb5abaca2459237b7ad",
+          "bytes": 27118,
+          "mode": "600"
+        },
+        "verify-ari.mjs": {
+          "sha256": "fa4fabe13081f316ba598d2201c2bfbc1d2eb880b5c5e46639dcf8e6170694a4",
+          "bytes": 39216,
+          "mode": "600"
+        }
+      },
+      "manifest_sha256": "08f1b624606005da0fa5810815c1e295afcfd2692a2351fb47949bdee505a923"
+    }
+  },
+  "assessor_inputs_after": {
+    "prompt_sha256": "ee8bbb2b99b5cb0fbfdda05cfdf41e9701c564a3e4c9e1055a71cfc34de3eebf",
+    "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+    "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+    "orchestration": {
+      "root": "/home/ubuntu/ultrafuzz-527-ari-refresh/950c0c44bfea54f4a7706ff99eb10ccf11127597/runner",
+      "files": {
+        "ari-refresh-common.mjs": {
+          "sha256": "95455888d757c836e9ef97a80cd7eedcaf57671223e091002274fc6fc369085f",
+          "bytes": 17274,
+          "mode": "600"
+        },
+        "ari-refresh.schema.json": {
+          "sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+          "bytes": 8432,
+          "mode": "600"
+        },
+        "run-claude-structured.mjs": {
+          "sha256": "e68f18a326a2e42b53576b9704ed835f3c6f2b1336148da174bc21fb65cb3d3e",
+          "bytes": 20762,
+          "mode": "600"
+        },
+        "run-codex-structured.mjs": {
+          "sha256": "dd5da2d4da402e8a9846056d5202ae70074a83a9c90c5ffa472ef2ae0e219dc5",
+          "bytes": 10958,
+          "mode": "600"
+        },
+        "verify-ari-selftest.mjs": {
+          "sha256": "40c37eebd48dad29e1ee4f40e3c97b5b10e3b84d9f845eb5abaca2459237b7ad",
+          "bytes": 27118,
+          "mode": "600"
+        },
+        "verify-ari.mjs": {
+          "sha256": "fa4fabe13081f316ba598d2201c2bfbc1d2eb880b5c5e46639dcf8e6170694a4",
+          "bytes": 39216,
+          "mode": "600"
+        }
+      },
+      "manifest_sha256": "08f1b624606005da0fa5810815c1e295afcfd2692a2351fb47949bdee505a923"
+    }
+  },
+  "prompt_sha256": "ee8bbb2b99b5cb0fbfdda05cfdf41e9701c564a3e4c9e1055a71cfc34de3eebf",
+  "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+  "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+  "output_sha256": "a4ad575edc3686c408ed2f4c349b64dc7a095eb847fd1ba54e84dcc7f633ef51",
+  "raw_sha256": "dfdf0e3dd08371dedcfd04b52f1289652029ddca0e93d439f314954f582a51f9",
+  "primary_raw_sha256": null,
+  "fallback_raw_sha256": "dfdf0e3dd08371dedcfd04b52f1289652029ddca0e93d439f314954f582a51f9",
+  "duration_ms": 1392614,
+  "duration_api_ms": 1393661,
+  "total_cost_usd": 5.714256000000001,
+  "num_turns": 23,
+  "session_id": "3eb8097c-42cf-4efa-9777-6f061a24554c"
+}

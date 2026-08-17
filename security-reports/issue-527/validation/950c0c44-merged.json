@@ -1,0 +1,239 @@
+{
+  "schema_version": "ultrafuzz.release-validation.report.v2",
+  "package_id": "ultrafuzz",
+  "generated_at": "2026-08-17T19:22:04.903Z",
+  "project_root": "/home/ubuntu/ultrafuzz-527-validation/950c0c44/package-gates",
+  "report_path": ".ultrafuzz/release-validation/950c0c44-merged.json",
+  "overall_status": "pass",
+  "commands": [
+    {
+      "id": "dependency-advisories",
+      "title": "Production dependency advisory policy",
+      "command": "pnpm -w security:dependency-advisories",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 4148,
+      "validation_gates": [
+        "G-SECURITY"
+      ]
+    },
+    {
+      "id": "ci-scripts",
+      "title": "CI policy script tests",
+      "command": "pnpm -w test:ci-scripts",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 41361,
+      "validation_gates": [
+        "G-SECURITY"
+      ]
+    },
+    {
+      "id": "docs",
+      "title": "Documentation inventory",
+      "command": "pnpm -w docs:check",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 291,
+      "validation_gates": [
+        "G-DOCS"
+      ]
+    },
+    {
+      "id": "config",
+      "title": "Config package tests",
+      "command": "pnpm --filter @ultrafuzz/config test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 4615,
+      "validation_gates": [
+        "G-CONFIG"
+      ]
+    },
+    {
+      "id": "audit-profile-package",
+      "title": "Audit profile package assets",
+      "command": "node scripts/validate-audit-profile-package.mjs",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 3859,
+      "validation_gates": [
+        "G-CONFIG",
+        "G-CLI"
+      ]
+    },
+    {
+      "id": "security",
+      "title": "Security package tests",
+      "command": "pnpm --filter @ultrafuzz/security test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 802,
+      "validation_gates": [
+        "G-SECURITY"
+      ]
+    },
+    {
+      "id": "topology",
+      "title": "Topology package tests",
+      "command": "pnpm --filter @ultrafuzz/topology test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 7871,
+      "validation_gates": [
+        "G-TOPOLOGY"
+      ]
+    },
+    {
+      "id": "prompts",
+      "title": "Prompt package tests",
+      "command": "pnpm --filter @ultrafuzz/prompts test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 5325,
+      "validation_gates": [
+        "G-PROMPTS"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "title": "Artifacts package tests",
+      "command": "pnpm --filter @ultrafuzz/artifacts test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 9764,
+      "validation_gates": [
+        "G-ARTIFACTS"
+      ]
+    },
+    {
+      "id": "runtime-supporting",
+      "title": "Runtime supporting test files",
+      "command": "pnpm --filter @ultrafuzz/runtime test:release:supporting",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1233114,
+      "validation_gates": [
+        "G-RUNTIME"
+      ]
+    },
+    {
+      "id": "runtime-1",
+      "title": "Runtime integration tests (shard 1/4)",
+      "command": "pnpm --filter @ultrafuzz/runtime test:release:runtime-shard -- 1/4",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1258811,
+      "validation_gates": [
+        "G-RUNTIME"
+      ]
+    },
+    {
+      "id": "runtime-2",
+      "title": "Runtime integration tests (shard 2/4)",
+      "command": "pnpm --filter @ultrafuzz/runtime test:release:runtime-shard -- 2/4",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 788364,
+      "validation_gates": [
+        "G-RUNTIME"
+      ]
+    },
+    {
+      "id": "runtime-3",
+      "title": "Runtime integration tests (shard 3/4)",
+      "command": "pnpm --filter @ultrafuzz/runtime test:release:runtime-shard -- 3/4",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1377293,
+      "validation_gates": [
+        "G-RUNTIME"
+      ]
+    },
+    {
+      "id": "runtime-4",
+      "title": "Runtime integration tests (shard 4/4)",
+      "command": "pnpm --filter @ultrafuzz/runtime test:release:runtime-shard -- 4/4",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1449453,
+      "validation_gates": [
+        "G-RUNTIME"
+      ]
+    },
+    {
+      "id": "evals",
+      "title": "Evals package tests",
+      "command": "pnpm --filter @ultrafuzz/evals test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 18503,
+      "validation_gates": [
+        "G-EVALS"
+      ]
+    },
+    {
+      "id": "modal",
+      "title": "Modal package tests",
+      "command": "pnpm --filter @ultrafuzz/modal test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 60237,
+      "validation_gates": [
+        "G-MODAL"
+      ]
+    },
+    {
+      "id": "cli",
+      "title": "CLI package tests",
+      "command": "pnpm --filter @ultrafuzz/cli test",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1608847,
+      "validation_gates": [
+        "G-CLI"
+      ]
+    },
+    {
+      "id": "benchmark-history",
+      "title": "Benchmark history charts",
+      "command": "pnpm -w benchmark:check:prebuilt",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 1273,
+      "validation_gates": [
+        "G-CLI"
+      ]
+    },
+    {
+      "id": "workspace-typecheck",
+      "title": "Workspace typecheck",
+      "command": "pnpm -w typecheck",
+      "required": true,
+      "status": "passed",
+      "exit_code": 0,
+      "duration_ms": 79495,
+      "validation_gates": [
+        "G-WORKSPACE-TYPECHECK"
+      ]
+    }
+  ]
+}

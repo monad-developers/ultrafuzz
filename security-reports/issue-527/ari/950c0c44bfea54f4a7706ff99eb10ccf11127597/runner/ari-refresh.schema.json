@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lane",
+    "intended_model",
+    "actual_model",
+    "effort",
+    "degradation",
+    "skill_commit",
+    "ari_commit",
+    "baseline_commit",
+    "final_commit",
+    "old",
+    "pivot",
+    "final",
+    "delta_scope",
+    "delta_controls",
+    "accepted_yolo_residuals",
+    "scope_changes",
+    "verification_notes",
+    "report_markdown"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "lane": { "const": "openai" } },
+        "required": ["lane"]
+      },
+      "then": {
+        "properties": {
+          "intended_model": { "const": "gpt-5.6-sol" },
+          "actual_model": { "const": "gpt-5.6-sol" },
+          "effort": { "const": "xhigh" },
+          "degradation": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "lane": { "const": "anthropic" } },
+        "required": ["lane"]
+      },
+      "then": {
+        "properties": {
+          "intended_model": { "const": "claude-fable-5" },
+          "actual_model": { "enum": ["claude-fable-5", "claude-opus-4-8"] },
+          "effort": { "const": "max" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "actual_model": { "const": "claude-fable-5" } },
+              "required": ["actual_model"]
+            },
+            "then": { "properties": { "degradation": { "type": "null" } } }
+          },
+          {
+            "if": {
+              "properties": { "actual_model": { "const": "claude-opus-4-8" } },
+              "required": ["actual_model"]
+            },
+            "then": {
+              "properties": {
+                "degradation": {
+                  "type": "string",
+                  "minLength": 1,
+                  "allOf": [{ "pattern": "claude-fable-5" }, { "pattern": "claude-opus-4-8" }]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "lane": { "type": "string", "enum": ["openai", "anthropic"] },
+    "intended_model": { "type": "string", "enum": ["gpt-5.6-sol", "claude-fable-5"] },
+    "actual_model": {
+      "type": "string",
+      "enum": ["gpt-5.6-sol", "claude-fable-5", "claude-opus-4-8"]
+    },
+    "effort": { "type": "string", "enum": ["xhigh", "max"] },
+    "degradation": {
+      "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+    },
+    "skill_commit": {
+      "type": "string",
+      "enum": ["d4846045a1e4079676e5ea539af7db8bfa8c3c9e"]
+    },
+    "ari_commit": {
+      "type": "string",
+      "enum": ["847f5e300d1977be9a437ead50826ddd5930a01d"]
+    },
+    "baseline_commit": {
+      "type": "string",
+      "enum": ["a634d948038f502e5e677477138dca0c763e2380"]
+    },
+    "final_commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "old": {
+      "allOf": [{ "$ref": "#/$defs/state" }, { "properties": { "label": { "const": "old" } } }]
+    },
+    "pivot": {
+      "allOf": [{ "$ref": "#/$defs/state" }, { "properties": { "label": { "const": "pivot" } } }]
+    },
+    "final": {
+      "allOf": [{ "$ref": "#/$defs/state" }, { "properties": { "label": { "const": "final" } } }]
+    },
+    "delta_scope": { "type": "number" },
+    "delta_controls": { "type": "number" },
+    "accepted_yolo_residuals": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^D-0[1-4]\\b", "minLength": 5 },
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true
+    },
+    "scope_changes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "verification_notes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "report_markdown": { "type": "string", "minLength": 1000 }
+  },
+  "$defs": {
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "ari",
+        "risk_mass",
+        "risk_capacity",
+        "band_grade",
+        "grade",
+        "severity_gate_grade_cap",
+        "threats"
+      ],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "ari": { "type": "number", "minimum": 0, "maximum": 100 },
+        "risk_mass": { "type": "number", "minimum": 0 },
+        "risk_capacity": { "type": "number", "minimum": 0 },
+        "band_grade": { "type": "string", "enum": ["A", "B", "C", "D", "F"] },
+        "grade": { "type": "string", "enum": ["A", "B", "C", "D", "F"] },
+        "severity_gate_grade_cap": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "enum": ["B", "C", "D", "F"] }]
+        },
+        "threats": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/threat" }
+        }
+      }
+    },
+    "threat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "severity", "weight", "controls", "gap", "residual_mass"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^T[0-9]+$" },
+        "title": { "type": "string", "minLength": 1 },
+        "severity": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+        "weight": { "type": "integer", "enum": [1, 3, 5, 8] },
+        "controls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/control" }
+        },
+        "gap": { "type": "number", "minimum": 0, "maximum": 1 },
+        "residual_mass": { "type": "number", "minimum": 0 }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "status", "effectiveness", "effectiveness_rationale", "independence_group"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "Not Applied" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "effectiveness": { "type": "null" },
+              "effectiveness_rationale": { "type": "null" },
+              "independence_group": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "const": "Eliminated" } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "effectiveness": { "type": "null" },
+              "effectiveness_rationale": { "type": "null" },
+              "independence_group": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "status": { "enum": ["Applied", "Partial"] } },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "independence_group": { "type": "string", "minLength": 1 }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "effectiveness": { "type": "null" } },
+                  "required": ["effectiveness"]
+                },
+                "then": { "properties": { "effectiveness_rationale": { "type": "null" } } }
+              },
+              {
+                "if": {
+                  "properties": { "effectiveness": { "type": "number" } },
+                  "required": ["effectiveness"]
+                },
+                "then": {
+                  "properties": {
+                    "effectiveness_rationale": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^C[0-9]+$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["Eliminated", "Applied", "Partial", "Not Applied"] },
+        "effectiveness": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "number",
+              "enum": [
+                0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9,
+                0.95
+              ]
+            }
+          ]
+        },
+        "effectiveness_rationale": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "independence_group": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        }
+      }
+    }
+  }
+}

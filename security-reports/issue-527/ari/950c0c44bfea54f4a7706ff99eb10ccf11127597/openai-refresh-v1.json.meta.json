@@ -1,0 +1,213 @@
+{
+  "status": "succeeded",
+  "error": null,
+  "lane": "openai",
+  "intended_model": "gpt-5.6-sol",
+  "commanded_model": "gpt-5.6-sol",
+  "actual_model": "gpt-5.6-sol",
+  "effort": "xhigh",
+  "degradation": null,
+  "cli_version": "codex-cli 0.147.0",
+  "limits": {
+    "codex_deadline_ms": 5400000,
+    "claude_attempt_deadline_ms": 5400000,
+    "term_grace_ms": 10000,
+    "claude_stdout_max_bytes": 8388608,
+    "codex_event_max_bytes": 134217728,
+    "structured_output_max_bytes": 8388608
+  },
+  "execution": {
+    "code": 0,
+    "signal": null,
+    "spawn_error": null,
+    "termination_reason": null,
+    "timed_out": false,
+    "output_limit_exceeded": false,
+    "term_sent": false,
+    "kill_sent": false,
+    "deadline_ms": 5400000,
+    "term_grace_ms": 10000,
+    "wall_time_ms": 847236
+  },
+  "event_stream": {
+    "max_bytes": 134217728,
+    "observed_bytes": 1215066,
+    "captured_bytes": 1215066,
+    "limit_exceeded": false,
+    "stream_error": null,
+    "file_bytes": 1215066
+  },
+  "structured_output": {
+    "max_bytes": 8388608,
+    "bytes": 30506,
+    "limit_exceeded": false
+  },
+  "generation_schema": {
+    "purpose": "generation_only",
+    "canonical_verification_authoritative": true,
+    "transform": "inline labeled states, omit canonical-only conditionals, and close typed object schemas",
+    "added_object_types": 0,
+    "added_closed_objects": 0,
+    "omitted_control_conditionals": true,
+    "omitted_lane_conditionals": true,
+    "omitted_unique_items": 2,
+    "path": "/home/ubuntu/ultrafuzz-527-ari-refresh/950c0c44bfea54f4a7706ff99eb10ccf11127597/openai-refresh-v1.json.generation.schema.json",
+    "bytes": 11123,
+    "sha256": "5b8ed4849735238eec45e273a65360ccec87f1d4a916856ff9a4b755750a8a6c"
+  },
+  "skill_commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+  "ari_commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+  "baseline_commit": "a634d948038f502e5e677477138dca0c763e2380",
+  "reports_commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+  "final_commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+  "final_base": "e0b872e387307128cc6fbf049e7623b031c5ff22",
+  "reviewed_remediation_heads": [
+    "8c6a7985df4cc38404a577a0977f85e9f3e629a2",
+    "6c0f71dedb5580c9285d928ddd66056ee868de67",
+    "62ad4e58f2691bbf55a038f7ae3e7942eafe2a34",
+    "38ebd41573a9400ba2c0452defbf26c1e662d2d4",
+    "bc345d86ef5f4a29e5cd35524387946ec6cec1e0"
+  ],
+  "repositories_before": {
+    "final": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/aggregate-final-frozen-20260817",
+      "commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+      "clean": true
+    },
+    "baseline": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/ari-baseline",
+      "commit": "a634d948038f502e5e677477138dca0c763e2380",
+      "clean": true
+    },
+    "skill": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/claude-sec-skills",
+      "commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+      "clean": true
+    },
+    "ari": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ari",
+      "commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+      "clean": true
+    },
+    "reports": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ultrafuzz-sec-skills-reports",
+      "commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+      "clean": true
+    }
+  },
+  "repositories_after": {
+    "final": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/aggregate-final-frozen-20260817",
+      "commit": "950c0c44bfea54f4a7706ff99eb10ccf11127597",
+      "clean": true
+    },
+    "baseline": {
+      "path": "/home/ubuntu/ultrafuzz-527-worktrees/ari-baseline",
+      "commit": "a634d948038f502e5e677477138dca0c763e2380",
+      "clean": true
+    },
+    "skill": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/claude-sec-skills",
+      "commit": "d4846045a1e4079676e5ea539af7db8bfa8c3c9e",
+      "clean": true
+    },
+    "ari": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ari",
+      "commit": "847f5e300d1977be9a437ead50826ddd5930a01d",
+      "clean": true
+    },
+    "reports": {
+      "path": "/home/ubuntu/ultrafuzz-issue-527/.audit-orchestration/ultrafuzz-sec-skills-reports",
+      "commit": "b4f992a23e1f9a33f7c5fa2d4a5c6817c7c7a06a",
+      "clean": true
+    }
+  },
+  "assessor_inputs_before": {
+    "prompt_sha256": "ce80b8bcabb36f5c021013e67177512044833762e105c3a1fef3296354bc88f9",
+    "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+    "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+    "orchestration": {
+      "root": "/home/ubuntu/ultrafuzz-527-ari-refresh/950c0c44bfea54f4a7706ff99eb10ccf11127597/runner",
+      "files": {
+        "ari-refresh-common.mjs": {
+          "sha256": "95455888d757c836e9ef97a80cd7eedcaf57671223e091002274fc6fc369085f",
+          "bytes": 17274,
+          "mode": "600"
+        },
+        "ari-refresh.schema.json": {
+          "sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+          "bytes": 8432,
+          "mode": "600"
+        },
+        "run-claude-structured.mjs": {
+          "sha256": "e68f18a326a2e42b53576b9704ed835f3c6f2b1336148da174bc21fb65cb3d3e",
+          "bytes": 20762,
+          "mode": "600"
+        },
+        "run-codex-structured.mjs": {
+          "sha256": "dd5da2d4da402e8a9846056d5202ae70074a83a9c90c5ffa472ef2ae0e219dc5",
+          "bytes": 10958,
+          "mode": "600"
+        },
+        "verify-ari-selftest.mjs": {
+          "sha256": "40c37eebd48dad29e1ee4f40e3c97b5b10e3b84d9f845eb5abaca2459237b7ad",
+          "bytes": 27118,
+          "mode": "600"
+        },
+        "verify-ari.mjs": {
+          "sha256": "fa4fabe13081f316ba598d2201c2bfbc1d2eb880b5c5e46639dcf8e6170694a4",
+          "bytes": 39216,
+          "mode": "600"
+        }
+      },
+      "manifest_sha256": "08f1b624606005da0fa5810815c1e295afcfd2692a2351fb47949bdee505a923"
+    }
+  },
+  "assessor_inputs_after": {
+    "prompt_sha256": "ce80b8bcabb36f5c021013e67177512044833762e105c3a1fef3296354bc88f9",
+    "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+    "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+    "orchestration": {
+      "root": "/home/ubuntu/ultrafuzz-527-ari-refresh/950c0c44bfea54f4a7706ff99eb10ccf11127597/runner",
+      "files": {
+        "ari-refresh-common.mjs": {
+          "sha256": "95455888d757c836e9ef97a80cd7eedcaf57671223e091002274fc6fc369085f",
+          "bytes": 17274,
+          "mode": "600"
+        },
+        "ari-refresh.schema.json": {
+          "sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+          "bytes": 8432,
+          "mode": "600"
+        },
+        "run-claude-structured.mjs": {
+          "sha256": "e68f18a326a2e42b53576b9704ed835f3c6f2b1336148da174bc21fb65cb3d3e",
+          "bytes": 20762,
+          "mode": "600"
+        },
+        "run-codex-structured.mjs": {
+          "sha256": "dd5da2d4da402e8a9846056d5202ae70074a83a9c90c5ffa472ef2ae0e219dc5",
+          "bytes": 10958,
+          "mode": "600"
+        },
+        "verify-ari-selftest.mjs": {
+          "sha256": "40c37eebd48dad29e1ee4f40e3c97b5b10e3b84d9f845eb5abaca2459237b7ad",
+          "bytes": 27118,
+          "mode": "600"
+        },
+        "verify-ari.mjs": {
+          "sha256": "fa4fabe13081f316ba598d2201c2bfbc1d2eb880b5c5e46639dcf8e6170694a4",
+          "bytes": 39216,
+          "mode": "600"
+        }
+      },
+      "manifest_sha256": "08f1b624606005da0fa5810815c1e295afcfd2692a2351fb47949bdee505a923"
+    }
+  },
+  "prompt_sha256": "ce80b8bcabb36f5c021013e67177512044833762e105c3a1fef3296354bc88f9",
+  "schema_sha256": "021ec82a164dc639dbf59bda6427d051f57d7fc74f4198f93573cc3b8625a9be",
+  "remediation_manifest_sha256": "fac2351a5f6130bcd2f62d2fb894d31362df19b49c3f43145f3eb315dd2ce6b5",
+  "output_sha256": "b4518019e09c4c7fc716d28702fd3d007778ca0eca0c6a56e5bf96d17bcdf82d",
+  "events_sha256": "e039a07a2635dd1379ba54c15308d129cbf8ada69a9ed65ba99b87eeb7bb7613",
+  "event_bytes": 1215066
+}

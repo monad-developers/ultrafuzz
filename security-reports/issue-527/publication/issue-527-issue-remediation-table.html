@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Ultrafuzz #527 — Issue Remediation Table</title>
+    <style>
+      :root {
+        --ink: #10243a;
+        --muted: #5d6b7a;
+        --line: #d6dfe8;
+        --paper: #ffffff;
+        --canvas: #edf2f6;
+        --navy: #0c253e;
+        --navy-2: #153c5e;
+        --green: #167652;
+        --green-soft: #e7f5ef;
+        --amber: #a76511;
+        --amber-soft: #fff2da;
+        --red: #a33d3d;
+        --red-soft: #faeeee;
+        --blue: #1f65aa;
+        --blue-soft: #e9f3fc;
+        --violet: #6652a8;
+        --violet-soft: #f0edfb;
+        --shadow: 0 12px 32px rgba(21, 48, 72, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font:
+          14px/1.45 Arial,
+          "Liberation Sans",
+          "Segoe UI",
+          sans-serif;
+      }
+
+      a {
+        color: var(--blue);
+        font-weight: 800;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 2px;
+      }
+
+      code {
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: #edf1f5;
+        color: #263f58;
+        font:
+          12px/1.35 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      main {
+        width: min(1420px, calc(100% - 28px));
+        margin: 14px auto 30px;
+        border: 1px solid #cfd8e2;
+        background: var(--paper);
+        box-shadow: var(--shadow);
+      }
+
+      .masthead {
+        display: grid;
+        grid-template-columns: 1.5fr 0.8fr;
+        gap: 30px;
+        padding: 28px 32px 25px;
+        color: white;
+        background:
+          radial-gradient(
+            circle at 88% 15%,
+            rgba(77, 189, 148, 0.26),
+            transparent 30%
+          ),
+          linear-gradient(120deg, var(--navy), var(--navy-2));
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: #9edac4;
+        font-size: 12px;
+        font-weight: 850;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(30px, 4vw, 48px);
+        line-height: 1.04;
+        letter-spacing: -0.035em;
+      }
+
+      .subtitle {
+        max-width: 900px;
+        margin: 12px 0 0;
+        color: #dce9f3;
+        font-size: 16px;
+      }
+
+      .mast-meta {
+        align-self: end;
+        padding-left: 22px;
+        border-left: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .mast-meta strong {
+        display: block;
+        margin-bottom: 3px;
+      }
+
+      .mast-meta p {
+        margin: 0 0 12px;
+        color: #c9dae7;
+      }
+
+      .mast-meta a {
+        color: white;
+      }
+
+      .mast-meta code {
+        background: rgba(255, 255, 255, 0.12);
+        color: white;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        border-bottom: 1px solid var(--line);
+        background: #f8fafc;
+      }
+
+      .metric {
+        min-height: 86px;
+        padding: 15px 18px;
+        border-right: 1px solid var(--line);
+      }
+
+      .metric:last-child {
+        border-right: 0;
+      }
+
+      .metric .value {
+        display: block;
+        font-size: 28px;
+        font-weight: 850;
+        letter-spacing: -0.03em;
+      }
+
+      .metric .label {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .metric.ready .value {
+        color: var(--green);
+      }
+
+      .metric.partial .value {
+        color: var(--amber);
+      }
+
+      .metric.deferred .value {
+        color: var(--red);
+      }
+
+      .content {
+        padding: 22px 24px 28px;
+      }
+
+      .method {
+        margin-bottom: 16px;
+        padding: 13px 15px;
+        border: 1px solid #a9d5c4;
+        border-left: 6px solid var(--green);
+        background: linear-gradient(90deg, var(--green-soft), #fff 80%);
+      }
+
+      .method strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 16px;
+      }
+
+      .method p {
+        margin: 0;
+        color: #315648;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+      }
+
+      table {
+        width: 100%;
+        min-width: 1050px;
+        border-collapse: collapse;
+      }
+
+      caption {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+
+      th {
+        padding: 11px 10px;
+        border-bottom: 2px solid #b8c5d1;
+        background: #eef3f7;
+        color: #334b62;
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: 0.045em;
+        text-align: left;
+        text-transform: uppercase;
+      }
+
+      td {
+        padding: 13px 10px;
+        border-bottom: 1px solid #e2e8ed;
+        vertical-align: top;
+      }
+
+      tbody tr:nth-child(even) {
+        background: #fbfcfd;
+      }
+
+      tbody tr:hover {
+        background: #f2f7fa;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .issue {
+        width: 33%;
+      }
+
+      .loc {
+        width: 31%;
+      }
+
+      .state {
+        width: 20%;
+      }
+
+      .prs {
+        width: 16%;
+      }
+
+      .issue-id {
+        display: inline-block;
+        margin-right: 6px;
+        font:
+          850 13px/1.4 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      .issue-title {
+        display: block;
+        margin-top: 5px;
+        font-weight: 800;
+      }
+
+      .scope {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .loc-block + .loc-block {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed #cbd5de;
+      }
+
+      .loc-label {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 850;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .loc-value {
+        display: block;
+        margin-top: 1px;
+        font-size: 17px;
+        font-weight: 850;
+        letter-spacing: -0.015em;
+      }
+
+      .loc-value.exact {
+        color: var(--green);
+      }
+
+      .loc-value.remaining {
+        color: var(--amber);
+      }
+
+      .loc-value.prototype {
+        color: var(--violet);
+      }
+
+      .loc-note {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 4px 8px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 850;
+        white-space: nowrap;
+      }
+
+      .badge.ready {
+        border-color: #a7d6c4;
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .badge.partial {
+        border-color: #e6c78b;
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .badge.deferred {
+        border-color: #d7b3b3;
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .state-detail {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .pr-link {
+        display: block;
+        margin-bottom: 7px;
+      }
+
+      .pr-link:last-child {
+        margin-bottom: 0;
+      }
+
+      .pr-link small {
+        display: block;
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 650;
+      }
+
+      .aggregate {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr auto;
+        gap: 18px;
+        align-items: center;
+        margin-top: 16px;
+        padding: 15px 17px;
+        border: 1px solid #a7c9e7;
+        border-left: 6px solid var(--blue);
+        background: var(--blue-soft);
+      }
+
+      .aggregate strong {
+        display: block;
+        font-size: 16px;
+      }
+
+      .aggregate span {
+        display: block;
+        margin-top: 3px;
+        color: #385c7d;
+      }
+
+      .aggregate .aggregate-loc {
+        color: var(--blue);
+        font-size: 24px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .footnotes {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 16px;
+      }
+
+      .footnote {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        background: #f8fafc;
+      }
+
+      .footnote strong {
+        display: block;
+      }
+
+      .footnote span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 14px 24px;
+        border-top: 1px solid var(--line);
+        background: #f5f7f9;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          width: calc(100% - 12px);
+          margin-top: 6px;
+        }
+
+        .masthead {
+          grid-template-columns: 1fr;
+          padding: 22px;
+        }
+
+        .mast-meta {
+          padding: 14px 0 0;
+          border: 0;
+          border-top: 1px solid rgba(255, 255, 255, 0.22);
+        }
+
+        .summary {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .summary .metric:last-child {
+          grid-column: 1 / -1;
+        }
+
+        .metric {
+          border-bottom: 1px solid var(--line);
+        }
+
+        .content {
+          padding: 16px 12px 22px;
+        }
+
+        .aggregate {
+          grid-template-columns: 1fr;
+        }
+
+        .footnotes {
+          grid-template-columns: 1fr;
+        }
+
+        footer {
+          flex-direction: column;
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+          font-size: 10px;
+        }
+
+        main {
+          width: 100%;
+          margin: 0;
+          border: 0;
+          box-shadow: none;
+        }
+
+        .masthead {
+          padding: 16px 20px;
+        }
+
+        .content {
+          padding: 12px;
+        }
+
+        .table-wrap {
+          overflow: visible;
+        }
+
+        table {
+          min-width: 0;
+        }
+
+        th,
+        td {
+          padding: 6px;
+        }
+
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+
+        tr,
+        .aggregate,
+        .footnote {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">
+            Ultrafuzz · AppSec issue #527 · issue-level view · 2026-08-17
+          </p>
+          <h1>Remediation issues: LOC, status, and PR</h1>
+          <p class="subtitle">
+            One row for each AppSec remediation issue, showing what is ready,
+            what remains, the best available LOC evidence, and the relevant
+            delivery PRs.
+          </p>
+        </div>
+        <div class="mast-meta">
+          <strong>Exact selected aggregate</strong>
+          <p>
+            <a href="https://github.com/monad-developers/ultrafuzz/pull/632"
+              >Draft PR #632</a
+            >
+            at <code>950c0c44</code> · 8,699 changed lines
+          </p>
+          <strong>Current state</strong>
+          <p>All issues remain open · all delivery PRs remain draft/unmerged</p>
+          <a href="https://github.com/monad-developers/ultrafuzz/issues/527"
+            >Open meta issue #527 ↗</a
+          >
+        </div>
+      </header>
+
+      <section class="summary" aria-label="Issue remediation summary">
+        <div class="metric">
+          <span class="value">8</span
+          ><span class="label">Remediation issues</span>
+        </div>
+        <div class="metric ready">
+          <span class="value">1</span
+          ><span class="label">Fully ready in draft</span>
+        </div>
+        <div class="metric partial">
+          <span class="value">4</span><span class="label">Partially ready</span>
+        </div>
+        <div class="metric deferred">
+          <span class="value">3</span><span class="label">Fully deferred</span>
+        </div>
+        <div class="metric ready">
+          <span class="value">4 / 4</span
+          ><span class="label">Actionable Highs covered</span>
+        </div>
+      </section>
+
+      <div class="content">
+        <aside class="method">
+          <strong>LOC is changed-line footprint, not net added code.</strong>
+          <p>
+            Values include additions plus deletions across production, tests,
+            docs/config, schema, and lockfiles. “Shared prototype” means the
+            exact footprint of a closed, unmerged multi-recommendation draft; it
+            is evidence of scale, not a per-recommendation estimate. Component
+            footprints are non-additive, so the exact aggregate remains 8,699
+            lines.
+          </p>
+        </aside>
+
+        <div class="table-wrap">
+          <table>
+            <caption>
+              Ultrafuzz AppSec remediation issues by LOC evidence, current
+              status, and pull request
+            </caption>
+            <thead>
+              <tr>
+                <th class="issue" scope="col">Issue</th>
+                <th class="loc" scope="col">LOC to remediate</th>
+                <th class="state" scope="col">Status</th>
+                <th class="prs" scope="col">PR link</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/612"
+                    >#612</a
+                  >
+                  <span class="issue-title"
+                    >Seal controller execution and launch policy</span
+                  >
+                  <span class="scope"
+                    >R-01, R-03, R-07, R-08, R-25 · 5 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label">Ready in drafts</span>
+                    <span class="loc-value exact"
+                      >4,410 shared + 474 exact</span
+                    >
+                    <span class="loc-note"
+                      >#635 is shared with #613; #639 is the exact incremental
+                      credential boundary.</span
+                    >
+                  </div>
+                  <div class="loc-block">
+                    <span class="loc-label">Remaining R-08 evidence</span>
+                    <span class="loc-value remaining">≥967 dedicated</span>
+                    <span class="loc-note"
+                      >Measured follow-up lower bound; 2,533-line historical
+                      full-group prototype.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge partial">Partial · 4 / 5 ready</span>
+                  <span class="state-detail"
+                    >R-08 is deferred as the next stretch candidate.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/635"
+                      >#635</a
+                    ><small>open draft · R-01/R-03</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/639"
+                      >#639</a
+                    ><small>open draft · R-07/R-25</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/630"
+                      >#630</a
+                    ><small>closed prototype · includes R-08</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/613"
+                    >#613</a
+                  >
+                  <span class="issue-title"
+                    >Add campaign data governance and durable approvals</span
+                  >
+                  <span class="scope"
+                    >R-04, R-09, R-26 · 3 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label">Ready R-04 delivery</span>
+                    <span class="loc-value exact">4,410 shared</span>
+                    <span class="loc-note"
+                      >#635 grouped footprint shared with #612 High
+                      controls.</span
+                    >
+                  </div>
+                  <div class="loc-block">
+                    <span class="loc-label">Remaining R-09/R-26 evidence</span>
+                    <span class="loc-value prototype">9,578 shared</span>
+                    <span class="loc-note"
+                      >Historical 3-item governance prototype; remaining items
+                      are not individually isolated.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge partial">Partial · 1 / 3 ready</span>
+                  <span class="state-detail"
+                    >Durable signoff and private-upload approval remain
+                    deferred.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/635"
+                      >#635</a
+                    ><small>open draft · R-04</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/629"
+                      >#629</a
+                    ><small>closed · unmerged prototype</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/614"
+                    >#614</a
+                  >
+                  <span class="issue-title"
+                    >Make artifacts and local credentials secret-safe</span
+                  >
+                  <span class="scope"
+                    >R-02, R-05, R-18, R-28 · 4 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label">Exact open-draft footprint</span>
+                    <span class="loc-value exact">1,708</span>
+                    <span class="loc-note"
+                      >22 files · 901 prod/docs/config · 758 tests · 49
+                      schema/lock.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge ready">Ready · 4 / 4 in draft</span>
+                  <span class="state-detail"
+                    >Issue would close if the draft merges.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/622"
+                      >#622</a
+                    ><small>open draft · unmerged</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                  <span class="issue-title"
+                    >Harden dashboard authentication, privacy, errors, and
+                    CSP</span
+                  >
+                  <span class="scope"
+                    >R-06, R-19, R-27, R-31, R-32, R-36, R-37 · 7
+                    recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label"
+                      >Historical full-issue prototype</span
+                    >
+                    <span class="loc-value prototype">2,042 shared</span>
+                    <span class="loc-note"
+                      >28 files · exact closed prototype footprint; not a fresh
+                      remaining estimate.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge deferred">Deferred · 0 / 7 ready</span>
+                  <span class="state-detail"
+                    >R-06 is conditional on broader dashboard exposure; the rest
+                    remain backlog.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                      >#624</a
+                    ><small>closed · unmerged prototype</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                  <span class="issue-title"
+                    >Enforce dependency and Git supply-chain policy</span
+                  >
+                  <span class="scope"
+                    >R-10, R-11, R-20, R-34, R-35, R-38 · 6
+                    recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label">Exact current delivery</span>
+                    <span class="loc-value exact">1,354</span>
+                    <span class="loc-note"
+                      >290 lines for R-10 plus 1,064 incremental lines for
+                      R-11.</span
+                    >
+                  </div>
+                  <div class="loc-block">
+                    <span class="loc-label"
+                      >Deferred-scope historical evidence</span
+                    >
+                    <span class="loc-value prototype">1,826 shared</span>
+                    <span class="loc-note"
+                      >Archived full 6-item prototype; remaining four items are
+                      not individually isolated.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge partial">Partial · 2 / 6 ready</span>
+                  <span class="state-detail"
+                    >Git transport, pinning, provenance, and EVMBench work
+                    remain deferred.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/623"
+                      >#623</a
+                    ><small>open draft · R-10</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/641"
+                      >#641</a
+                    ><small>open draft · R-11</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/commit/fe23ef9a3298187c99a051619f7f2365440171cb"
+                      >fe23ef9a</a
+                    ><small>archived prototype commit</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                  <span class="issue-title"
+                    >Harden Modal image, credential, bundle, and shell
+                    boundaries</span
+                  >
+                  <span class="scope"
+                    >R-12, R-13, R-17, R-24, R-29 · 5 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label"
+                      >Historical full-issue prototype</span
+                    >
+                    <span class="loc-value prototype">17,763 shared</span>
+                    <span class="loc-note"
+                      >39 files; 15,419 lines (86.8%) are generated locks and
+                      2,344 are non-lock changes.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge deferred">Deferred · 0 / 5 ready</span>
+                  <span class="state-detail"
+                    >High recurring pin/token operations and generated-lock
+                    burden.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                      >#625</a
+                    ><small>closed · unmerged prototype</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/618"
+                    >#618</a
+                  >
+                  <span class="issue-title"
+                    >Enforce resource ceilings and bounded pricing fetches</span
+                  >
+                  <span class="scope"
+                    >R-14, R-15, R-16 · 3 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label">Exact current delivery</span>
+                    <span class="loc-value exact">781</span>
+                    <span class="loc-note"
+                      >R-15/R-16 grouped footprint · 9 files.</span
+                    >
+                  </div>
+                  <div class="loc-block">
+                    <span class="loc-label">Remaining R-14 evidence</span>
+                    <span class="loc-value remaining">≈4,900–5,300</span>
+                    <span class="loc-note"
+                      >Historical delta after separating selected R-15/R-16
+                      scope; full prototype was 5,651 lines.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge partial">Partial · 2 / 3 ready</span>
+                  <span class="state-detail"
+                    >Provider-wide enforced spend/token accounting remains
+                    deferred.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/640"
+                      >#640</a
+                    ><small>open draft · R-15/R-16</small></span
+                  >
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/627"
+                      >#627</a
+                    ><small>closed full-group prototype</small></span
+                  >
+                </td>
+              </tr>
+
+              <tr>
+                <td>
+                  <a
+                    class="issue-id"
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                  <span class="issue-title"
+                    >Harden references, paths, and materialization
+                    boundaries</span
+                  >
+                  <span class="scope"
+                    >R-21, R-22, R-23, R-30, R-33 · 5 recommendations</span
+                  >
+                </td>
+                <td>
+                  <div class="loc-block">
+                    <span class="loc-label"
+                      >Historical full-issue prototype</span
+                    >
+                    <span class="loc-value prototype">1,366 shared</span>
+                    <span class="loc-note"
+                      >37 files · exact closed prototype footprint; individual
+                      items are not isolated.</span
+                    >
+                  </div>
+                </td>
+                <td>
+                  <span class="badge deferred">Deferred · 0 / 5 ready</span>
+                  <span class="state-detail"
+                    >All path/reference recommendations remain in backlog.</span
+                  >
+                </td>
+                <td>
+                  <span class="pr-link"
+                    ><a
+                      href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                      >#620</a
+                    ><small>closed · unmerged prototype</small></span
+                  >
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <section class="aggregate" aria-label="Aggregate delivery issue">
+          <div>
+            <strong
+              ><a
+                href="https://github.com/monad-developers/ultrafuzz/issues/628"
+                >Integration issue #628</a
+              >
+              · exact selected candidate</strong
+            >
+            <span
+              >13 recommendations ready: High 4/4, Medium 6/12, Low 3/15,
+              Informational 0/7.</span
+            >
+          </div>
+          <div>
+            <strong
+              ><a href="https://github.com/monad-developers/ultrafuzz/pull/632"
+                >Aggregate draft PR #632</a
+              ></strong
+            >
+            <span>97 files · +7,746/−953 · 19/19 release gates passed.</span>
+          </div>
+          <div class="aggregate-loc">8,699 LOC</div>
+        </section>
+
+        <div class="footnotes">
+          <div class="footnote">
+            <strong>Why LOC values are sometimes shared</strong>
+            <span
+              >Security helpers and tests implement several recommendations in
+              the same hunks. Assigning those lines to one issue would create
+              false precision and double counting.</span
+            >
+          </div>
+          <div class="footnote">
+            <strong>YOLO invariant</strong>
+            <span
+              >D-01–D-04 remain accepted and Not Applied. No sandbox, egress or
+              command allowlist, mediated filesystem reads, or in-run approval
+              was introduced.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <footer>
+        <span
+          ><strong>Status:</strong> #527 open · seven selected PRs open drafts ·
+          zero merged.</span
+        >
+        <span
+          ><strong>ARI after draft:</strong> OpenAI 18.7667 Grade C · Anthropic
+          18.8621 Grade C.</span
+        >
+      </footer>
+    </main>
+  </body>
+</html>

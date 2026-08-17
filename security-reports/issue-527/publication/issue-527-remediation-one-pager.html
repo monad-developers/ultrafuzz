@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Ultrafuzz #527 — AppSec Remediation One-Pager</title>
+  <style>
+    :root {
+      --ink: #10243a;
+      --muted: #5d6b7a;
+      --line: #d8e0e8;
+      --paper: #ffffff;
+      --canvas: #edf2f6;
+      --navy: #0c253e;
+      --navy-2: #153c5e;
+      --green: #177b57;
+      --green-soft: #e8f6f0;
+      --red: #b83a3a;
+      --red-soft: #fcecec;
+      --amber: #a86413;
+      --amber-soft: #fff3dd;
+      --blue: #1f66ad;
+      --blue-soft: #eaf3fc;
+      --gray-soft: #f2f5f7;
+      --shadow: 0 12px 32px rgba(21, 48, 72, .10);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font: 14px/1.42 Arial, "Liberation Sans", "Segoe UI", sans-serif;
+    }
+
+    a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+    main {
+      width: min(1460px, calc(100% - 28px));
+      margin: 14px auto 28px;
+      background: var(--paper);
+      border: 1px solid #cfd8e2;
+      box-shadow: var(--shadow);
+    }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: 1.5fr .8fr;
+      gap: 30px;
+      padding: 28px 32px 25px;
+      color: white;
+      background:
+        radial-gradient(circle at 88% 15%, rgba(77, 189, 148, .26), transparent 30%),
+        linear-gradient(120deg, var(--navy), var(--navy-2));
+    }
+
+    .eyebrow {
+      margin: 0 0 5px;
+      color: #9edac4;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 900px;
+      font-size: clamp(29px, 4vw, 48px);
+      line-height: 1.04;
+      letter-spacing: -.035em;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 850px;
+      color: #dce9f3;
+      font-size: 16px;
+    }
+
+    .mast-meta {
+      align-self: end;
+      padding-left: 22px;
+      border-left: 1px solid rgba(255,255,255,.22);
+    }
+
+    .mast-meta strong { display: block; margin-bottom: 3px; color: #fff; }
+    .mast-meta p { margin: 0 0 12px; color: #c9dae7; }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+
+    .metric {
+      min-height: 88px;
+      padding: 15px 18px;
+      border-right: 1px solid var(--line);
+    }
+
+    .metric:last-child { border-right: 0; }
+    .metric .value { display: block; font-size: 28px; font-weight: 850; letter-spacing: -.03em; }
+    .metric .label { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+    .metric.good .value { color: var(--green); }
+    .metric.warn .value { color: var(--amber); }
+
+    .content { padding: 22px 24px 26px; }
+
+    .priority-truth {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 15px;
+      align-items: center;
+      margin-bottom: 20px;
+      padding: 14px 16px;
+      border: 1px solid #a9d5c4;
+      border-left: 6px solid var(--green);
+      background: linear-gradient(90deg, var(--green-soft), #fff 72%);
+    }
+
+    .priority-truth .flag {
+      display: grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      color: white;
+      background: var(--green);
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    .priority-truth strong { display: block; font-size: 17px; }
+    .priority-truth p { margin: 2px 0 0; color: #315648; }
+    .priority-truth .coverage { color: var(--green); font-size: 25px; font-weight: 850; white-space: nowrap; }
+
+    .top-grid {
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: var(--paper);
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f7f9fb;
+    }
+
+    .panel-head h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+    .panel-head span { color: var(--muted); font-size: 11px; }
+
+    .coverage-list { padding: 12px 14px 10px; }
+    .coverage-row {
+      display: grid;
+      grid-template-columns: 105px 1fr 72px;
+      gap: 12px;
+      align-items: center;
+      margin: 0 0 11px;
+    }
+    .coverage-row:last-child { margin-bottom: 0; }
+    .coverage-name { font-weight: 800; }
+    .coverage-name small { display: block; color: var(--muted); font-weight: 600; }
+    .track { width: 100%; height: 13px; overflow: hidden; border: 0; border-radius: 8px; background: #e6ebf0; appearance: none; }
+    .track::-webkit-progress-bar { border-radius: 8px; background: #e6ebf0; }
+    .track::-webkit-progress-value { border-radius: 8px; background: var(--green); }
+    .track::-moz-progress-bar { border-radius: 8px; background: var(--green); }
+    .coverage-count { text-align: right; font-weight: 800; }
+
+    .evidence {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1px;
+      background: var(--line);
+    }
+    .evidence div { min-height: 78px; padding: 12px 13px; background: white; }
+    .evidence b { display: block; color: var(--green); font-size: 22px; letter-spacing: -.02em; }
+    .evidence span { color: var(--muted); font-size: 12px; }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 21px 0 10px;
+    }
+    .section-title h2 { margin: 0; font-size: 19px; letter-spacing: -.015em; }
+    .section-title .line { height: 1px; flex: 1; background: var(--line); }
+    .section-title .count { color: var(--muted); font-size: 12px; font-weight: 700; }
+
+    .deferred-note {
+      margin: -2px 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .implemented-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 9px;
+    }
+
+    .implemented {
+      position: relative;
+      min-height: 132px;
+      padding: 12px 12px 10px;
+      border: 1px solid #a9d5c4;
+      border-top: 4px solid var(--green);
+      background: var(--green-soft);
+    }
+    .implemented .rec-id, .item .rec-id {
+      display: inline-block;
+      margin-right: 6px;
+      font: 800 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .implemented h3 { margin: 9px 0 8px; font-size: 14px; line-height: 1.26; }
+    .meta { color: var(--muted); font-size: 11px; }
+    .status-chip, .priority-chip {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: .035em;
+      text-transform: uppercase;
+    }
+    .status-chip { color: #09583d; background: #ccebdd; }
+    .implemented .status-chip { margin-left: 4px; }
+    .p0 { color: #8a2424; background: #f7d6d6; }
+    .p1 { color: #85500d; background: #ffe7bc; }
+    .p2 { color: #245f96; background: #dcecfb; }
+    .p3 { color: #53606c; background: #e6ebef; }
+
+    .deferred-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .priority-column { border: 1px solid var(--line); }
+    .priority-column > header {
+      padding: 10px 11px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafb;
+    }
+    .priority-column > header strong { display: block; font-size: 14px; }
+    .priority-column > header span { color: var(--muted); font-size: 11px; }
+    .priority-column.high { border-top: 4px solid var(--red); }
+    .priority-column.medium { border-top: 4px solid var(--amber); }
+    .priority-column.low { border-top: 4px solid var(--blue); }
+    .priority-column.info { border-top: 4px solid #7b8792; }
+
+    .item {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 7px;
+      align-items: start;
+      min-height: 49px;
+      padding: 8px 9px;
+      border-bottom: 1px solid #e7ebef;
+    }
+    .item:last-child { border-bottom: 0; }
+    .item .title { font-size: 11.5px; line-height: 1.28; }
+    .item .issue { color: var(--muted); font-size: 10px; font-weight: 750; white-space: nowrap; }
+
+    .decision-grid {
+      display: grid;
+      grid-template-columns: 1.08fr .92fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .next-wave { padding: 14px; background: var(--amber-soft); }
+    .next-wave h2, .residuals h2, .ari h2 { margin: 0 0 8px; font-size: 17px; }
+    .next-wave p { margin: 0 0 10px; color: #5b4a2b; }
+    .next-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .next-list div { padding: 9px 10px; border: 1px solid #e7c98f; background: rgba(255,255,255,.65); }
+    .next-list strong { display: block; font-size: 12px; }
+    .next-list span { color: var(--muted); font-size: 11px; }
+
+    .residuals { padding: 14px; background: var(--gray-soft); }
+    .residuals > p { margin: 0 0 9px; color: var(--muted); }
+    .residual-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    .residual {
+      padding: 8px 9px;
+      border: 1px solid #ccd5dd;
+      background: white;
+      font-size: 11px;
+    }
+    .residual strong { display: block; margin-bottom: 2px; }
+
+    .ari {
+      margin-top: 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+    }
+    .ari-row {
+      display: grid;
+      grid-template-columns: 142px 1fr;
+      gap: 14px;
+      align-items: start;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+    .ari-lane strong { display: block; font-size: 13px; }
+    .ari-lane span { color: var(--muted); font-size: 11px; }
+    .ari-flow {
+      display: grid;
+      grid-template-columns: minmax(92px, 1fr) auto minmax(92px, 1fr) auto minmax(92px, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+    .ari-stage {
+      min-height: 52px;
+      padding: 7px 8px;
+      border-left: 3px solid #8997a4;
+      background: var(--gray-soft);
+    }
+    .ari-stage.after { border-left-color: var(--green); background: var(--green-soft); }
+    .ari-stage span { display: block; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .035em; }
+    .ari-stage b { display: block; margin-top: 2px; font-size: 17px; letter-spacing: -.02em; }
+    .ari-delta { color: var(--muted); font-size: 10px; text-align: center; white-space: nowrap; }
+    .ari-delta b { display: block; color: var(--amber); font-size: 11px; }
+    .ari-delta.safer b { color: var(--green); }
+    .ari-total { margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .ari-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 13px 24px;
+      color: #cbd8e2;
+      background: var(--navy);
+      font-size: 11px;
+    }
+    footer strong { color: white; }
+
+    @media (max-width: 1050px) {
+      .summary-strip { grid-template-columns: repeat(3, 1fr); }
+      .metric:nth-child(3) { border-right: 0; }
+      .implemented-grid { grid-template-columns: repeat(3, 1fr); }
+      .deferred-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 720px) {
+      main { width: 100%; margin: 0; border: 0; }
+      .masthead, .top-grid, .decision-grid { grid-template-columns: 1fr; }
+      .masthead { padding: 24px 20px; }
+      .mast-meta { padding: 14px 0 0; border-left: 0; border-top: 1px solid rgba(255,255,255,.22); }
+      .summary-strip { grid-template-columns: repeat(2, 1fr); }
+      .metric { border-bottom: 1px solid var(--line); }
+      .metric:last-child { grid-column: 1 / -1; }
+      .content { padding: 16px 12px 20px; }
+      .priority-truth { grid-template-columns: auto 1fr; }
+      .priority-truth .coverage { grid-column: 2; }
+      .implemented-grid, .deferred-grid, .next-list { grid-template-columns: 1fr; }
+      .ari-row { grid-template-columns: 1fr; gap: 8px; }
+      footer { flex-direction: column; }
+    }
+
+    @media (max-width: 520px) {
+      .ari-flow { grid-template-columns: 1fr; }
+      .ari-delta { padding-left: 8px; text-align: left; }
+      .ari-delta .arrow { display: inline-block; transform: rotate(90deg); }
+    }
+
+    @media print {
+      @page { size: 420mm 594mm; margin: 4mm; }
+      body { background: white; font-size: 9px; }
+      main { width: 100%; margin: 0; border: 0; box-shadow: none; }
+      .masthead { padding: 10px 16px 8px; }
+      h1 { font-size: 28px; }
+      .subtitle { margin-top: 7px; font-size: 13px; }
+      .mast-meta p { margin-bottom: 7px; }
+      .metric { min-height: 56px; padding: 7px 12px; }
+      .metric .value { font-size: 21px; }
+      .content { padding: 7px 12px; }
+      .priority-truth { margin-bottom: 7px; padding: 6px 9px; }
+      .top-grid { margin-bottom: 8px; }
+      .section-title { margin: 9px 0 5px; }
+      .implemented { min-height: 91px; padding: 8px 9px 7px; }
+      .implemented h3 { margin: 6px 0; font-size: 12px; }
+      .item { min-height: 32px; padding: 4px 6px; }
+      .item .rec-id { font-size: 10px; }
+      .item .title { font-size: 10px; line-height: 1.18; }
+      .item .issue { font-size: 9px; }
+      .decision-grid, .ari { margin-top: 11px; }
+      .next-wave, .residuals, .ari { padding: 10px; }
+      footer { padding: 9px 12px; }
+      .priority-truth, .top-grid, .implemented-grid, .deferred-grid, .decision-grid, .ari-row { break-inside: avoid; }
+      a { text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">Ultrafuzz · AppSec issue #527 · status 2026-08-17</p>
+      <h1>All actionable Highs are ready in draft, plus the best-ROI Mediums</h1>
+      <p class="subtitle">A human-readable view of all 38 approved recommendations after treating 2,000 changed lines as a reviewability target—not a hard security ceiling.</p>
+    </div>
+    <div class="mast-meta">
+      <strong>Exact aggregate candidate</strong>
+      <p><a href="https://github.com/monad-developers/ultrafuzz/pull/632">PR #632</a> at <code>950c0c44</code> · tree <code>9f7ad9f2</code> · 97 files · +7,746/−953 = 8,699 changed lines</p>
+      <strong>Publication state</strong>
+      <p>Drafts #622, #623, #635, #639, #640, #641, and aggregate #632 open · zero merged · #527 remains open</p>
+      <a href="https://github.com/monad-developers/ultrafuzz/issues/527">Open issue #527 ↗</a>
+    </div>
+  </header>
+
+  <section class="summary-strip" aria-label="Executive summary">
+    <div class="metric good"><span class="value">13 / 38</span><span class="label">Ready in draft</span></div>
+    <div class="metric warn"><span class="value">25</span><span class="label">Deferred recommendations</span></div>
+    <div class="metric"><span class="value">8,699</span><span class="label">Changed lines, all-inclusive</span></div>
+    <div class="metric good"><span class="value">19 / 19</span><span class="label">Release gates passed</span></div>
+    <div class="metric good"><span class="value">18.77 / 18.86</span><span class="label">After ARI · OpenAI / Anthropic</span></div>
+  </section>
+
+  <div class="content">
+    <aside class="priority-truth" aria-label="Priority assessment">
+      <div class="flag">✓</div>
+      <div>
+        <strong>Priority outcome: every actionable High recommendation is covered.</strong>
+        <p>The draft candidate covers all four Highs, six of twelve Mediums, and three low-cost Low items. The remaining 25 are weighted toward lower priority or higher maintenance burden; agent YOLO execution remains unchanged.</p>
+      </div>
+      <div class="coverage">4 / 4 High</div>
+    </aside>
+
+    <div class="top-grid">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Coverage by risk priority</h2>
+          <span>P0–P3 are derived directly from reconciled severity</span>
+        </div>
+        <div class="coverage-list">
+          <div class="coverage-row">
+            <div class="coverage-name">P0 · High<small>4 total</small></div>
+            <progress class="track" aria-label="High recommendations ready in draft" value="4" max="4">4 of 4</progress>
+            <div class="coverage-count">4 ready</div>
+          </div>
+          <div class="coverage-row">
+            <div class="coverage-name">P1 · Medium<small>12 total</small></div>
+            <progress class="track" aria-label="Medium recommendations ready in draft" value="6" max="12">6 of 12</progress>
+            <div class="coverage-count">6 ready</div>
+          </div>
+          <div class="coverage-row">
+            <div class="coverage-name">P2 · Low<small>15 total</small></div>
+            <progress class="track" aria-label="Low recommendations ready in draft" value="3" max="15">3 of 15</progress>
+            <div class="coverage-count">3 ready</div>
+          </div>
+          <div class="coverage-row">
+            <div class="coverage-name">P3 · Info<small>7 total</small></div>
+            <progress class="track" aria-label="Informational recommendations ready in draft" value="0" max="7">0 of 7</progress>
+            <div class="coverage-count">0 ready</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Exact-candidate assurance</h2>
+          <span>No remote Modal workload claimed</span>
+        </div>
+        <div class="evidence">
+          <div><b>950c0c44</b><span>exact candidate; tree 9f7ad9f2</span></div>
+          <div><b>82 / 82</b><span>CI policy tests passed on the exact candidate</span></div>
+          <div><b>19 / 19</b><span>release gates passed; report SHA-256 <code>1d5e927e</code></span></div>
+          <div><b>−24.68 / −20.31</b><span>controls-only ARI delta · OpenAI / Anthropic</span></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="section-title"><h2>Ready in the draft candidate</h2><div class="line"></div><span class="count">13 recommendations · 6 component drafts · aggregate #632</span></div>
+    <section class="implemented-grid" aria-label="Recommendations ready in draft">
+      <article class="implemented" data-rec-id="R-01" data-status="ready-in-draft" data-priority="P0">
+        <span class="rec-id">R-01</span><span class="priority-chip p0">P0 · High</span><span class="status-chip">Draft</span>
+        <h3>Keep target-supplied <code>.smithers</code> code outside controller execution authority</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/635">PR #635</a> · closes #634; addresses #612</div>
+      </article>
+      <article class="implemented" data-rec-id="R-02" data-status="ready-in-draft" data-priority="P0">
+        <span class="rec-id">R-02</span><span class="priority-chip p0">P0 · High</span><span class="status-chip">Draft</span>
+        <h3>Universal fail-closed secret gate before canonical artifact publication</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/622">PR #622</a> · closes #614 if merged</div>
+      </article>
+      <article class="implemented" data-rec-id="R-03" data-status="ready-in-draft" data-priority="P0">
+        <span class="rec-id">R-03</span><span class="priority-chip p0">P0 · High</span><span class="status-chip">Draft</span>
+        <h3>Enforce operator-owned credential-name and provider-home policy</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/635">PR #635</a> · closes #634; addresses #612</div>
+      </article>
+      <article class="implemented" data-rec-id="R-04" data-status="ready-in-draft" data-priority="P0">
+        <span class="rec-id">R-04</span><span class="priority-chip p0">P0 · High</span><span class="status-chip">Draft</span>
+        <h3>Classify campaign data and require provider-disclosure acknowledgement</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/635">PR #635</a> · closes #634; addresses #613</div>
+      </article>
+      <article class="implemented" data-rec-id="R-05" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-05</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Expanded secret patterns, entropy fallback, and exact in-memory secret checks</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/622">PR #622</a> · closes #614 if merged</div>
+      </article>
+      <article class="implemented" data-rec-id="R-07" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-07</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Scope provider credentials per child in local multi-provider runs</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/639">PR #639</a> · closes #636; addresses #612</div>
+      </article>
+      <article class="implemented" data-rec-id="R-10" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-10</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Upgrade the vulnerable ZIP parser and retain malicious-archive limits</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/623">PR #623</a> · addresses R-10; #616 stays open</div>
+      </article>
+      <article class="implemented" data-rec-id="R-11" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-11</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Fail CI on unapproved High/Critical production dependency advisories</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/641">PR #641</a> · closes #638; addresses #616</div>
+      </article>
+      <article class="implemented" data-rec-id="R-15" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-15</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Cap eval-matrix rows before resolution, allocation, or materialization</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/640">PR #640</a> · closes #637; addresses #618</div>
+      </article>
+      <article class="implemented" data-rec-id="R-16" data-status="ready-in-draft" data-priority="P1">
+        <span class="rec-id">R-16</span><span class="priority-chip p1">P1 · Medium</span><span class="status-chip">Draft</span>
+        <h3>Bound and validate pricing fetches; reject redirects and private destinations</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/640">PR #640</a> · closes #637; addresses #618</div>
+      </article>
+      <article class="implemented" data-rec-id="R-18" data-status="ready-in-draft" data-priority="P2">
+        <span class="rec-id">R-18</span><span class="priority-chip p2">P2 · Low</span><span class="status-chip">Draft</span>
+        <h3>Stop writing the Kimi API key to persistent cleartext configuration</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/622">PR #622</a> · closes #614 if merged</div>
+      </article>
+      <article class="implemented" data-rec-id="R-25" data-status="ready-in-draft" data-priority="P2">
+        <span class="rec-id">R-25</span><span class="priority-chip p2">P2 · Low</span><span class="status-chip">Draft</span>
+        <h3>Replace wildcard <code>SMITHERS_*</code> forwarding with a named allowlist</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/639">PR #639</a> · closes #636; addresses #612</div>
+      </article>
+      <article class="implemented" data-rec-id="R-28" data-status="ready-in-draft" data-priority="P2">
+        <span class="rec-id">R-28</span><span class="priority-chip p2">P2 · Low</span><span class="status-chip">Draft</span>
+        <h3>Ignore common local environment, key, and credential files</h3>
+        <div class="meta"><a href="https://github.com/monad-developers/ultrafuzz/pull/622">PR #622</a> · closes #614 if merged</div>
+      </article>
+    </section>
+
+    <div class="section-title"><h2>Deferred backlog</h2><div class="line"></div><span class="count">25 recommendations · child issues remain open</span></div>
+    <p class="deferred-note">The earlier broad drafts #620, #624, #625, #627, #629, and #630 remain closed unmerged. Selected controls now live in focused drafts #635, #639, #640, and #641.</p>
+    <section class="deferred-grid" aria-label="Deferred recommendations by priority">
+      <div class="priority-column high">
+        <header><strong>P0 · High</strong><span>0 deferred of 4 total</span></header>
+        <div class="item"><span class="rec-id">✓</span><span class="title">None—all actionable High recommendations are selected in draft.</span></div>
+      </div>
+
+      <div class="priority-column medium">
+        <header><strong>P1 · Medium</strong><span>6 deferred of 12 total</span></header>
+        <div class="item" data-rec-id="R-06" data-status="deferred" data-priority="P1"><span class="rec-id">R-06</span><span class="title">Stop returning the dashboard token from an unauthenticated route</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-08" data-status="deferred" data-priority="P1"><span class="rec-id">R-08</span><span class="title">Digest-bind required prompt review at launch</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/612">#612</a></div>
+        <div class="item" data-rec-id="R-09" data-status="deferred" data-priority="P1"><span class="rec-id">R-09</span><span class="title">Durable human signoff bound to final-report and materialization digests</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/613">#613</a></div>
+        <div class="item" data-rec-id="R-12" data-status="deferred" data-priority="P1"><span class="rec-id">R-12</span><span class="title">Integrity-pin Modal image, downloads, and global installs</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/617">#617</a></div>
+        <div class="item" data-rec-id="R-13" data-status="deferred" data-priority="P1"><span class="rec-id">R-13</span><span class="title">Short-TTL Modal tokens and per-row credential volumes</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/617">#617</a></div>
+        <div class="item" data-rec-id="R-14" data-status="deferred" data-priority="P1"><span class="rec-id">R-14</span><span class="title">Enforced per-run token and spend ceilings that abort</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/618">#618</a></div>
+      </div>
+
+      <div class="priority-column low">
+        <header><strong>P2 · Low</strong><span>12 deferred of 15 total</span></header>
+        <div class="item" data-rec-id="R-17" data-status="deferred" data-priority="P2"><span class="rec-id">R-17</span><span class="title">Reject redirects on Kimi OAuth refresh</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/617">#617</a></div>
+        <div class="item" data-rec-id="R-19" data-status="deferred" data-priority="P2"><span class="rec-id">R-19</span><span class="title">Redact raw logs and rendered prompts on the dashboard path</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-20" data-status="deferred" data-priority="P2"><span class="rec-id">R-20</span><span class="title">Lock down Git transports and unsafe repository/ref inputs</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/616">#616</a></div>
+        <div class="item" data-rec-id="R-21" data-status="deferred" data-priority="P2"><span class="rec-id">R-21</span><span class="title">Fence and label Markdown references as untrusted data</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/619">#619</a></div>
+        <div class="item" data-rec-id="R-22" data-status="deferred" data-priority="P2"><span class="rec-id">R-22</span><span class="title">Case-normalize protected-root and sensitive-path matching</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/619">#619</a></div>
+        <div class="item" data-rec-id="R-23" data-status="deferred" data-priority="P2"><span class="rec-id">R-23</span><span class="title">Close the materialization overwrite symlink-swap race</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/619">#619</a></div>
+        <div class="item" data-rec-id="R-24" data-status="deferred" data-priority="P2"><span class="rec-id">R-24</span><span class="title">Add a traversal guard to the staged public-bundle writer</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/617">#617</a></div>
+        <div class="item" data-rec-id="R-26" data-status="deferred" data-priority="P2"><span class="rec-id">R-26</span><span class="title">Separate approval for private eval artifact upload</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/613">#613</a></div>
+        <div class="item" data-rec-id="R-29" data-status="deferred" data-priority="P2"><span class="rec-id">R-29</span><span class="title">Remove or quote shell interpolation in the Modal smoke harness</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/617">#617</a></div>
+        <div class="item" data-rec-id="R-31" data-status="deferred" data-priority="P2"><span class="rec-id">R-31</span><span class="title">Return generic dashboard errors with correlation IDs</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-32" data-status="deferred" data-priority="P2"><span class="rec-id">R-32</span><span class="title">Require confirmation before dashboard run launch</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-38" data-status="deferred" data-priority="P2"><span class="rec-id">R-38</span><span class="title">Make EVMBench Dockerfile interpolation structurally safe</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/616">#616</a></div>
+      </div>
+
+      <div class="priority-column info">
+        <header><strong>P3 · Informational</strong><span>7 deferred of 7 total</span></header>
+        <div class="item" data-rec-id="R-27" data-status="deferred" data-priority="P3"><span class="rec-id">R-27</span><span class="title">Fail closed when a dashboard API request omits <code>Host</code></span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-30" data-status="deferred" data-priority="P3"><span class="rec-id">R-30</span><span class="title">Rename or unify colliding <code>validateSafeId</code> APIs</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/619">#619</a></div>
+        <div class="item" data-rec-id="R-33" data-status="deferred" data-priority="P3"><span class="rec-id">R-33</span><span class="title">Make frontmatter plain-object checks prototype-safe</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/619">#619</a></div>
+        <div class="item" data-rec-id="R-34" data-status="deferred" data-priority="P3"><span class="rec-id">R-34</span><span class="title">Adopt and enforce one direct-dependency pinning policy</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/616">#616</a></div>
+        <div class="item" data-rec-id="R-35" data-status="deferred" data-priority="P3"><span class="rec-id">R-35</span><span class="title">Periodically review publisher and provenance drift</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/616">#616</a></div>
+        <div class="item" data-rec-id="R-36" data-status="deferred" data-priority="P3"><span class="rec-id">R-36</span><span class="title">Remove unused <code>data:</code> image allowance from CSP</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+        <div class="item" data-rec-id="R-37" data-status="deferred" data-priority="P3"><span class="rec-id">R-37</span><span class="title">Add CSP violation visibility in development and CI</span><a class="issue" href="https://github.com/monad-developers/ultrafuzz/issues/615">#615</a></div>
+      </div>
+    </section>
+
+    <div class="decision-grid">
+      <section class="next-wave">
+        <h2>Selective next tranche</h2>
+        <p>All actionable Highs are covered. Add more only when the incremental security gain justifies the code and recurring operational burden.</p>
+        <div class="next-list">
+          <div><strong>Next stretch: R-08</strong><span>Digest-bind launch review; reuse the High tranche's input digest while keeping launch UX separately selectable</span></div>
+          <div><strong>Conditional: R-06</strong><span>Prioritize if the dashboard moves beyond its documented trusted-operator/loopback deployment</span></div>
+          <div><strong>Higher-burden Mediums</strong><span>R-09, R-12, R-13, and R-14 remain deferred pending a clear operational payoff</span></div>
+          <div><strong>Low / Informational backlog</strong><span>19 items; select only when security benefit exceeds maintenance cost</span></div>
+        </div>
+      </section>
+
+      <section class="residuals">
+        <h2>Not Applied · accepted YOLO residuals</h2>
+        <p>These are separate from the 25 deferred recommendations. They conflict with the non-negotiable YOLO execution model.</p>
+        <div class="residual-grid">
+          <div class="residual" data-residual-id="D-01"><strong>D-01 · High</strong>No OS/container containment for agents</div>
+          <div class="residual" data-residual-id="D-02"><strong>D-02 · High</strong>No agent network-egress allowlist</div>
+          <div class="residual" data-residual-id="D-03"><strong>D-03 · High</strong>No command allowlist or in-run approval</div>
+          <div class="residual" data-residual-id="D-04"><strong>D-04 · Medium</strong>No mediated agent filesystem reads</div>
+        </div>
+      </section>
+    </div>
+
+    <section class="ari" aria-label="Aggregate Risk Index comparison">
+      <h2>ARI result · model families remain separate</h2>
+      <div class="ari-row" role="group" aria-label="OpenAI ARI: pinned before 33.8163 Grade D; refreshed pivot 43.4500 Grade D; after draft 18.7667 Grade C">
+        <div class="ari-lane"><strong>OpenAI</strong><span>gpt-5.6-sol · xhigh</span></div>
+        <div>
+          <div class="ari-flow">
+            <div class="ari-stage"><span>Pinned before</span><b>33.8163</b></div>
+            <div class="ari-delta"><span>scope</span><b>+9.6337 <span class="arrow" aria-hidden="true">→</span></b></div>
+            <div class="ari-stage"><span>Refreshed pivot</span><b>43.4500</b></div>
+            <div class="ari-delta safer"><span>controls</span><b>−24.6833 <span class="arrow" aria-hidden="true">→</span></b></div>
+            <div class="ari-stage after"><span>After draft</span><b>18.7667 · C</b></div>
+          </div>
+          <div class="ari-total">Total pinned-before → after: −15.0497. Numeric band B; Grade C after the accepted YOLO severity cap.</div>
+        </div>
+      </div>
+      <div class="ari-row" role="group" aria-label="Anthropic ARI: pinned before 28.3929 Grade C; refreshed pivot 39.1724 Grade C; after draft 18.8621 Grade C">
+        <div class="ari-lane"><strong>Anthropic</strong><span>fable-5 → opus-4-8 fallback · max</span></div>
+        <div>
+          <div class="ari-flow">
+            <div class="ari-stage"><span>Pinned before</span><b>28.3929</b></div>
+            <div class="ari-delta"><span>scope</span><b>+10.7796 <span class="arrow" aria-hidden="true">→</span></b></div>
+            <div class="ari-stage"><span>Refreshed pivot</span><b>39.1724</b></div>
+            <div class="ari-delta safer"><span>controls</span><b>−20.3103 <span class="arrow" aria-hidden="true">→</span></b></div>
+            <div class="ari-stage after"><span>After draft</span><b>18.8621 · C</b></div>
+          </div>
+          <div class="ari-total">Total pinned-before → after: −9.5308. Numeric band B; Grade C after the accepted YOLO severity cap.</div>
+        </div>
+      </div>
+      <p class="ari-note">Lower is safer. Lanes are independent and are not averaged. Refresh target: aggregate <code>950c0c44</code>, tree <code>9f7ad9f2</code>. Verified report SHA-256: OpenAI <code>b4518019…</code>; Anthropic <code>a4ad575e…</code>. Pivot → after is the controls-only comparison.</p>
+    </section>
+  </div>
+
+  <footer>
+    <span><strong>Priority method:</strong> P0 High · P1 Medium · P2 Low · P3 Informational, taken from the reconciled 80-finding questionnaire.</span>
+    <span><strong>Status:</strong> #527 open · 7 draft PRs open · zero merged · artifact prepared without Smithers.</span>
+  </footer>
+</main>
+</body>
+</html>

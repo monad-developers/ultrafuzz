@@ -1,0 +1,2240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>
+      Ultrafuzz #527 — Remediation Severity, LOC, Status, and PR Matrix
+    </title>
+    <style>
+      :root {
+        --ink: #10243a;
+        --muted: #5d6b7a;
+        --line: #d6dfe8;
+        --paper: #ffffff;
+        --canvas: #edf2f6;
+        --navy: #0c253e;
+        --navy-2: #153c5e;
+        --green: #167652;
+        --green-soft: #e7f5ef;
+        --red: #b53a3a;
+        --red-soft: #fcecec;
+        --amber: #a76511;
+        --amber-soft: #fff2da;
+        --blue: #1f65aa;
+        --blue-soft: #e9f3fc;
+        --violet: #6652a8;
+        --violet-soft: #f0edfb;
+        --gray-soft: #f2f5f7;
+        --shadow: 0 12px 32px rgba(21, 48, 72, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font:
+          14px/1.42 Arial,
+          "Liberation Sans",
+          "Segoe UI",
+          sans-serif;
+      }
+
+      a {
+        color: var(--blue);
+        font-weight: 750;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 2px;
+      }
+
+      code {
+        padding: 1px 4px;
+        border-radius: 3px;
+        background: #edf1f5;
+        color: #263f58;
+        font:
+          12px/1.35 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      main {
+        width: min(1520px, calc(100% - 28px));
+        margin: 14px auto 30px;
+        border: 1px solid #cfd8e2;
+        background: var(--paper);
+        box-shadow: var(--shadow);
+      }
+
+      .masthead {
+        display: grid;
+        grid-template-columns: 1.5fr 0.8fr;
+        gap: 30px;
+        padding: 28px 32px 25px;
+        color: white;
+        background:
+          radial-gradient(
+            circle at 88% 15%,
+            rgba(77, 189, 148, 0.26),
+            transparent 30%
+          ),
+          linear-gradient(120deg, var(--navy), var(--navy-2));
+      }
+
+      .eyebrow {
+        margin: 0 0 6px;
+        color: #9edac4;
+        font-size: 12px;
+        font-weight: 850;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        max-width: 980px;
+        font-size: clamp(29px, 4vw, 47px);
+        line-height: 1.04;
+        letter-spacing: -0.035em;
+      }
+
+      .subtitle {
+        max-width: 920px;
+        margin: 12px 0 0;
+        color: #dce9f3;
+        font-size: 16px;
+      }
+
+      .mast-meta {
+        align-self: end;
+        padding-left: 22px;
+        border-left: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .mast-meta strong {
+        display: block;
+        margin-bottom: 3px;
+      }
+      .mast-meta p {
+        margin: 0 0 12px;
+        color: #c9dae7;
+      }
+      .mast-meta a {
+        color: white;
+      }
+      .mast-meta code {
+        background: rgba(255, 255, 255, 0.12);
+        color: white;
+      }
+
+      .summary-strip {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        border-bottom: 1px solid var(--line);
+        background: #f8fafc;
+      }
+
+      .metric {
+        min-height: 88px;
+        padding: 15px 18px;
+        border-right: 1px solid var(--line);
+      }
+
+      .metric:last-child {
+        border-right: 0;
+      }
+      .metric .value {
+        display: block;
+        font-size: 28px;
+        font-weight: 850;
+        letter-spacing: -0.03em;
+      }
+      .metric .label {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .metric.good .value {
+        color: var(--green);
+      }
+      .metric.warn .value {
+        color: var(--amber);
+      }
+
+      .content {
+        padding: 22px 24px 28px;
+      }
+
+      .method {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 14px;
+        align-items: start;
+        margin-bottom: 18px;
+        padding: 14px 16px;
+        border: 1px solid #a9d5c4;
+        border-left: 6px solid var(--green);
+        background: linear-gradient(90deg, var(--green-soft), #fff 80%);
+      }
+
+      .method .mark {
+        display: grid;
+        place-items: center;
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: var(--green);
+        color: white;
+        font-size: 18px;
+        font-weight: 900;
+      }
+
+      .method strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 16px;
+      }
+      .method p {
+        margin: 0;
+        color: #315648;
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) 190px 250px auto auto;
+        gap: 10px;
+        align-items: end;
+        margin-bottom: 12px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        background: #f7f9fb;
+      }
+
+      .field label {
+        display: block;
+        margin: 0 0 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      input,
+      select,
+      button {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid #bfcbd6;
+        border-radius: 4px;
+        background: white;
+        color: var(--ink);
+        font: inherit;
+      }
+
+      input,
+      select {
+        padding: 7px 9px;
+      }
+
+      button {
+        width: auto;
+        padding: 7px 14px;
+        cursor: pointer;
+        font-weight: 800;
+      }
+
+      button:hover {
+        border-color: #7890a5;
+        background: #eef3f7;
+      }
+
+      .result-count {
+        align-self: center;
+        min-width: 190px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 750;
+        text-align: right;
+      }
+
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        align-items: end;
+        margin: 24px 0 10px;
+      }
+
+      .section-head h2 {
+        margin: 0;
+        font-size: 20px;
+        letter-spacing: -0.015em;
+      }
+      .section-head p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        text-align: right;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        background: white;
+      }
+
+      table {
+        width: 100%;
+        min-width: 1160px;
+        border-collapse: collapse;
+      }
+
+      caption {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        padding: 10px 9px;
+        border-bottom: 2px solid #b8c5d1;
+        background: #eef3f7;
+        color: #334b62;
+        font-size: 11px;
+        font-weight: 850;
+        letter-spacing: 0.045em;
+        text-align: left;
+        text-transform: uppercase;
+      }
+
+      td {
+        padding: 10px 9px;
+        border-bottom: 1px solid #e3e8ed;
+        vertical-align: top;
+      }
+
+      tbody tr:nth-child(even) {
+        background: #fbfcfd;
+      }
+      tbody tr:hover {
+        background: #f2f7fa;
+      }
+      tbody tr[hidden] {
+        display: none;
+      }
+      tbody:last-child tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .col-recs {
+        width: 40%;
+      }
+      .col-severity {
+        width: 11%;
+      }
+      .col-issue {
+        width: 11%;
+      }
+      .col-loc {
+        width: 16%;
+      }
+      .col-status {
+        width: 13%;
+      }
+      .col-pr {
+        width: 9%;
+      }
+
+      .recs {
+        display: grid;
+        gap: 6px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .recs li {
+        display: grid;
+        grid-template-columns: 42px 1fr;
+        gap: 7px;
+        align-items: start;
+      }
+
+      .rec-id {
+        color: #31526d;
+        font:
+          800 12px/1.45 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          Consolas,
+          monospace;
+      }
+
+      .group-name {
+        display: block;
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .severity-stack {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+
+      .chip,
+      .status {
+        display: inline-block;
+        padding: 3px 7px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 850;
+        line-height: 1.35;
+        white-space: nowrap;
+      }
+
+      .high {
+        border-color: #e4afaf;
+        background: var(--red-soft);
+        color: var(--red);
+      }
+      .medium {
+        border-color: #e6c78b;
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+      .low {
+        border-color: #abcbe9;
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+      .info {
+        border-color: #c9c0e7;
+        background: var(--violet-soft);
+        color: var(--violet);
+      }
+
+      .status.ready {
+        border-color: #a7d6c4;
+        background: var(--green-soft);
+        color: var(--green);
+      }
+      .status.next {
+        border-color: #abcbe9;
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+      .status.conditional {
+        border-color: #e6c78b;
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+      .status.burden {
+        border-color: #d7b3b3;
+        background: #faeeee;
+        color: #9f3e3e;
+      }
+      .status.backlog {
+        border-color: #ccd4dc;
+        background: var(--gray-soft);
+        color: #566575;
+      }
+      .status.accepted {
+        border-color: #d7b3b3;
+        background: #faeeee;
+        color: #9f3e3e;
+      }
+
+      .issue-cell a,
+      .pr-cell a {
+        display: inline-block;
+      }
+      .issue-cell small,
+      .pr-cell small,
+      .loc small,
+      .loc em {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 11px;
+        font-style: normal;
+        font-weight: 600;
+      }
+
+      .loc strong {
+        display: block;
+        font-size: 16px;
+        letter-spacing: -0.01em;
+      }
+
+      .loc.exact strong {
+        color: var(--green);
+      }
+      .loc.estimate strong {
+        color: var(--amber);
+      }
+      .loc.historical strong {
+        color: var(--violet);
+      }
+      .loc.unknown strong {
+        color: var(--muted);
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 22px;
+        margin: 10px 2px 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .legend b {
+        color: var(--ink);
+      }
+
+      .residual-table {
+        min-width: 900px;
+      }
+
+      .ari-note {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-top: 18px;
+      }
+
+      .ari-lane {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        background: #f8fafc;
+      }
+
+      .ari-lane strong {
+        display: block;
+        font-size: 15px;
+      }
+      .ari-lane span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 14px 24px;
+        border-top: 1px solid var(--line);
+        background: #f5f7f9;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      @media (max-width: 980px) {
+        main {
+          width: calc(100% - 12px);
+          margin-top: 6px;
+        }
+        .masthead {
+          grid-template-columns: 1fr;
+          padding: 22px;
+        }
+        .mast-meta {
+          padding: 14px 0 0;
+          border: 0;
+          border-top: 1px solid rgba(255, 255, 255, 0.22);
+        }
+        .summary-strip {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .metric {
+          border-bottom: 1px solid var(--line);
+        }
+        .summary-strip .metric:last-child {
+          grid-column: 1 / -1;
+        }
+        .content {
+          padding: 16px 12px 22px;
+        }
+        .toolbar {
+          grid-template-columns: 1fr 1fr;
+        }
+        .toolbar .search {
+          grid-column: 1 / -1;
+        }
+        .result-count {
+          min-width: 0;
+          text-align: left;
+        }
+        .ari-note {
+          grid-template-columns: 1fr;
+        }
+        footer {
+          flex-direction: column;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .toolbar {
+          grid-template-columns: 1fr;
+        }
+        .toolbar .search {
+          grid-column: auto;
+        }
+        .summary-strip {
+          grid-template-columns: 1fr 1fr;
+        }
+        .metric .value {
+          font-size: 23px;
+        }
+        .section-head {
+          display: block;
+        }
+        .section-head p {
+          margin-top: 4px;
+          text-align: left;
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+          font-size: 10px;
+        }
+        main {
+          width: 100%;
+          margin: 0;
+          border: 0;
+          box-shadow: none;
+        }
+        .masthead {
+          padding: 16px 20px;
+        }
+        .toolbar {
+          display: none;
+        }
+        .content {
+          padding: 12px;
+        }
+        .table-wrap {
+          overflow: visible;
+        }
+        table {
+          min-width: 0;
+        }
+        th {
+          position: static;
+        }
+        td,
+        th {
+          padding: 5px;
+        }
+        a {
+          color: inherit;
+          text-decoration: none;
+        }
+        .ari-note,
+        .method,
+        tr {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main id="remediation-matrix">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">
+            Ultrafuzz · AppSec issue #527 · final draft state · 2026-08-17
+          </p>
+          <h1>Remediation matrix: severity, LOC, status, and delivery PR</h1>
+          <p class="subtitle">
+            All 38 recommendations, with exact grouped footprints for
+            implemented drafts and honest cost evidence for deferred work.
+          </p>
+        </div>
+        <div class="mast-meta">
+          <strong>Exact aggregate candidate</strong>
+          <p>
+            <a href="https://github.com/monad-developers/ultrafuzz/pull/632"
+              >Draft PR #632</a
+            >
+            at <code>950c0c44</code> · tree <code>9f7ad9f2</code>
+          </p>
+          <strong>Assessment state</strong>
+          <p>
+            19/19 release gates passed · #527 remains open · zero remediation
+            PRs merged
+          </p>
+          <a href="https://github.com/monad-developers/ultrafuzz/issues/527"
+            >Open AppSec meta issue #527 ↗</a
+          >
+        </div>
+      </header>
+
+      <section class="summary-strip" aria-label="Remediation summary">
+        <div class="metric">
+          <span class="value">38</span
+          ><span class="label">Recommendations</span>
+        </div>
+        <div class="metric good">
+          <span class="value">13</span
+          ><span class="label">Ready in open drafts</span>
+        </div>
+        <div class="metric warn">
+          <span class="value">25</span><span class="label">Deferred</span>
+        </div>
+        <div class="metric good">
+          <span class="value">4 / 4</span
+          ><span class="label">High severity covered</span>
+        </div>
+        <div class="metric">
+          <span class="value">8,699</span
+          ><span class="label">Exact aggregate changed lines</span>
+        </div>
+      </section>
+
+      <div class="content">
+        <aside class="method">
+          <div class="mark">i</div>
+          <div>
+            <strong>How to read “LOC to remediate”</strong>
+            <p>
+              LOC means all-inclusive changed lines: additions plus deletions
+              across production, tests, docs/config, schema, and lockfiles.
+              Open-draft values are exact grouped PR footprints and are not
+              separable per recommendation. Deferred ranges are rough
+              incremental estimates; “shared prototype” values are exact closed,
+              unmerged full-group footprints and are not individual estimates.
+              Do not sum component rows—the reconciled aggregate is exactly
+              8,699 lines.
+            </p>
+          </div>
+        </aside>
+
+        <div class="toolbar" aria-label="Table filters">
+          <div class="field search">
+            <label for="matrix-search"
+              >Search recommendations, issues, or PRs</label
+            >
+            <input
+              id="matrix-search"
+              type="search"
+              placeholder="Example: credentials, R-08, #617"
+            />
+          </div>
+          <div class="field">
+            <label for="severity-filter">Severity</label>
+            <select id="severity-filter">
+              <option value="all">All severities</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="info">Informational</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="status-filter">Status</label>
+            <select id="status-filter">
+              <option value="all">All statuses</option>
+              <option value="ready">Ready in open draft</option>
+              <option value="next">Deferred · next stretch</option>
+              <option value="conditional">Deferred · conditional</option>
+              <option value="burden">Deferred · higher burden</option>
+              <option value="backlog">Deferred · backlog</option>
+            </select>
+          </div>
+          <button id="clear-filters" type="button">Clear</button>
+          <div id="result-count" class="result-count" aria-live="polite">
+            31 delivery rows covering 38 recommendations
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <caption>
+              Ultrafuzz issue 527 remediation recommendations by severity, LOC
+              evidence, status, issue, and pull request
+            </caption>
+            <thead>
+              <tr>
+                <th class="col-recs" scope="col">Recommendation(s)</th>
+                <th class="col-severity" scope="col">Severity</th>
+                <th class="col-issue" scope="col">Issue</th>
+                <th class="col-loc" scope="col">LOC to remediate</th>
+                <th class="col-status" scope="col">Status</th>
+                <th class="col-pr" scope="col">PR / evidence</th>
+              </tr>
+            </thead>
+            <tbody id="matrix-body">
+              <tr data-severity="high" data-status="ready" data-rec-count="3">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-01</span
+                      ><span
+                        >Do not grant execution authority to target-supplied
+                        <code>.smithers</code> code.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-03</span
+                      ><span
+                        >Enforce operator-owned credential-name and
+                        provider-home policy.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-04</span
+                      ><span
+                        >Add campaign sensitivity classification and
+                        provider/cloud disclosure acknowledgement.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Remaining actionable High controls</span
+                  >
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip high">High ×3</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/612"
+                    >#612</a
+                  >
+                  ·
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/613"
+                    >#613</a
+                  >
+                  <small
+                    >delivery issue
+                    <a
+                      href="https://github.com/monad-developers/ultrafuzz/issues/634"
+                      >#634</a
+                    ></small
+                  >
+                </td>
+                <td class="loc exact">
+                  <strong>4,410</strong>
+                  <small>exact grouped footprint · 62 files</small>
+                  <em>2,438 prod · 1,928 tests · 44 schema/lock</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/635"
+                    >#635</a
+                  ><small>open draft · unmerged</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="high medium low"
+                data-status="ready"
+                data-rec-count="4"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-02</span
+                      ><span
+                        >Add a universal fail-closed secret gate before
+                        canonical artifact publication.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-05</span
+                      ><span
+                        >Expand secret patterns, add an entropy fallback, and
+                        thread exact run secrets through at-rest checks.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-18</span
+                      ><span
+                        >Stop writing the Kimi API key to persistent cleartext
+                        configuration.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-28</span
+                      ><span
+                        >Ignore common local secret and key file names.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Secret-safe artifacts and credentials</span
+                  >
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip high">High ×1</span
+                    ><span class="chip medium">Medium ×1</span
+                    ><span class="chip low">Low ×2</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/614"
+                    >#614</a
+                  ><small>closed by PR if merged</small>
+                </td>
+                <td class="loc exact">
+                  <strong>1,708</strong>
+                  <small>exact grouped footprint · 22 files</small>
+                  <em>901 prod · 758 tests · 49 schema/lock</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/622"
+                    >#622</a
+                  ><small>open draft · unmerged</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium low"
+                data-status="ready"
+                data-rec-count="2"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-07</span
+                      ><span
+                        >Scope provider credentials per child in multi-provider
+                        local runs.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-25</span
+                      ><span
+                        >Replace wildcard <code>SMITHERS_*</code> forwarding
+                        with a named allowlist.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Per-child credential minimization</span
+                  >
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip medium">Medium ×1</span
+                    ><span class="chip low">Low ×1</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/612"
+                    >#612</a
+                  >
+                  <small
+                    >delivery issue
+                    <a
+                      href="https://github.com/monad-developers/ultrafuzz/issues/636"
+                      >#636</a
+                    ></small
+                  >
+                </td>
+                <td class="loc exact">
+                  <strong>474</strong>
+                  <small>exact grouped footprint · 7 files</small>
+                  <em>133 prod · 341 tests</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/639"
+                    >#639</a
+                  ><small>open stacked draft</small>
+                </td>
+              </tr>
+
+              <tr data-severity="medium" data-status="ready" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-10</span
+                      ><span
+                        >Upgrade or replace vulnerable <code>adm-zip</code> and
+                        retain malicious-archive regression coverage.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Archive dependency hardening</span>
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip medium">Medium</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  ><small>issue remains open for deferred scope</small>
+                </td>
+                <td class="loc exact">
+                  <strong>290</strong>
+                  <small>exact 1:1 footprint · 4 files</small>
+                  <em>55 prod · 197 tests · 38 lock</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/623"
+                    >#623</a
+                  ><small>open draft · unmerged</small>
+                </td>
+              </tr>
+
+              <tr data-severity="medium" data-status="ready" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-11</span
+                      ><span
+                        >Add a production dependency advisory gate with
+                        recorded, expiring exceptions.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Production advisory policy</span>
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip medium">Medium</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                  <small
+                    >delivery issue
+                    <a
+                      href="https://github.com/monad-developers/ultrafuzz/issues/638"
+                      >#638</a
+                    ></small
+                  >
+                </td>
+                <td class="loc exact">
+                  <strong>1,064</strong>
+                  <small>exact 1:1 footprint · 9 files</small>
+                  <em>707 prod · 357 tests</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/641"
+                    >#641</a
+                  ><small>open stacked draft</small>
+                </td>
+              </tr>
+
+              <tr data-severity="medium" data-status="ready" data-rec-count="2">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-15</span
+                      ><span
+                        >Enforce an absolute eval-matrix row cap before
+                        resolution or materialization.</span
+                      >
+                    </li>
+                    <li>
+                      <span class="rec-id">R-16</span
+                      ><span
+                        >Bound, validate, stream-limit, and reject redirects for
+                        pricing-catalog fetches.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Bounded eval and pricing inputs</span
+                  >
+                </td>
+                <td>
+                  <div class="severity-stack">
+                    <span class="chip medium">Medium ×2</span>
+                  </div>
+                </td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/618"
+                    >#618</a
+                  >
+                  <small
+                    >delivery issue
+                    <a
+                      href="https://github.com/monad-developers/ultrafuzz/issues/637"
+                      >#637</a
+                    ></small
+                  >
+                </td>
+                <td class="loc exact">
+                  <strong>781</strong>
+                  <small>exact grouped footprint · 9 files</small>
+                  <em>439 prod · 318 tests · 24 schema</em>
+                </td>
+                <td><span class="status ready">Ready in open draft</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/640"
+                    >#640</a
+                  ><small>open draft · unmerged</small>
+                </td>
+              </tr>
+
+              <tr data-severity="medium" data-status="next" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-08</span
+                      ><span
+                        >Enforce <code>prompt_review_required</code> at launch,
+                        bound to an effective-configuration digest.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Controller policy</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/612"
+                    >#612</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>≥967 dedicated</strong
+                  ><small
+                    >measured follow-up lower bound · 2,533-line full-group
+                    prototype shared</small
+                  >
+                </td>
+                <td>
+                  <span class="status next">Deferred · next stretch</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/630"
+                    >#630</a
+                  ><small>closed full-group prototype</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium"
+                data-status="conditional"
+                data-rec-count="1"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-06</span
+                      ><span
+                        >Stop returning the dashboard session token from an
+                        unauthenticated route; authenticate reads and SSE
+                        too.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small>historical 7-item prototype; R-06 not isolated</small>
+                </td>
+                <td>
+                  <span class="status conditional">Deferred · conditional</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed full-group prototype</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium"
+                data-status="burden"
+                data-rec-count="1"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-09</span
+                      ><span
+                        >Require durable human signoff bound to final-report and
+                        materialization digests.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Governance and approvals</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/613"
+                    >#613</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>9,578 shared</strong
+                  ><small>historical 3-item prototype; R-09 not isolated</small>
+                </td>
+                <td>
+                  <span class="status burden">Deferred · higher burden</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/629"
+                    >#629</a
+                  ><small>closed full-group prototype</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium"
+                data-status="burden"
+                data-rec-count="1"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-12</span
+                      ><span
+                        >Integrity-pin the Modal base image, toolchain
+                        downloads, and global installs; record a material
+                        manifest or SBOM.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Modal boundaries</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>17,763 shared</strong
+                  ><small
+                    >historical 5-item prototype; 15,419 lines are generated
+                    locks</small
+                  >
+                </td>
+                <td>
+                  <span class="status burden">Deferred · higher burden</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                    >#625</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium"
+                data-status="burden"
+                data-rec-count="1"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-13</span
+                      ><span
+                        >Exchange Kimi refresh credentials for short-TTL access
+                        tokens and scope credential volumes per row.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Modal boundaries</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>17,763 shared</strong
+                  ><small>historical 5-item prototype; R-13 not isolated</small>
+                </td>
+                <td>
+                  <span class="status burden">Deferred · higher burden</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                    >#625</a
+                  ><small>closed full-group prototype</small>
+                </td>
+              </tr>
+
+              <tr
+                data-severity="medium"
+                data-status="burden"
+                data-rec-count="1"
+              >
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-14</span
+                      ><span
+                        >Add enforced per-run token/spend and
+                        request/turn/context ceilings that abort.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Resource bounds</span>
+                </td>
+                <td><span class="chip medium">Medium</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/618"
+                    >#618</a
+                  >
+                </td>
+                <td class="loc estimate">
+                  <strong>≈4,900–5,300</strong
+                  ><small
+                    >defensible historical delta after removing selected
+                    R-15/R-16 scope</small
+                  >
+                </td>
+                <td>
+                  <span class="status burden">Deferred · higher burden</span>
+                </td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/627"
+                    >#627</a
+                  ><small>closed full-group prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-17</span
+                      ><span>Reject redirects on Kimi OAuth refresh.</span>
+                    </li>
+                  </ul>
+                  <span class="group-name">Modal boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>17,763 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                    >#625</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-19</span
+                      ><span
+                        >Redact raw stdout, stderr, and rendered-prompt data on
+                        the dashboard path.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-20</span
+                      ><span
+                        >Lock down Git transports and reject option-like or
+                        unsafe repository/ref inputs.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Dependency and Git supply chain</span
+                  >
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,826 shared</strong
+                  ><small
+                    >archived 6-item supply-chain prototype; R-20 not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/commit/fe23ef9a3298187c99a051619f7f2365440171cb"
+                    >fe23ef9a</a
+                  ><small>archived prototype commit</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-21</span
+                      ><span
+                        >Fence and label Markdown reference bodies as untrusted
+                        data.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Path boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,366 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                    >#620</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-22</span
+                      ><span
+                        >Case-normalize protected-root and sensitive-path
+                        matching.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Path boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,366 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                    >#620</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-23</span
+                      ><span
+                        >Close the materialization overwrite symlink-swap
+                        race.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Path boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,366 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                    >#620</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-24</span
+                      ><span
+                        >Add a self-contained traversal guard to the staged
+                        public-bundle writer.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Modal boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>17,763 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                    >#625</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-26</span
+                      ><span
+                        >Require a separate operator acknowledgement for private
+                        eval artifact upload.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Governance and approvals</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/613"
+                    >#613</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>9,578 shared</strong
+                  ><small
+                    >historical 3-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/629"
+                    >#629</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-29</span
+                      ><span
+                        >Remove or quote shell interpolation in the Modal smoke
+                        harness.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Modal boundaries</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/617"
+                    >#617</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>17,763 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/625"
+                    >#625</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-31</span
+                      ><span
+                        >Return generic unexpected errors with correlation IDs
+                        and retain redacted server-side detail.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-32</span
+                      ><span
+                        >Require explicit confirmation before dashboard run
+                        launch.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="low" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-38</span
+                      ><span
+                        >Make EVMBench Dockerfile interpolation structurally
+                        safe.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Dependency and Git supply chain</span
+                  >
+                </td>
+                <td><span class="chip low">Low</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,826 shared</strong
+                  ><small
+                    >archived 6-item supply-chain prototype; R-38 not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/commit/fe23ef9a3298187c99a051619f7f2365440171cb"
+                    >fe23ef9a</a
+                  ><small>archived prototype commit</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-27</span
+                      ><span
+                        >Fail closed when an API request omits
+                        <code>Host</code>.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-30</span
+                      ><span
+                        >Rename or unify colliding
+                        <code>validateSafeId</code> APIs so result contracts
+                        cannot be confused or discarded.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Path boundaries</span>
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,366 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                    >#620</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-33</span
+                      ><span
+                        >Make prompt-frontmatter plain-object checks
+                        prototype-safe.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Path boundaries</span>
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/619"
+                    >#619</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,366 shared</strong
+                  ><small
+                    >historical 5-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/620"
+                    >#620</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-34</span
+                      ><span
+                        >Adopt and enforce one direct-dependency pinning
+                        policy.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Dependency and Git supply chain</span
+                  >
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,826 shared</strong
+                  ><small
+                    >archived 6-item supply-chain prototype; R-34 not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/commit/fe23ef9a3298187c99a051619f7f2365440171cb"
+                    >fe23ef9a</a
+                  ><small>archived prototype commit</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-35</span
+                      ><span
+                        >Periodically record and review publisher and provenance
+                        drift for critical tools.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name"
+                    >Dependency and Git supply chain</span
+                  >
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/616"
+                    >#616</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>1,826 shared</strong
+                  ><small
+                    >archived 6-item supply-chain prototype; R-35 not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/commit/fe23ef9a3298187c99a051619f7f2365440171cb"
+                    >fe23ef9a</a
+                  ><small>archived prototype commit</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-36</span
+                      ><span
+                        >Remove the unused <code>data:</code> image allowance
+                        from CSP.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+
+              <tr data-severity="info" data-status="backlog" data-rec-count="1">
+                <td>
+                  <ul class="recs">
+                    <li>
+                      <span class="rec-id">R-37</span
+                      ><span
+                        >Add CSP violation visibility in development and
+                        CI.</span
+                      >
+                    </li>
+                  </ul>
+                  <span class="group-name">Dashboard hardening</span>
+                </td>
+                <td><span class="chip info">Informational</span></td>
+                <td class="issue-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/issues/615"
+                    >#615</a
+                  >
+                </td>
+                <td class="loc historical">
+                  <strong>2,042 shared</strong
+                  ><small
+                    >historical 7-item prototype; individual LOC not
+                    isolated</small
+                  >
+                </td>
+                <td><span class="status backlog">Deferred · backlog</span></td>
+                <td class="pr-cell">
+                  <a
+                    href="https://github.com/monad-developers/ultrafuzz/pull/624"
+                    >#624</a
+                  ><small>closed · unmerged prototype</small>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="legend" aria-label="LOC evidence legend">
+          <span
+            ><b style="color: var(--green)">Exact:</b> current open component PR
+            diff.</span
+          >
+          <span
+            ><b style="color: var(--amber)">Estimate:</b> rough incremental
+            implementation range, not a commitment.</span
+          >
+          <span
+            ><b style="color: var(--violet)">Shared prototype:</b> exact closed
+            full-group diff; not an individual recommendation estimate.</span
+          >
+          <span
+            ><b>Aggregate:</b> 97 files, +7,746/−953 = 8,699 changed
+            lines.</span
+          >
+        </div>
+
+        <div class="section-head">
+          <h2>Accepted execution-design residuals</h2>
+          <p>
+            These are not part of the 25-item deferred recommendation backlog.
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table class="residual-table">
+            <caption>
+              Accepted YOLO execution-design residuals
+            </caption>
+            <thead>
+              <tr>
+                <th scope="col">ID</th>
+                <th scope="col">Severity</th>
+                <th scope="col">Residual</th>
+                <th scope="col">LOC</th>
+                <th scope="col">Status</th>
+                <th scope="col">PR</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="rec-id">D-01</span></td>
+                <td><span class="chip high">High</span></td>
+                <td>
+                  No OS or container containment for product agent execution.
+                </td>
+                <td class="loc unknown">
+                  <strong>N/A</strong
+                  ><small>conflicts with required YOLO model</small>
+                </td>
+                <td>
+                  <span class="status accepted">Accepted · Not Applied</span>
+                </td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><span class="rec-id">D-02</span></td>
+                <td><span class="chip high">High</span></td>
+                <td>No agent network-egress allowlist.</td>
+                <td class="loc unknown">
+                  <strong>N/A</strong
+                  ><small>conflicts with required YOLO model</small>
+                </td>
+                <td>
+                  <span class="status accepted">Accepted · Not Applied</span>
+                </td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><span class="rec-id">D-03</span></td>
+                <td><span class="chip high">High</span></td>
+                <td>No agent command allowlist or in-run approval prompts.</td>
+                <td class="loc unknown">
+                  <strong>N/A</strong
+                  ><small>conflicts with required YOLO model</small>
+                </td>
+                <td>
+                  <span class="status accepted">Accepted · Not Applied</span>
+                </td>
+                <td>—</td>
+              </tr>
+              <tr>
+                <td><span class="rec-id">D-04</span></td>
+                <td><span class="chip medium">Medium</span></td>
+                <td>No mediated or proxied agent filesystem reads.</td>
+                <td class="loc unknown">
+                  <strong>N/A</strong
+                  ><small>conflicts with required YOLO model</small>
+                </td>
+                <td>
+                  <span class="status accepted">Accepted · Not Applied</span>
+                </td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="ari-note" aria-label="Final ARI results">
+          <div class="ari-lane">
+            <strong>OpenAI · gpt-5.6-sol xhigh</strong
+            ><span
+              >33.8163 Grade D → 18.7667 Grade C · controls-only delta
+              −24.6833</span
+            >
+          </div>
+          <div class="ari-lane">
+            <strong>Anthropic · opus-4-8 max fallback</strong
+            ><span
+              >28.3929 Grade C → 18.8621 Grade C · controls-only delta
+              −20.3103</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <footer>
+        <span
+          ><strong>Priority:</strong> High 4/4 ready · Medium 6/12 ready · Low
+          3/15 ready · Informational 0/7 ready.</span
+        >
+        <span
+          ><strong>Invariant:</strong> Agent YOLO / bypass-permissions execution
+          is unchanged. Prepared without Smithers.</span
+        >
+      </footer>
+    </main>
+
+    <script>
+      (() => {
+        const root = document.getElementById("remediation-matrix");
+        const search = root.querySelector("#matrix-search");
+        const severity = root.querySelector("#severity-filter");
+        const status = root.querySelector("#status-filter");
+        const clear = root.querySelector("#clear-filters");
+        const result = root.querySelector("#result-count");
+        const rows = Array.from(
+          root.querySelectorAll("#matrix-body tr[data-severity]"),
+        );
+
+        const applyFilters = () => {
+          const query = search.value.trim().toLocaleLowerCase();
+          const severityValue = severity.value;
+          const statusValue = status.value;
+          let visibleRows = 0;
+
+          for (const row of rows) {
+            const severities = row.dataset.severity.split(" ");
+            const matchesSearch =
+              query === "" ||
+              row.textContent.toLocaleLowerCase().includes(query);
+            const matchesSeverity =
+              severityValue === "all" || severities.includes(severityValue);
+            const matchesStatus =
+              statusValue === "all" || row.dataset.status === statusValue;
+            const visible = matchesSearch && matchesSeverity && matchesStatus;
+            row.hidden = !visible;
+            if (visible) {
+              visibleRows += 1;
+            }
+          }
+
+          const isDefault =
+            query === "" && severityValue === "all" && statusValue === "all";
+          result.textContent = isDefault
+            ? "31 delivery rows covering 38 recommendations"
+            : `${visibleRows} delivery row${visibleRows === 1 ? "" : "s"} shown`;
+        };
+
+        search.addEventListener("input", applyFilters);
+        severity.addEventListener("change", applyFilters);
+        status.addEventListener("change", applyFilters);
+        clear.addEventListener("click", () => {
+          search.value = "";
+          severity.value = "all";
+          status.value = "all";
+          applyFilters();
+          search.focus();
+        });
+
+        applyFilters();
+      })();
+    </script>
+  </body>
+</html>
