@@ -27,6 +27,7 @@ import {
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
@@ -130,6 +131,24 @@ interface FakeInspectionFixtures {
   cancelExitCode?: number;
 }
 
+type FakeInspectionControl = "cancel-terminal" | "error-exit-code" | "error-text" | "kill-self";
+
+function fakeInspectionControlPath(project: string, control: FakeInspectionControl): string {
+  return path.join(project, `fake-${control}`);
+}
+
+function failFakeInspectionRunner(project: string, message: string, exitCode: number): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-text"), `${message}\n`, "utf8");
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-exit-code"), `${exitCode}\n`, "utf8");
+}
+
+function enableFakeInspectionControl(
+  project: string,
+  control: Exclude<FakeInspectionControl, "error-exit-code" | "error-text">
+): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, control), "", "utf8");
+}
+
 function smithersEventLine(input: {
   seq: number;
   timestampMs: number;
@@ -204,7 +223,12 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(path.join(project, "smithers-commands.log"))}`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "kill-self"))} ]; then kill -9 $$; fi`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))} ]; then`,
+      `  if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-text"))} ]; then cat ${shellQuote(fakeInspectionControlPath(project, "error-text"))} >&2; fi`,
+      `  exit "$(cat ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))})"`,
+      "fi",
       'case "$1" in',
       "  why)",
       `    cat ${shellQuote(files.why)}`,
@@ -216,16 +240,16 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      '    if [ -n "$SMITHERS_FAKE_NODE_WATCH" ]; then',
-      '      cat "$SMITHERS_FAKE_NODE_WATCH"',
-      "    else",
-      `      cat ${shellQuote(files.node)}`,
-      "    fi",
+      `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
       "    ;;",
       "  events)",
       `    cat ${shellQuote(files.events)}`,
       "    ;;",
       "  cancel)",
+      `    if [ -f ${shellQuote(fakeInspectionControlPath(project, "cancel-terminal"))} ]; then`,
+      '      printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
+      "      exit 4",
+      "    fi",
       `    printf '%s\\n' '{"ok":true,"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
       `    exit ${fixtures.cancelExitCode ?? 2}`,
       "    ;;",
@@ -238,12 +262,14 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  return {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
-  };
+  return bindSmithersExecutableCapability(
+    {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers
+    },
+    smithers,
+    project
+  );
 }
 
 async function launchedProject(
@@ -311,8 +337,7 @@ test("cancelRun persists the canonical canceled state once the engine confirms",
 
 test("cancelRun reports a stable diagnostic when the engine command fails", async () => {
   const { project, env } = await launchedProject({});
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'boom' >&2\nexit 9\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "boom", 9);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -730,8 +755,7 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
 
 test("event queries report a diagnostic when the engine command exits nonzero", async () => {
   const { project, env } = await launchedProject({ events: "" });
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'run not found' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "run not found", 4);
 
   // A failed query must not look like a run with no events.
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
@@ -756,8 +780,7 @@ test("event queries report a diagnostic when the engine process is killed by a s
   const { project, env } = await launchedProject({ events: "" });
   // An OOM-style external kill leaves no exit code, which must still be a
   // failure rather than an empty success.
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nkill -9 $$\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  enableFakeInspectionControl(project, "kill-self");
 
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
@@ -899,20 +922,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
   const { project, env, runRoot } = await launchedProject({});
   // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
   // rerunning cancel to confirm an in-flight request must not error.
-  fs.writeFileSync(
-    env.SMITHERS_BIN!,
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
-      "  exit 4",
-      "fi",
-      "printf '%s\\n' '{\"ok\":true}'",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  enableFakeInspectionControl(project, "cancel-terminal");
 
   const confirmed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -925,8 +935,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
 
 test("cancelRun still fails on an unrelated engine error exit", async () => {
   const { project, env } = await launchedProject({});
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'database is locked' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "database is locked", 4);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
