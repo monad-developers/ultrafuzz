@@ -36,11 +36,23 @@ an isolation boundary.
 ## Production dependency advisories
 
 CI and release validation run `pnpm security:dependency-advisories`. The gate
-executes `pnpm audit --prod --json` and blocks every High or Critical production
-advisory unless `.github/dependency-advisory-exceptions.json` contains a current
-exception for that exact GHSA and package. Audit command, output-schema, JSON,
-metadata-count, and production-finding failures are blocking errors; the gate
-does not treat an unavailable registry or malformed response as a clean audit.
+enumerates the installed production graph with the repository-pinned pnpm,
+requires exact package versions resolved from `registry.npmjs.org`, and posts
+that bounded inventory directly to the fixed npm advisory bulk endpoint. It
+does not honor a configurable package-registry URL for security decisions. The
+raw response is size-bounded and parsed with the repository's strict JSON
+reader before validating every package, advisory ID, GitHub advisory URL,
+severity, range, CWE, and CVSS field. Aliased dependencies are audited under
+their registry package names. Invalid UTF-8 and unknown, missing, duplicate,
+partial, or error-bearing fields fail closed instead of relying on pnpm
+normalization, which can discard malformed registry records.
+
+The gate blocks every High or Critical production advisory unless
+`.github/dependency-advisory-exceptions.json` contains a current exception for
+that exact GHSA and package. Enumeration, registry, HTTP, response-size, schema,
+and JSON failures are blocking; an unavailable or malformed registry response
+is never treated as a clean audit. CI and release validation also run the policy
+fixture suite that exercises these fail-closed cases.
 
 Exceptions are temporary dispositions, not permanent suppressions. Each entry
 must record the severity, status, review date, expiry, accountable GitHub owner,
