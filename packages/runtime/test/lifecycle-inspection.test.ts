@@ -131,6 +131,24 @@ interface FakeInspectionFixtures {
   cancelExitCode?: number;
 }
 
+type FakeInspectionControl = "cancel-terminal" | "error-exit-code" | "error-text" | "kill-self";
+
+function fakeInspectionControlPath(project: string, control: FakeInspectionControl): string {
+  return path.join(project, `fake-${control}`);
+}
+
+function failFakeInspectionRunner(project: string, message: string, exitCode: number): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-text"), `${message}\n`, "utf8");
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-exit-code"), `${exitCode}\n`, "utf8");
+}
+
+function enableFakeInspectionControl(
+  project: string,
+  control: Exclude<FakeInspectionControl, "error-exit-code" | "error-text">
+): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, control), "", "utf8");
+}
+
 function smithersEventLine(input: {
   seq: number;
   timestampMs: number;
@@ -205,11 +223,11 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
-      'if [ -n "$SMITHERS_FAKE_KILL_SELF" ]; then kill -9 $$; fi',
-      'if [ -n "$SMITHERS_FAKE_ERROR_EXIT_CODE" ]; then',
-      '  if [ -n "$SMITHERS_FAKE_ERROR_TEXT" ]; then printf \'%s\\n\' "$SMITHERS_FAKE_ERROR_TEXT" >&2; fi',
-      '  exit "$SMITHERS_FAKE_ERROR_EXIT_CODE"',
+      `printf '%s\\n' "$*" >> ${shellQuote(path.join(project, "smithers-commands.log"))}`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "kill-self"))} ]; then kill -9 $$; fi`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))} ]; then`,
+      `  if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-text"))} ]; then cat ${shellQuote(fakeInspectionControlPath(project, "error-text"))} >&2; fi`,
+      `  exit "$(cat ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))})"`,
       "fi",
       'case "$1" in',
       "  why)",
@@ -222,17 +240,13 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      '    if [ -n "$SMITHERS_FAKE_NODE_WATCH" ]; then',
-      '      cat "$SMITHERS_FAKE_NODE_WATCH"',
-      "    else",
-      `      cat ${shellQuote(files.node)}`,
-      "    fi",
+      `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
       "    ;;",
       "  events)",
       `    cat ${shellQuote(files.events)}`,
       "    ;;",
       "  cancel)",
-      '    if [ -n "$SMITHERS_FAKE_CANCEL_TERMINAL" ]; then',
+      `    if [ -f ${shellQuote(fakeInspectionControlPath(project, "cancel-terminal"))} ]; then`,
       '      printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
       "      exit 4",
       "    fi",
@@ -251,9 +265,7 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   return bindSmithersExecutableCapability(
     {
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      SMITHERS_BIN: smithers,
-      SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-      ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
+      SMITHERS_BIN: smithers
     },
     smithers,
     project
@@ -325,8 +337,7 @@ test("cancelRun persists the canonical canceled state once the engine confirms",
 
 test("cancelRun reports a stable diagnostic when the engine command fails", async () => {
   const { project, env } = await launchedProject({});
-  env.SMITHERS_FAKE_ERROR_TEXT = "boom";
-  env.SMITHERS_FAKE_ERROR_EXIT_CODE = "9";
+  failFakeInspectionRunner(project, "boom", 9);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -744,8 +755,7 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
 
 test("event queries report a diagnostic when the engine command exits nonzero", async () => {
   const { project, env } = await launchedProject({ events: "" });
-  env.SMITHERS_FAKE_ERROR_TEXT = "run not found";
-  env.SMITHERS_FAKE_ERROR_EXIT_CODE = "4";
+  failFakeInspectionRunner(project, "run not found", 4);
 
   // A failed query must not look like a run with no events.
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
@@ -770,7 +780,7 @@ test("event queries report a diagnostic when the engine process is killed by a s
   const { project, env } = await launchedProject({ events: "" });
   // An OOM-style external kill leaves no exit code, which must still be a
   // failure rather than an empty success.
-  env.SMITHERS_FAKE_KILL_SELF = "1";
+  enableFakeInspectionControl(project, "kill-self");
 
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
@@ -912,7 +922,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
   const { project, env, runRoot } = await launchedProject({});
   // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
   // rerunning cancel to confirm an in-flight request must not error.
-  env.SMITHERS_FAKE_CANCEL_TERMINAL = "1";
+  enableFakeInspectionControl(project, "cancel-terminal");
 
   const confirmed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -925,8 +935,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
 
 test("cancelRun still fails on an unrelated engine error exit", async () => {
   const { project, env } = await launchedProject({});
-  env.SMITHERS_FAKE_ERROR_TEXT = "database is locked";
-  env.SMITHERS_FAKE_ERROR_EXIT_CODE = "4";
+  failFakeInspectionRunner(project, "database is locked", 4);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
