@@ -69,6 +69,7 @@ import {
   observeTerminalModalRecoveryLifecycle,
   publicBenchmarkCollectionSecretValues,
   readModalCollectResultFiles,
+  overseeModalBenchmarkOnce,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
   publicEvalDiagnosticsDroppedFromEvidence,
@@ -584,6 +585,22 @@ describe("Modal image source staging", () => {
     await expect(launchModalBenchmark({ configPath, repoRoot: path.resolve("../.."), env: {} })).rejects.toThrow(
       /exact local Git HEAD/u
     );
+  });
+
+  it("rejects private launch and recovery before Modal or local state mutation", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-private-modal-governance-"));
+    const configPath = path.join(root, "benchmark.json"),
+      statePath = path.join(root, "launch-state.json"),
+      recoveryStatePath = path.join(root, "recovery-state.json");
+    fs.writeFileSync(configPath, `${JSON.stringify(privateBenchmarkConfig())}\n`);
+    await expect(launchModalBenchmark({ configPath, statePath, env: {} })).rejects.toThrow(
+      /eval disclosure authorization/u
+    );
+    await expect(overseeModalBenchmarkOnce({ configPath, statePath, recoveryStatePath, env: {} })).rejects.toThrow(
+      /eval disclosure authorization/u
+    );
+    expect(fs.existsSync(statePath)).toBe(false);
+    expect(fs.existsSync(recoveryStatePath)).toBe(false);
   });
 });
 
@@ -1137,7 +1154,6 @@ describe("Modal result collection", () => {
       OPENAI_API_KEY: "judge-secret",
       KIMI_BASE_URL: "https://kimi.example.invalid/v1"
     });
-
     expect(() =>
       modalBenchmarkSecretValues(config, model, {
         MOONSHOT_API_KEY: "moonshot-secret",
@@ -1232,6 +1248,11 @@ model = "k3"
   return root;
 }
 
+function privateBenchmarkConfig() {
+  // prettier-ignore
+  return parseModalBenchmarkConfig({ schema_version: "ultrafuzz.modal.benchmark.v2", run_id: "immutable-run", app_name: "ultrafuzz-evals", image_name: "ultrafuzz-security-runner:latest", target: { repo: "https://github.com/example/target", ref: "main" }, ground_truth: { repo: "https://github.com/example/ground-truth", ref: "main", file: "findings.yml", format: "ultrafuzz" }, braintrust: { project: "termination-test", api_key_env: "BRAINTRUST_API_KEY", judge_api_key_env: "OPENAI_API_KEY", judge_url: "https://api.openai.com/v1/chat/completions", judge_credential_ttl_seconds: 57_600 }, node_timeout_seconds: 7_200, loops: 3, models: [MODEL], benchmark_execution: { excluded_node_ids: [] }, eval_reporting: { provider: "braintrust" } });
+}
+
 function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundleLineage>[0] {
   const candidateCommit = "d".repeat(40);
   const configFingerprint = "a".repeat(64);
@@ -1316,7 +1337,7 @@ function writeCanonicalRecoveryPlan(runRoot: string, runId: string, logicalNodes
   fs.writeFileSync(
     path.join(runRoot, "plan.json"),
     JSON.stringify({
-      schema_version: "ultrafuzz.run-plan.v2",
+      schema_version: "ultrafuzz.run-plan.v3",
       run_id: runId,
       mode: "run",
       graph_fingerprint: "a".repeat(64),
@@ -1576,8 +1597,10 @@ describe("Modal worker identity", () => {
     const command = modalWorkerEntrypointCommand("anthropic");
 
     expect(command).toContain('chown -R ubuntu:ubuntu "$data_root"');
+    expect(command).toContain("install -d -m 700 -o ubuntu -g ubuntu '/run/ultrafuzz-auth'");
     expect(command).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/claude'");
     expect(command).toContain("runuser -u ubuntu -- env HOME='/home/ubuntu'");
+    expect(command).toContain("ULTRAFUZZ_PROVIDER_HOME_ROOT='/run/ultrafuzz-auth'");
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
     expect(command).toContain("/run/ultrafuzz-config/lineage.json");
     expect(command).toContain("/run/ultrafuzz-config/launch-ready");

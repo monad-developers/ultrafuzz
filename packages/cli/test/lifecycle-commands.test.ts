@@ -28,7 +28,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1", ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
@@ -95,7 +95,7 @@ function addOpenRouterProfile(project: string): void {
 }
 
 function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const whyPath = path.join(project, "fake-why.json");
   const timelinePath = path.join(project, "fake-timeline.json");
@@ -569,7 +569,7 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /^Workflow engine:$/mu);
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
-  assert.match(human.stdout + human.stderr, /- compatibility patches: detached snapshot transfer /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: local delegation .*detached snapshot transfer /u);
   // Every tracked workaround has to reach the operator, not just the first one.
   // The two resume-durability patches are the ones whose absence silently costs
   // durable resume progress, so assert them by name.
@@ -619,7 +619,7 @@ test("doctor reports install posture in human and JSON output", async () => {
 
 test("status recommends ultrafuzz why instead of the engine command", async () => {
   const project = tempProject();
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(

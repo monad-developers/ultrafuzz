@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
+import { BUN_MODULE_CONFINEMENT_SOURCE } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -35,6 +36,7 @@ import { currentArtifactBinding } from "./current-artifact-fixtures.js";
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
 const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
 const AGENT_ENV = "ULTRAFUZZ_TEST_AGENT_KEY";
+const testBunExecutable = (): string => execFileSync("which", ["bun"], { encoding: "utf8" }).trim();
 
 describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   it("probes required commands inside the configured image and tears down the transient sandbox", async () => {
@@ -201,7 +203,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
-  it("preserves pinned source identity and the sealed submodule closure in cloud handoffs", async () => {
+  it("preserves pinned source identity and fails closed without its ref", async () => {
     const fixture = createProjectFixture({ pinnedSubmodules: true });
     const pinnedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: fixture.root,
@@ -232,6 +234,8 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
         source_commit?: unknown;
       };
       expect(manifest.source_commit).toBe(pinnedCommit);
+      execFileSync("git", ["branch", "-m", "moved-pin"], { cwd: fixture.root });
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(/ultrafuzz-pinned/u);
     } finally {
       archive.cleanup();
       fs.rmSync(extracted, { recursive: true, force: true });
@@ -495,12 +499,8 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("rejects committed symlinks before building a cloud handoff archive", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({ committedSymlink: true });
     try {
-      fs.symlinkSync("source.txt", path.join(fixture.root, "source-link.txt"));
-      execFileSync("git", ["add", "source-link.txt"], { cwd: fixture.root });
-      execFileSync("git", ["commit", "--quiet", "-m", "add symlink"], { cwd: fixture.root });
-
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
         /unsupported symlink entry/u
       );
@@ -762,17 +762,26 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-test-"));
     const logPath = path.join(root, "commands.jsonl");
     const environmentPath = path.join(root, "environment.json");
+    const ambientMarker = path.join(root, "ambient-package-ran");
+    const startupMarker = path.join(root, "ambient-startup-ran"),
+      startupPreload = path.join(root, "ambient-startup.mjs");
     const fixture = createProjectFixture({
       smithersCli: `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
+let ambientError; try { require("ultrafuzz-hostile-ambient"); } catch (error) { ambientError = String(error); }
 fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
 fs.writeFileSync(${JSON.stringify(environmentPath)}, JSON.stringify({
   path: process.env.PATH,
+  startup: process.execArgv.join("\\n"),
   artifacts: process.env.ULTRAFUZZ_ARTIFACTS_MODULE,
   runtime: process.env.ULTRAFUZZ_RUNTIME_MODULE,
   config: process.env.ULTRAFUZZ_CONFIG_PATH,
-  workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
+  confinement: process.env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT,
+  governance: process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH,
+  workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
+  injections: ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_OPTIONS", "NODE_PATH"].map((name) => process.env[name] ?? null),
+  ambientError
 }));
 if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); process.exit(4); }
 `
@@ -782,10 +791,26 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     const shadowCli = path.join(shadowBin, "ultrafuzz");
     fs.writeFileSync(shadowCli, "#!/bin/sh\nexit 77\n", "utf8");
     fs.chmodSync(shadowCli, 0o500);
-    const previousPath = process.env.PATH;
+    fs.mkdirSync(path.join(fixture.root, "node_modules", "ultrafuzz-hostile-ambient"), { recursive: true });
+    fs.writeFileSync(
+      path.join(fixture.root, "node_modules", "ultrafuzz-hostile-ambient", "package.json"),
+      '{"main":"index.js"}\n'
+    );
+    fs.writeFileSync(
+      path.join(fixture.root, "node_modules", "ultrafuzz-hostile-ambient", "index.js"),
+      `require("node:fs").writeFileSync(${JSON.stringify(ambientMarker)}, "hostile");\n`
+    );
+    fs.writeFileSync(
+      startupPreload,
+      `import fs from "node:fs"; fs.writeFileSync(${JSON.stringify(startupMarker)}, "hostile");\n`
+    );
+    // prettier-ignore
+    const injectionNames = ["BUN_OPTIONS", "BUN_INSPECT_PRELOAD", "NODE_OPTIONS", "NODE_PATH"] as const, previousInjections = Object.fromEntries(injectionNames.map((name) => [name, process.env[name]])), previousPath = process.env.PATH;
     process.env.PATH = [shadowBin, previousPath ?? ""].filter((entry) => entry.length > 0).join(path.delimiter);
+    // prettier-ignore
+    { process.env.BUN_OPTIONS = `--preload=${startupPreload}`; process.env.BUN_INSPECT_PRELOAD = startupPreload; process.env.NODE_OPTIONS = `--import=${startupPreload}`; process.env.NODE_PATH = path.dirname(startupPreload); }
     try {
-      await runDurableWorkflow(fixture.root, "inner-run", fixture.input);
+      await runDurableWorkflow(fixture.root, "inner-run", fixture.input, testBunExecutable);
       const commands = fs
         .readFileSync(logPath, "utf8")
         .trim()
@@ -807,12 +832,25 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/runtime/dist/index\\.js$`, "u")
       );
       expect(environment.config).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/ultrafuzz\\.toml$`, "u"));
+      expect(environment.confinement).toMatch(
+        new RegExp(`^${childVisibleRoot}[0-9]+/controls/bun-module-confinement\\.js$`, "u")
+      );
+      expect(environment.startup).toMatch(/--no-addons[\s\S]*--preload=.*bun-module-confinement\.js/u);
+      expect(environment.startup).not.toMatch(/--tsconfig-override/u);
+      expect(environment.ambientError).toMatch(/outside its sealed snapshot/u);
+      expect((environment as unknown as { injections: unknown }).injections).toEqual([null, null, null, null]);
+      expect(fs.existsSync(ambientMarker)).toBe(false);
+      expect(fs.existsSync(startupMarker)).toBe(false);
+      // prettier-ignore
+      expect(environment.governance).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/data-governance\\.json$`, "u"));
       expect(environment.workflow).toMatch(
         new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
       );
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
+      // prettier-ignore
+      for (const name of injectionNames) { const value = previousInjections[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; }
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
     }
@@ -849,7 +887,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     });
     const canonicalSnapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
     try {
-      await expect(runDurableWorkflow(fixture.root, "inner-run", fixture.input)).rejects.toThrow(
+      await expect(runDurableWorkflow(fixture.root, "inner-run", fixture.input, testBunExecutable)).rejects.toThrow(
         /execution snapshot directory changed during descriptor ownership|descriptor does not match its canonical generation/u
       );
       const observation = JSON.parse(fs.readFileSync(observationPath, "utf8")) as Record<string, string>;
@@ -2329,7 +2367,8 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
   };
 }
 
-function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?: boolean } = {}) {
+// prettier-ignore
+function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?: boolean; committedSymlink?: boolean } = {}) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
@@ -2388,10 +2427,12 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
   fs.writeFileSync(path.join(root, runRoot, "artifacts", "unrelated", "unrelated.txt"), "unrelated\n");
   fs.writeFileSync(path.join(root, workspaceDir, "local.txt"), "excluded\n");
   fs.writeFileSync(path.join(root, runRoot, "logs", "local.log"), "excluded\n");
+  if (options.committedSymlink === true) fs.symlinkSync("source.txt", path.join(root, "source-link.txt"));
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
-  execFileSync("git", ["add", "source.txt"], { cwd: root });
+  // prettier-ignore
+  execFileSync("git", ["add", "source.txt", ...(options.committedSymlink === true ? ["source-link.txt"] : [])], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   if (options.pinnedSubmodules === true) {
     execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${"d".repeat(40)},vendor/dependency`], {
@@ -2400,11 +2441,18 @@ function createProjectFixture(options: { smithersCli?: string; pinnedSubmodules?
     execFileSync("git", ["commit", "--quiet", "-m", "pinned dependency"], { cwd: root });
     execFileSync("git", ["branch", "-M", "ultrafuzz-pinned"], { cwd: root });
   }
+  const governedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const governedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
 
   const snapshotFiles = new Map<string, string>([
     [workflowRelativePath, "export default { sealed: true };\n"],
     [promptRelativePath, "sealed rendered prompt\n"],
+    ["tsconfig.json", "{}\n"],
+    ["controls/bunfig.toml", "\n"],
+    ["controls/bun-module-confinement.js", BUN_MODULE_CONFINEMENT_SOURCE],
     ["controls/ultrafuzz.toml", '[models]\ndefault = "sealed"\n'],
+    // prettier-ignore
+    ["controls/data-governance.json", `${JSON.stringify({ policy: { sensitivity: "private" }, target: { commit: governedCommit, tree: governedTree, dirty: false }, required_source_destinations: [] })}\n`],
     [".smithers/agents/index.ts", 'export * from "./kimi.ts";\n'],
     [".smithers/agents/codex.ts", "export const sealedCodex = true;\n"],
     [".smithers/agents/claude.ts", "export const sealedClaude = true;\n"],

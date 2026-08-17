@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-// The generated workflow workspace is installed with `--package-lock=false`, so npm
+// Each ephemeral workflow workspace is installed with `--package-lock=false`, so npm
 // re-resolves every unpinned transitive dependency on each install. That resolution
 // can land on a version published seconds earlier, whose packument entry is already
 // live but whose tarball has not reached the registry CDN edge the container talks

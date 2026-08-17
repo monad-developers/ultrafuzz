@@ -235,6 +235,9 @@ function sealedSmithersExecutable(snapshotRoot: string): string {
   return smithers;
 }
 
+// prettier-ignore
+function trustedCloudBunExecutable(): string { const executable = "/usr/local/bin/bun"; assertRootOwnedReadOnlyFile(executable, "Modal Bun interpreter"); return executable; }
+
 function sealedSnapshotModuleUrl(snapshotRoot: string, name: "artifacts" | "runtime"): string {
   return pathToFileURL(
     regularSnapshotFile(
@@ -596,7 +599,8 @@ function cleanupStalePublicationDirectories(dataRoot: string): void {
 export async function runDurableWorkflow(
   projectRoot: string,
   localRunId: string,
-  input: ReturnType<typeof parseModalNodeWorkerInput>
+  input: ReturnType<typeof parseModalNodeWorkerInput>,
+  bunExecutable: () => string = trustedCloudBunExecutable
 ): Promise<void> {
   const canonicalSnapshotRoot = anchoredProjectPath(projectRoot, input.execution_snapshot_root);
   const canonicalWorkflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
@@ -608,7 +612,15 @@ export async function runDurableWorkflow(
       openedSnapshotRoot.opened
     );
     verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
+    const bun = bunExecutable();
     const smithers = sealedSmithersExecutable(snapshotAccessRoot);
+    const confinement = regularSnapshotFile(
+      snapshotAccessRoot,
+      "controls/bun-module-confinement.js",
+      "sealed Bun module confinement"
+    );
+    // prettier-ignore
+    const bunArguments = [`--config=${regularSnapshotFile(snapshotAccessRoot, "controls/bunfig.toml", "sealed Bun config")}`, "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", `--preload=${confinement}`, smithers];
     const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
     const environment = {
       PATH: ["/usr/local/bin", process.env.PATH ?? ""].filter((entry) => entry.length > 0).join(path.delimiter),
@@ -616,13 +628,16 @@ export async function runDurableWorkflow(
       ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
       ULTRAFUZZ_CONFIG_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/ultrafuzz.toml", "sealed cloud config"),
+      ULTRAFUZZ_BUN_MODULE_CONFINEMENT: confinement,
+      // prettier-ignore
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/data-governance.json", "sealed cloud data governance"),
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     try {
       await runChecked(
         "resume-workflow",
-        smithers,
-        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true),
+        bun,
+        [...bunArguments, ...workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true)],
         projectRoot,
         environment
       );
@@ -630,8 +645,8 @@ export async function runDurableWorkflow(
       if (!isMissingWorkflowRun(error)) throw error;
       await runChecked(
         "run-workflow",
-        smithers,
-        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false),
+        bun,
+        [...bunArguments, ...workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false)],
         projectRoot,
         environment
       );
@@ -1301,9 +1316,11 @@ async function runChecked(
   cwd: string,
   env: Record<string, string> = {}
 ): Promise<void> {
+  const childEnvironment = { ...process.env, ...env };
+  for (const name of ["BUN_INSPECT_PRELOAD", "BUN_OPTIONS", "NODE_OPTIONS", "NODE_PATH"]) delete childEnvironment[name];
   const child = spawn(command, args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const stdout = readBoundedText(child.stdout);

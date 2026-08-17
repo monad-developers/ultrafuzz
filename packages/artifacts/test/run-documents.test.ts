@@ -63,13 +63,14 @@ function canonicalConfigRedactions(): ConfigRedactionsDocument {
 
 function canonicalRunPlan(): RunPlanDocument {
   return {
-    schema_version: "ultrafuzz.run-plan.v2",
+    schema_version: "ultrafuzz.run-plan.v3",
     run_id: "run-child",
     mode: "run",
     graph_fingerprint: DIGEST_A,
     config_fingerprint: DIGEST_B,
     redacted_config_fingerprint: DIGEST_A,
     prompt_digest: DIGEST_B,
+    controller_source_digest: DIGEST_A,
     execution: {
       mode: "local",
       retentionDays: 30,
@@ -91,6 +92,8 @@ function canonicalRunPlan(): RunPlanDocument {
       overridden_settings: [],
       topology_overridden: false
     },
+    // prettier-ignore
+    data_governance: { schema_version: "ultrafuzz.data-governance-provenance.v1", path: "data-governance.json", sha256: DIGEST_A, policy_digest: DIGEST_B, input_digest: DIGEST_A, sensitivity: "private", acknowledgement_status: "approved" },
     rendered_prompts: [
       {
         node_id: "node-a-0",
@@ -267,7 +270,7 @@ test("every runtime document rejects its historical schema version", () => {
     /unsupported configuration redaction manifest schemaVersion/u
   );
   assert.throws(
-    () => assertRunPlanDocument({ ...canonicalRunPlan(), schema_version: "ultrafuzz.run-plan.v1" }),
+    () => assertRunPlanDocument({ ...canonicalRunPlan(), schema_version: "ultrafuzz.run-plan.v2" }),
     /unsupported run plan schema_version/u
   );
   assert.throws(

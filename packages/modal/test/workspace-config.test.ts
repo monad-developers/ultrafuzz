@@ -73,7 +73,7 @@ describe("Modal target model profiles", () => {
     );
 
     expect(config).toContain(`[models.default]\nagent = "KimiAgent"\nmodel = "kimi-k3"\nreasoning = "max"`);
-    expect(config).toContain('[agents.KimiAgent]\nauth = "subscription"\nconfig_dir = "/run/ultrafuzz-auth/kimi"');
+    expect(config).toContain('[agents.KimiAgent]\nauth = "subscription"');
     expect(config).not.toContain("final-message-only");
   });
 

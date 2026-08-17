@@ -67,6 +67,11 @@ export function forgeGuardMetadata(config: ResolvedConfig, active: boolean): For
   };
 }
 
+// Only the exact run-owned Forge wrapper may re-enter the controller PATH after
+// target-local command directories are removed.
+// prettier-ignore
+export function isPreparedForgeGuardBin(projectRoot: string, candidate: string): boolean { try { const target = fs.realpathSync(path.resolve(projectRoot)), lexical = path.resolve(candidate), canonical = fs.realpathSync(lexical), relative = path.relative(path.join(target, ".ultrafuzz", "runs"), canonical), components = relative.split(path.sep), directory = fs.lstatSync(lexical), names = fs.readdirSync(canonical), wrapper = path.join(canonical, "forge"), stat = fs.lstatSync(wrapper); return lexical === canonical && components.length === 2 && components[0] !== "" && components[0] !== "." && components[0] !== ".." && components[1] === "safe-bin" && directory.isDirectory() && !directory.isSymbolicLink() && (directory.mode & 0o022) === 0 && names.length === 1 && names[0] === "forge" && stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && (stat.mode & 0o777) === 0o700 && fs.readFileSync(wrapper, "utf8") === forgeGuardWrapper(); } catch { return false; } }
+
 function resolveExecutableOnPath(name: string, pathValue: string, excludedDirectory: string): string | undefined {
   const resolvedExcludedDirectory = comparablePath(excludedDirectory);
   for (const entry of pathValue.split(path.delimiter)) {

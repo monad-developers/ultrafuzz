@@ -25,31 +25,35 @@ const AGENT_TEMPLATES = [
     file: "claude.ts",
     template: "smithers/agents/claude.tsx",
     ref: "ClaudeAgent",
-    stock032Sha256: "f2b97c9b57aa45bdc3b42be20d7a3baddc0086a2bae95c161b841599f3262232"
+    stock032Sha256: ["f2b97c9b57aa45bdc3b42be20d7a3baddc0086a2bae95c161b841599f3262232"]
   },
   {
     file: "codex.ts",
     template: "smithers/agents/codex.tsx",
     ref: "CodexAgent",
-    stock032Sha256: "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5"
+    stock032Sha256: [
+      "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5",
+      "e7e845b2bccf5b7d41a3f0cedfaec7a1457580126513ff96f282a36307c7da98",
+      "7865f1be1715d36d016c7b2814081b70e70a9aca7e30d5b41f5d91bf2337f681"
+    ]
   },
   {
     file: "deepseek.ts",
     template: "smithers/agents/deepseek.tsx",
     ref: "DeepSeekAgent",
-    stock032Sha256: "1da0e8300e1b9f5c8311c14414acd3029b750fe70644c9d364c598ea460a08f2"
+    stock032Sha256: ["1da0e8300e1b9f5c8311c14414acd3029b750fe70644c9d364c598ea460a08f2"]
   },
   {
     file: "kimi.ts",
     template: "smithers/agents/kimi.tsx",
     ref: "KimiAgent",
-    stock032Sha256: "8e9c9fee048d2ac7a04669d8999647ba460c27855959bb77cd2b7eb0ea1ac940"
+    stock032Sha256: ["8e9c9fee048d2ac7a04669d8999647ba460c27855959bb77cd2b7eb0ea1ac940"]
   },
   {
     file: "openrouter.ts",
     template: "smithers/agents/openrouter.tsx",
     ref: "OpenRouterAgent",
-    stock032Sha256: null
+    stock032Sha256: []
   }
 ] as const;
 
@@ -166,6 +170,8 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    // prettier-ignore
+    writeProjectFile(projectRoot, ".smithers/agents/provider-home.ts", loadRuntimeTemplate("smithers/agents/provider-home.tsx"), input.force === true, created, preserved, overwritten);
     writeProjectFile(
       projectRoot,
       ".smithers/agents/strict-json.ts",
@@ -287,7 +293,7 @@ function upgradeStockSmithers032Adapters(
       continue;
     }
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (agent.stock032Sha256 === null || digest !== agent.stock032Sha256) continue;
+    if (!(agent.stock032Sha256 as readonly string[]).includes(digest)) continue;
     writeProjectFile(
       projectRoot,
       relativePath,

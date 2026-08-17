@@ -98,7 +98,7 @@ function fakeSmithersEnv(
   includeFinalReport = false,
   additionalTerminalNodeIds: readonly string[] = []
 ): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(inspectStatePath, "running\n", "utf8");
@@ -436,7 +436,7 @@ async function cli(
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1", ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
@@ -1396,7 +1396,6 @@ test("old commands and backend flags are rejected instead of aliased or shimmed"
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
 
   for (const argv of [
-    ["doctor", "--json"],
     ["list", "--json"],
     ["restart", "cli-run", "--json"],
     ["continue", "cli-run", "--json"],
@@ -1456,7 +1455,7 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
   const body = parseJson(failed);
   assert.equal(body.ok, false, JSON.stringify(body));
   assertNoSmithersSurface(body);
-  assert.match(JSON.stringify(body.diagnostics), /AGENT_REFERENCE_UNKNOWN/);
+  assert.match(JSON.stringify(body.diagnostics), /CONFIG_MODEL_AGENT_INVALID/);
 });
 
 test("run rejects an OpenRouter override whose effective model is invalid", async () => {
