@@ -2054,6 +2054,35 @@ test("aggregation schema gates exactly reconcile authenticated atomic bundles an
     const exactDocument = buildDocument();
     assertPasses("an exact copied bundle and exact authenticated empty bundle pass every schema gate", exactDocument);
 
+    // Regression for the rounding pipeline pilot: the agent copied the
+    // `attempt-0` destination-layout segment into every `node_id`. The rows
+    // remained internally consistent, so only authenticated reconciliation can
+    // distinguish that ordinal from an arbitrary producer node id.
+    const substitutedNodeId = "attempt-0";
+    const substitutedNodeDocument = buildDocument({
+      sourceBundles: [{ ...copiedBundleSummary, node_id: substitutedNodeId }, emptyBundleSummary],
+      files: [{ ...generatedCopiedRow, node_id: substitutedNodeId }],
+      supportFiles: [{ ...supportCopiedRow, node_id: substitutedNodeId }]
+    });
+    const substitutedNodeFailures = execute(substitutedNodeDocument).filter((result) => result.status !== "passed");
+    const substitutedNodeReconciliation = substitutedNodeFailures.find(
+      (result) => result.gate === "aggregation-authenticated-source-destination-reconciliation"
+    );
+    assert.equal(substitutedNodeReconciliation?.status, "failed", "attempt-0 node_id must be rejected");
+    const substitutedNodeMessages =
+      substitutedNodeReconciliation?.status === "failed"
+        ? substitutedNodeReconciliation.issues.map((entry) => entry.message).join("\n")
+        : "";
+    assert.match(substitutedNodeMessages, /bundle attribution does not match authority/u);
+    assert.match(substitutedNodeMessages, /entry attribution or metadata does not match authority/u);
+    assert.deepEqual(
+      substitutedNodeFailures.filter(
+        (result) => result.gate !== "aggregation-authenticated-source-destination-reconciliation"
+      ),
+      [],
+      "document-only gates must not mistake a self-consistent ordinal for authenticated identity"
+    );
+
     const skippedReason = "duplicate atomic bundle";
     const skippedBundleSummary = { ...copiedBundleSummary, disposition: "skipped", reason: skippedReason };
     assertPasses(

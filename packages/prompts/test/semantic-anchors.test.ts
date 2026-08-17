@@ -941,6 +941,18 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain(
       "attempt, run, framework, exact path, immutable digest, entry counts, and actual\ndisposition"
     );
+    // The rounding pipeline pilot lost source provenance because the prompt named
+    // the identity fields without binding them to the source manifest: the agent
+    // read the `attempt-<n>` destination-layout segment as the node identity and
+    // wrote `attempt-0` for every strategy bundle, which the authenticated
+    // aggregation gate rejected. Keep the binding, and keep it strategy-agnostic.
+    expect(normalized(aggregate)).toContain(
+      "Copy each row's `strategy` and `node_id` byte-for-byte from the value of the source manifest's own root-level `node_id`"
+    );
+    expect(aggregate).toMatch(/may be any strategy id/u);
+    expect(normalized(aggregate)).toContain(
+      "Never derive a source identity from a destination path, from a copy-layout directory segment such as `attempt-<n>`"
+    );
     expect(aggregate).toContain("artifact-relative path, byte size, digest, and any\nsource metadata exactly");
     expect(aggregate).toContain("corresponding\n`generated-test` or `support-file` kind");
     expect(aggregate).toContain("Every considered source entry appears exactly once");

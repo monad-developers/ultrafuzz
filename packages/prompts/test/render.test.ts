@@ -737,6 +737,10 @@ describe("prompt rendering", () => {
     );
     expect(rendered).toContain("Record one source-bundle row for every declared manifest");
     expect(rendered).toContain("Bind each row to the source manifest's logical node");
+    // Survives end-to-end rendering, not just the on-disk prompt: without this the
+    // agent substitutes the `attempt-<n>` destination segment for the source node id.
+    expect(rendered).toContain("byte-for-byte from the value of the");
+    expect(rendered.replace(/\s+/gu, " ")).toContain("copy-layout directory segment such as `attempt-<n>`");
     expect(rendered).toContain("preserve the source identity");
     expect(rendered).toContain("byte size, digest, and any\nsource metadata exactly");
     expect(rendered).toContain("A bundle is atomic");
