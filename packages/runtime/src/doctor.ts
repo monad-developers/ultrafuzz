@@ -156,12 +156,21 @@ export async function diagnoseProject(input: DoctorInput) {
   }
 
   const engineCheck = workflowEngineCheck(installation);
-  checks.push(engineCheck.check);
-  diagnostics.push(...engineCheck.diagnostics);
+  const observedEngineStatus = engineCheck.check.status;
+  checks.push({
+    ...engineCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
+  });
 
   const patchCheck = compatibilityPatchCheck(installation);
-  checks.push(patchCheck.check);
-  diagnostics.push(...patchCheck.diagnostics);
+  checks.push({
+    ...patchCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
+  });
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);
@@ -183,7 +192,7 @@ export async function diagnoseProject(input: DoctorInput) {
       installed_bin_target: installation.installed_bin_target,
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
-      layout_status: engineCheck.check.status,
+      layout_status: observedEngineStatus,
       layout_detail: installation.layout_error,
       compatibility_patches: installation.compatibility_patches
     }

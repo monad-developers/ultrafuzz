@@ -17,11 +17,16 @@ import {
 import {
   INVARIANT_PINNED_SOURCE_BRANCH,
   INVARIANT_PINNED_SOURCE_REF,
-  invariantPinnedSourceRefExists,
   materializePromptSchemas,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
   publishFileDurableExclusive
 } from "@ultrafuzz/artifacts";
-import { parseRuntimeDocumentBytes, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID } from "@ultrafuzz/runtime";
+import {
+  parseRuntimeDocumentBytes,
+  trustedGitExecutable,
+  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID
+} from "@ultrafuzz/runtime";
 import {
   MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
@@ -464,6 +469,7 @@ export async function createModalNodeHandoffArchive(
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
   const root = fs.realpathSync(path.resolve(projectRoot));
+  const gitExecutable = trustedGitExecutable(root);
   const runRoot = checkedPath(root, input.run_root, "run root");
   const executionSnapshotRoot = checkedPath(root, input.execution_snapshot_root, "execution snapshot root");
   const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
@@ -475,6 +481,7 @@ export async function createModalNodeHandoffArchive(
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
   assertExecutionSnapshotRoot(runRoot, executionSnapshotRoot);
   assertChildPath(executionSnapshotRoot, workflowPath, "workflow path");
+  const governedSource = readGovernedSourceIdentity(root, runRoot, executionSnapshotRoot, workflowPath, gitExecutable);
   if (promptPath !== undefined) assertChildPath(executionSnapshotRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
@@ -486,18 +493,18 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    if (pinnedSourceHasGitlinks(root)) {
-      createPinnedGitBaseline(root, staging, temporaryRoot);
+    if (pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)) {
+      createPinnedGitBaseline(root, staging, temporaryRoot, gitExecutable, governedSource);
     } else {
       const baseArchive = path.join(temporaryRoot, "base.tar");
-      execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], {
+      execFileSync(gitExecutable, ["archive", "--format=tar", "--output", baseArchive, governedSource.commit], {
         cwd: root,
-        env: deterministicGitEnvironment()
+        env: deterministicGitEnvironment(gitExecutable)
       });
       await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
       fs.rmSync(baseArchive, { force: true });
       assertSafeTree(staging);
-      createDeterministicGitBaseline(staging, temporaryRoot);
+      createDeterministicGitBaseline(staging, temporaryRoot, gitExecutable);
     }
     assertSafeTree(staging);
 
@@ -534,11 +541,49 @@ export async function createModalNodeHandoffArchive(
   }
 }
 
-function pinnedSourceHasGitlinks(projectRoot: string): boolean {
-  if (!invariantPinnedSourceRefExists(projectRoot)) return false;
-  const entries = execFileSync("git", ["ls-tree", "-r", "--full-tree", INVARIANT_PINNED_SOURCE_REF], {
+function readGovernedSourceIdentity(
+  projectRoot: string,
+  runRoot: string,
+  snapshotRoot: string,
+  workflowPath: string,
+  gitExecutable: string
+): { commit: string; tree: string } {
+  const contents = readRegularFileSnapshot(path.join(snapshotRoot, "controls", "data-governance.json"), 1024 * 1024);
+  const expected = readExpectedExecutionSnapshotFiles(runRoot, snapshotRoot, workflowPath).get(
+    "controls/data-governance.json"
+  );
+  if (
+    expected === undefined ||
+    expected.size !== BigInt(contents.byteLength) ||
+    expected.sha256 !== crypto.createHash("sha256").update(contents).digest("hex")
+  )
+    throw new Error("cloud source governance is not sealed by the execution snapshot");
+  const governance = parseStrictJsonBytes(contents),
+    target = isRecord(governance) && isRecord(governance.target) ? governance.target : {},
+    commit = target.commit,
+    tree = target.tree;
+  if (
+    typeof commit !== "string" ||
+    typeof tree !== "string" ||
+    !/^[a-f0-9]{40,64}$/u.test(commit) ||
+    !/^[a-f0-9]{40,64}$/u.test(tree)
+  )
+    throw new Error("cloud source governance has an invalid Git identity");
+  const actualTree = execFileSync(gitExecutable, ["rev-parse", "--verify", `${commit}^{tree}`], {
     cwd: projectRoot,
-    env: deterministicGitEnvironment(),
+    env: deterministicGitEnvironment(gitExecutable),
+    encoding: "utf8"
+  })
+    .trim()
+    .toLowerCase();
+  if (actualTree !== tree) throw new Error("cloud source differs from the acknowledged Git tree");
+  return { commit, tree };
+}
+
+function pinnedSourceHasGitlinks(projectRoot: string, gitExecutable: string, commit: string): boolean {
+  const entries = execFileSync(gitExecutable, ["ls-tree", "-r", "--full-tree", commit], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(gitExecutable),
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"]
@@ -546,26 +591,36 @@ function pinnedSourceHasGitlinks(projectRoot: string): boolean {
   return entries.split("\n").some((entry) => entry.startsWith("160000 commit "));
 }
 
-function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratchRoot: string): void {
-  const environment = deterministicGitEnvironment();
-  const pinnedCommit = execFileSync("git", ["rev-parse", `${INVARIANT_PINNED_SOURCE_REF}^{commit}`], {
+function createPinnedGitBaseline(
+  sourceRoot: string,
+  projectRoot: string,
+  scratchRoot: string,
+  gitExecutable: string,
+  governedSource: { commit: string; tree: string }
+): void {
+  const environment = deterministicGitEnvironment(gitExecutable);
+  const pinnedCommit = execFileSync(gitExecutable, ["rev-parse", `${INVARIANT_PINNED_SOURCE_REF}^{commit}`], {
     cwd: sourceRoot,
     env: environment,
     encoding: "utf8"
   }).trim();
-  const sourceHead = execFileSync("git", ["rev-parse", "HEAD"], {
+  const sourceHead = execFileSync(gitExecutable, ["rev-parse", "HEAD"], {
     cwd: sourceRoot,
     env: environment,
     encoding: "utf8"
   }).trim();
-  if (!/^[0-9a-f]{40}$/u.test(pinnedCommit) || sourceHead !== pinnedCommit) {
+  if (
+    !/^[0-9a-f]{40,64}$/u.test(pinnedCommit) ||
+    sourceHead !== pinnedCommit ||
+    pinnedCommit !== governedSource.commit
+  ) {
     throw new Error("pinned cloud source ref does not identify HEAD");
   }
 
   const template = path.join(scratchRoot, "git-template");
   fs.mkdirSync(template, { mode: 0o700 });
   execFileSync(
-    "git",
+    gitExecutable,
     [
       "clone",
       "--quiet",
@@ -583,7 +638,7 @@ function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratc
     { env: environment, stdio: "ignore" }
   );
 
-  const clonedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+  const clonedCommit = execFileSync(gitExecutable, ["rev-parse", "HEAD"], {
     cwd: projectRoot,
     env: environment,
     encoding: "utf8"
@@ -605,7 +660,7 @@ function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratc
     mode: 0o600
   });
   const publishingIndex = path.join(gitRoot, "index.publishing");
-  execFileSync("git", ["read-tree", "HEAD"], {
+  execFileSync(gitExecutable, ["read-tree", "HEAD"], {
     cwd: projectRoot,
     env: { ...environment, GIT_INDEX_FILE: publishingIndex },
     stdio: "ignore"
@@ -613,12 +668,12 @@ function createPinnedGitBaseline(sourceRoot: string, projectRoot: string, scratc
   fs.chmodSync(publishingIndex, 0o600);
   fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
 
-  const revisionCount = execFileSync("git", ["rev-list", "--all", "--count"], {
+  const revisionCount = execFileSync(gitExecutable, ["rev-list", "--all", "--count"], {
     cwd: projectRoot,
     env: environment,
     encoding: "utf8"
   }).trim();
-  const remotes = execFileSync("git", ["remote"], {
+  const remotes = execFileSync(gitExecutable, ["remote"], {
     cwd: projectRoot,
     env: environment,
     encoding: "utf8"
@@ -638,24 +693,28 @@ const DETERMINISTIC_GIT_CONFIG = `[core]
 \tignorecase = false
 `;
 
-function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string): void {
+function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string, gitExecutable: string): void {
   const template = path.join(scratchRoot, "git-template");
   fs.mkdirSync(template, { mode: 0o700 });
-  const environment = deterministicGitEnvironment();
-  execFileSync("git", ["init", "--quiet", "--initial-branch=main", "--object-format=sha1", `--template=${template}`], {
-    cwd: projectRoot,
-    env: environment,
-    stdio: "ignore"
-  });
+  const environment = deterministicGitEnvironment(gitExecutable);
+  execFileSync(
+    gitExecutable,
+    ["init", "--quiet", "--initial-branch=main", "--object-format=sha1", `--template=${template}`],
+    {
+      cwd: projectRoot,
+      env: environment,
+      stdio: "ignore"
+    }
+  );
   const gitRoot = path.join(projectRoot, ".git");
   fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
-  execFileSync("git", ["add", "--all", "--", "."], { cwd: projectRoot, env: environment, stdio: "ignore" });
-  const tree = execFileSync("git", ["write-tree"], {
+  execFileSync(gitExecutable, ["add", "--all", "--", "."], { cwd: projectRoot, env: environment, stdio: "ignore" });
+  const tree = execFileSync(gitExecutable, ["write-tree"], {
     cwd: projectRoot,
     env: environment,
     encoding: "utf8"
   }).trim();
-  const commit = execFileSync("git", ["commit-tree", tree, "-m", "immutable cloud input"], {
+  const commit = execFileSync(gitExecutable, ["commit-tree", tree, "-m", "immutable cloud input"], {
     cwd: projectRoot,
     env: environment,
     encoding: "utf8"
@@ -675,7 +734,7 @@ function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string
   fs.writeFileSync(path.join(gitRoot, "HEAD"), "ref: refs/heads/main\n", { mode: 0o600 });
   fs.writeFileSync(path.join(gitRoot, "refs", "heads", "main"), `${commit}\n`, { mode: 0o600 });
   const publishingIndex = path.join(gitRoot, "index.publishing");
-  execFileSync("git", ["read-tree", "HEAD"], {
+  execFileSync(gitExecutable, ["read-tree", "HEAD"], {
     cwd: projectRoot,
     env: { ...environment, GIT_INDEX_FILE: publishingIndex },
     stdio: "ignore"
@@ -684,13 +743,14 @@ function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string
   fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
 }
 
-function deterministicGitEnvironment(): NodeJS.ProcessEnv {
+function deterministicGitEnvironment(gitExecutable: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (!name.startsWith("GIT_") && value !== undefined) environment[name] = value;
   }
   return {
     ...environment,
+    PATH: path.dirname(gitExecutable),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_ATTR_NOSYSTEM: "1",

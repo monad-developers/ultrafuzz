@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CodexAgent as SmithersCodexAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { readRootStringTable, readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -20,7 +21,17 @@ type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
 export class CompatibleCodexAgent extends SmithersCodexAgent {
   override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
     const command = await super.buildCommand(params);
-    const sanitizedCommand = { ...command, env: workflowControlChildEnvironment(command.env) };
+    let env: Record<string, string>;
+    try {
+      env = workflowControlChildEnvironment(command.env, process.env, {
+        agent: this.workflowDataGovernanceAgent(),
+        configDir: this.opts.configDir
+      });
+    } catch (error) {
+      await command.cleanup?.();
+      throw error;
+    }
+    const sanitizedCommand = { ...command, env };
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
       return sanitizedCommand;
@@ -38,6 +49,10 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
         ...command.args.slice(addDirIndex + 1 + directories.length)
       ]
     };
+  }
+
+  protected workflowDataGovernanceAgent(): "CodexAgent" | "OpenRouterAgent" {
+    return "CodexAgent";
   }
 }
 
@@ -57,19 +72,19 @@ export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexA
 function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
+  const configDir = resolveProviderHome("codex", config.config_dir);
   if (auth === "api-key") {
     const apiKey = requiredEnv(config.api_key_env ?? "OPENAI_API_KEY");
-    return { apiKey, env: { CODEX_API_KEY: apiKey } };
+    return { apiKey, configDir, env: { CODEX_API_KEY: apiKey } };
   }
   if (auth === "subscription") {
-    const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);
     const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };
     // An operator-supplied route always wins; only fill the gap.
     if ((process.env.OPENAI_BASE_URL ?? "").trim() === "") {
       const baseUrl = codexProviderBaseUrl(configDir);
       if (baseUrl !== undefined) env.OPENAI_BASE_URL = baseUrl;
     }
-    return { ...(configDir === undefined ? {} : { configDir }), env };
+    return { configDir, env };
   }
   throw new Error(`unsupported CodexAgent auth mode in ultrafuzz.toml: ${auth}`);
 }
@@ -144,11 +159,4 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.CodexAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.CodexAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }

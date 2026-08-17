@@ -563,11 +563,19 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, plan.value!.layout);
+  assert.deepEqual(
+    verifiedControl.executionFiles
+      .filter((file) => file.snapshotPath.startsWith("controls/bun"))
+      .map((file) => file.snapshotPath),
+    ["controls/bun-module-confinement.js", "controls/bunfig.toml"]
+  );
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,
     snapshot: verifiedControl
   });
+  assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
+  assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
   assert.equal(
     sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
     expectation.manifest_sha256
@@ -598,7 +606,7 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   const cloudPlan = await planRun({
     projectRoot: fixture.source,
     runId: "pinned-cloud-only",
-    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret" }
+    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret", ULTRAFUZZ_PROVIDER_HOME_ROOT: fixture.root }
   });
   assert.equal(cloudPlan.ok, true, JSON.stringify(cloudPlan.diagnostics));
   const cloudCompiled = compileSmithersWorkflow({

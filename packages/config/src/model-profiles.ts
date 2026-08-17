@@ -1,5 +1,6 @@
 import { z, type ZodIssue } from "zod/v4";
 import { DEFAULT_MODEL_PROFILE_ID, synthesizeDefaultModelProfile } from "./defaults.js";
+import { STOCK_AGENT_IDS } from "./agents.js";
 import { diagnostic, type ConfigDiagnostic, type ResolvedConfig } from "./types.js";
 
 export interface DefaultProfileOverrides {
@@ -12,12 +13,11 @@ const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 
 const profileIdSchema = z.string().regex(PROFILE_ID_PATTERN);
 
-const safeAgentRefSchema = z.string().regex(SAFE_AGENT_REF_PATTERN);
+const safeAgentRefSchema = z.enum(STOCK_AGENT_IDS);
 
 const modelProfileSchema = z.strictObject({
   id: z.string(),
@@ -52,8 +52,10 @@ export function syncDefaultModelProfile(config: ResolvedConfig): void {
     return;
   }
 
-  const existingAgent = config.models.profiles[defaultId]?.agent;
-  if (!config.models.profiles[defaultId] || config.models.synthesizedDefault) {
+  const existingAgent = Object.hasOwn(config.models.profiles, defaultId)
+    ? config.models.profiles[defaultId]?.agent
+    : undefined;
+  if (!Object.hasOwn(config.models.profiles, defaultId) || config.models.synthesizedDefault) {
     config.models.profiles[defaultId] = synthesizeDefaultModelProfile(existingAgent);
     config.models.synthesizedDefault = true;
   }
@@ -75,7 +77,7 @@ export function applyModelProfileOverrides(
   if (overrides.agent === undefined && overrides.model === undefined && overrides.reasoning === undefined) {
     return;
   }
-  const profile = config.models.profiles[profileId];
+  const profile = Object.hasOwn(config.models.profiles, profileId) ? config.models.profiles[profileId] : undefined;
   if (profile === undefined) {
     return;
   }
@@ -101,7 +103,7 @@ export function applyModelProfileOverrides(
 
 function modelProfileSemanticIssues(config: ResolvedConfig): ModelProfileIssue[] {
   const issues: ModelProfileIssue[] = [];
-  if (config.models.profiles[config.models.default] === undefined) {
+  if (!Object.hasOwn(config.models.profiles, config.models.default)) {
     issues.push({ code: "custom", path: ["default"], message: "CONFIG_MODEL_DEFAULT_UNKNOWN" });
   }
   for (const [id, profile] of Object.entries(config.models.profiles).sort()) {
@@ -160,14 +162,15 @@ function modelProfileDiagnosticCode(issue: ModelProfileIssue): string {
 
 function modelProfileDiagnosticMessage(code: string, issue: ModelProfileIssue, config: ResolvedConfig): string {
   const id = modelProfileId(issue);
-  const profile = id === undefined ? undefined : config.models.profiles[id];
+  const profile =
+    id !== undefined && Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
   switch (code) {
     case "CONFIG_MODEL_DEFAULT_UNKNOWN":
       return `models.default references unknown model profile \`${config.models.default}\``;
     case "CONFIG_MODEL_PROFILE_ID_MISMATCH":
       return `model profile key \`${id ?? ""}\` must match profile id \`${profile?.id ?? ""}\``;
     case "CONFIG_MODEL_AGENT_INVALID":
-      return `model profile \`${id ?? ""}\` references invalid agent \`${String(profile?.agent)}\``;
+      return `model profile \`${id ?? ""}\` must reference a packaged stock agent, not \`${String(profile?.agent)}\``;
     case "CONFIG_MODEL_NAME_EMPTY":
       return `model profile \`${id ?? ""}\` model cannot be empty`;
     case "CONFIG_MODEL_REASONING_EMPTY":

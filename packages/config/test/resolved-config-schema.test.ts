@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "694bfb866468a09209296041ce404933927d4ddeaa5b44b4ae0b57ba71f58843";
-const EXPECTED_BUNDLE_SHA256 = "71f90f2b5f4c21ec45dba4a4afa1efcb5d521ed36a2747727b466f32ea9f7dda";
+const EXPECTED_SCHEMA_SHA256 = "fb0b51b6b28da314e59c50385bc320abeae16e637352771f8d212035ed2da60d";
+const EXPECTED_BUNDLE_SHA256 = "db5d6c16a8823adaf8446da570f638dc960e5c21dd4258251e7117c166c724d4";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -104,7 +104,7 @@ describe("resolved config JSON contract", () => {
           void (record(record(record(record(value.execution).nodes)["project-discovery"]).resources).gpu = 1)
       },
       {
-        label: "duplicate credentials",
+        label: "noncanonical Modal credentials",
         mutate: (value) => {
           const execution = record(value.execution);
           execution.mode = "cloud";
@@ -113,7 +113,7 @@ describe("resolved config JSON contract", () => {
             modal: {
               app: "ultrafuzz",
               image: "runner:current",
-              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_ID"]
+              credentialEnv: ["CLOUD_TOKEN_ID", "CLOUD_TOKEN_SECRET"]
             }
           };
         }
@@ -125,6 +125,7 @@ describe("resolved config JSON contract", () => {
         mutate: (value) => void (record(value.retry).agents = ["default", "default"])
       },
       { label: "unknown profile property", mutate: (value) => void (profile(value, "default").temperature = 1) },
+      { label: "non-stock profile agent", mutate: (value) => void (profile(value, "default").agent = "constructor") },
       { label: "unsupported Kimi reasoning", mutate: (value) => void (profile(value, "kimi").reasoning = "xhigh") },
       {
         label: "DeepSeek subscription",
@@ -153,6 +154,10 @@ describe("resolved config JSON contract", () => {
         mutate: (value) => void delete record(record(value.agents).CodexAgent).apiKeyEnv
       },
       { label: "empty agents", mutate: (value) => void (value.agents = {}) },
+      {
+        label: "non-stock agent",
+        mutate: (value) => void (record(value.agents).CustomAgent = record(value.agents).CodexAgent)
+      },
       { label: "bad trust model", mutate: (value) => void (record(value.permissions).trustModel = "sandbox") },
       {
         label: "missing production source roots",

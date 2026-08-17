@@ -42,6 +42,10 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Campaign data governance
+
+Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY` to strict JSON with one complete policy row per declared destination, for example: `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"private","source_destinations":["model:openai"],"artifact_destinations":[],"destination_policies":[{"destination":"model:openai","processor":"OpenAI","region":"operator-approved","retention_policy":"operator-approved","training_policy":"operator-approved","dpa_status":"operator-approved","minimization_policy":"required inputs only","data_handling_basis":"operator-approved"}],"openrouter_model_allowlist":[]}`. Each row requires exactly `destination`, `processor`, `region`, `retention_policy`, `training_policy`, `dpa_status`, `minimization_policy`, and `data_handling_basis`. The first failed private launch reports the exact route IDs plus policy/input digests. Put reviewed records in `ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS`, for example: `[{"schema_version":"ultrafuzz.data-disclosure-acknowledgement.v1","destination":"model:openai","policy_digest":"<64 lowercase hex>","input_digest":"<64 lowercase hex>","acknowledged_by":"reviewer@example.com","acknowledged_at":"2026-08-17T00:00:00.000Z"}]`. Acknowledgements bind policy, effective inputs, prompt, routes, and Git/worktree identity; any change makes them stale. Credential values are never persisted. Private standalone Modal evals remain fail-closed pending the separate R-26 disclosure authorization. Public Modal runs record `cloud:modal`. These controls are not a sandbox or egress filter: YOLO agents remain unrestricted.
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,

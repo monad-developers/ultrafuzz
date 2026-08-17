@@ -3,6 +3,7 @@ export * from "./aggregation-semantic-context.js";
 export * from "./audit-contracts.js";
 export * from "./clean.js";
 export * from "./canonical-properties-markdown.js";
+export * from "./data-governance.js";
 export * from "./doctor.js";
 export * from "./final-report-markdown.js";
 export * from "./init.js";
