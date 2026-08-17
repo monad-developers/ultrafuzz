@@ -737,10 +737,12 @@ describe("prompt rendering", () => {
     );
     expect(rendered).toContain("Record one source-bundle row for every declared manifest");
     expect(rendered).toContain("Bind each row to the source manifest's logical node");
-    // Survives end-to-end rendering, not just the on-disk prompt: without this the
-    // agent substitutes the `attempt-<n>` destination segment for the source node id.
-    expect(rendered).toContain("byte-for-byte from the value of the");
-    expect(rendered.replace(/\s+/gu, " ")).toContain("copy-layout directory segment such as `attempt-<n>`");
+    // Survives end-to-end rendering, not just the on-disk prompt: the topology
+    // supplies the authoritative source-node/manifest pair so an agent cannot
+    // substitute an `attempt-<n>` destination segment for the source node id.
+    expect(rendered).toContain("source-authority table above is mechanically derived from the topology and");
+    expect(rendered).toContain("byte-for-byte equal to that manifest's root-level `node_id`");
+    expect(rendered.replace(/\s+/gu, " ")).toContain("directory segment such as `attempt-<n>` is never a `node_id`");
     expect(rendered).toContain("preserve the source identity");
     expect(rendered).toContain("byte size, digest, and any\nsource metadata exactly");
     expect(rendered).toContain("A bundle is atomic");
@@ -931,6 +933,38 @@ describe("prompt rendering", () => {
     expect(sentinel.artifactReferences).toContainEqual({
       kind: "ancestor_artifacts_by_contract",
       logicalIds: [],
+      contract: "ultrafuzz/generated-tests@3"
+    });
+
+    input.prompt = "Authorities:\n{{ancestor_generated_test_manifest_authorities}}";
+    expect(renderPrompt(input).renderedMarkdown).toBe("Authorities:\nNone declared by this topology.");
+  });
+
+  it("renders generated-test source authorities as exact logical-id and manifest-path pairs", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes.push({
+      id: "aggregate-test-files",
+      dependsOn: ["boundary-tests"],
+      outputs: [],
+      artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
+    });
+    input.node.logicalId = "aggregate-test-files";
+    input.node.concreteId = "aggregate-test-files";
+    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
+    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
+    input.prompt = "Authorities:\n{{ancestor_generated_test_manifest_authorities}}";
+
+    const manifestPath = path.join(input.run.artifactsDir, "boundary-tests", "generated-tests.json");
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toBe(
+      `Authorities:\n- source node_id: \`boundary-tests\`; generated-tests manifest: \`${manifestPath}\``
+    );
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_artifacts_by_contract",
+      logicalIds: ["boundary-tests"],
       contract: "ultrafuzz/generated-tests@3"
     });
   });

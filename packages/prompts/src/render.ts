@@ -16,6 +16,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "artifact_dir",
   "ancestor_artifacts",
   "ancestor_generated_test_manifests",
+  "ancestor_generated_test_manifest_authorities",
   "run_metadata_path",
   "output_findings_path",
   "output_patch_path",
@@ -303,6 +304,15 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       const contract = "ultrafuzz/generated-tests@3";
       const matched = ancestorArtifactsByContract(contract, graph);
       rendered += renderOptionalPathList(matched.paths);
+      artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
+      consumed = occurrence.end;
+      continue;
+    }
+
+    if (occurrence.name === "ancestor_generated_test_manifest_authorities") {
+      const contract = "ultrafuzz/generated-tests@3";
+      const matched = ancestorArtifactsByContract(contract, graph);
+      rendered += renderGeneratedTestManifestAuthorities(matched.entries);
       artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
       consumed = occurrence.end;
       continue;
@@ -882,9 +892,13 @@ function renderAncestorArtifacts(selector: "direct" | string[], graph: GraphInde
   return renderPathList(paths.sort());
 }
 
-function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { logicalIds: string[]; paths: string[] } {
+function ancestorArtifactsByContract(
+  contract: string,
+  graph: GraphIndex
+): { logicalIds: string[]; paths: string[]; entries: Array<{ logicalId: string; path: string }> } {
   const logicalIds: string[] = [];
   const paths: string[] = [];
+  const entries: Array<{ logicalId: string; path: string }> = [];
   for (const logicalId of [...graph.ancestorIds].sort()) {
     const node = graph.logicalNodes.get(logicalId);
     if (node === undefined) continue;
@@ -892,13 +906,23 @@ function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { log
     if (outputs.length === 0) continue;
     logicalIds.push(logicalId);
     for (const dir of graph.artifactDirsByLogicalId.get(logicalId) ?? []) {
-      for (const output of outputs) paths.push(path.join(dir, output.path));
+      for (const output of outputs) {
+        const artifactPath = path.join(dir, output.path);
+        paths.push(artifactPath);
+        entries.push({ logicalId, path: artifactPath });
+      }
     }
   }
   // A contract with no matching ancestor output is not an error: findings-only
   // topologies are valid, and the consumer renders the explicit no-match
   // sentinel (mirroring ancestor_artifacts_by_path) instead of hard-failing.
-  return { logicalIds, paths: paths.sort() };
+  return {
+    logicalIds,
+    paths: paths.sort(),
+    entries: entries.sort(
+      (left, right) => left.logicalId.localeCompare(right.logicalId) || left.path.localeCompare(right.path)
+    )
+  };
 }
 
 function ancestorArtifactsByPath(
@@ -930,6 +954,16 @@ function renderPathList(paths: string[]): string {
 
 function renderOptionalPathList(paths: string[]): string {
   return paths.length === 0 ? "None declared by this topology." : renderPathList(paths);
+}
+
+function renderGeneratedTestManifestAuthorities(entries: Array<{ logicalId: string; path: string }>): string {
+  if (entries.length === 0) return "None declared by this topology.";
+  return entries
+    .map(
+      ({ logicalId, path: manifestPath }) =>
+        `- source node_id: \`${logicalId}\`; generated-tests manifest: \`${manifestPath}\``
+    )
+    .join("\n");
 }
 
 function referenceForProducer(producer: ArtifactProducer, suffix: string | undefined): PromptArtifactReference {

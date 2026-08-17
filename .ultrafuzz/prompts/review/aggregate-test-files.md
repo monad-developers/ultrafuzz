@@ -45,6 +45,10 @@ topology:
 
 {{ancestor_generated_test_manifests}}
 
+Render-time authenticated source authorities for those manifests:
+
+{{ancestor_generated_test_manifest_authorities}}
+
 When the list above renders the no-match sentinel
 `None declared by this topology.`, no ancestor declares a generated-test
 manifest: copy nothing and write the schema-defined empty `aggregation.json`
@@ -98,13 +102,15 @@ collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.
-Copy each row's `strategy` and `node_id` byte-for-byte from the value of the
-source manifest's own root-level `node_id`; that value is the logical producer
-node this topology declares and may be any strategy id. Read `source_run_id`
-and `framework` from that same manifest's root fields. Never derive a source
-identity from a destination path, from a copy-layout directory segment such as
-`attempt-<n>`, from an ordinal, or from this aggregating node's own id, and
-never abbreviate, normalize, or reorder it.
+The source-authority table above is mechanically derived from the topology and
+is binding: for each listed manifest, write its exact `source node_id` into
+every corresponding `source_bundles`, copied-entry, and skipped-entry row.
+Then confirm it is byte-for-byte equal to that manifest's root-level `node_id`.
+Do not use a destination directory segment, an ordinal, a strategy attempt, or
+this aggregating node's own id as an identity. In particular, a directory
+segment such as `attempt-<n>` is never a `node_id`. Read `source_run_id` and
+`framework` from the source manifest's root fields. Never abbreviate,
+normalize, or reorder any source identity.
 Preserve the manifest's one `framework` only on its `source_bundles` record.
 Preserve every entry's `language`, `description`, and `provenance` fields without
 rewriting them; copied and skipped entry rows must not repeat `framework`. Do

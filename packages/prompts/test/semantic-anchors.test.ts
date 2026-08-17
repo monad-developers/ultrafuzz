@@ -589,6 +589,7 @@ describe("prompt semantic anchors", () => {
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
     expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
+    expect(aggregate).toContain("{{ancestor_generated_test_manifest_authorities}}");
     expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
     expect(dynamic).not.toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
@@ -947,12 +948,12 @@ describe("prompt semantic anchors", () => {
     // wrote `attempt-0` for every strategy bundle, which the authenticated
     // aggregation gate rejected. Keep the binding, and keep it strategy-agnostic.
     expect(normalized(aggregate)).toContain(
-      "Copy each row's `strategy` and `node_id` byte-for-byte from the value of the source manifest's own root-level `node_id`"
+      "The source-authority table above is mechanically derived from the topology and is binding"
     );
-    expect(aggregate).toMatch(/may be any strategy id/u);
     expect(normalized(aggregate)).toContain(
-      "Never derive a source identity from a destination path, from a copy-layout directory segment such as `attempt-<n>`"
+      "write its exact `source node_id` into every corresponding `source_bundles`"
     );
+    expect(normalized(aggregate)).toContain("a directory segment such as `attempt-<n>` is never a `node_id`");
     expect(aggregate).toContain("artifact-relative path, byte size, digest, and any\nsource metadata exactly");
     expect(aggregate).toContain("corresponding\n`generated-test` or `support-file` kind");
     expect(aggregate).toContain("Every considered source entry appears exactly once");

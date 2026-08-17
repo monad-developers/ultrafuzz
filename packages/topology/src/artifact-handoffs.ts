@@ -152,7 +152,10 @@ function validatePromptVariable(
     return;
   }
 
-  if (variable.name === "ancestor_generated_test_manifests") {
+  if (
+    variable.name === "ancestor_generated_test_manifests" ||
+    variable.name === "ancestor_generated_test_manifest_authorities"
+  ) {
     // A findings-only topology is valid: when no ancestor declares the
     // `ultrafuzz/generated-tests@3` contract, rendering emits the explicit
     // no-match sentinel (mirroring `ancestor_artifacts_by_path`) instead of
@@ -165,7 +168,7 @@ function validatePromptVariable(
     if (ancestorProducers.length === 0) {
       throw topologyError(
         "INVALID_PROMPT_ARTIFACT_REFERENCE",
-        "ancestor_generated_test_manifests requires at least one ancestor artifact producer",
+        "generated-test ancestor manifest references require at least one ancestor artifact producer",
         { nodeId: node.id, variable: variable.raw }
       );
     }
