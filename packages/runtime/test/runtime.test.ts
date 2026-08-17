@@ -16377,26 +16377,40 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   const installer = writeFakeNpmInstaller(project);
   const npmFixture = path.join(installer.binDir, "npm");
   fs.chmodSync(npmFixture, 0o700);
-  fs.appendFileSync(
-    npmFixture,
-    `\nfs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nif [ "$1" = "inspect" ]; then printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}\'; exit 4; fi\nif [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then : > "$SMITHERS_FAKE_MARKER"; exit 42; fi\nprintf \'%s\\n\' \'{"ok":true}\'\n')});\n`
-  );
+  const installedRunnerSource = [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+    'if [ "$1" = "up" ]; then',
+    `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > ${shellQuote(cloudEnvironmentLog)}`,
+    "fi",
+    'if [ "$1" = "inspect" ]; then',
+    `  printf '%s\\n' '{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}'`,
+    "  exit 4",
+    "fi",
+    `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+    `  : > ${shellQuote(markerPath)}`,
+    "  exit 42",
+    "fi",
+    `printf '%s\\n' '{"ok":true}'`,
+    ""
+  ].join("\n");
+  fs.appendFileSync(npmFixture, `\nfs.writeFileSync(target, ${JSON.stringify(installedRunnerSource)});\n`);
   fs.chmodSync(npmFixture, 0o500);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
-      '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+      'if [ "$1" = "up" ]; then',
+      `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> ${shellQuote(cloudEnvironmentLog)}`,
       "fi",
       'if [ "$1" = "inspect" ]; then',
       '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"No Smithers run history found at /workspace/target/smithers.db. Run \'\\\'\'smithers up <workflow>\'\\\'\' to start a run first."}}\'',
       "  exit 4",
       "fi",
-      'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
-      '  : > "$SMITHERS_FAKE_MARKER"',
+      `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+      `  : > ${shellQuote(markerPath)}`,
       "  exit 42",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",
@@ -16409,11 +16423,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: logPath,
-    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     MODAL_TOKEN_ID: "provider-one",
-    MODAL_TOKEN_SECRET: "provider-two",
-    SMITHERS_FAKE_MARKER: markerPath
+    MODAL_TOKEN_SECRET: "provider-two"
   };
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
