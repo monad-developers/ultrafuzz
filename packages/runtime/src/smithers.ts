@@ -1069,6 +1069,11 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
 ]);
+const SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES = new Set([
+  "SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS",
+  "SMITHERS_KEEP_WORKTREES",
+  "SMITHERS_MONITOR_SUPPRESS"
+]);
 export type SmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
 export type SmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
 export type SmithersNodeState = (typeof SMITHERS_NODE_STATES)[number];
@@ -4047,7 +4052,7 @@ function smithersCommandEnv(
       value !== undefined &&
       !["BUN_INSPECT_PRELOAD", "BUN_OPTIONS", "NODE_OPTIONS", "NODE_PATH"].includes(normalizedKey) &&
       (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
-        (normalizedKey.startsWith("SMITHERS_") &&
+        (SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES.has(normalizedKey) &&
           !SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES.has(normalizedKey)) ||
         forwarded.has(normalizedKey))
     ) {

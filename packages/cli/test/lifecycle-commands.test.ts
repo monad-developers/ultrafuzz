@@ -103,6 +103,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   const nodePath = path.join(project, "fake-node.json");
   const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   const eventsPath = path.join(project, "fake-events.ndjson");
+  const eventsFailurePath = path.join(project, "fake-events-failure");
+  const commandLog = path.join(project, "smithers-commands.log");
   const nodeUsage = {
     inputTokens: 10,
     outputTokens: 5,
@@ -283,7 +285,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       `  why) cat ${shellQuote(whyPath)} ;;`,
       `  timeline) cat ${shellQuote(timelinePath)} ;;`,
@@ -294,7 +296,13 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       `      *) cat ${shellQuote(nodePath)} ;;`,
       "    esac",
       "    ;;",
-      `  events) cat ${shellQuote(eventsPath)} ;;`,
+      "  events)",
+      `    if [ -f ${shellQuote(eventsFailurePath)} ]; then`,
+      `      cat ${shellQuote(eventsFailurePath)} >&2`,
+      "      exit 3",
+      "    fi",
+      `    cat ${shellQuote(eventsPath)}`,
+      "    ;;",
       "  inspect)",
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
       "    ;;",
@@ -342,8 +350,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_BIN: smithers
   };
 }
 
@@ -520,8 +527,7 @@ test("events rejects a raw event category instead of widening the view", async (
 
 test("events --watch --json keeps a stream failure on one NDJSON line", async () => {
   const { project, env } = await launchedProject();
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'stream broke' >&2\nexit 3\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  fs.writeFileSync(path.join(project, "fake-events-failure"), "stream broke\n", "utf8");
 
   const watched = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
 
