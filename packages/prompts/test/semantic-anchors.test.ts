@@ -953,6 +953,10 @@ describe("prompt semantic anchors", () => {
     expect(normalized(aggregate)).toContain(
       "write its exact `source node_id` into every corresponding `source_bundles`"
     );
+    expect(normalized(aggregate)).toContain(
+      "write `source_manifest_relative_path` byte-for-byte from that table's canonical relative-path column"
+    );
+    expect(aggregate).toContain("Never insert an artifact directory\nprefix such as `artifacts/<source-node>/`");
     expect(normalized(aggregate)).toContain("a directory segment such as `attempt-<n>` is never a `node_id`");
     expect(aggregate).toContain("artifact-relative path, byte size, digest, and any\nsource metadata exactly");
     expect(aggregate).toContain("corresponding\n`generated-test` or `support-file` kind");

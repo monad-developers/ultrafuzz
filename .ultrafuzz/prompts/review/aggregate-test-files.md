@@ -106,6 +106,15 @@ The source-authority table above is mechanically derived from the topology and
 is binding: for each listed manifest, write its exact `source node_id` into
 every corresponding `source_bundles`, copied-entry, and skipped-entry row.
 Then confirm it is byte-for-byte equal to that manifest's root-level `node_id`.
+For each source-bundle and entry row, write `source_manifest_relative_path`
+byte-for-byte from that table's canonical relative-path column (for this
+contract, normally `generated-tests.json`) and write `source_manifest_path`
+byte-for-byte from its absolute-path column. The latter is the manifest's
+location; it is not a valid relative path. Never insert an artifact directory
+prefix such as `artifacts/<source-node>/` into
+`source_manifest_relative_path`. Only an entry's `source_artifact_path` names
+its absolute companion location below the source artifact directory, while its
+`source_relative_path` comes byte-for-byte from the source manifest entry.
 Do not use a destination directory segment, an ordinal, a strategy attempt, or
 this aggregating node's own id as an identity. In particular, a directory
 segment such as `attempt-<n>` is never a `node_id`. Read `source_run_id` and

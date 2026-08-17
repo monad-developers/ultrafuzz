@@ -940,7 +940,7 @@ describe("prompt rendering", () => {
     expect(renderPrompt(input).renderedMarkdown).toBe("Authorities:\nNone declared by this topology.");
   });
 
-  it("renders generated-test source authorities as exact logical-id and manifest-path pairs", () => {
+  it("renders generated-test source authorities with exact logical id and relative/absolute manifest paths", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -960,7 +960,8 @@ describe("prompt rendering", () => {
     const result = renderPrompt(input);
 
     expect(result.renderedMarkdown).toBe(
-      `Authorities:\n- source node_id: \`boundary-tests\`; generated-tests manifest: \`${manifestPath}\``
+      `Authorities:\n- source node_id: \`boundary-tests\`; source_manifest_relative_path: ` +
+        `\`generated-tests.json\`; source_manifest_path: \`${manifestPath}\``
     );
     expect(result.artifactReferences).toContainEqual({
       kind: "ancestor_artifacts_by_contract",

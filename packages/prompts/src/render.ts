@@ -895,10 +895,14 @@ function renderAncestorArtifacts(selector: "direct" | string[], graph: GraphInde
 function ancestorArtifactsByContract(
   contract: string,
   graph: GraphIndex
-): { logicalIds: string[]; paths: string[]; entries: Array<{ logicalId: string; path: string }> } {
+): {
+  logicalIds: string[];
+  paths: string[];
+  entries: Array<{ logicalId: string; path: string; relativePath: string }>;
+} {
   const logicalIds: string[] = [];
   const paths: string[] = [];
-  const entries: Array<{ logicalId: string; path: string }> = [];
+  const entries: Array<{ logicalId: string; path: string; relativePath: string }> = [];
   for (const logicalId of [...graph.ancestorIds].sort()) {
     const node = graph.logicalNodes.get(logicalId);
     if (node === undefined) continue;
@@ -909,7 +913,7 @@ function ancestorArtifactsByContract(
       for (const output of outputs) {
         const artifactPath = path.join(dir, output.path);
         paths.push(artifactPath);
-        entries.push({ logicalId, path: artifactPath });
+        entries.push({ logicalId, path: artifactPath, relativePath: output.path });
       }
     }
   }
@@ -956,12 +960,15 @@ function renderOptionalPathList(paths: string[]): string {
   return paths.length === 0 ? "None declared by this topology." : renderPathList(paths);
 }
 
-function renderGeneratedTestManifestAuthorities(entries: Array<{ logicalId: string; path: string }>): string {
+function renderGeneratedTestManifestAuthorities(
+  entries: Array<{ logicalId: string; path: string; relativePath: string }>
+): string {
   if (entries.length === 0) return "None declared by this topology.";
   return entries
     .map(
-      ({ logicalId, path: manifestPath }) =>
-        `- source node_id: \`${logicalId}\`; generated-tests manifest: \`${manifestPath}\``
+      ({ logicalId, path: manifestPath, relativePath }) =>
+        `- source node_id: \`${logicalId}\`; source_manifest_relative_path: \`${relativePath}\`; ` +
+        `source_manifest_path: \`${manifestPath}\``
     )
     .join("\n");
 }
