@@ -731,9 +731,12 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
 
     const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
-    for (const name of ["Check formatting", "Lint", "Build"]) {
+    for (const name of ["Enforce production dependency advisory policy", "Check formatting", "Lint", "Build"]) {
       expect(steps.find((step) => step.name === name)?.if, `${name} must run for drafts`).toBeUndefined();
     }
+    expect(steps.find((step) => step.name === "Enforce production dependency advisory policy")?.run).toBe(
+      "pnpm -w security:dependency-advisories"
+    );
     const fullLane = "github.event_name == 'push' || github.event.pull_request.draft == false";
     const releaseValidation = workflow.jobs["release-validation"];
     expect(releaseValidation?.if).toBe(fullLane);
@@ -744,7 +747,8 @@ describe("public Modal benchmark configuration", () => {
         include: [
           {
             lane: "package-gates",
-            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
+            gates:
+              "dependency-advisories,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
             timeout_minutes: 30,
             build_modal_dependencies: true
           },

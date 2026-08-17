@@ -33,6 +33,48 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Production dependency advisories
+
+CI and release validation run `pnpm security:dependency-advisories`. The gate
+executes `pnpm audit --prod --json` and blocks every High or Critical production
+advisory unless `.github/dependency-advisory-exceptions.json` contains a current
+exception for that exact GHSA and package. Audit command, output-schema, JSON,
+metadata-count, and production-finding failures are blocking errors; the gate
+does not treat an unavailable registry or malformed response as a clean audit.
+
+Exceptions are temporary dispositions, not permanent suppressions. Each entry
+must record the severity, status, review date, expiry, accountable GitHub owner,
+tracking issue, reachability analysis, and rationale. An exception may last at
+most 30 days from `reviewed_on` and is valid through its `expires` date in UTC.
+CI rejects future-dated reviews, expired or overlong exceptions, severity
+mismatches, duplicate entries, unknown fields, and entries for advisories that
+no longer appear. Remove a stale entry in the same change that remediates its
+advisory.
+
+Allowed statuses are `not-reachable`, `remediation-in-progress`, and
+`risk-accepted`. A renewal requires a new review date and updated evidence in
+the tracking issue. Security owners should fix Critical advisories within seven
+days and High advisories within 30 days; use an exception only when the tracking
+issue documents why that target cannot be met and what compensating controls
+apply.
+
+The committed exception file starts empty. A complete entry has this shape:
+
+```json
+{
+  "advisory": "GHSA-2345-6789-cfgh",
+  "package": "example-package",
+  "severity": "high",
+  "status": "not-reachable",
+  "reviewed_on": "2026-08-17",
+  "expires": "2026-09-16",
+  "owner": "@security-owner",
+  "tracking_issue": "#123",
+  "reachability": "The vulnerable parser is not called by production inputs.",
+  "rationale": "Retained while the tracked upstream upgrade is validated."
+}
+```
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,
