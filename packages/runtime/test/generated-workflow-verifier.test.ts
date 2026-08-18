@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
 
 import {
+  assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   executeSchemaSemanticGates,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -22,6 +23,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
   validatePropertiesSchema,
@@ -130,8 +132,8 @@ function loadArtifactAwareAgent(
   task: unknown,
   chainIndex: number,
   originalPrompt: string,
-  agent: { generate(args: unknown): Promise<unknown> }
-) => { generate(args: unknown): Promise<unknown> } {
+  agent: { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> }
+) => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function artifactAwareAgent");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
@@ -148,6 +150,8 @@ function loadArtifactAwareAgent(
     "finalReportAgentExecution",
     "declaredFinalReportOutputPair",
     "smithersTaskAgentId",
+    "normalizeNodeAttemptFailureMessage",
+    "sensitiveEnvironmentValues",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onReset?.(),
@@ -156,8 +160,46 @@ function loadArtifactAwareAgent(
     () => undefined,
     () => ({ planned_chain: [], failed_attempts: [], producer: {} }),
     () => undefined,
-    () => "ultrafuzz-agent:test"
+    () => "ultrafuzz-agent:test",
+    normalizeNodeAttemptFailureMessage,
+    sensitiveEnvironmentValues
   ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+type NormalizedAgentFailure = Error & { code?: string; details?: Record<string, unknown> };
+
+async function captureAgentFailure(
+  failure: unknown,
+  task: unknown = { agentChain: [{}] },
+  preflight = false
+): Promise<NormalizedAgentFailure> {
+  const fail = async (): Promise<never> => {
+    throw failure;
+  };
+  const wrapped = loadArtifactAwareAgent()(task, 0, "prompt", {
+    ...(preflight ? { preflight: fail } : {}),
+    generate: fail
+  });
+  try {
+    await (preflight ? wrapped.preflight!({}) : wrapped.generate({ taskContext: { attempt: 1 } }));
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    return error;
+  }
+  return assert.fail("agent failure was not propagated");
+}
+
+async function withEnvironment(values: Record<string, string>, callback: () => Promise<void>): Promise<void> {
+  const previous = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, values);
+  try {
+    await callback();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 
 function loadFinalReportAgentExecution(): (
@@ -1170,6 +1212,8 @@ function loadVerifyArtifactsHarness(
     "invariantSuiteNodeIds",
     "rememberInvariantSuitePublications",
     "createHash",
+    "assertArtifactPublicationsContainNoSecrets",
+    "sensitiveEnvironmentValues",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
     "taskPublishesWorkspacePatch",
@@ -1340,6 +1384,8 @@ function loadVerifyArtifactsHarness(
     new Set<string>(),
     () => undefined,
     createHash,
+    assertArtifactPublicationsContainNoSecrets,
+    () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -1680,6 +1726,25 @@ test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys 
     const duplicate = duplicateHarness.captureTaskOutputs(jsonTask);
     assert.throws(() => duplicateHarness.verifyArtifacts(jsonTask, duplicate), /not strict JSON/u);
     assert.equal(duplicateHarness.publications.size, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers verifier rejects secret-bearing captured bytes before publication", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-secret-output-")));
+  try {
+    const outputPath = path.join(root, "result.json");
+    const contaminated = Buffer.from("analysis token=otherwise-unknown-secret\n", "utf8");
+    fs.writeFileSync(outputPath, contaminated);
+    const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+    const harness = loadVerifyArtifactsHarness();
+    const captured = harness.captureTaskOutputs(task);
+
+    assert.throws(() => harness.verifyArtifacts(task, captured), /contains sensitive data/u);
+    assert.deepEqual(fs.readFileSync(outputPath), contaminated);
+    assert.equal(harness.publications.size, 0);
+    assert.equal(harness.markerWrites.length, 0);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -4681,7 +4746,7 @@ test("generated Smithers pinned source proof rejects any previously published by
 test("agent retries are error-agnostic fresh generations with Smithers' effective prompt", async () => {
   let resets = 0;
   const calls: Array<Record<string, unknown> | undefined> = [];
-  const arbitraryFailure = { provider: "opaque", detail: { code: 731 } };
+  const arbitraryFailure = new Error("opaque provider failure 731");
   const artifactAwareAgent = loadArtifactAwareAgent({ onReset: () => (resets += 1) });
   const prompt = "the original task prompt";
   const wrapped = artifactAwareAgent({ agentChain: [{}] }, 0, prompt, {
@@ -4699,7 +4764,7 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
         continueSession: true,
         taskContext: { attempt: 1 }
       }),
-    (error) => error === arbitraryFailure
+    (error) => error instanceof Error && error !== arbitraryFailure && error.message === "opaque provider failure 731"
   );
   const result = await wrapped.generate({
     prompt: "worktree isolation\n\nthe original task prompt\n\nstructured output contract",
@@ -4728,6 +4793,153 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
   assert.equal(resets, 2);
   assert.deepEqual(calls[2]?.messages, [{ role: "user", content: "repair the schema" }]);
   assert.equal(calls[2]?.prompt, undefined);
+});
+
+test("agent failures redact configured credentials before Smithers can retain them", async () => {
+  const agentCredentialName = "ULTRAFUZZ_TEST_AGENT_CREDENTIAL";
+  const modalCredentialName = "ULTRAFUZZ_TEST_MODAL_CREDENTIAL";
+  const agentCredential = "agent credential value that rotated";
+  const modalCredential = "modal credential value that rotated";
+  await withEnvironment(
+    { [agentCredentialName]: agentCredential, [modalCredentialName]: modalCredential },
+    async () => {
+      const originalFailure = Object.assign(
+        new Error(`provider echoed ${agentCredential}; modal echoed ${modalCredential}`, {
+          cause: { response: agentCredential }
+        }),
+        {
+          code: "AGENT_QUOTA_EXCEEDED",
+          details: {
+            failureQuota: true,
+            quotaResetAtMs: 1_800_000_000_000,
+            failureRetryable: true,
+            retryAfterMs: 2_500,
+            discardResumeSession: false,
+            discardAgentCheckpoint: true,
+            underlying: agentCredential
+          },
+          summary: `raw summary ${agentCredential}`,
+          docsUrl: `https://example.invalid/${agentCredential}`,
+          custom: agentCredential
+        }
+      );
+      originalFailure.stack = `raw provider stack ${agentCredential}`;
+      const normalized = await captureAgentFailure(originalFailure, {
+        agentChain: [{}],
+        execution: {
+          agentCredentialEnv: [agentCredentialName],
+          modal: { credentialEnv: [modalCredentialName] }
+        }
+      });
+      assert.notEqual(normalized, originalFailure);
+      assert.equal(normalized.message, "provider echoed <redacted>; modal echoed <redacted>");
+      assert.equal(normalized.code, "AGENT_QUOTA_EXCEEDED");
+      assert.deepEqual(normalized.details, {
+        failureQuota: true,
+        failureRetryable: true,
+        discardResumeSession: false,
+        discardAgentCheckpoint: true,
+        quotaResetAtMs: 1_800_000_000_000,
+        retryAfterMs: 2_500
+      });
+      assert.deepEqual(Object.keys(normalized).sort(), ["code", "details"]);
+      for (const key of ["cause", "summary", "docsUrl", "custom"]) assert.equal(key in normalized, false);
+      assert.doesNotMatch(
+        `${normalized.stack}\n${normalized.message}`,
+        /raw provider stack|credential value that rotated/u
+      );
+    }
+  );
+});
+
+test("agent failure normalization preserves only validated Smithers recovery controls", async () => {
+  for (const [code, details] of [
+    ["AGENT_SESSION_LOST", { failureRetryable: true, discardResumeSession: true }],
+    ["AGENT_CHECKPOINT_INVALID", { failureRetryable: true, discardAgentCheckpoint: true }],
+    ["AGENT_CONFIG_INVALID", { failureRetryable: false }]
+  ] as const) {
+    const failure = Object.assign(new Error("controlled failure"), { code, details });
+    const normalized = await captureAgentFailure(failure);
+    assert.equal(normalized.code, code);
+    assert.deepEqual(normalized.details, details);
+  }
+
+  const abort = new Error("operation aborted") as Error & { code: string };
+  abort.name = "AbortError";
+  abort.code = "TASK_ABORTED";
+  abort.stack = "raw abort stack";
+  const normalizedAbort = await captureAgentFailure(abort);
+  assert.equal(normalizedAbort.name, "AbortError");
+  assert.equal(normalizedAbort.code, "TASK_ABORTED");
+  assert.equal(Object.prototype.propertyIsEnumerable.call(normalizedAbort, "name"), false);
+  assert.doesNotMatch(normalizedAbort.stack ?? "", /raw abort stack/u);
+
+  const credentialName = "ULTRAFUZZ_TEST_STATEFUL_FAILURE_CREDENTIAL";
+  const credential = "credential removed by hostile message getter";
+  await withEnvironment({ [credentialName]: credential }, async () => {
+    let messageReads = 0;
+    let throwingDetailReads = 0;
+    const invalid = Object.assign(new Error("unused"), {
+      code: "AGENT_UNKNOWN",
+      details: {
+        failureQuota: "true",
+        failureRetryable: 1,
+        discardResumeSession: null,
+        quotaResetAtMs: Number.POSITIVE_INFINITY,
+        retryAfterMs: -1,
+        get discardAgentCheckpoint(): never {
+          throwingDetailReads += 1;
+          throw new Error("trapped detail");
+        }
+      }
+    });
+    Object.defineProperty(invalid, "message", {
+      configurable: true,
+      get() {
+        messageReads += 1;
+        delete process.env[credentialName];
+        return `provider echoed ${credential}`;
+      }
+    });
+    const normalizedInvalid = await captureAgentFailure(invalid, {
+      agentChain: [{}],
+      execution: { agentCredentialEnv: [credentialName] }
+    });
+    assert.equal(normalizedInvalid.message, "provider echoed <redacted>");
+    assert.equal(messageReads, 1);
+    assert.equal(throwingDetailReads, 1);
+    assert.equal("code" in normalizedInvalid, false);
+    assert.equal("details" in normalizedInvalid, false);
+  });
+});
+
+test("agent preflight failures redact configured credentials without retaining their cause", async () => {
+  const credentialName = "ULTRAFUZZ_TEST_PREFLIGHT_CREDENTIAL";
+  const credential = "preflight credential value that rotated";
+  await withEnvironment({ [credentialName]: credential }, async () => {
+    const originalFailure = new Error(`preflight provider echoed ${credential}`, {
+      cause: { response: credential }
+    });
+    const normalized = await captureAgentFailure(
+      originalFailure,
+      { agentChain: [{}], execution: { agentCredentialEnv: [credentialName] } },
+      true
+    );
+    assert.notEqual(normalized, originalFailure);
+    assert.equal(normalized.message, "preflight provider echoed <redacted>");
+    assert.equal("cause" in normalized, false);
+    assert.doesNotMatch(normalized.message, /credential value that rotated/u);
+  });
+});
+
+test("agent failure normalization never stringifies arbitrary thrown objects", async () => {
+  const normalized = await captureAgentFailure({
+    toString(): never {
+      throw new Error("attacker-controlled toString must not execute");
+    }
+  });
+  assert.equal(normalized.message, "agent execution failed");
+  assert.equal("cause" in normalized, false);
 });
 
 test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
@@ -4977,7 +5189,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
     source.indexOf("function isStrictlyInsideDirectory")
   );
   assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
-  assert.doesNotMatch(agent, /catch \(|previousFailure|error\.message|String\(error\)/u);
+  assert.doesNotMatch(agent, /previousFailure|error\.message|String\(error\)/u);
   assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
@@ -5598,6 +5810,16 @@ test("generated Smithers verifier publishes the complete validated set before ta
     verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)") <
       verifier.indexOf("const publications = new Map<string, Buffer>()")
   );
+  assert.ok(
+    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") > verifier.indexOf("primary === undefined")
+  );
+  assert.ok(
+    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") <
+      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)")
+  );
+  assert.match(verifier, /sensitiveEnvironmentValues\(process\.env/u);
+  assert.match(verifier, /task\.execution\?\.agentCredentialEnv/u);
+  assert.match(verifier, /task\.execution\?\.modal\?\.credentialEnv/u);
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
   );

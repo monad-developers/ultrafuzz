@@ -5014,9 +5014,11 @@ default_effort = "high"
     const apiKeyConfigDir = apiKeyCommand.env?.KIMI_SHARE_DIR;
     assert.ok(apiKeyConfigDir);
     assert.equal(apiKeyCommand.env?.KIMI_CODE_HOME, apiKeyConfigDir);
+    assert.equal(apiKeyCommand.env?.KIMI_API_KEY, "test-key");
     const apiKeyConfig = fs.readFileSync(path.join(apiKeyConfigDir, "config.toml"), "utf8");
     assert.match(apiKeyConfig, /default_model = "kimi-k3"/);
-    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"\napi_key = "test-key"/);
+    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"/);
+    assert.doesNotMatch(apiKeyConfig, /api_key|test-key/u);
     assert.match(apiKeyConfig, /base_url = "https:\/\/api\.moonshot\.ai\/v1"/);
     assert.match(apiKeyConfig, /\[models\."kimi-k3"\]/);
     assert.match(apiKeyConfig, /model = "k3"/);
@@ -5120,8 +5122,12 @@ test(
       else process.env.KIMI_BASE_URL = previousBaseUrl;
     }
     assert.ok(command.env?.KIMI_CODE_HOME);
+    assert.equal(command.env?.KIMI_API_KEY, "contract-test-key");
+    const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
+    assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /api_key|contract-test-key/u);
     execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
-      encoding: "utf8"
+      encoding: "utf8",
+      env: { ...process.env, ...command.env }
     });
     const parserArgs = [...command.args];
     const modelIndex = parserArgs.indexOf("--model");
@@ -5131,8 +5137,7 @@ test(
       cwd: project,
       env: {
         ...process.env,
-        KIMI_CODE_HOME: command.env.KIMI_CODE_HOME,
-        KIMI_SHARE_DIR: command.env.KIMI_CODE_HOME,
+        ...command.env,
         NO_PROXY: "127.0.0.1,localhost"
       },
       encoding: "utf8",
@@ -5149,7 +5154,9 @@ test(
       `${parsed.stdout}\n${parsed.stderr}`,
       /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
     );
+    const runtimeHome = command.env.KIMI_CODE_HOME;
     await command.cleanup?.();
+    assert.equal(fs.existsSync(runtimeHome), false);
   }
 );
 
@@ -13466,6 +13473,67 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
       selection: "observed"
     }))
   );
+});
+
+test("syncRun keeps redacted failure state and attempt evidence stable across credential rotation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-rotated-credential";
+  const workflowRunId = "ultrafuzz-sync-rotated-credential";
+  const oldCredential = "old provider credential that must stay concealed";
+  const rotatedCredential = "new provider credential after rotation";
+  const failureEvents = (message: string): string =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message } }
+    ]);
+  const lifecycleEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: failureEvents(`provider echoed ${oldCredential}`)
+  });
+  const initialEnv = { ...lifecycleEnv, OPENAI_API_KEY: oldCredential };
+  const run = await startRun({ projectRoot: project, runId, env: initialEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const createdAt = (JSON.parse(fs.readFileSync(statePath, "utf8")) as { created_at: string }).created_at;
+  const synchronize = (env: NodeJS.ProcessEnv) =>
+    syncRun({ projectRoot: project, runId, env }, { now: () => Date.parse(createdAt) + 1_000 });
+
+  const first = await synchronize(initialEnv);
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.ok(!first.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const stateBeforeRotation = fs.readFileSync(statePath);
+  const ledgerBeforeRotation = fs.readFileSync(ledgerPath);
+  for (const evidence of [stateBeforeRotation, ledgerBeforeRotation]) {
+    assert.match(evidence.toString("utf8"), /provider echoed <redacted>/u);
+    assert.doesNotMatch(evidence.toString("utf8"), new RegExp(oldCredential, "u"));
+  }
+
+  const rotatedEnv = { ...initialEnv, OPENAI_API_KEY: rotatedCredential };
+  const replayed = await synchronize(rotatedEnv);
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const snapshots = [
+    [statePath, stateBeforeRotation],
+    [ledgerPath, ledgerBeforeRotation]
+  ] as const;
+  for (const [file, before] of snapshots) {
+    assert.deepEqual(fs.readFileSync(file), before);
+    assert.doesNotMatch(fs.readFileSync(file, "utf8"), new RegExp(`${oldCredential}|${rotatedCredential}`, "u"));
+  }
+
+  fs.writeFileSync(lifecycleEnv.SMITHERS_FAKE_EVENTS!, failureEvents(`different provider failure ${oldCredential}`));
+  const changed = await synchronize(rotatedEnv);
+  assert.equal(changed.ok, true, JSON.stringify(changed.diagnostics));
+  assert.ok(changed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  for (const [file, before] of snapshots) assert.deepEqual(fs.readFileSync(file), before);
 });
 
 test("syncRun records failed primaries and the actual fallback producer", async () => {

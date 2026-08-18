@@ -7,10 +7,12 @@ import test from "node:test";
 
 import {
   ArtifactPathError,
+  ArtifactSecretGateError,
   GENERATED_TESTS_SCHEMA_VERSION,
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   appendUsageEvents,
+  assertArtifactPublicationsContainNoSecrets,
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
@@ -250,6 +252,108 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
   assert.equal(normalizeNodeAttemptFailureMessage("  first\nsecond  "), "first second");
+});
+
+function failedAttemptInput(id: string, failureMessage: string) {
+  return {
+    workflowRunId: `workflow-run-${id}`,
+    controlGeneration: "d".repeat(64),
+    nodeId: `strategy-${id}`,
+    strategyAttemptId: `strategy-${id}`,
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
+    startedAt: "2026-07-18T11:00:00.000Z",
+    finishedAt: "2026-07-18T11:01:00.000Z",
+    outcome: "failed" as const,
+    inputManifestDigest: manifestDigest(`${id} input manifest`),
+    failureCategory: "executor-error" as const,
+    failureMessage
+  };
+}
+
+test("node attempt ledger replay keeps a persisted failure redaction authoritative across credential rotation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-redacted-replay" });
+  const oldCredential = "correct horse battery staple";
+  const input = failedAttemptInput("redacted-replay", `provider echoed ${oldCredential}`);
+
+  const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
+  const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
+  assert.equal(first.entry.failure_message, "provider echoed <redacted>");
+  assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
+  assert.equal(first.entry.failure_message_truncated, undefined);
+
+  const replayed = appendNodeAttempt(layout, {
+    ...input,
+    forbiddenSecretValues: ["new credential value"]
+  });
+  assert.equal(replayed.appended, false);
+  assert.deepEqual(replayed.entry, first.entry);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+
+  for (const failureMessage of [
+    `different provider failure ${oldCredential}`,
+    `provider echoed ${oldCredential}; changed non-secret context`
+  ]) {
+    assert.throws(
+      () =>
+        appendNodeAttempt(layout, {
+          ...input,
+          failureMessage,
+          forbiddenSecretValues: ["new credential value"]
+        }),
+      /already recorded with different immutable data/u
+    );
+  }
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+});
+
+test("node attempt ledger uses explicit provenance for truncated redaction replay", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-truncated-replay" });
+  const oldCredential = "old credential material ".repeat(30).trim();
+  const input = failedAttemptInput(
+    "truncated-replay",
+    `provider echoed ${oldCredential}; stable context ${"x".repeat(1_500)}`
+  );
+
+  const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
+  const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
+  assert.equal(Buffer.byteLength(first.entry.failure_message ?? "", "utf8"), MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
+  assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
+  assert.equal(first.entry.failure_message_truncated, true);
+
+  const replayed = appendNodeAttempt(layout, {
+    ...input,
+    forbiddenSecretValues: ["rotated credential value"]
+  });
+  assert.equal(replayed.appended, false);
+  assert.deepEqual(replayed.entry, first.entry);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
+
+  assert.throws(
+    () =>
+      appendNodeAttempt(layout, {
+        ...input,
+        failureMessage: `changed prefix ${oldCredential}; stable context ${"x".repeat(1_500)}`,
+        forbiddenSecretValues: ["rotated credential value"]
+      }),
+    /already recorded with different immutable data/u
+  );
+});
+
+test("node attempt ledger does not infer replay-safe redaction from a literal placeholder", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-literal-placeholder" });
+  const input = failedAttemptInput("literal-placeholder", `provider echoed <redacted>; ${"x".repeat(1_500)}`);
+
+  const first = appendNodeAttempt(layout, input);
+  assert.equal(first.entry.failure_message_redaction_span_code_points, undefined);
+  assert.equal(first.entry.failure_message_truncated, true);
+  assert.throws(
+    () =>
+      appendNodeAttempt(layout, { ...input, failureMessage: `provider echoed old credential; ${"x".repeat(1_500)}` }),
+    /already recorded with different immutable data/u
+  );
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
@@ -761,6 +865,149 @@ test("run state redacts secret-looking node errors before persistence", () => {
   const serialized = fs.readFileSync(layout.statePath, "utf8");
   assert.doesNotMatch(serialized, /sk-state-secret/);
   assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/);
+});
+
+const exactAtRestSecret = "exact unknown run credential";
+const mnemonicAtRestSecret =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const entropyAtRestSecret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q";
+
+function atRestSecretFixture(): string {
+  return [
+    `private-key=0x${"1a".repeat(32)}`,
+    "token npm_0123456789abcdefghijklmnopqrstuv",
+    `mnemonic ${mnemonicAtRestSecret}`,
+    "rpc https://eth-mainnet.g.alchemy.com/v2/0123456789abcdefghijklmnopqrstuv",
+    `opaque ${entropyAtRestSecret}`,
+    `exact ${exactAtRestSecret}`
+  ].join("\n");
+}
+
+test("state diagnostics redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-state-expanded-redaction" });
+  updateNodeState(
+    layout,
+    "node-a",
+    { status: "failed", last_error: atRestSecretFixture() },
+    "2026-08-15T00:00:00.000Z",
+    { forbiddenSecretValues: [exactAtRestSecret] }
+  );
+
+  const serialized = fs.readFileSync(layout.statePath, "utf8");
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(serialized, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/u);
+});
+
+test("event payloads redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-expanded-redaction" });
+  appendEvent(layout, {
+    eventType: "workflow-submit-failed",
+    status: "failed",
+    payload: {
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: atRestSecretFixture(),
+      severity: "error",
+      source: "workflow",
+      details: {}
+    },
+    forbiddenSecretValues: [exactAtRestSecret]
+  });
+
+  const serialized = fs.readFileSync(layout.eventsPath, "utf8");
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(serialized, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(serialized, /<redacted>/u);
+});
+
+test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-attempt-expanded-redaction" });
+  const result = appendNodeAttempt(layout, {
+    workflowRunId: "workflow-run-expanded-redaction",
+    controlGeneration: "c".repeat(64),
+    nodeId: "strategy-a",
+    strategyAttemptId: "strategy-a",
+    iteration: 0,
+    attempt: 1,
+    startedEventSequence: 1,
+    sourceEventSequence: 2,
+    startedAt: "2026-08-15T00:00:00.000Z",
+    finishedAt: "2026-08-15T00:01:00.000Z",
+    outcome: "failed",
+    inputManifestDigest: manifestDigest("expanded redaction input"),
+    failureCategory: "executor-error",
+    failureMessage: atRestSecretFixture(),
+    forbiddenSecretValues: [exactAtRestSecret]
+  });
+
+  const persisted = result.entry.failure_message ?? "";
+  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+    assert.doesNotMatch(persisted, new RegExp(secret.replaceAll(".", "\\."), "u"));
+  }
+  assert.match(persisted, /<redacted>/u);
+});
+
+test("canonical publication secret gate fails closed without rewriting bytes", () => {
+  const maintainedFixtures = new Map<string, Buffer>([
+    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")],
+    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")]
+  ]);
+  const original = new Map([...maintainedFixtures].map(([artifactPath, bytes]) => [artifactPath, Buffer.from(bytes)]));
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(maintainedFixtures),
+    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "generated/Exploit.t.sol"
+  );
+  for (const [artifactPath, bytes] of maintainedFixtures) assert.deepEqual(bytes, original.get(artifactPath));
+
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(
+        new Map([["raw-key.txt", Buffer.from(`signing key: ${"2b".repeat(32)}\n`, "utf8")]])
+      ),
+    /raw-key\.txt/u
+  );
+
+  const exactBytes = Buffer.from(`otherwise safe ${exactAtRestSecret}`, "utf8");
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(new Map([["evidence.json", exactBytes]]), [exactAtRestSecret]),
+    /evidence\.json/u
+  );
+  assert.equal(exactBytes.toString("utf8"), `otherwise safe ${exactAtRestSecret}`);
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(new Map([["binary-corpus.bin", Buffer.from([0xff, 0x00, 0xfe])]]))
+  );
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(
+        new Map([
+          ["binary-leak.bin", Buffer.concat([Buffer.from([0xff]), Buffer.from("sk-ant-binaryLeak123", "utf8")])]
+        ])
+      ),
+    /binary-leak\.bin/u
+  );
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([["short-exact.txt", Buffer.from("safe prose contains e", "utf8")]]),
+      ["e"]
+    )
+  );
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        [
+          "report.md",
+          Buffer.from(`Reproducer transaction hash: 0x${"56".repeat(32)}\nNo sensitive values here.\n`, "utf8")
+        ],
+        [
+          "generated-tests/HashFixture.t.sol",
+          Buffer.from(`contract HashFixture { bytes32 public constant DOMAIN = 0x${"34".repeat(32)}; }\n`, "utf8")
+        ],
+        ["manifest.json", Buffer.from(`{"sha256":"${"a".repeat(64)}"}\n`, "utf8")]
+      ])
+    )
+  );
 });
 
 test("updateNodeState accepts an explicit transition timestamp", () => {

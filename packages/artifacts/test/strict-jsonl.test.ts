@@ -184,6 +184,39 @@ test("node-attempt byte readers reject inverted lifecycle evidence and oversized
         failure_message: "😀".repeat(Math.floor(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES / 4) + 1)
       },
       pattern: /failure_message exceeds.*UTF-8 bytes/iu
+    },
+    {
+      entry: {
+        ...canonical,
+        outcome: "failed",
+        manifests: { ...canonical.manifests, output_sha256: null },
+        failure_category: "executor-error",
+        failure_message: "ordinary failure",
+        failure_message_redaction_span_code_points: [8]
+      },
+      pattern: /redaction span lengths require an inserted redaction placeholder/iu
+    },
+    {
+      entry: {
+        ...canonical,
+        outcome: "failed",
+        manifests: { ...canonical.manifests, output_sha256: null },
+        failure_category: "executor-error",
+        failure_message: "<redacted> then <redacted>",
+        failure_message_redaction_span_code_points: [8]
+      },
+      pattern: /span lengths must match persisted placeholders exactly/iu
+    },
+    {
+      entry: {
+        ...canonical,
+        outcome: "failed",
+        manifests: { ...canonical.manifests, output_sha256: null },
+        failure_category: "executor-error",
+        failure_message: "short failure",
+        failure_message_truncated: true
+      },
+      pattern: /truncated failure messages must occupy 1000 UTF-8 bytes/iu
     }
   ];
   for (const { entry, pattern } of cases) {
