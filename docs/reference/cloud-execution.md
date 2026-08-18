@@ -105,6 +105,11 @@ traversal, and paths outside the project are rejected. The controller records a
 SHA-256 identity for the archive and the worker verifies it before validated
 streaming extraction.
 
+Cloud launch requires the sealed governance target to record `dirty: false`,
+including for public campaigns. Commit every tracked or untracked source input
+that the cloud agents must analyze; Ultrafuzz rejects a target recorded as dirty
+instead of silently sending only its committed baseline.
+
 Dependency artifacts keep their existing producer directories. Fan-in nodes
 receive the collection of those declared artifact snapshots; Ultrafuzz never
 merges dependency workspaces or silently chooses one producer's tree.
