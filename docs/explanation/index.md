@@ -7,5 +7,6 @@ product model behind that contract.
 - [How Campaigns Work](campaigns.md)
 - [Topology, Prompts, and Artifacts](topology-prompts-artifacts.md)
 - [Agents, Workflow Boundary, and Safety](backends-safety.md)
+- [Provider-agnostic Coding Harness Research](provider-harness-research.md)
 - [Aave v4 Invariant Case Study](aave-v4-invariant-case-study.md)
 - [Monad Bugfinder Context](bugfinder.md)
