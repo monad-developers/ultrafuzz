@@ -3490,8 +3490,8 @@ packages:
     resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
     engines: {node: '>=0.3.1'}
 
-  dompurify@3.4.12:
-    resolution: {integrity: sha512-zQvGet8Z2sWbQhCmfFz/T5QWH2oBmjnqK3qvOjaqaNLrLEF912WamU+ohnTp0TCep/MFVHpdJuCZEdFOdTnEFg==}
+  dompurify@3.4.13:
+    resolution: {integrity: sha512-2vmYIoqjze2d+kakP8S/nS5shfsl587kzwEjcGlTdiksUVgFHnFCsLYDVj/JNqJVOQZGSYBTmuycv0PodwmnMQ==}
 
   drizzle-orm@0.45.2:
     resolution: {integrity: sha512-kY0BSaTNYWnoDMVoyY8uxmyHjpJW1geOmBMdSSicKo9CIIWkSxMIj2rkeSR51b8KAPB7m+qysjuHme5nKP+E5Q==}
@@ -3926,8 +3926,8 @@ packages:
   hast-util-whitespace@3.0.0:
     resolution: {integrity: sha512-88JUN06ipLwsnv+dVn+OIYOvAuvBMy/Qoi6O7mQHxdPXpjy+Cd6xRkWwux7DKO+4sYILtLBRIKgsdpS2gQc7qw==}
 
-  hono@4.12.32:
-    resolution: {integrity: sha512-XcuyW9qE2kJn07PkecMOBd5Vq/hMy7mmGw+idz1yblbg9N17ijJODrvPkn7/dwL3Kulj8LcRJ69DLOWf91dRUg==}
+  hono@4.12.34:
+    resolution: {integrity: sha512-GqXJqY/xJkJmuloTrnV1ZEXG3fqte+VjkUqoRNZXcrUidiUOP4fMSIHHY4tsqZBK++kVyWmt/AAfSUuy57/eSA==}
     engines: {node: '>=16.9.0'}
 
   html-void-elements@3.0.0:
@@ -4227,8 +4227,8 @@ packages:
     resolution: {integrity: sha512-Snk314V5ayFLhp3fkUREub6WtjBfPdCPY1Ln8/8munuLuiYhsABgBVWsozAG+MWMbVEvcdcpbi9R7ww22l9Q3g==}
     engines: {node: '>=18'}
 
-  mermaid@11.16.0:
-    resolution: {integrity: sha512-Zvm3kbstgdpvIJPPItlL7fppIZ3kibvc1oZIGxdvk9t6UFz6flv+Jw7FtRGKwfcI8OckmH04LqG6LlS6X4B1pA==}
+  mermaid@11.16.1:
+    resolution: {integrity: sha512-TQsq6u22fAn3rek5VOubrhKPo1g5hwC3FXUN9hiyupTckcYiGuuKGkNQrKYwGJkXUxZdojwRG46gsSCFZMDp4g==}
 
   micromark-core-commonmark@2.0.3:
     resolution: {integrity: sha512-RDBrHEMSxVFLg6xvnXmb1Ayr2WzLAWjeSATAoxwKYJV94TeNavgoIdA0a9ytzDSVzBy2YKFK+emCPOEibLeCrg==}
@@ -4367,13 +4367,8 @@ packages:
   msgpackr@2.0.5:
     resolution: {integrity: sha512-cef05H/dSYpLpqp3sj/qyZh5vhUYCalnaLO7j1yOmpsR0y/XwLVtK7r5gn+U/F7CTEfMowcGhlUQJDLcLf7jcA==}
 
-  nanoid@3.3.15:
-    resolution: {integrity: sha512-y7Wygv/7mEOvxTuEQDB8StXdMRBWf1kR/tlhAzBRUFkB2jfcLOAxO/SHmOO2zgz1pVgK29/kyupn059/bCHdjA==}
-    engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
-    hasBin: true
-
-  nanoid@3.3.16:
-    resolution: {integrity: sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q==}
+  nanoid@3.3.18:
+    resolution: {integrity: sha512-DTg4MJbGMWkfi6VZFdNt2/caMbQy4Ou+Op/hJQvGEWcnVfoA1QA+xzRKAzw9jD6+GVOOeYr/mIcuDSdug6F6+w==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
@@ -4601,10 +4596,6 @@ packages:
 
   points-on-path@0.2.1:
     resolution: {integrity: sha512-25ClnWWuw7JbWZcgqY/gJ4FQWadKxGWk+3kR/7kD0tCaDtPPMj7oHu2ToLaVhfpnHrZzYby2w6tUA0eOIuUg8g==}
-
-  postcss@8.5.16:
-    resolution: {integrity: sha512-vuwillviilfKZsg0VGj5R/YwwcHx4SLsIOI/7K6mQkWx+l5cUHTjj5g0AasTBcyXsbfTgrwsUNmVUb5xVwyPwg==}
-    engines: {node: ^10 || ^12 || >=14}
 
   postcss@8.5.23:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
@@ -6123,9 +6114,9 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.3
 
-  '@hono/node-server@1.19.15(hono@4.12.32)':
+  '@hono/node-server@1.19.15(hono@4.12.34)':
     dependencies:
-      hono: 4.12.32
+      hono: 4.12.34
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -6376,7 +6367,7 @@ snapshots:
       '@milkdown/utils': 7.21.2
       '@types/lodash-es': 4.17.12
       clsx: 2.1.1
-      dompurify: 3.4.12
+      dompurify: 3.4.13
       lodash-es: 4.18.1
       nanoid: 5.1.16
       unist-util-visit: 5.1.0
@@ -6409,7 +6400,7 @@ snapshots:
       '@types/lodash-es': 4.17.12
       clsx: 2.1.1
       codemirror: 6.0.2
-      dompurify: 3.4.12
+      dompurify: 3.4.13
       katex: 0.17.0
       lodash-es: 4.18.1
       prosemirror-virtual-cursor: 0.4.2(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)
@@ -6643,7 +6634,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)':
     dependencies:
-      '@hono/node-server': 1.19.15(hono@4.12.32)
+      '@hono/node-server': 1.19.15(hono@4.12.34)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -6653,7 +6644,7 @@ snapshots:
       eventsource-parser: 3.1.0
       express: 5.2.1
       express-rate-limit: 8.6.0(express@5.2.1)
-      hono: 4.12.32
+      hono: 4.12.34
       jose: 6.2.4
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -8774,7 +8765,7 @@ snapshots:
       '@smthrs/engine': 0.34.0(@cfworker/json-schema@4.1.1)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@opentelemetry/semantic-conventions@1.43.0)
       '@smthrs/ui-styleguide': 0.34.0
       effect: 4.0.0-beta.105
-      mermaid: 11.16.0
+      mermaid: 11.16.1
       smthrs: 0.34.0(58d79a073fab4aa1d549c4cefd132c73)
       zod: 4.4.3
     transitivePeerDependencies:
@@ -9019,7 +9010,7 @@ snapshots:
       cron-parser: 5.6.2
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.5.4)(pg@8.22.0)
       effect: 4.0.0-beta.105
-      hono: 4.12.32
+      hono: 4.12.34
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)
       ws: 8.21.1
@@ -10422,7 +10413,7 @@ snapshots:
 
   diff@9.0.0: {}
 
-  dompurify@3.4.12:
+  dompurify@3.4.13:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
@@ -10874,7 +10865,7 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.5
 
-  hono@4.12.32: {}
+  hono@4.12.34: {}
 
   html-void-elements@3.0.0: {}
 
@@ -11237,7 +11228,7 @@ snapshots:
 
   merge-descriptors@2.0.0: {}
 
-  mermaid@11.16.0:
+  mermaid@11.16.1:
     dependencies:
       '@braintree/sanitize-url': 7.1.2
       '@iconify/utils': 3.1.4
@@ -11251,7 +11242,7 @@ snapshots:
       d3-sankey: 0.12.3
       dagre-d3-es: 7.0.14
       dayjs: 1.11.21
-      dompurify: 3.4.12
+      dompurify: 3.4.13
       es-toolkit: 1.50.0
       katex: 0.16.47
       khroma: 2.1.0
@@ -11576,9 +11567,7 @@ snapshots:
     optionalDependencies:
       msgpackr-extract: 3.0.4
 
-  nanoid@3.3.15: {}
-
-  nanoid@3.3.16: {}
+  nanoid@3.3.18: {}
 
   nanoid@5.1.16: {}
 
@@ -11738,15 +11727,9 @@ snapshots:
       path-data-parser: 0.1.0
       points-on-curve: 0.2.0
 
-  postcss@8.5.16:
-    dependencies:
-      nanoid: 3.3.15
-      picocolors: 1.1.1
-      source-map-js: 1.2.1
-
   postcss@8.5.23:
     dependencies:
-      nanoid: 3.3.16
+      nanoid: 3.3.18
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
@@ -12744,7 +12727,7 @@ snapshots:
       esbuild: 0.28.1
       fdir: 6.5.0(picomatch@4.0.4)
       picomatch: 4.0.4
-      postcss: 8.5.16
+      postcss: 8.5.23
       rollup: 4.62.2
       tinyglobby: 0.2.17
     optionalDependencies:
