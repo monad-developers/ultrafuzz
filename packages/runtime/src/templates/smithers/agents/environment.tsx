@@ -4,6 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 
+export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
+  "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
+
 const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_BIN",
   "SMITHERS_CLI_SRC_DIR",

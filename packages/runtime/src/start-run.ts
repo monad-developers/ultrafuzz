@@ -48,7 +48,10 @@ import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { assertControllerExecutionSnapshotDigest } from "./controller-source.js";
+import {
+  assertControllerExecutionSnapshotDigest,
+  assertProviderScopedSensitiveEnvironmentCapability
+} from "./controller-source.js";
 import { targetIdentity } from "./data-governance.js";
 import {
   compileSmithersWorkflow,
@@ -576,6 +579,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       ...process.env,
       ...linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames)
     };
+    assertProviderScopedSensitiveEnvironmentCapability(
+      evidence.verifiedControl.executionFiles,
+      lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
+    );
     assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
