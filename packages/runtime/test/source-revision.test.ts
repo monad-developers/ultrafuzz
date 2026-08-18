@@ -32,6 +32,7 @@ test("run planning binds local task worktrees to the launch checkout commit", as
     git(["commit", "--quiet", "-m", "develop source"]);
     const launchRevision = git(["rev-parse", "HEAD"]);
     assert.notEqual(launchRevision, mainRevision);
+    git(["update-ref", "refs/heads/ultrafuzz-pinned", mainRevision]);
 
     const planned = await planRun({ projectRoot: project, runId: "develop-source", env: {} });
     assert.equal(planned.ok, true, JSON.stringify(planned.diagnostics));
@@ -51,7 +52,6 @@ test("run planning binds local task worktrees to the launch checkout commit", as
     git(["reset", "--quiet", "--hard", mainRevision]);
     assert.equal(git(["rev-parse", "develop"]), mainRevision);
     assert.equal(git(["rev-parse", planned.value!.source_ref!]), launchRevision);
-    git(["update-ref", "refs/heads/ultrafuzz-pinned", mainRevision]);
 
     const compiled = compileSmithersWorkflow({
       config: planned.value!.resolved_config,
@@ -196,6 +196,44 @@ test("multi-run cleanup deletes source refs atomically", async () => {
     assert.equal(fs.existsSync(first.value!.run_root), true);
     assert.equal(fs.existsSync(second.value!.run_root), true);
   } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("failed directory cleanup preserves the run source ref", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-clean-remove-failure-"));
+  const originalRmSync = fs.rmSync;
+  try {
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
+    gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
+    gitAt(project, ["config", "user.email", "test@invalid"]);
+    fs.writeFileSync(path.join(project, "source.txt"), "source\n");
+    gitAt(project, ["add", "--all"]);
+    gitAt(project, ["commit", "--quiet", "-m", "source"]);
+
+    const planned = await planRun({ projectRoot: project, runId: "remove-failure", env: {} });
+    assert.equal(planned.ok, true, JSON.stringify(planned.diagnostics));
+    const sourceRef = planned.value!.source_ref!;
+    const sourceRevision = planned.value!.source_revision!;
+    const runRoot = planned.value!.run_root;
+
+    fs.rmSync = ((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(runRoot)) throw new Error("simulated removal failure");
+      return originalRmSync(target, options);
+    }) as typeof fs.rmSync;
+    const cleaned = await cleanRun({
+      projectRoot: project,
+      confirmed: true,
+      selections: ["runs/remove-failure"]
+    });
+
+    assert.equal(cleaned.ok, false);
+    assert.ok(cleaned.diagnostics.some((diagnostic) => diagnostic.code === "CLEAN_REMOVE_FAILED"));
+    assert.equal(fs.existsSync(runRoot), true);
+    assert.equal(gitAt(project, ["rev-parse", sourceRef]), sourceRevision);
+  } finally {
+    fs.rmSync = originalRmSync;
     fs.rmSync(project, { recursive: true, force: true });
   }
 });

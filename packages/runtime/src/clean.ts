@@ -12,7 +12,12 @@ import {
   readCleanAuditJournal,
   type CleanAuditRecord
 } from "./audit-contracts.js";
-import { deleteRunSourceRevisions, runSourceRef, type RunSourceRevision } from "./source-revision.js";
+import {
+  assertRunSourceRevision,
+  deleteRunSourceRevisions,
+  runSourceRef,
+  type RunSourceRevision
+} from "./source-revision.js";
 import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
@@ -65,16 +70,48 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
   }
 
   if (input.dryRun !== true) {
+    let sources: RunSourceRevision[];
+    try {
+      sources = runSourceRefsForCleanup(input.projectRoot, planned);
+    } catch {
+      return runtimeFailure([
+        runtimeError(
+          "CLEAN_SOURCE_REF_FAILED",
+          "run source revision cleanup could not be prepared; local evidence was preserved",
+          "clean",
+          ".ultrafuzz/runs"
+        )
+      ]);
+    }
     const cloudCleanup = await cleanupCloudRunStorage(input, planned);
     if (cloudCleanup !== undefined) {
       return runtimeFailure([cloudCleanup]);
     }
-    const sourceRefCleanup = cleanupRunSourceRefs(input.projectRoot, planned);
-    if (sourceRefCleanup !== undefined) {
-      return runtimeFailure([sourceRefCleanup]);
+    try {
+      for (const removal of planned) {
+        fs.rmSync(removal.absolutePath, { recursive: true, force: false });
+      }
+    } catch {
+      return runtimeFailure([
+        runtimeError(
+          "CLEAN_REMOVE_FAILED",
+          "generated artifact cleanup failed; run source refs were preserved",
+          "clean",
+          ".ultrafuzz"
+        )
+      ]);
     }
-    for (const removal of planned) {
-      fs.rmSync(removal.absolutePath, { recursive: true, force: false });
+    try {
+      deleteRunSourceRevisions(input.projectRoot, sources);
+    } catch {
+      return runtimeFailure([
+        runtimeError(
+          "CLEAN_SOURCE_REF_FAILED",
+          "local evidence was removed, but run source ref cleanup failed; retained refs remain safe",
+          "clean",
+          ".ultrafuzz/runs"
+        )
+      ]);
     }
   }
 
@@ -104,28 +141,21 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
   });
 }
 
-function cleanupRunSourceRefs(projectRoot: string, planned: PlannedRemoval[]): RuntimeDiagnostic | undefined {
-  try {
-    const sources = runRootsForCleanup(planned).flatMap((root): RunSourceRevision[] => {
-      const planPath = path.join(root, "plan.json");
-      if (!fs.existsSync(planPath)) return [];
-      assertNoSymlinkComponents(root, planPath, "source revision cleanup plan");
-      const plan = readRunPlanDocument(planPath, path.basename(root));
-      const ref = runSourceRef(plan.run_id);
-      return plan.source_revision === undefined || plan.source_ref !== ref
-        ? []
-        : [{ revision: plan.source_revision, ref, pinned: false }];
-    });
-    deleteRunSourceRevisions(projectRoot, sources);
-    return undefined;
-  } catch {
-    return runtimeError(
-      "CLEAN_SOURCE_REF_FAILED",
-      "run source revision cleanup failed; local evidence was preserved",
-      "clean",
-      ".ultrafuzz/runs"
-    );
+function runSourceRefsForCleanup(projectRoot: string, planned: PlannedRemoval[]): RunSourceRevision[] {
+  const sources = runRootsForCleanup(planned).flatMap((root): RunSourceRevision[] => {
+    const planPath = path.join(root, "plan.json");
+    if (!fs.existsSync(planPath)) return [];
+    assertNoSymlinkComponents(root, planPath, "source revision cleanup plan");
+    const plan = readRunPlanDocument(planPath, path.basename(root));
+    const ref = runSourceRef(plan.run_id);
+    return plan.source_revision === undefined || plan.source_ref !== ref
+      ? []
+      : [{ revision: plan.source_revision, ref, pinned: false }];
+  });
+  for (const source of sources) {
+    assertRunSourceRevision(projectRoot, source);
   }
+  return sources;
 }
 
 async function cleanupCloudRunStorage(

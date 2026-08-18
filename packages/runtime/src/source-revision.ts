@@ -27,10 +27,10 @@ export interface RunSourceRevision {
  */
 export function captureLaunchSourceRevision(projectRoot: string, runId: string): RunSourceRevision | undefined {
   if (!SAFE_RUN_ID.test(runId)) throw new Error("run source revision requires a safe run ID");
-  const pinnedRevision = tryGitObjectId(projectRoot, `${INVARIANT_PINNED_SOURCE_REF}^{commit}`);
-  const pinned = pinnedRevision !== undefined;
-  const revision = pinnedRevision ?? tryGitObjectId(projectRoot, "HEAD^{commit}");
+  const revision = tryGitObjectId(projectRoot, "HEAD^{commit}");
   if (revision === undefined) return undefined;
+  const pinnedRevision = tryGitObjectId(projectRoot, `${INVARIANT_PINNED_SOURCE_REF}^{commit}`);
+  const pinned = pinnedRevision === revision;
   if (pinned) {
     return { revision, ref: INVARIANT_PINNED_SOURCE_REF, pinned: true };
   }
