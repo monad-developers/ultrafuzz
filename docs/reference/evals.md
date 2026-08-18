@@ -317,9 +317,9 @@ The expanded target × variant × trial matrix has an absolute 100,000-row
 ceiling. Planning rejects a larger product with overflow-safe division before
 target resolution, row allocation, iteration, or artifact writes; each
 individual dimension is capped at the same value in both JSON Schema and the
-runtime schema. Target-level concurrency is capped at 16 and concurrently
-launched or scored matrix rows are capped at 32. These ceilings leave headroom
-above the built-in full lane (8 targets and 20 runs) while bounding process and
+runtime schema. Target-level concurrency is capped at 32 and concurrently
+launched or scored matrix rows are capped at 80. These ceilings are four times
+the built-in full lane (8 targets and 20 runs) while bounding process and
 provider fan-out for repository-selected suites.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
 Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It selects
