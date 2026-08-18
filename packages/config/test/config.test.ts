@@ -78,6 +78,7 @@ describe("config loading and resolution", () => {
       reasoning: "max"
     });
     expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
+    expect(resolved.value.run.defaultTimeoutSeconds).toBe(3600);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
@@ -91,7 +92,7 @@ describe("config loading and resolution", () => {
       resources: {
         cpu: 4,
         memoryMiB: 8192,
-        timeoutSeconds: 1800
+        timeoutSeconds: 3600
       },
       nodes: {},
       providers: {}

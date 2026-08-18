@@ -19,7 +19,7 @@ retention_days = 30
 [execution.resources]
 cpu = 4
 memory_mib = 8192
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [execution.providers.modal]
 app = "ultrafuzz"
