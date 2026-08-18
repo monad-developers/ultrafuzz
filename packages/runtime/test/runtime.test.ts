@@ -31,7 +31,12 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, serializeResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import {
+  parseProjectConfigToml,
+  parseResolvedConfigJsonBytes,
+  resolveConfig,
+  serializeResolvedConfigJsonBytes
+} from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -2425,6 +2430,20 @@ test(
     }
   }
 );
+
+test("init resolves one-hour node and execution-resource timeout defaults", () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+
+  const config = fs.readFileSync(path.join(project, "ultrafuzz.toml"), "utf8");
+  const parsed = parseProjectConfigToml(config);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.diagnostics));
+  const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+  assert.equal(resolved.ok, true, JSON.stringify(resolved.diagnostics));
+  assert.equal(resolved.value?.run.defaultTimeoutSeconds, 3600);
+  assert.equal(resolved.value?.execution.resources.timeoutSeconds, 3600);
+});
 
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
