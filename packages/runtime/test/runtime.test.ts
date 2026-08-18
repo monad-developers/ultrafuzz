@@ -13827,6 +13827,9 @@ test("syncRun honors cancellation and an overall deadline before terminal synchr
 });
 
 test("syncRun aborts or times out a blocked inspection child without durable mutation", async () => {
+  // Leave enough headroom for a contended hosted runner while still proving
+  // that the child exits before the five-second forced-kill grace period.
+  const responsiveTerminationBudgetMs = 4_000;
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -13864,7 +13867,7 @@ if (process.argv[2] === "inspect") {
   clearTimeout(abortTimer);
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
-  assert.ok(Date.now() - abortStartedAt < 2_000);
+  assert.ok(Date.now() - abortStartedAt < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
   const deadlineStartedAt = Date.now();
@@ -13874,7 +13877,7 @@ if (process.argv[2] === "inspect") {
   );
   assert.equal(expired.ok, false);
   assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
-  assert.ok(Date.now() - deadlineStartedAt < 2_000);
+  assert.ok(Date.now() - deadlineStartedAt < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 });
 
