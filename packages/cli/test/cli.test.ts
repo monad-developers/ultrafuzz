@@ -102,6 +102,9 @@ function fakeSmithersEnv(
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(inspectStatePath, "running\n", "utf8");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const statusOverridePath = path.join(project, "fake-smithers-status-override.json");
+  const invalidEventStreamPath = path.join(project, "fake-smithers-invalid-event-stream");
   const smithers = path.join(binDir, "smithers");
   const terminalNodeIds = [
     "project-discovery",
@@ -171,7 +174,7 @@ function fakeSmithersEnv(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  ps)",
       `    printf '%s\\n' ${shellQuote(
@@ -195,7 +198,7 @@ function fakeSmithersEnv(
       )}`,
       "    ;;",
       "  inspect)",
-      "    inspect_state=$(tr -d '\\n' < \"$SMITHERS_FAKE_INSPECT_STATE\")",
+      `    inspect_state=$(tr -d '\\n' < ${shellQuote(inspectStatePath)})`,
       '    inspect_status="running"',
       '    inspect_nodes="[]"',
       '    if [ "$inspect_state" = "succeeded" ]; then',
@@ -205,10 +208,11 @@ function fakeSmithersEnv(
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
       "    ;;",
       "  events)",
-      '    if [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "events" ] && [ "$3" != "--type" ]; then',
+      `    invalid_event_stream=$(if [ -f ${shellQuote(invalidEventStreamPath)} ]; then tr -d '\\n' < ${shellQuote(invalidEventStreamPath)}; fi)`,
+      '    if [ "$invalid_event_stream" = "events" ] && [ "$3" != "--type" ]; then',
       "      printf '%s' '{\"malformed\":'",
       "      exit 0",
-      '    elif [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "token-events" ] && [ "$3" = "--type" ]; then',
+      '    elif [ "$invalid_event_stream" = "token-events" ] && [ "$3" = "--type" ]; then',
       "      printf '%s' '{\"malformed\":'",
       "      exit 0",
       "    fi",
@@ -217,7 +221,7 @@ function fakeSmithersEnv(
         JSON.stringify({ ok: true, data: [], meta: { command: "events", duration: "1ms" } })
       )} ;;`,
       "      *)",
-      '        if [ "$(tr -d \'\\n\' < "$SMITHERS_FAKE_INSPECT_STATE")" = "succeeded" ]; then',
+      `        if [ "$(tr -d '\\n' < ${shellQuote(inspectStatePath)})" = "succeeded" ]; then`,
       ...workflowEvents.map((event) => `          ${fakeWorkflowEventPrintf(event)}`),
       "        fi",
       "        ;;",
@@ -238,8 +242,8 @@ function fakeSmithersEnv(
       "    exit 2",
       "    ;;",
       "  status)",
-      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
-      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      `    if [ -f ${shellQuote(statusOverridePath)} ]; then`,
+      `      cat ${shellQuote(statusOverridePath)}`,
       "    else",
       `      printf '%s\\n' ${shellQuote(JSON.stringify(fakeStatusEnvelope()))}`,
       "    fi",
@@ -255,10 +259,16 @@ function fakeSmithersEnv(
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath
+    SMITHERS_BIN: smithers
   };
+}
+
+function setFakeSmithersStatus(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function setFakeSmithersInvalidEventStream(project: string, stream: "events" | "token-events"): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-invalid-event-stream"), `${stream}\n`, "utf8");
 }
 
 function writeSmallTopology(project: string): void {
@@ -1380,7 +1390,7 @@ test("status --watch stops immediately on a degraded verdict even while product 
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", "watch-degraded-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(fakeStatusEnvelope("degraded"));
+  setFakeSmithersStatus(project, fakeStatusEnvelope("degraded"));
 
   const watched = await cli(project, ["status", "watch-degraded-run", "--watch", "--interval", "1", "--json"], env);
 
@@ -2529,10 +2539,8 @@ test("stats falls back to unchanged local evidence when workflow event output is
     ["token-events", "WORKFLOW_TOKEN_EVENTS_INVALID"]
   ] as const) {
     await context.test(stream, async () => {
-      const captured = await cli(project, ["stats", "stats-invalid-workflow-events", "--json"], {
-        ...env,
-        SMITHERS_FAKE_INVALID_EVENT_STREAM: stream
-      });
+      setFakeSmithersInvalidEventStream(project, stream);
+      const captured = await cli(project, ["stats", "stats-invalid-workflow-events", "--json"], env);
       assert.equal(captured.code, 0, captured.stderr);
       const body = parseJson(captured);
       assert.equal(body.ok, true);

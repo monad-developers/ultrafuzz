@@ -78,6 +78,29 @@ import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
+const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
+  "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
+  "SMITHERS_FAKE_CLOUD_ENV_LOG",
+  "SMITHERS_FAKE_CONTEXT_LOG",
+  "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
+  "SMITHERS_FAKE_ENV_LOG",
+  "SMITHERS_FAKE_EXECUTED_AS_LOG",
+  "SMITHERS_FAKE_FAIL_UP",
+  "SMITHERS_FAKE_FORGE_GUARD_LOG",
+  "SMITHERS_FAKE_FORKED_RUN_ID",
+  "SMITHERS_FAKE_INPUT_LOG",
+  "SMITHERS_FAKE_KEEP_WORKTREES_LOG",
+  "SMITHERS_FAKE_KIMI_ENV_LOG",
+  "SMITHERS_FAKE_LOG",
+  "SMITHERS_FAKE_MARKER",
+  "SMITHERS_FAKE_OPENROUTER_ENV_LOG",
+  "SMITHERS_FAKE_PATH_LOG",
+  "SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS",
+  "SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG",
+  "SMITHERS_FAKE_RUN_EXISTS",
+  "SMITHERS_FAKE_SNAPSHOT_ATTEMPT",
+  "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
+] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
 const TEST_DATA_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:anthropic","model:deepseek","model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","model:moonshot","model:openai","model:openrouter"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:anthropic","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:deepseek","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:moonshot","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openrouter","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":["~anthropic/claude-sonnet-latest:free","~vendor/model.latest:free+preview@2026"]}`;
 process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-homes-"));
@@ -130,6 +153,13 @@ function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntr
 }
 
 function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
+  const environmentAllowlist = [
+    ...SMITHERS_TEST_ENVIRONMENT_ALLOWLIST,
+    ...(input.env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")
+  ]
+    .map((name) => name.trim())
+    .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
+    .join(",");
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
@@ -146,7 +176,8 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
         no_proxy: undefined,
         OPENAI_BASE_URL: undefined,
         KIMI_BASE_URL: undefined,
-        ...input.env
+        ...input.env,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: environmentAllowlist
       }
     })
   );
@@ -995,6 +1026,11 @@ function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFix
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
+  createDeepSeekAgent(options?: Record<string, unknown>): {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      env?: Record<string, string>;
+    }>;
+  };
   CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
     buildCommand(params: {
       prompt: string;
@@ -1071,6 +1107,11 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
+    createDeepSeekAgent(options?: Record<string, unknown>): {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        env?: Record<string, string>;
+      }>;
+    };
     DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
       generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
       stream(options: Record<string, unknown>): Promise<{
@@ -1099,6 +1140,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     };
   };
   return {
+    createDeepSeekAgent: deepSeekModule.createDeepSeekAgent,
     CompatibleClaudeCodeAgent: claudeModule.CompatibleClaudeCodeAgent,
     DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent
   };
@@ -1266,13 +1308,14 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const statusOverride = path.join(project, "fake-smithers-status-override.json");
+  const alreadyPausedMarker = path.join(project, "fake-smithers-already-paused");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ] && [ -n "$SMITHERS_FAKE_SNAPSHOT_ATTEMPT" ]; then',
       '  case "$2" in',
       "    */.smithers/workflows/*.tsx)",
@@ -1288,7 +1331,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  esac",
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
-      '  printf \'%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$CLAUDE_CONFIG_DIR" > "$SMITHERS_FAKE_ENV_LOG"',
+      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$CLAUDE_CONFIG_DIR" "$SMITHERS_UNDOCUMENTED_SECRET" "$ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
@@ -1327,7 +1370,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
       "      exit 0",
-      '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
+      `    elif [ -f ${shellQuote(alreadyPausedMarker)} ]; then`,
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"paused"}}\'',
       "    else",
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"pause-requested"}}\'',
@@ -1349,8 +1392,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    esac",
       "    ;;",
       "  status)",
-      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
-      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      `    if [ -f ${shellQuote(statusOverride)} ]; then`,
+      `      cat ${shellQuote(statusOverride)}`,
       "    else",
       // The runner emits its envelope only under --full-output, and emits the bare
       // document otherwise. A fake that always enveloped hid a caller that never
@@ -1373,8 +1416,17 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: commandLog,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST.join(",")
   };
+}
+
+function setFakeSmithersStatus(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function markFakeSmithersAlreadyPaused(project: string): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-already-paused"), "\n", "utf8");
 }
 
 function currentPsEnvelope(runs: unknown[]): unknown {
@@ -1430,7 +1482,7 @@ function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string 
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
-    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', '  cat "$SMITHERS_FAKE_PS"', "  exit 0", "fi", "exit 1", ""].join("\n"),
+    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', `  cat ${shellQuote(psPath)}`, "  exit 0", "fi", "exit 1", ""].join("\n"),
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
@@ -1543,20 +1595,19 @@ function fakeLifecycleSmithersEnv(
     );
   }
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  inspect)",
       ...(input.inspectMarkerPath === undefined ? [] : [`    touch ${shellQuote(input.inspectMarkerPath)}`]),
-      '    cat "$SMITHERS_FAKE_INSPECT"',
+      `    cat ${shellQuote(inspectPath)}`,
       "    ;;",
       "  node)",
-      '    cat "$SMITHERS_FAKE_NODE_DETAILS/$2.json"',
+      `    cat ${shellQuote(nodeDetailsDirectory)}/"$2.json"`,
       "    ;;",
       "  cancel)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
@@ -1564,22 +1615,22 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    case "$*" in',
-      '      *--full-output*) cat "$SMITHERS_FAKE_STATUS_EVENTS" ;;',
+      `      *--full-output*) cat ${shellQuote(statusEventsPath)} ;;`,
       '      *) if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
-      '           cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      `           cat ${shellQuote(tokenEventsPath)}`,
       "         else",
-      '           cat "$SMITHERS_FAKE_EVENTS"',
+      `           cat ${shellQuote(eventsPath)}`,
       "         fi ;;",
       "    esac",
       "    ;;",
       "  timeline)",
-      '    cat "$SMITHERS_FAKE_TIMELINE"',
+      `    cat ${shellQuote(timelinePath)}`,
       "    ;;",
       "  status)",
-      '    cat "$SMITHERS_FAKE_STATUS"',
+      `    cat ${shellQuote(statusPath)}`,
       "    ;;",
       "  why)",
-      '    cat "$SMITHERS_FAKE_WHY"',
+      `    cat ${shellQuote(whyPath)}`,
       "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -1619,7 +1670,7 @@ function fakeLifecycleSmithersEnv(
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_LOG: commandLog,
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
@@ -1628,7 +1679,8 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_WHY: whyPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     SMITHERS_FAKE_NODE_DETAILS: nodeDetailsDirectory,
-    ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+    ULTRAFUZZ_PRICING_CATALOG_URL: "off",
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST.join(",")
   };
 }
 
@@ -4653,6 +4705,43 @@ test(
     ]) {
       assert.equal(sanitized[name], "", `${name} escaped into a model child environment`);
     }
+
+    const providerScoped = workflowControlChildEnvironment(
+      {
+        OPENAI_API_KEY: "active-openai-key",
+        CUSTOM_ACTIVE_KEY: "active-custom-key",
+        CODEX_HOME: "/operator/codex"
+      },
+      {
+        OPENAI_API_KEY: "ambient-openai-key",
+        ANTHROPIC_API_KEY: "ambient-anthropic-key",
+        DEEPSEEK_API_KEY: "ambient-deepseek-key",
+        OPENROUTER_API_KEY: "ambient-openrouter-key",
+        CUSTOM_PROVIDER_KEY: "ambient-custom-key",
+        CLAUDE_CONFIG_DIR: "/operator/claude",
+        KIMI_CODE_HOME: "/operator/kimi",
+        ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES:
+          "OPENAI_API_KEY,ANTHROPIC_API_KEY,DEEPSEEK_API_KEY,OPENROUTER_API_KEY,CUSTOM_PROVIDER_KEY,CUSTOM_ACTIVE_KEY"
+      }
+    );
+    assert.equal(providerScoped.OPENAI_API_KEY, "active-openai-key");
+    assert.equal(providerScoped.CUSTOM_ACTIVE_KEY, "active-custom-key");
+    assert.equal(providerScoped.CODEX_HOME, "/operator/codex");
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "OPENROUTER_API_KEY",
+      "CUSTOM_PROVIDER_KEY",
+      "CLAUDE_CONFIG_DIR",
+      "KIMI_CODE_HOME"
+    ]) {
+      assert.equal(providerScoped[name], "", `${name} leaked into the OpenAI child`);
+    }
+    assert.equal(providerScoped.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES, "");
+    assert.throws(
+      () => workflowControlChildEnvironment({}, { ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: "NOT-AN-ENV" }),
+      /provider credential environment list is invalid/u
+    );
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -8048,7 +8137,7 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
     env: { ...fakeSmithersEnv(project), CLAUDE_CONFIG_DIR: claudeHome, SMITHERS_FAKE_ENV_LOG: environmentLog }
   });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(environmentLog, "utf8"), `|||${claudeHome}\n`);
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), `|||${claudeHome}||\n`);
 
   const smithersTasks = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
@@ -8626,7 +8715,7 @@ test("getRunHealth accepts the terminal degraded verdict without converting it t
 
   const envelope = currentStatusEnvelope("ultrafuzz-degraded-health-run");
   const data = envelope.data as Record<string, unknown>;
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...data,
@@ -8654,7 +8743,7 @@ test("getRunHealth binds the workflow health summary to the run it asked about",
   const run = await startRun({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(currentStatusEnvelope("ultrafuzz-another-run"));
+  setFakeSmithersStatus(project, currentStatusEnvelope("ultrafuzz-another-run"));
   const foreign = await getRunHealth({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(foreign.ok, false);
   assert.deepEqual(
@@ -8691,7 +8780,7 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
   ];
 
   for (const invalid of invalidDocuments) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(invalid.value);
+    setFakeSmithersStatus(project, invalid.value);
     const health = await getRunHealth({ projectRoot: project, runId: "strict-health-run", env });
     assert.equal(health.ok, false, invalid.label);
     assert.equal(health.value, undefined, invalid.label);
@@ -8714,7 +8803,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
   const base = envelope.data as Record<string, unknown>;
 
   for (const verdict of ["orphaned", "cancel-pending"] as const) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+    setFakeSmithersStatus(project, {
       ...envelope,
       data: {
         ...base,
@@ -8748,7 +8837,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
   }
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...base,
@@ -8784,7 +8873,7 @@ test("pauseRun accepts the workflow runner pause-request exit and is idempotent 
   assert.equal(requested.value?.status, "pause-requested");
   assert.equal(requested.value?.submitted, true);
 
-  env.SMITHERS_FAKE_ALREADY_PAUSED = "1";
+  markFakeSmithersAlreadyPaused(project);
   const paused = await pauseRun({ projectRoot: project, runId: "pause-run", env });
   assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
   assert.equal(paused.value?.status, "paused");
@@ -8952,6 +9041,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
     SMITHERS_SNAPSHOT_SOCK: "/outer/snapshot.sock",
     OPENAI_API_KEY: "configured-agent-key",
     AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
+    SMITHERS_UNDOCUMENTED_SECRET: "must-not-forward",
     FOUNDRY_PROFILE: "ci",
     ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE"
   };
@@ -8959,9 +9049,105 @@ test("startRun forwards configured and explicitly allowed environment variables 
   const run = await startRun({ projectRoot: project, runId: "filtered-environment", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci|\n");
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci|||OPENAI_API_KEY\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
+
+test(
+  "two active API-key providers reach generated children with only their own credential",
+  { skip: !runningUnderBun, timeout: 120_000 },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+    fs.writeFileSync(
+      topologyPath,
+      fs
+        .readFileSync(topologyPath, "utf8")
+        .replace(
+          "    prompt: setup/project-discovery.md\n    depends_on:\n",
+          "    prompt: setup/project-discovery.md\n    model_profiles:\n      - default\n    depends_on:\n"
+        )
+        .replace(
+          "  - id: __finish__\n",
+          `  - id: deepseek-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    model_profiles:
+      - deepseek
+    depends_on:
+      - __start__
+    outputs:
+      - path: setup/deepseek-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+`
+        )
+        .replace(
+          "    depends_on:\n      - project-discovery\n",
+          "    depends_on:\n      - project-discovery\n      - deepseek-discovery\n"
+        ),
+      "utf8"
+    );
+
+    const controllerEnvironmentLog = path.join(project, "smithers-multi-provider-environment.log");
+    const controllerCredentialLog = path.join(project, "smithers-multi-provider-credentials.log");
+    const openAiKey = "active-openai-key";
+    const deepSeekKey = "active-deepseek-key";
+    const run = await startRun({
+      projectRoot: project,
+      runId: "multi-provider-credential-isolation",
+      env: {
+        ...fakeSmithersEnv(project),
+        SMITHERS_FAKE_ENV_LOG: controllerEnvironmentLog,
+        SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG: controllerCredentialLog,
+        OPENAI_API_KEY: openAiKey,
+        DEEPSEEK_API_KEY: deepSeekKey
+      }
+    });
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.equal(fs.readFileSync(controllerCredentialLog, "utf8"), `${openAiKey}|${deepSeekKey}\n`);
+    const controllerEnvironment = fs.readFileSync(controllerEnvironmentLog, "utf8").trimEnd().split("|");
+    assert.equal(controllerEnvironment[0], openAiKey);
+    const providerCredentialNames = controllerEnvironment.at(-1);
+    assert.equal(providerCredentialNames, "DEEPSEEK_API_KEY,OPENAI_API_KEY");
+
+    const saved = Object.fromEntries(
+      ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"].map(
+        (name) => [name, process.env[name]]
+      )
+    );
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES = providerCredentialNames!;
+    process.env.OPENAI_API_KEY = openAiKey;
+    process.env.DEEPSEEK_API_KEY = deepSeekKey;
+    try {
+      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      const codexEnvironment = (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
+      assert.equal(codexEnvironment.CODEX_API_KEY, openAiKey);
+      assert.equal(codexEnvironment.DEEPSEEK_API_KEY, "");
+
+      const { createDeepSeekAgent } = await loadGeneratedDeepSeekAgent(project);
+      const deepSeekCommand = await createDeepSeekAgent().buildCommand({
+        prompt: "isolate",
+        cwd: project,
+        options: {}
+      });
+      assert.equal(deepSeekCommand.env?.ANTHROPIC_AUTH_TOKEN, deepSeekKey);
+      assert.equal(deepSeekCommand.env?.OPENAI_API_KEY, "");
+      assert.equal(deepSeekCommand.env?.CODEX_API_KEY, "");
+      assert.equal(deepSeekCommand.env?.DEEPSEEK_API_KEY, "");
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
 
 test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
@@ -16191,26 +16377,40 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   const installer = writeFakeNpmInstaller(project);
   const npmFixture = path.join(installer.binDir, "npm");
   fs.chmodSync(npmFixture, 0o700);
-  fs.appendFileSync(
-    npmFixture,
-    `\nfs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nif [ "$1" = "inspect" ]; then printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}\'; exit 4; fi\nif [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then : > "$SMITHERS_FAKE_MARKER"; exit 42; fi\nprintf \'%s\\n\' \'{"ok":true}\'\n')});\n`
-  );
+  const installedRunnerSource = [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+    'if [ "$1" = "up" ]; then',
+    `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > ${shellQuote(cloudEnvironmentLog)}`,
+    "fi",
+    'if [ "$1" = "inspect" ]; then',
+    `  printf '%s\\n' '{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}'`,
+    "  exit 4",
+    "fi",
+    `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+    `  : > ${shellQuote(markerPath)}`,
+    "  exit 42",
+    "fi",
+    `printf '%s\\n' '{"ok":true}'`,
+    ""
+  ].join("\n");
+  fs.appendFileSync(npmFixture, `\nfs.writeFileSync(target, ${JSON.stringify(installedRunnerSource)});\n`);
   fs.chmodSync(npmFixture, 0o500);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
-      '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+      'if [ "$1" = "up" ]; then',
+      `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> ${shellQuote(cloudEnvironmentLog)}`,
       "fi",
       'if [ "$1" = "inspect" ]; then',
       '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"No Smithers run history found at /workspace/target/smithers.db. Run \'\\\'\'smithers up <workflow>\'\\\'\' to start a run first."}}\'',
       "  exit 4",
       "fi",
-      'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
-      '  : > "$SMITHERS_FAKE_MARKER"',
+      `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+      `  : > ${shellQuote(markerPath)}`,
       "  exit 42",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",
@@ -16223,11 +16423,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: logPath,
-    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     MODAL_TOKEN_ID: "provider-one",
-    MODAL_TOKEN_SECRET: "provider-two",
-    SMITHERS_FAKE_MARKER: markerPath
+    MODAL_TOKEN_SECRET: "provider-two"
   };
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
