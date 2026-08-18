@@ -49,6 +49,68 @@ describe("production dependency advisory policy", () => {
     expect(result).toEqual({ actionableCount: 1, activeExceptionCount: 1, errors: [] });
   });
 
+  it("accepts an exception for a one-character npm package name", () => {
+    const advisory = { ...highAdvisory, package: "q" };
+    const result = evaluateDependencyAdvisoryPolicy(
+      auditWith([advisory]),
+      exceptions([{ ...validException(), package: "q" }]),
+      "2026-08-17"
+    );
+
+    expect(result).toEqual({ actionableCount: 1, activeExceptionCount: 1, errors: [] });
+  });
+
+  it("keeps JSON Schema and semantic exception validation aligned", () => {
+    const cases = [
+      {
+        field: "reviewed_on",
+        exception: { ...validException(), reviewed_on: "2026-02-30", expires: "2026-08-30" },
+        semanticError: "dependency advisory exception 1 reviewed_on is not a real calendar date"
+      },
+      {
+        field: "reachability",
+        exception: { ...validException(), reachability: " Invalid reachability evidence." },
+        semanticError:
+          "dependency advisory exception 1 reachability must be a bounded string without edge whitespace or control characters"
+      },
+      {
+        field: "rationale",
+        exception: { ...validException(), rationale: "Invalid rationale. " },
+        semanticError:
+          "dependency advisory exception 1 rationale must be a bounded string without edge whitespace or control characters"
+      },
+      {
+        field: "rationale",
+        exception: { ...validException(), rationale: "Invalid\u0000rationale." },
+        semanticError:
+          "dependency advisory exception 1 rationale must be a bounded string without edge whitespace or control characters"
+      },
+      {
+        field: "tracking_issue",
+        exception: { ...validException(), tracking_issue: `#${"1".repeat(2_000)}` },
+        semanticError:
+          "dependency advisory exception 1 tracking_issue must be a bounded string without edge whitespace or control characters"
+      }
+    ];
+
+    for (const candidate of cases) {
+      const errors = evaluateDependencyAdvisoryPolicy(
+        auditWith([highAdvisory]),
+        exceptions([candidate.exception]),
+        "2026-08-17"
+      ).errors;
+
+      expect(
+        errors.some((error) =>
+          error.startsWith(
+            `dependency advisory exception document does not match its JSON Schema at /exceptions/0/${candidate.field}:`
+          )
+        )
+      ).toBe(true);
+      expect(errors).toContain(candidate.semanticError);
+    }
+  });
+
   it("rejects expired, future-reviewed, and overlong exceptions", () => {
     expect(
       evaluateDependencyAdvisoryPolicy(

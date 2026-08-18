@@ -24,6 +24,7 @@ const maximumExceptionBytes = 1024 * 1024;
 const maximumAuditItems = 100_000;
 const exactPackageVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const cweIdentifier = /^CWE-[1-9]\d*$/u;
+const packageWhitespace = /\s/u;
 const exceptionJsonSchema = readJson(
   defaultExceptionSchemaPath,
   maximumExceptionBytes,
@@ -183,6 +184,10 @@ function parseExceptions(document, asOfMs, errors) {
     errors.push("dependency advisory exceptions must be an array");
     return exceptions;
   }
+  if (document.exceptions.length > maximumAuditItems) {
+    errors.push("dependency advisory exception document has too many entries");
+    return exceptions;
+  }
 
   for (const [index, candidate] of document.exceptions.entries()) {
     const prefix = `dependency advisory exception ${index + 1}`;
@@ -207,8 +212,8 @@ function parseExceptions(document, asOfMs, errors) {
     }
 
     const advisory = requiredText(candidate.advisory, `${prefix} advisory`, errors);
-    const packageName = requiredText(candidate.package, `${prefix} package`, errors);
-    const severity = requiredText(candidate.severity, `${prefix} severity`, errors).toLowerCase();
+    const packageName = requiredText(candidate.package, `${prefix} package`, errors, 1, 214);
+    const severity = requiredText(candidate.severity, `${prefix} severity`, errors);
     const status = requiredText(candidate.status, `${prefix} status`, errors);
     const reviewedOn = requiredText(candidate.reviewed_on, `${prefix} reviewed_on`, errors);
     const expires = requiredText(candidate.expires, `${prefix} expires`, errors);
@@ -434,7 +439,7 @@ function requireBoundedRegistryText(value, label) {
     value.length < 1 ||
     value.length > 2_000 ||
     value.trim() !== value ||
-    hasAsciiControl(value, false)
+    hasAsciiControl(value)
   ) {
     throw new Error(`${label} must be bounded text without edge whitespace or control characters`);
   }
@@ -546,14 +551,13 @@ function parseDate(value, label, errors) {
   return parsed;
 }
 
-function requiredText(value, label, errors, minimumLength = 2) {
-  if (
-    typeof value !== "string" ||
-    value.trim() !== value ||
-    value.length < minimumLength ||
-    value.length > 2_000 ||
-    hasAsciiControl(value, false)
-  ) {
+function requiredText(value, label, errors, minimumLength = 2, maximumLength = 2_000) {
+  if (typeof value !== "string") {
+    errors.push(`${label} must be a bounded string without edge whitespace or control characters`);
+    return "";
+  }
+  const length = [...value].length;
+  if (value.trim() !== value || length < minimumLength || length > maximumLength || hasAsciiControl(value)) {
     errors.push(`${label} must be a bounded string without edge whitespace or control characters`);
     return "";
   }
@@ -561,19 +565,15 @@ function requiredText(value, label, errors, minimumLength = 2) {
 }
 
 function isPackageName(value) {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 214 &&
-    value.trim() === value &&
-    !hasAsciiControl(value, true)
-  );
+  if (typeof value !== "string") return false;
+  const length = [...value].length;
+  return length > 0 && length <= 214 && !packageWhitespace.test(value) && !hasAsciiControl(value);
 }
 
-function hasAsciiControl(value, includeSpace) {
+function hasAsciiControl(value) {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code < 32 || code === 127 || (includeSpace && code === 32)) return true;
+    if (code < 32 || code === 127) return true;
   }
   return false;
 }
