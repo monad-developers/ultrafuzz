@@ -79,6 +79,13 @@ describe("production dependency advisory policy", () => {
     );
     expect(
       evaluateDependencyAdvisoryPolicy(
+        auditWith([]),
+        { schema_version: "ultrafuzz.dependency-advisory-exceptions.v1", exceptions: [] },
+        "2026-08-17"
+      ).errors
+    ).toContain("dependency advisory exception document has an unsupported $schema reference");
+    expect(
+      evaluateDependencyAdvisoryPolicy(
         auditWith([highAdvisory]),
         exceptions([{ ...validException(), owner: "security-owner", unexpected: true }]),
         "2026-08-17"
@@ -316,7 +323,11 @@ function rawAdvisory() {
 }
 
 function exceptions(values: unknown[]) {
-  return { schema_version: "ultrafuzz.dependency-advisory-exceptions.v1", exceptions: values };
+  return {
+    $schema: "./dependency-advisory-exceptions.schema.json",
+    schema_version: "ultrafuzz.dependency-advisory-exceptions.v1",
+    exceptions: values
+  };
 }
 
 function validException() {

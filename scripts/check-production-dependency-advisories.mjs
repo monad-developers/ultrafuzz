@@ -3,10 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { parseStrictJsonBytes } from "../packages/artifacts/dist/index.js";
+import { createStrictAjv, parseStrictJsonBytes, runValidator } from "../packages/artifacts/dist/index.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultExceptionPath = path.join(root, ".github", "dependency-advisory-exceptions.json");
+const defaultExceptionSchemaPath = path.join(root, ".github", "dependency-advisory-exceptions.schema.json");
+const exceptionSchemaReference = "./dependency-advisory-exceptions.schema.json";
+const exceptionJsonSchemaId = "urn:ultrafuzz:schema:ci:dependency-advisory-exceptions:1";
 const exceptionSchema = "ultrafuzz.dependency-advisory-exceptions.v1";
 const auditSchema = "ultrafuzz.production-dependency-audit.v1";
 export const APPROVED_AUDIT_ENDPOINT = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
@@ -21,6 +24,16 @@ const maximumExceptionBytes = 1024 * 1024;
 const maximumAuditItems = 100_000;
 const exactPackageVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const cweIdentifier = /^CWE-[1-9]\d*$/u;
+const exceptionJsonSchema = readJson(
+  defaultExceptionSchemaPath,
+  maximumExceptionBytes,
+  "dependency advisory exception JSON Schema"
+);
+const exceptionSchemaValidator = createStrictAjv();
+exceptionSchemaValidator.addSchema(exceptionJsonSchema, exceptionJsonSchemaId);
+const validateExceptionDocument = exceptionSchemaValidator.getSchema(exceptionJsonSchemaId);
+if (validateExceptionDocument === undefined)
+  throw new Error("dependency advisory exception JSON Schema did not compile");
 
 export function evaluateDependencyAdvisoryPolicy(audit, exceptionDocument, asOf) {
   const errors = [];
@@ -146,14 +159,25 @@ function parseProductionAudit(audit, errors) {
 
 function parseExceptions(document, asOfMs, errors) {
   const exceptions = new Map();
+  const structuralValidation = runValidator(validateExceptionDocument, document);
+  if (!structuralValidation.ok) {
+    for (const issue of structuralValidation.issues.slice(0, 20)) {
+      errors.push(
+        `dependency advisory exception document does not match its JSON Schema at ${issue.instancePath || "/"}: ${issue.message}`
+      );
+    }
+  }
   if (!isRecord(document) || document.schema_version !== exceptionSchema) {
     errors.push("dependency advisory exceptions use an unsupported schema version");
     return exceptions;
   }
   for (const field of Object.keys(document).sort()) {
-    if (field !== "schema_version" && field !== "exceptions") {
+    if (field !== "$schema" && field !== "schema_version" && field !== "exceptions") {
       errors.push(`dependency advisory exception document contains unknown field ${field}`);
     }
+  }
+  if (document.$schema !== exceptionSchemaReference) {
+    errors.push("dependency advisory exception document has an unsupported $schema reference");
   }
   if (!Array.isArray(document.exceptions)) {
     errors.push("dependency advisory exceptions must be an array");

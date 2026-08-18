@@ -70,22 +70,11 @@ days and High advisories within 30 days; use an exception only when the tracking
 issue documents why that target cannot be met and what compensating controls
 apply.
 
-The committed exception file starts empty. A complete entry has this shape:
-
-```json
-{
-  "advisory": "GHSA-2345-6789-cfgh",
-  "package": "example-package",
-  "severity": "high",
-  "status": "not-reachable",
-  "reviewed_on": "2026-08-17",
-  "expires": "2026-09-16",
-  "owner": "@security-owner",
-  "tracking_issue": "#123",
-  "reachability": "The vulnerable parser is not called by production inputs.",
-  "rationale": "Retained while the tracked upstream upgrade is validated."
-}
-```
+The committed exception file starts empty. Its canonical field contract and a
+complete example are maintained in the checked-in
+[dependency-advisory exceptions schema](../.github/dependency-advisory-exceptions.schema.json).
+Keep the file's `$schema` reference so editors and reviewers use the same
+contract that the CI policy validates.
 
 ## Agent process environment
 

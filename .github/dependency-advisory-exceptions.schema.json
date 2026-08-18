@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:ci:dependency-advisory-exceptions:1",
+  "title": "Ultrafuzz production dependency advisory exceptions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "exceptions"],
+  "properties": {
+    "$schema": { "const": "./dependency-advisory-exceptions.schema.json" },
+    "schema_version": { "const": "ultrafuzz.dependency-advisory-exceptions.v1" },
+    "exceptions": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/exception" }
+    }
+  },
+  "$defs": {
+    "longText": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 2000,
+      "pattern": "\\S"
+    },
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "advisory",
+        "package",
+        "severity",
+        "status",
+        "reviewed_on",
+        "expires",
+        "owner",
+        "tracking_issue",
+        "reachability",
+        "rationale"
+      ],
+      "properties": {
+        "advisory": {
+          "type": "string",
+          "pattern": "^GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}$"
+        },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 214,
+          "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
+        },
+        "severity": { "enum": ["high", "critical"] },
+        "status": { "enum": ["not-reachable", "remediation-in-progress", "risk-accepted"] },
+        "reviewed_on": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "expires": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "owner": {
+          "type": "string",
+          "pattern": "^@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+        },
+        "tracking_issue": { "type": "string", "pattern": "^#[1-9][0-9]*$" },
+        "reachability": { "$ref": "#/$defs/longText" },
+        "rationale": { "$ref": "#/$defs/longText" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "$schema": "./dependency-advisory-exceptions.schema.json",
+      "schema_version": "ultrafuzz.dependency-advisory-exceptions.v1",
+      "exceptions": [
+        {
+          "advisory": "GHSA-2345-6789-cfgh",
+          "package": "example-package",
+          "severity": "high",
+          "status": "not-reachable",
+          "reviewed_on": "2026-08-17",
+          "expires": "2026-09-16",
+          "owner": "@security-owner",
+          "tracking_issue": "#123",
+          "reachability": "The vulnerable parser is not called by production inputs.",
+          "rationale": "Retained while the tracked upstream upgrade is validated."
+        }
+      ]
+    }
+  ]
+}
