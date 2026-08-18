@@ -74,7 +74,7 @@ import {
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
-import { modelDestination } from "../src/data-governance.js";
+import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -165,12 +165,18 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     .map((name) => name.trim())
     .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
     .join(",");
+  const inheritedModelRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent", "KimiAgent"].flatMap((agent) =>
+      effectiveRouteEnvironment(agent, process.env).map(([name]) => [name, undefined])
+    )
+  );
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
       env: {
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
+        ...inheritedModelRouteEnvironment,
         ALL_PROXY: undefined,
         HTTP_PROXY: undefined,
         HTTPS_PROXY: undefined,
