@@ -343,6 +343,26 @@ test("source links cannot point to the run itself", () => {
   );
 });
 
+test("run source refs are bound to the document run identity", () => {
+  const source_revision = "c".repeat(40);
+  const foreignRef = "refs/ultrafuzz/runs/run-foreign/source";
+  assert.throws(
+    () => assertRunPlanDocument({ ...canonicalRunPlan(), source_revision, source_ref: foreignRef }),
+    /source ref does not belong/u
+  );
+  assert.throws(
+    () => assertRunMetadataDocument({ ...canonicalRunMetadata(), source_revision, source_ref: foreignRef }),
+    /source ref does not belong/u
+  );
+  assert.doesNotThrow(() =>
+    assertRunPlanDocument({
+      ...canonicalRunPlan(),
+      source_revision,
+      source_ref: "refs/ultrafuzz/runs/run-child/source"
+    })
+  );
+});
+
 test("configuration redaction keys must exactly project their paths", () => {
   const redactions = canonicalConfigRedactions();
   redactions.entries[0]!.key = "providers.modal.other-token";

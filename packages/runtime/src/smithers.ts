@@ -15,7 +15,6 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
-  invariantPinnedSourceRefExists,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunPlanDocument,
@@ -60,6 +59,7 @@ import {
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import { retryChainAttemptCount, retryFallbackProfileIds } from "./retry-chain.js";
+import { assertRunSourceRevision, captureRunSourceRevision, type RunSourceRevision } from "./source-revision.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import {
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
@@ -1124,6 +1124,8 @@ export interface SmithersCompileInput {
   graph: ExpandedGraph;
   runLayout: RunLayout;
   projectRoot?: string;
+  sourceRevision?: string;
+  sourceRef?: string;
   workflowName?: string;
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
@@ -1153,6 +1155,8 @@ export interface CompiledSmithersWorkflow {
   workflowName: string;
   tasks: readonly CompiledSmithersTask[];
   projectRoot: string;
+  sourceRevision?: string;
+  sourceRef?: string;
   workflowPath: string;
   evidenceWorkflowPath: string;
   expandedGraphPath: string;
@@ -1241,6 +1245,7 @@ export interface SmithersCommandSnapshot {
 
 export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSmithersWorkflow {
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
+  const source = sourceRevisionForCompilation(input, projectRoot);
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
   if (!isCompatibleSmithersRunId(smithersRunId)) {
@@ -1276,6 +1281,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           node,
           attempt,
           runLayout: input.runLayout,
+          sourceRevision: source?.revision,
+          sourceRef: source?.ref,
           workflowName,
           renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
@@ -1309,9 +1316,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   // expectation is computed for every execution mode. Every task worktree is
   // created locally, so Git's shared worktree-config prerequisite is enabled
   // whenever a pinned expectation exists.
-  const pinnedSubmodules = invariantPinnedSourceRefExists(projectRoot)
-    ? pinnedSubmoduleExpectationForProject(projectRoot)
-    : undefined;
+  const pinnedSubmodules = source?.pinned === true ? pinnedSubmoduleExpectationForProject(projectRoot) : undefined;
   enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
@@ -1320,6 +1325,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     workflowName,
     tasks,
     projectRoot,
+    ...(source === undefined ? {} : { sourceRevision: source.revision, sourceRef: source.ref }),
     workflowPath,
     evidenceWorkflowPath,
     expandedGraphPath,
@@ -1358,6 +1364,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     run_id: input.runLayout.runId,
     smithers_run_id: smithersRunId,
     workflow_name: workflowName,
+    ...(source === undefined ? {} : { source_revision: source.revision, source_ref: source.ref }),
     pinned_submodules: pinnedSubmodules ?? null,
     tasks
   };
@@ -1391,6 +1398,25 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     "evidence workflow"
   );
   return compiled;
+}
+
+function sourceRevisionForCompilation(
+  input: Pick<SmithersCompileInput, "runLayout" | "sourceRevision" | "sourceRef">,
+  projectRoot: string
+): RunSourceRevision | undefined {
+  if (input.sourceRevision === undefined && input.sourceRef === undefined) {
+    return captureRunSourceRevision(projectRoot, input.runLayout.runId);
+  }
+  if (input.sourceRevision === undefined || input.sourceRef === undefined) {
+    throw new Error("Smithers source revision and ref must be supplied together");
+  }
+  const source: RunSourceRevision = {
+    revision: input.sourceRevision,
+    ref: input.sourceRef,
+    pinned: input.sourceRef === "refs/heads/ultrafuzz-pinned"
+  };
+  assertRunSourceRevision(projectRoot, source);
+  return source;
 }
 
 /**
@@ -4103,6 +4129,8 @@ function compileTask(input: {
   node: ExpandedNode;
   attempt: NodeAttemptProvenance;
   runLayout: RunLayout;
+  sourceRevision?: string;
+  sourceRef?: string;
   workflowName: string;
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
@@ -4195,7 +4223,10 @@ function compileTask(input: {
       primitive: "worktree",
       path: workspacePath,
       repoPath: input.config.project.repo,
-      trustModel: input.config.permissions.trustModel
+      trustModel: input.config.permissions.trustModel,
+      ...(input.sourceRevision === undefined
+        ? {}
+        : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! })
     },
     artifacts: {
       dir: artifactDir,
@@ -4235,6 +4266,9 @@ function compileTask(input: {
     heartbeatTimeoutMs,
     retries,
     retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+    ...(input.sourceRevision === undefined
+      ? {}
+      : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! }),
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
@@ -4577,6 +4611,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
       sourceProjectRoot: compiled.projectRoot,
+      sourceRevision: task.sourceRevision ?? null,
+      sourceRef: task.sourceRef ?? null,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),

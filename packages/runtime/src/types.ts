@@ -156,6 +156,8 @@ export interface PlanRunValue {
   run_id: string;
   run_root: string;
   source_run_id?: string;
+  source_revision?: string;
+  source_ref?: string;
   graph: PlannedGraph;
   expanded_graph: ExpandedGraph;
   graph_fingerprint: string;

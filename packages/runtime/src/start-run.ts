@@ -161,6 +161,8 @@ export async function startRun(input: StartRunInput) {
       graph: plan.expanded_graph,
       runLayout: plan.layout,
       projectRoot: plan.validation.project_root,
+      sourceRevision: plan.source_revision,
+      sourceRef: plan.source_ref,
       workflowName: `ultrafuzz-${plan.run_id}`,
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,

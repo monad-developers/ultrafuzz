@@ -64,6 +64,65 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
   }
 });
 
+test("a real Smithers worktree uses the recorded launch commit after its branch moves", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-source-revision-"));
+  const workflowDir = path.join(root, ".smithers", "workflows");
+  const workflowPath = path.join(workflowDir, "source-revision.tsx");
+  const worktreePath = path.join(root, ".smithers", "worktrees", "source-revision");
+  const canonicalRoot = path.join(root, ".ultrafuzz", "source-revision");
+  const canonicalPath = path.join(canonicalRoot, "observed.json");
+  const runId = `source-revision-${process.pid}-${Date.now()}`;
+
+  try {
+    fs.mkdirSync(workflowDir, { recursive: true });
+    fs.mkdirSync(canonicalRoot, { recursive: true });
+    execGit(root, ["init", "--quiet", "--initial-branch=main"]);
+    execGit(root, ["config", "user.name", "Ultrafuzz Synthetic Test"]);
+    execGit(root, ["config", "user.email", "synthetic@example.invalid"]);
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.smithers/\n/.ultrafuzz/\n", "utf8");
+    fs.writeFileSync(path.join(root, "main-only.txt"), "main\n", "utf8");
+    execGit(root, ["add", ".gitignore", "main-only.txt"]);
+    execGit(root, ["commit", "--quiet", "-m", "main source"]);
+    const mainRevision = execGit(root, ["rev-parse", "HEAD"]).trim();
+
+    execGit(root, ["switch", "--quiet", "-c", "develop"]);
+    fs.rmSync(path.join(root, "main-only.txt"));
+    fs.writeFileSync(path.join(root, "develop-only.txt"), "develop\n", "utf8");
+    execGit(root, ["add", "--all"]);
+    execGit(root, ["commit", "--quiet", "-m", "develop source"]);
+    const sourceRevision = execGit(root, ["rev-parse", "HEAD"]).trim();
+    execGit(root, ["update-ref", `refs/ultrafuzz/runs/${runId}/source`, sourceRevision]);
+    execGit(root, ["reset", "--quiet", "--hard", mainRevision]);
+
+    const smithersPackageRoot = fs.realpathSync(path.join(runtimePackageRoot(), "node_modules", "smthrs"));
+    fs.symlinkSync(path.dirname(smithersPackageRoot), path.join(root, ".smithers", "node_modules"), "dir");
+    fs.writeFileSync(
+      workflowPath,
+      sourceRevisionWorkflowSource({ canonicalPath, sourceRevision, worktreePath }),
+      "utf8"
+    );
+
+    execFileSync(
+      smithersBinary(),
+      ["up", workflowPath, "--detach", "--run-id", runId, "--root", root, "--input", "{}", "--format", "json"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "", SMITHERS_POST_FAILURE: "0" }
+      }
+    );
+
+    await waitForSuccessfulCompletion(root, runId);
+    assert.deepEqual(JSON.parse(fs.readFileSync(canonicalPath, "utf8")), {
+      head: sourceRevision,
+      developOnly: true,
+      mainOnly: false
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function syntheticWorkflowSource(input: {
   artifactModule: string;
   canonicalRoot: string;
@@ -111,6 +170,49 @@ export default smithers(() => (
 `;
 }
 
+function sourceRevisionWorkflowSource(input: {
+  canonicalPath: string;
+  sourceRevision: string;
+  worktreePath: string;
+}): string {
+  return `/** @jsxImportSource smthrs */
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { createSmithers } from "smthrs";
+import { z } from "zod/v4";
+
+const canonicalPath = ${JSON.stringify(input.canonicalPath)};
+const sourceRevision = ${JSON.stringify(input.sourceRevision)};
+const worktreePath = ${JSON.stringify(input.worktreePath)};
+const { Workflow, Worktree, Task, smithers, outputs } = createSmithers({
+  input: z.object({}),
+  inspect: z.object({ head: z.string(), developOnly: z.boolean(), mainOnly: z.boolean() })
+});
+
+export default smithers(() => (
+  <Workflow name="synthetic-source-revision">
+    <Worktree
+      path={worktreePath}
+      branch="synthetic-source-revision"
+      baseBranch={sourceRevision}
+    >
+      <Task id="inspect" output={outputs.inspect} retries={0}>
+        {() => {
+          const observed = {
+            head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim(),
+            developOnly: fs.existsSync(worktreePath + "/develop-only.txt"),
+            mainOnly: fs.existsSync(worktreePath + "/main-only.txt")
+          };
+          fs.writeFileSync(canonicalPath, JSON.stringify(observed));
+          return observed;
+        }}
+      </Task>
+    </Worktree>
+  </Workflow>
+));
+`;
+}
+
 async function waitForSuccessfulReap(root: string, runId: string, worktreePath: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   let status = "unknown";
@@ -135,6 +237,31 @@ async function waitForSuccessfulReap(root: string, runId: string, worktreePath: 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`synthetic Smithers workflow did not reap its worktree; final status ${status}`);
+}
+
+async function waitForSuccessfulCompletion(root: string, runId: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let status = "unknown";
+  while (Date.now() < deadline) {
+    try {
+      const inspected = JSON.parse(
+        execFileSync(smithersBinary(), ["inspect", runId, "--format", "json"], {
+          cwd: root,
+          encoding: "utf8"
+        })
+      ) as { status?: string; run?: { status?: string } };
+      status = inspected.status ?? inspected.run?.status ?? status;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+    if (status === "finished") return;
+    if (["failed", "cancelled", "canceled"].includes(status)) {
+      throw new Error(`synthetic Smithers workflow ended with status ${status}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`synthetic Smithers workflow did not finish; final status ${status}`);
 }
 
 function smithersBinary(): string {

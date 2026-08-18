@@ -12,6 +12,7 @@ import {
   readCleanAuditJournal,
   type CleanAuditRecord
 } from "./audit-contracts.js";
+import { deleteRunSourceRevisions, runSourceRef, type RunSourceRevision } from "./source-revision.js";
 import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
@@ -68,6 +69,10 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
     if (cloudCleanup !== undefined) {
       return runtimeFailure([cloudCleanup]);
     }
+    const sourceRefCleanup = cleanupRunSourceRefs(input.projectRoot, planned);
+    if (sourceRefCleanup !== undefined) {
+      return runtimeFailure([sourceRefCleanup]);
+    }
     for (const removal of planned) {
       fs.rmSync(removal.absolutePath, { recursive: true, force: false });
     }
@@ -97,6 +102,30 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
       selections: planned.map((removal) => removal.selection)
     }
   });
+}
+
+function cleanupRunSourceRefs(projectRoot: string, planned: PlannedRemoval[]): RuntimeDiagnostic | undefined {
+  try {
+    const sources = runRootsForCleanup(planned).flatMap((root): RunSourceRevision[] => {
+      const planPath = path.join(root, "plan.json");
+      if (!fs.existsSync(planPath)) return [];
+      assertNoSymlinkComponents(root, planPath, "source revision cleanup plan");
+      const plan = readRunPlanDocument(planPath, path.basename(root));
+      const ref = runSourceRef(plan.run_id);
+      return plan.source_revision === undefined || plan.source_ref !== ref
+        ? []
+        : [{ revision: plan.source_revision, ref, pinned: false }];
+    });
+    deleteRunSourceRevisions(projectRoot, sources);
+    return undefined;
+  } catch {
+    return runtimeError(
+      "CLEAN_SOURCE_REF_FAILED",
+      "run source revision cleanup failed; local evidence was preserved",
+      "clean",
+      ".ultrafuzz/runs"
+    );
+  }
 }
 
 async function cleanupCloudRunStorage(
@@ -151,20 +180,24 @@ async function cleanupCloudRunStorage(
 }
 
 function cloudRunsForCleanup(planned: PlannedRemoval[]): Array<{ runId: string; modal: ModalExecutionProviderConfig }> {
-  const runRoots = planned.flatMap((removal) => {
+  return runRootsForCleanup(planned).flatMap((root) => {
+    const runId = path.basename(root);
+    const modal = readPersistedModalExecution(root);
+    return modal === undefined ? [] : [{ runId, modal }];
+  });
+}
+
+function runRootsForCleanup(planned: PlannedRemoval[]): string[] {
+  return planned.flatMap((removal) => {
     const match = /^runs\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(removal.selection);
     if (match?.[1] !== undefined) {
-      return [{ runId: match[1], root: removal.absolutePath }];
+      return [removal.absolutePath];
     }
     if (removal.selection !== "runs") return [];
     return fs
       .readdirSync(removal.absolutePath, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
-      .map((entry) => ({ runId: entry.name, root: path.join(removal.absolutePath, entry.name) }));
-  });
-  return runRoots.flatMap(({ runId, root }) => {
-    const modal = readPersistedModalExecution(root);
-    return modal === undefined ? [] : [{ runId, modal }];
+      .map((entry) => path.join(removal.absolutePath, entry.name));
   });
 }
 

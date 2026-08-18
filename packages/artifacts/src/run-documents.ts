@@ -13,6 +13,9 @@ export const CONFIG_REDACTIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:
 export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v3" as const;
 export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:3" as const;
 export const RUN_METADATA_SCHEMA_VERSION = "ultrafuzz.run-metadata.v2" as const;
+
+const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
+const RUN_SOURCE_REF = /^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u;
 export const RUN_METADATA_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-metadata:2" as const;
 
 const MAX_RUNTIME_DOCUMENT_BYTES = 64 * 1024 * 1024;
@@ -122,6 +125,8 @@ export interface RunPlanDocument {
   run_id: string;
   mode: "run" | "resume" | "replay" | "fork";
   source_run_id?: string;
+  source_revision?: string;
+  source_ref?: string;
   graph_fingerprint: string;
   config_fingerprint: string;
   redacted_config_fingerprint: string;
@@ -260,6 +265,8 @@ export interface RunMetadataDocument {
   run_id: string;
   created_at: string;
   source_run_id?: string;
+  source_revision?: string;
+  source_ref?: string;
   mode: "run" | "resume" | "replay" | "fork";
   workflow_ids: string[];
   redacted_config_fingerprint: string;
@@ -340,6 +347,7 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
   if (expectedRunId !== undefined && document.run_id !== expectedRunId) {
     throw new Error(`run plan identity does not match run ${JSON.stringify(expectedRunId)}`);
   }
+  assertSourceRevisionPair(document.source_revision, document.source_ref, document.run_id, "run plan");
   const attempts = new Set<string>();
   for (const prompt of document.rendered_prompts) {
     if (attempts.has(prompt.attempt_id)) {
@@ -356,6 +364,7 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
   if (expectedRunId !== undefined && document.run_id !== expectedRunId) {
     throw new Error(`run metadata identity does not match run ${JSON.stringify(expectedRunId)}`);
   }
+  assertSourceRevisionPair(document.source_revision, document.source_ref, document.run_id, "run metadata");
   if (document.workflow === undefined) {
     if (document.workflow_ids.length !== 0) throw new Error("unlinked run metadata cannot carry workflow IDs");
   } else if (document.workflow_ids.length !== 1 || document.workflow_ids[0] !== document.workflow.run_id) {
@@ -375,6 +384,23 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
     }
   }
   return document;
+}
+
+function assertSourceRevisionPair(
+  revision: string | undefined,
+  ref: string | undefined,
+  runId: string,
+  label: string
+): void {
+  if ((revision === undefined) !== (ref === undefined)) {
+    throw new Error(`${label} source revision and ref must be recorded together`);
+  }
+  if ((revision !== undefined && !GIT_OBJECT_ID.test(revision)) || (ref !== undefined && !RUN_SOURCE_REF.test(ref))) {
+    throw new Error(`${label} source revision binding is invalid`);
+  }
+  if (ref !== undefined && ref !== "refs/heads/ultrafuzz-pinned" && ref !== `refs/ultrafuzz/runs/${runId}/source`) {
+    throw new Error(`${label} source ref does not belong to run ${JSON.stringify(runId)}`);
+  }
 }
 
 export function readSourceRunDocument(filePath: string, expectedRunId?: string): SourceRunDocument {

@@ -78,12 +78,19 @@ import { assertControllerSourceDigest, inspectControllerSource } from "./control
 import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import {
+  assertLaunchCheckoutRevision,
+  captureLaunchSourceRevision,
+  deleteRunSourceRevision,
+  publishRunSourceRevision
+} from "./source-revision.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
 interface PlanRunHooks {
   enforceDataGovernance?: boolean;
+  afterSourceCapture?(source: ReturnType<typeof captureLaunchSourceRevision>): Promise<void> | void;
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
@@ -92,6 +99,20 @@ interface PlanRunHooks {
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const projectRoot = path.resolve(input.projectRoot);
+  const runId = input.runId ?? generateRunId(input.mode ?? "run");
+  let sourceRevision: ReturnType<typeof captureLaunchSourceRevision>;
+  try {
+    sourceRevision = captureLaunchSourceRevision(projectRoot, runId);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_FAILED")]);
+  }
+  try {
+    await hooks.afterSourceCapture?.(sourceRevision);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_HOOK_FAILED")
+    ]);
+  }
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
     return runtimeFailure<PlanRunValue>(validation.diagnostics);
@@ -133,7 +154,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
   };
 
-  const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
   const redacted = redactResolvedConfig(resolved.config);
   const redactedConfigFingerprint = sha256Stable(redacted.config);
@@ -327,6 +347,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       runMetadata: {
         mode: input.mode ?? "run",
         workflow_ids: [],
+        ...(sourceRevision === undefined
+          ? {}
+          : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
         redacted_config_fingerprint: redactedConfigFingerprint,
         prompt_digest: promptDigest,
         audit_profile: {
@@ -381,42 +404,74 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (validation.value.topology === undefined) {
     throw new Error("validated run plan is missing its topology summary");
   }
-  writeRunPlanDocument(path.join(layout.root, "plan.json"), {
-    schema_version: RUN_PLAN_SCHEMA_VERSION,
-    run_id: runId,
-    mode: input.mode ?? "run",
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    prompt_digest: promptDigest,
-    controller_source_digest: controllerSource.digest,
-    execution: resolved.config.execution,
-    topology: validation.value.topology,
-    audit_profile: {
-      id: auditPolicy.auditProfile,
-      catalog_digest: auditPolicy.catalogDigest,
-      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
-      topology_path_origin: auditPolicy.topologyPathOrigin,
-      topology_digest: auditPolicy.topologyDigest,
+  if (sourceRevision !== undefined) {
+    try {
+      assertLaunchCheckoutRevision(projectRoot, sourceRevision);
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CHANGED")]);
+    }
+  }
+  let sourceRefCreated = false;
+  try {
+    if (sourceRevision !== undefined) sourceRefCreated = publishRunSourceRevision(projectRoot, sourceRevision);
+    writeRunPlanDocument(path.join(layout.root, "plan.json"), {
+      schema_version: RUN_PLAN_SCHEMA_VERSION,
+      run_id: runId,
+      mode: input.mode ?? "run",
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      ...(sourceRevision === undefined
+        ? {}
+        : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
       prompt_digest: promptDigest,
-      expanded_graph_fingerprint: graphFingerprint,
-      effective_settings: auditPolicy.effectiveSettings,
-      setting_origins: auditPolicy.settingOrigins,
-      overridden_settings: auditPolicy.overriddenSettings,
-      topology_overridden: auditPolicy.topologyOverridden
-    },
-    data_governance: governanceReference,
-    rendered_prompts: persistedRenderedPrompts,
-    policy_posture: Object.fromEntries(
-      Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
-    ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
-  });
+      controller_source_digest: controllerSource.digest,
+      execution: resolved.config.execution,
+      topology: validation.value.topology,
+      audit_profile: {
+        id: auditPolicy.auditProfile,
+        catalog_digest: auditPolicy.catalogDigest,
+        effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+        topology_path_origin: auditPolicy.topologyPathOrigin,
+        topology_digest: auditPolicy.topologyDigest,
+        prompt_digest: promptDigest,
+        expanded_graph_fingerprint: graphFingerprint,
+        effective_settings: auditPolicy.effectiveSettings,
+        setting_origins: auditPolicy.settingOrigins,
+        overridden_settings: auditPolicy.overriddenSettings,
+        topology_overridden: auditPolicy.topologyOverridden
+      },
+      data_governance: governanceReference,
+      rendered_prompts: persistedRenderedPrompts,
+      policy_posture: Object.fromEntries(
+        Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
+      ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
+    });
+  } catch (error) {
+    if (sourceRefCreated && sourceRevision !== undefined) {
+      try {
+        deleteRunSourceRevision(projectRoot, sourceRevision);
+      } catch (rollbackError) {
+        return runtimeFailure<PlanRunValue>([
+          diagnosticFromError(
+            new AggregateError([error, rollbackError], "run plan persistence and source ref rollback failed"),
+            "runtime",
+            "RUN_SOURCE_REVISION_ROLLBACK_FAILED"
+          )
+        ]);
+      }
+    }
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_PERSIST_FAILED")]);
+  }
 
   return runtimeResult(true, {
     run_id: runId,
     run_root: layout.root,
     ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+    ...(sourceRevision === undefined
+      ? {}
+      : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
     graph,
     expanded_graph: expandedGraph,
     graph_fingerprint: graphFingerprint,

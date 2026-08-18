@@ -953,6 +953,8 @@ function sameResumableNodeInput(
     left.run_id === right.run_id &&
     left.task_id === right.task_id &&
     left.attempt_id === right.attempt_id &&
+    left.source_revision === right.source_revision &&
+    left.source_ref === right.source_ref &&
     (ignoreExecutionGeneration || left.execution_generation === right.execution_generation) &&
     left.workflow_path === right.workflow_path &&
     left.prompt_path === right.prompt_path &&
