@@ -3074,7 +3074,7 @@ test(
     );
     const { createCodexAgent } = await loadGeneratedCodexAgent(project);
     const codexHome = path.join(process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT!, "codex");
-    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
 
     const agentEnvironment = (): Record<string, string> =>
       (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
