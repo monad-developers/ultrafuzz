@@ -20,6 +20,26 @@ test("the full stock controller closure is digest-bound to sealed bytes", () => 
   assert.match(inspected.digest, /^[a-f0-9]{64}$/u);
   assert.doesNotThrow(() => c.assertControllerSourceDigest(project, inspected.digest));
   assert.doesNotThrow(() => c.assertControllerExecutionSnapshotDigest(executionFiles, inspected.digest));
+  assert.doesNotThrow(() => c.assertProviderScopedSensitiveEnvironmentCapability(executionFiles, "MAINNET_RPC_URL"));
+  const legacyExecutionFiles = executionFiles.map((file) => ({ ...file, contents: Buffer.from(file.contents) }));
+  const legacyEnvironment = legacyExecutionFiles.find(
+    (file) => file.snapshotPath === ".smithers/agents/environment.ts"
+  );
+  assert.ok(legacyEnvironment);
+  legacyEnvironment.contents = Buffer.from(
+    legacyEnvironment.contents
+      .toString("utf8")
+      .replace(
+        `export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =\n  "${c.PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY}" as const;\n\n`,
+        ""
+      ),
+    "utf8"
+  );
+  assert.doesNotThrow(() => c.assertProviderScopedSensitiveEnvironmentCapability(legacyExecutionFiles, ""));
+  assert.throws(
+    () => c.assertProviderScopedSensitiveEnvironmentCapability(legacyExecutionFiles, "MAINNET_RPC_URL"),
+    /predates provider-scoped sensitive allowlisted environment handling.*start a new run/u
+  );
   executionFiles[0]!.contents = Buffer.from("changed");
   assert.throws(
     () => c.assertControllerExecutionSnapshotDigest(executionFiles, inspected.digest),

@@ -38,7 +38,7 @@ const BIP39_WORD_COUNTS = [24, 21, 18, 15, 12] as const;
 const ENGLISH_BIP39_WORDS = new Set(englishWordlist);
 const NON_SECRET_EXPLICIT_ENVIRONMENT_NAMES = new Set(["KIMI_BASE_URL"]);
 const SENSITIVE_ENVIRONMENT_NAME_PATTERN =
-  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CLIENT_?SECRET|CREDENTIAL|AUTHORIZATION)(?:_|$)/iu;
+  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CLIENT_?SECRET|CREDENTIALS?|AUTH(?:ORIZATION)?)(?:_|$)/iu;
 
 export function isSensitiveKeyName(key: string): boolean {
   const normalized = key

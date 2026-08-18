@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   containsSensitiveSecrets,
+  isSensitiveEnvironmentName,
   matchesRedactedText,
   redactSecretsInText,
   redactSecretsInValue,
@@ -11,6 +12,21 @@ import {
 } from "../src/index.js";
 
 const mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+test("sensitive environment names cover the provider credential vocabulary", () => {
+  for (const name of [
+    "CUSTOM_AUTH",
+    "AWS_ACCESS_KEY_ID",
+    "SSH_PRIVATE_KEY",
+    "DATABASE_PASSWD",
+    "CLIENT_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AUTHORIZATION"
+  ]) {
+    assert.equal(isSensitiveEnvironmentName(name), true, name);
+  }
+  assert.equal(isSensitiveEnvironmentName("FOUNDRY_PROFILE"), false);
+});
 
 test("redaction recognizes maintained key, token, mnemonic, URL, and entropy patterns", () => {
   const fixtures = [

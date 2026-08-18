@@ -561,7 +561,8 @@ function readGovernedSourceIdentity(
   const governance = parseStrictJsonBytes(contents),
     target = isRecord(governance) && isRecord(governance.target) ? governance.target : {},
     commit = target.commit,
-    tree = target.tree;
+    tree = target.tree,
+    dirty = target.dirty;
   if (
     typeof commit !== "string" ||
     typeof tree !== "string" ||
@@ -569,6 +570,7 @@ function readGovernedSourceIdentity(
     !/^[a-f0-9]{40,64}$/u.test(tree)
   )
     throw new Error("cloud source governance has an invalid Git identity");
+  if (dirty !== false) throw new Error("cloud handoff requires a clean governed Git source");
   const actualTree = execFileSync(gitExecutable, ["rev-parse", "--verify", `${commit}^{tree}`], {
     cwd: projectRoot,
     env: deterministicGitEnvironment(gitExecutable),

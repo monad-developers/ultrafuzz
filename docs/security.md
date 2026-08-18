@@ -112,6 +112,22 @@ complete example are maintained in the checked-in
 Keep the file's `$schema` reference so editors and reviewers use the same
 contract that the CI policy validates.
 
+The inventory also opens installed packages that declare bundled dependencies,
+validates their bounded no-symlink package trees, and submits every exact bundled
+version to the same advisory endpoint. This matters for the private workflow
+controller's pinned npm: pnpm otherwise reports npm as one opaque package and
+omits the packages npm ships inside itself. The lockfile-bound npm patch mirrors
+the green npm v11 upstream fixes in `npm/cli#9842` and `npm/cli#9872`: bundled
+`brace-expansion` 5.0.9, `ip-address` 10.5.0, `tar` 7.5.22, and `undici` 6.28.0.
+The patch can be removed when an upstream npm release carries those versions;
+the operator npm closure digest and advisory inventory both fail if that
+composition drifts. Pnpm's generated `node_modules/.bin` shims are excluded from
+the private snapshot because they embed installation-specific absolute paths and
+the controller invokes npm's pinned CLI directly; the snapshot test also proves
+that no such shim directory is copied. Socket's duplicate obfuscated-code
+warnings refer to npm's official bundled/minified distribution; no warning is
+suppressed, and registry integrity plus the closure digest cover those bytes.
+
 ## Agent process environment
 
 The workflow controller receives only the active agents' configured API-key
@@ -136,11 +152,29 @@ registered schema path is checked against its pinned digest. This keeps the
 producer and host on the same contract; it does not turn same-UID local agent
 execution into an OS security boundary.
 
+The workflow engine is installed by the controller rather than from the target
+repository. Ultrafuzz verifies the complete closure of its exact npm dependency,
+copies that closure into the target-specific private controller directory, and
+makes every copied directory and file read-only. It checks the closure before
+and after the script-disabled, registry-pinned install and again before cache
+reuse. The runner toolcache npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority;
+the latter remains only the run-owned validator launcher directory.
+
 Workflows that intentionally need additional variables can opt in explicitly:
 
 ```sh
-ULTRAFUZZ_AGENT_ENV_ALLOWLIST=FOUNDRY_PROFILE,MAINNET_RPC_URL ultrafuzz run
+ULTRAFUZZ_AGENT_ENV_ALLOWLIST=FOUNDRY_PROFILE ultrafuzz run
 ```
 
 The allowlist is operator-owned environment configuration, not project TOML.
+It is global only for ordinary workflow inputs. Credential-like names (for
+example, names containing `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `PASSWORD`,
+`PASSWD`, `SECRET`, or `TOKEN`) and values matching maintained secret formats,
+including credential-bearing RPC URLs, are blanked from unrelated model
+children and omitted from unrelated Modal task secrets. A recognized
+provider-route prefix such as `AWS_` scopes the value to that route. Arbitrary
+unrecognized credentials are not supported and reach no model task. Stock
+agent API keys use their validated canonical `api_key_env`; the active adapter
+restores only its own key. Use only a credential-free RPC endpoint when an RPC
+URL must remain a global input.
 Do not add unrelated credentials merely to make them available to prompts.

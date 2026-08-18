@@ -340,19 +340,19 @@ for prompt analysis today.
 
 ## Supported Environment Overrides
 
-| Variable                        | Effect                                                           |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                     |
-| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                  |
-| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                     |
-| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra variables forwarded to workflow processes. |
+| Variable                        | Effect                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                                 |
+| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                                      |
+| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                                   |
+| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                                      |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |
 
 Ultrafuzz automatically forwards only the credentials configured for active
 agents plus normal runtime essentials. Use `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` for
-deliberate workflow inputs such as RPC URLs or Foundry profiles. This is secret
-hygiene, not an agent sandbox; the trusted local execution model remains
-unchanged.
+deliberate non-secret workflow inputs such as Foundry profiles or
+credential-free RPC URLs. This is secret hygiene, not an agent sandbox; the
+trusted local execution model remains unchanged.
 
 ## Redaction
 

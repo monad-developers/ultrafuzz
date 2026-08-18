@@ -142,17 +142,36 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     let recoveryMarker: string | undefined;
     let observedRateLimit = false;
     let lastRateLimitError: unknown;
+    let retainedRateLimitRelay: BufferedAttemptRelay | undefined;
     const originalResumeSession = normalizedResumeSession(options?.resumeSession);
     const priorAttemptActionSnapshots = new BoundedActionSnapshots();
+    const discardRetainedRateLimitRelay = () => {
+      const retainedRelay = retainedRateLimitRelay;
+      retainedRateLimitRelay = undefined;
+      retainedRelay?.discard();
+    };
+    const releaseRetainedRateLimitRelay = (): { error: unknown } | undefined => {
+      const retainedRelay = retainedRateLimitRelay;
+      retainedRateLimitRelay = undefined;
+      if (retainedRelay === undefined) return undefined;
+      retainedRelay.release();
+      return retainedRelay.callerCallbackError();
+    };
     for (;;) {
       if (options?.abortSignal?.aborted === true) {
+        discardRetainedRateLimitRelay();
         throw abortReason(options.abortSignal);
       }
       const remainingTimeoutMs = remainingUntil(totalDeadline);
       if (remainingTimeoutMs !== undefined && remainingTimeoutMs <= 0) {
+        discardRetainedRateLimitRelay();
         throw this.retryTimeout(totalTimeoutMs, options);
       }
-      if (observedRateLimit && performance.now() >= retryDeadline) throw lastRateLimitError;
+      if (observedRateLimit && performance.now() >= retryDeadline) {
+        const callbackError = releaseRetainedRateLimitRelay();
+        if (callbackError !== undefined) throw callbackError.error;
+        throw lastRateLimitError;
+      }
       const relay = new BufferedAttemptRelay(options, priorAttemptActionSnapshots);
       const expectedResumeSession = recoveryResumeSession ?? originalResumeSession;
       let result: T;
@@ -171,30 +190,41 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       } catch (error) {
         if (options?.abortSignal?.aborted === true) {
           relay.discard();
+          discardRetainedRateLimitRelay();
           throw abortReason(options.abortSignal);
         }
         const conflict = relay.resumeSessionConflict();
         if (conflict !== undefined) {
           relay.discard();
+          discardRetainedRateLimitRelay();
           throw conflict;
         }
         const callbackError = relay.callerCallbackError();
         if (callbackError !== undefined) {
           relay.discard();
+          discardRetainedRateLimitRelay();
           throw callbackError.error;
         }
         if (relay.totalDeadlineExceeded()) {
           relay.discard();
+          discardRetainedRateLimitRelay();
           throw this.retryTimeout(totalTimeoutMs, options);
         }
         if (hasOpenRouterDeadlineMarker(error, OPENROUTER_TOTAL_DEADLINE_MARKER)) {
           relay.discard();
+          discardRetainedRateLimitRelay();
           throw this.retryTimeout(totalTimeoutMs, options);
         }
         if (hasOpenRouterDeadlineMarker(error, OPENROUTER_RECOVERY_DEADLINE_MARKER)) {
           relay.discard();
+          const retainedCallbackError = releaseRetainedRateLimitRelay();
+          if (retainedCallbackError !== undefined) throw retainedCallbackError.error;
           throw lastRateLimitError ?? error;
         }
+        // Any outcome from a replacement operation supersedes the prior 429.
+        // Keep that bounded diagnostic only when buildCommand rejects the
+        // replacement before its provider child can start.
+        discardRetainedRateLimitRelay();
         const terminalRateLimitError = relay.terminalRateLimitError(error);
         const terminalRateLimitObserved = terminalRateLimitError !== undefined;
         const classificationCallbackError = relay.callerCallbackError();
@@ -305,10 +335,17 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
           if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
           throw effectiveRateLimitError;
         }
-        relay.discardRetryOutput();
+        // The backoff decision was made from this attempt, but buildCommand
+        // can cross the recovery deadline before the replacement child starts.
+        // Retain one bounded relay until that child produces an authoritative
+        // outcome so the actual final 429 remains caller-visible in that race.
+        discardRetainedRateLimitRelay();
+        relay.retainRetryOutput();
+        retainedRateLimitRelay = relay;
         retryAttempt += 1;
         continue;
       }
+      discardRetainedRateLimitRelay();
       const successTimeoutRemaining = remainingUntil(totalDeadline);
       if (relay.totalDeadlineExceeded() || (successTimeoutRemaining !== undefined && successTimeoutRemaining <= 0)) {
         relay.discard();
@@ -556,6 +593,10 @@ class BufferedAttemptRelay {
 
   rememberActionSnapshotsForResume(): void {
     this.#priorAttemptActionSnapshots.mergeFrom(this.#attemptActionSnapshots);
+  }
+
+  retainRetryOutput(): void {
+    this.#clearTotalDeadlineTimer();
   }
 
   discardRetryOutput(): void {

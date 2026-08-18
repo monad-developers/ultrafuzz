@@ -337,7 +337,7 @@ rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 | ------------------------------- | --------------------------------------------------------------------------------- |
 | `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`.                          |
 | `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.                           |
-| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra environment-variable names forwarded to workflow processes. |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |
 | `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.                                      |
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.                                       |
 | `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                                                     |

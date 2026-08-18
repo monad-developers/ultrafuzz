@@ -5,6 +5,12 @@ import { readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts"
 import { loadRuntimeTemplate } from "./runtime-template.js";
 const MAX_CONTROLLER_FILE_BYTES = 2 * 1024 * 1024,
   SNAPSHOT_PREFIX = ".smithers/agents/";
+export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
+  "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
+const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_DECLARATION = Buffer.from(
+  `export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =\n  "${PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY}" as const;`,
+  "utf8"
+);
 const UNTRUSTED_SOURCE =
   "controller adapter source must exactly match the packaged stock closure; rerun ultrafuzz init --force";
 const CONTROLLER_NAMES = "claude codex deepseek environment index kimi openrouter provider-home strict-json toml".split(
@@ -56,6 +62,19 @@ export function assertControllerExecutionSnapshotDigest(
     return [{ name, contents }];
   });
   if (controllerDigest(files) !== expectedDigest) throw controllerSourceChanged();
+}
+export function assertProviderScopedSensitiveEnvironmentCapability(
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
+  sensitiveEnvironmentNames: string | undefined
+): void {
+  if ((sensitiveEnvironmentNames ?? "").trim().length === 0) return;
+  const environment = executionFiles.find((file) => file.snapshotPath === `${SNAPSHOT_PREFIX}environment.ts`);
+  if (environment === undefined || !environment.contents.includes(PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_DECLARATION)) {
+    throw new Error(
+      "sealed controller predates provider-scoped sensitive allowlisted environment handling; " +
+        "rerun ultrafuzz init --force and start a new run"
+    );
+  }
 }
 function expectedControllerFiles(): ControllerFile[] {
   return Object.entries(STOCK_CONTROLLER_SOURCE_TEMPLATES)

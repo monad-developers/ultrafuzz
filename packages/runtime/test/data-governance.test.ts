@@ -311,6 +311,10 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
     modelDestination("ClaudeAgent", routed, selectors),
     modelDestination("ClaudeAgent", routed, { ...selectors, AWS_REGION: "eu-west-1" })
   );
+  assert.equal(
+    modelDestination("ClaudeAgent", routed, { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" }),
+    "model:anthropic"
+  );
   const routes = [
     [".codex", "config.toml", '"model_provider" = "private"\n'],
     [".kimi-code", "config.toml", 'provider = "private"\n'],
@@ -322,6 +326,11 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
   }
   for (const agent of ["CodexAgent", "KimiAgent", "ClaudeAgent"])
     assert.match(modelDestination(agent, routed, { HOME: homes }), /^model:.*-route-/u);
+  fs.writeFileSync(
+    path.join(homes, ".claude", "settings.json"),
+    '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}'
+  );
+  assert.equal(modelDestination("ClaudeAgent", routed, { HOME: homes }), "model:anthropic");
   const kimiApiKey = {
     ...config,
     agents: { KimiAgent: { auth: "api-key", apiKeyEnv: "KIMI_API_KEY" } }

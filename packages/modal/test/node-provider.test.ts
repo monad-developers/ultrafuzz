@@ -203,6 +203,22 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("rejects tracked and untracked source changes recorded by cloud governance", async () => {
+    for (const kind of ["tracked", "untracked"] as const) {
+      const fixture = createProjectFixture({ governanceDirty: true });
+      try {
+        if (kind === "tracked") fs.writeFileSync(path.join(fixture.root, "source.txt"), "dirty tracked source\n");
+        else fs.writeFileSync(path.join(fixture.root, "untracked-source.txt"), "dirty untracked source\n");
+
+        await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+          "cloud handoff requires a clean governed Git source"
+        );
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  });
+
   it("preserves pinned source identity and fails closed without its ref", async () => {
     const fixture = createProjectFixture({ pinnedSubmodules: true });
     const pinnedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -2145,6 +2161,51 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("binds only the compiled task's scoped allowlist entries into its Modal secret", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        AWS_SESSION_TOKEN: "claude-route-token",
+        CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN,FOUNDRY_PROFILE",
+        ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN"
+      }
+    });
+    fixture.input.agent_credential_env = [
+      "AWS_SESSION_TOKEN",
+      "FOUNDRY_PROFILE",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"
+    ];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({
+        AWS_SESSION_TOKEN: "claude-route-token",
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN,FOUNDRY_PROFILE",
+        ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN"
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive(fixture.input.execution_snapshot_root);
@@ -2377,7 +2438,12 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
 }
 
 function createProjectFixture(
-  options: { smithersCli?: string; pinnedSubmodules?: boolean; committedSymlink?: boolean } = {}
+  options: {
+    smithersCli?: string;
+    pinnedSubmodules?: boolean;
+    committedSymlink?: boolean;
+    governanceDirty?: boolean;
+  } = {}
 ) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
@@ -2464,7 +2530,7 @@ function createProjectFixture(
     ["controls/ultrafuzz.toml", '[models]\ndefault = "sealed"\n'],
     [
       "controls/data-governance.json",
-      `${JSON.stringify({ policy: { sensitivity: "private" }, target: { commit: governedCommit, tree: governedTree, dirty: false }, required_source_destinations: [] })}\n`
+      `${JSON.stringify({ policy: { sensitivity: options.governanceDirty === true ? "public" : "private" }, target: { commit: governedCommit, tree: governedTree, dirty: options.governanceDirty === true }, required_source_destinations: [] })}\n`
     ],
     [".smithers/agents/index.ts", 'export * from "./kimi.ts";\n'],
     [".smithers/agents/codex.ts", "export const sealedCodex = true;\n"],

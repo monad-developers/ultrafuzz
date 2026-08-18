@@ -80,6 +80,7 @@ import { bindSmithersExecutableCapability } from "../src/smithers-executable-cap
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
@@ -165,18 +166,18 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     .map((name) => name.trim())
     .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
     .join(",");
-  const inheritedModelRouteEnvironment = Object.fromEntries(
-    ["ClaudeAgent", "CodexAgent", "KimiAgent"].flatMap((agent) =>
-      effectiveRouteEnvironment(agent, process.env).map(([name]) => [name, undefined])
-    )
+  const ambientRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent", "KimiAgent"]
+      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
+      .map((name) => [name, undefined])
   );
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
       env: {
+        ...ambientRouteEnvironment,
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
-        ...inheritedModelRouteEnvironment,
         ALL_PROXY: undefined,
         HTTP_PROXY: undefined,
         HTTPS_PROXY: undefined,
@@ -433,6 +434,10 @@ async function loadGeneratedOpenRouterAgent(
     provisionalCallbackLimit?: number;
     actionSnapshotLimit?: number;
     actionSnapshotBytes?: number;
+  },
+  testInstrumentation?: {
+    acknowledgeProvisionalRateLimit?: boolean;
+    expireRetryDeadlineBeforeReplacementBuild?: number;
   }
 ): Promise<{
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
@@ -544,6 +549,52 @@ async function loadGeneratedOpenRouterAgent(
       openRouterSource = replaced;
     }
   }
+  if (testInstrumentation?.acknowledgeProvisionalRateLimit === true) {
+    const from = 'this.#provisionalRateLimit = matchState === "provisional";';
+    const replaced = openRouterSource.replace(
+      from,
+      `${from}
+    if (
+      this.#provisionalRateLimit &&
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE === "stderr-provisional-post-terminal"
+    ) {
+      const acknowledgementPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
+      if (acknowledgementPath !== undefined) writeFileSync(acknowledgementPath, "observed\\n", "utf8");
+    }`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter provisional transition source");
+    openRouterSource = replaced;
+  }
+  const expirationBuild = testInstrumentation?.expireRetryDeadlineBeforeReplacementBuild;
+  if (expirationBuild !== undefined) {
+    assert.equal(
+      Number.isSafeInteger(expirationBuild) && expirationBuild > 0,
+      true,
+      "generated OpenRouter deadline expiration build must be a positive integer"
+    );
+    const counterFrom = 'const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");';
+    const counterReplacement = `${counterFrom}\nlet openRouterTestReplacementBuildCount = 0;`;
+    let replaced = openRouterSource.replace(counterFrom, counterReplacement);
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter attempt-deadline source");
+    openRouterSource = replaced;
+
+    const deadlineFrom = "    const deadlineError = openRouterAttemptDeadlineError(params.options);";
+    replaced = openRouterSource.replace(
+      deadlineFrom,
+      `    const instrumentedAttemptDeadlines = (params.options as Record<PropertyKey, unknown>)[
+      OPENROUTER_ATTEMPT_DEADLINES
+    ] as OpenRouterAttemptDeadlines | undefined;
+    if (
+      instrumentedAttemptDeadlines?.retryDeadlineMs !== undefined &&
+      ++openRouterTestReplacementBuildCount >= ${expirationBuild}
+    ) {
+      instrumentedAttemptDeadlines.retryDeadlineMs = performance.now() - 1;
+    }
+${deadlineFrom}`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter build deadline source");
+    openRouterSource = replaced;
+  }
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
   fs.writeFileSync(
@@ -622,12 +673,14 @@ function installOpenRouterRetryCodexFixture(project: string): {
   counter: string;
   journal: string;
   sentinel: string;
+  provisionalAck: string;
   warningAck: string;
 } {
   const bin = path.join(project, "openrouter-retry-bin");
   const counter = path.join(project, "openrouter-retry-count");
   const journal = path.join(project, "openrouter-retry-journal.jsonl");
   const sentinel = path.join(project, "openrouter-retry-sentinel");
+  const provisionalAck = path.join(project, "openrouter-retry-provisional-ack");
   const warningAck = path.join(project, "openrouter-retry-warning-ack");
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(counter, "0", "utf8");
@@ -644,6 +697,7 @@ if (process.argv.includes("--version")) {
 const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
 const journalPath = process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL;
 const sentinelPath = process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL;
+const provisionalAckPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
 const warningAckPath = process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK;
 let count = 0;
 try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
@@ -841,8 +895,18 @@ process.stdin.on("end", () => {
     const rateLimitMessage =
       "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
     if (mode === "stderr-provisional-post-terminal") {
-      process.stderr.write("HTTP 429");
-      setTimeout(() => {
+      // The test-generated relay acknowledges only after its actual
+      // provisional transition, regardless of how this write is chunked.
+      process.stderr.write("provisional boundary ready\\nHTTP 429");
+      const provisionalAckDeadline = setTimeout(() => {
+        clearInterval(provisionalAckTimer);
+        process.stderr.write("\\nprovisional boundary acknowledgement timed out\\n");
+        process.exitCode = 1;
+      }, 5_000);
+      const provisionalAckTimer = setInterval(() => {
+        if (!provisionalAckPath || !fs.existsSync(provisionalAckPath)) return;
+        clearInterval(provisionalAckTimer);
+        clearTimeout(provisionalAckDeadline);
         fs.appendFileSync(sentinelPath, "provisional-post-terminal-mutation\\n", "utf8");
         process.stdout.write(JSON.stringify({
           type: "message",
@@ -858,11 +922,9 @@ process.stdin.on("end", () => {
             status: "in_progress"
           }
         }) + "\\n");
-        setTimeout(() => {
-          process.stderr.write("\\n");
-          process.exitCode = 1;
-        }, 10);
-      }, 10);
+        process.stderr.write("\\n");
+        process.exitCode = 1;
+      }, 1);
       return;
     }
     if (mode === "stderr-post-terminal" || mode === "stdout-post-terminal") {
@@ -1040,7 +1102,7 @@ process.stdin.on("end", () => {
 `,
     { encoding: "utf8", mode: 0o755 }
   );
-  return { bin, counter, journal, sentinel, warningAck };
+  return { bin, counter, journal, sentinel, provisionalAck, warningAck };
 }
 
 type OpenRouterRetryFixtureEntry = {
@@ -1274,68 +1336,6 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
   return paths;
 }
 
-// `failures` makes the fake npm exit non-zero for its first N invocations, so a test
-// can drive the install retry loop. The npm log doubles as the attempt counter.
-function writeFakeNpmInstaller(
-  project: string,
-  failures: {
-    count: number;
-    stderr: readonly string[];
-    integrity?: string;
-    imported?: string;
-    optional?: string;
-    required?: string;
-  } = { count: 0, stderr: [] }
-): {
-  binDir: string;
-  npmLogPath: string;
-  smithersLogPath: string;
-} {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-fake-npm-"));
-  const npm = path.join(binDir, "npm");
-  const npmLogPath = path.join(project, "npm-install.log");
-  const smithersLogPath = path.join(project, "local-smithers.log");
-  const dependencies = [
-    ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
-    ["@smthrs/tool-context", SMITHERS_VERSION],
-    ["react", "19.2.4"],
-    ["smthrs", SMITHERS_VERSION],
-    ["zod", "4.4.3"]
-  ];
-  fs.writeFileSync(
-    npm,
-    [
-      'import fs from "node:fs";',
-      'import path from "node:path";',
-      `const args = process.argv.slice(2), log = ${JSON.stringify(npmLogPath)};`,
-      'fs.appendFileSync(log, `${args.join(" ")}\\n`);',
-      `if (fs.readFileSync(log, "utf8").trimEnd().split("\\n").length <= ${failures.count}) { ${failures.stderr.map((line) => `process.stderr.write(${JSON.stringify(`${line}\n`)});`).join(" ")} process.exit(1); }`,
-      `const prefix = args[args.indexOf("--prefix") + 1], dependencies = ${JSON.stringify(dependencies)}, packages = { '': JSON.parse(fs.readFileSync(path.join(prefix, 'package.json'), 'utf8')) };`,
-      `const integrity = ${JSON.stringify(failures.integrity ?? `sha512-${Buffer.alloc(64).toString("base64")}`)};`,
-      "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." +
-        JSON.stringify({
-          ...(failures.optional === undefined ? {} : { optionalDependencies: { [failures.optional]: "1.0.0" } }),
-          ...(failures.required === undefined ? {} : { dependencies: { [failures.required]: "1.0.0" } })
-        }) +
-        " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }",
-      "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
-      `fs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n')});`,
-      "fs.chmodSync(target, 0o755);",
-      "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);",
-      "fs.writeFileSync(path.join(prefix, 'package-lock.json'), `${JSON.stringify({ name: 'ultrafuzz-smithers', lockfileVersion: 3, requires: true, packages })}\\n`);"
-    ].join("\n"),
-    "utf8"
-  );
-  const optionalRunner =
-    (failures.imported ?? failures.optional) === undefined
-      ? undefined
-      : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_CLOUD_ENV_LOG) fs.writeFileSync(process.env.SMITHERS_FAKE_CLOUD_ENV_LOG, (process.env.MODAL_TOKEN_ID ?? "") + "|" + (process.env.MODAL_TOKEN_SECRET ?? "") + "\\n");\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
-  if (optionalRunner !== undefined)
-    fs.appendFileSync(npm, `\nfs.writeFileSync(target, ${JSON.stringify(optionalRunner)});\n`);
-  fs.chmodSync(npm, 0o500);
-  return { binDir, npmLogPath, smithersLogPath };
-}
-
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
@@ -1379,6 +1379,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$OPENAI_API_KEY" "$DEEPSEEK_API_KEY" > "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_SENSITIVE_ENV_LOG" ]; then',
+      '  printf \'%s|%s|%s\\n\' "$1" "$ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES" "$OPENAI_SESSION_TOKEN" >> "$SMITHERS_FAKE_SENSITIVE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
@@ -2962,6 +2965,34 @@ test("planned routes equal final generated-adapter validation", { skip: !running
   }
 });
 
+test("generated Claude route validation ignores Azure CLI extension plumbing", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const snapshot = path.join(project, "route-snapshot");
+  const authority = path.join(snapshot, "controls", "data-governance.json");
+  const claudeHome = path.join(project, "claude-home");
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.mkdirSync(claudeHome);
+  fs.writeFileSync(
+    path.join(claudeHome, "settings.json"),
+    '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
+    "utf8"
+  );
+  fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
+  const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+  const child = workflowControlChildEnvironment(
+    { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
+    {
+      AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+    },
+    { agent: "ClaudeAgent", configDir: claudeHome }
+  );
+  assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
+});
+
 test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -3053,6 +3084,29 @@ test(
     await resumed.cleanup?.();
   }
 );
+
+test("linked workflow classifies sensitive allowlist values from the ambient environment", () => {
+  const names = ["ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "AMBIENT_RPC_URL"] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = "AMBIENT_RPC_URL";
+  process.env.AMBIENT_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`;
+  try {
+    const ambient = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, undefined);
+    assert.equal(ambient.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "AMBIENT_RPC_URL");
+
+    const explicitlyReplaced = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, {
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE",
+      FOUNDRY_PROFILE: "ci"
+    });
+    assert.equal(explicitlyReplaced.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
 
 test(
   "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
@@ -3575,15 +3629,19 @@ test(
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
     const fixture = installOpenRouterRetryCodexFixture(project);
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
-      retryWindowMs: 5_000,
-      initialDelayMs: 1,
-      maxDelayMs: 1,
-      jitterFraction: 0,
-      provisionalCallbackLimit: 1,
-      actionSnapshotLimit: 2,
-      actionSnapshotBytes: 512
-    });
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        jitterFraction: 0,
+        provisionalCallbackLimit: 1,
+        actionSnapshotLimit: 2,
+        actionSnapshotBytes: 512
+      },
+      { acknowledgeProvisionalRateLimit: true }
+    );
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       key: process.env.OPENROUTER_API_KEY,
@@ -3591,6 +3649,7 @@ test(
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
       journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
       sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      provisionalAck: process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK,
       mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
       failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
     };
@@ -3600,6 +3659,7 @@ test(
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
     process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
     process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK = fixture.provisionalAck;
     process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
     try {
       process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-provisional-post-terminal";
@@ -3614,6 +3674,8 @@ test(
       });
       assert.equal(overflowResult.text, "OK");
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(fs.readFileSync(fixture.provisionalAck, "utf8"), "observed\n");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "provisional-post-terminal-mutation\n");
       assert.doesNotMatch(JSON.stringify(overflowEvents), /provisional-post-terminal/u);
       assert.doesNotMatch(overflowStdout, /provisional post-terminal/u);
 
@@ -3676,6 +3738,7 @@ test(
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
         OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
         OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK: previous.provisionalAck,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
@@ -3695,12 +3758,16 @@ test(
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
     const fixture = installOpenRouterRetryCodexFixture(project);
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
-      retryWindowMs: 5_000,
-      initialDelayMs: 1,
-      maxDelayMs: 2,
-      jitterFraction: 0
-    });
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 2,
+        jitterFraction: 0
+      },
+      { acknowledgeProvisionalRateLimit: true }
+    );
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       key: process.env.OPENROUTER_API_KEY,
@@ -3708,6 +3775,7 @@ test(
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
       journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
       sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      provisionalAck: process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK,
       warningAck: process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK,
       mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
       failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
@@ -3718,11 +3786,13 @@ test(
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
     process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
     process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK = fixture.provisionalAck;
     process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK = fixture.warningAck;
     const resetFixture = (mode: string, failures = 1) => {
       fs.writeFileSync(fixture.counter, "0", "utf8");
       fs.writeFileSync(fixture.journal, "", "utf8");
       fs.rmSync(fixture.sentinel, { force: true });
+      fs.rmSync(fixture.provisionalAck, { force: true });
       fs.rmSync(fixture.warningAck, { force: true });
       process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
       process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = String(failures);
@@ -3990,6 +4060,8 @@ test(
         readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
         ["fresh", "resume"]
       );
+      assert.equal(fs.readFileSync(fixture.provisionalAck, "utf8"), "observed\n");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "provisional-post-terminal-mutation\n");
       assert.doesNotMatch(JSON.stringify(provisionalTerminalEvents), /provisional-post-terminal/u);
       assert.doesNotMatch(provisionalTerminalStdout, /provisional post-terminal/u);
       assert.equal(provisionalTerminalProcessEvents.filter((event) => event.phase === "started").length, 2);
@@ -4374,6 +4446,7 @@ test(
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
         OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
         OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK: previous.provisionalAck,
         OPENROUTER_RETRY_FIXTURE_WARNING_ACK: previous.warningAck,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
@@ -4616,7 +4689,10 @@ test(
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
           prompt: "Preserve the provider 429 when idle-timeout recovery exhausts",
-          timeout: { idleMs: 100, totalMs: 5_000 },
+          // The idle clock includes the watchdog and fixture process startup.
+          // Leave enough launch headroom that this exercises a child which
+          // emitted a 429 and then went idle, not a pre-output startup timeout.
+          timeout: { idleMs: 500, totalMs: 5_000 },
           onStderr: (text) => {
             idleExhaustionStderr += text;
           }
@@ -4653,6 +4729,88 @@ test(
       assert.equal(finalReleaseOrder.includes("stderr"), true);
       assert.equal(finalReleaseOrder.includes("event"), true);
       assert.equal(finalReleaseOrder.at(-1), "completion");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter retains the last real 429 when a replacement build crosses the retry deadline",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        jitterFraction: 0
+      },
+      { expireRetryDeadlineBeforeReplacementBuild: 2 }
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-oversized";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+    try {
+      let finalStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Cross the retry deadline after deciding to replace the final real attempt",
+          onStderr: (text) => {
+            finalStderr += text;
+          }
+        }),
+        (error: unknown) => {
+          assert.match(String(error), /request id: fixture-2\b/u);
+          return true;
+        }
+      );
+
+      // Two provider children ran. The instrumented third replacement crossed
+      // its deadline inside buildCommand, before it could increment the child
+      // fixture counter or append a journal entry.
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(readOpenRouterRetryFixtureJournal(fixture.journal).length, 2);
+      assert.doesNotMatch(finalStderr, /request id: fixture-1\b/u);
+      assert.equal((finalStderr.match(/request id: fixture-2\b/gu) ?? []).length, 1);
+      assert.doesNotMatch(finalStderr, /request id: fixture-3\b/u);
+      assert.equal(finalStderr.length <= OPENROUTER_TEST_STDERR_PENDING_LIMIT * 2, true);
+
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
@@ -4786,6 +4944,72 @@ test(
       assert.equal(providerScoped[name], "", `${name} leaked into the OpenAI child`);
     }
     assert.equal(providerScoped.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES, "");
+
+    const allowlistedSource = linkedWorkflowExecutionEnvironment(
+      { executionSnapshot: { env: {} } } as never,
+      {
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+          "AWS_ACCESS_KEY_ID,AWS_CUSTOM_TOKEN,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_AUTH,CUSTOM_SHARED_TOKEN,DATABASE_PASSWD,FOUNDRY_PROFILE,MAINNET_RPC_URL,SSH_PRIVATE_KEY",
+        AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+        AWS_CUSTOM_TOKEN: "configured-for-codex",
+        AWS_SESSION_TOKEN: "claude-route-token",
+        aws_case_token: "case-variant-claude-token",
+        CUSTOM_AUTH: "custom-auth-secret",
+        CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+        DATABASE_PASSWD: "database-password",
+        FOUNDRY_PROFILE: "ci",
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`,
+        SSH_PRIVATE_KEY: "private-key"
+      },
+      ["aws_custom_token"]
+    );
+    assert.ok(allowlistedSource.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES?.split(",").includes("MAINNET_RPC_URL"));
+    const codexAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({}, allowlistedSource, { agent: "CodexAgent" })
+    };
+    assert.equal(codexAllowlisted.AWS_ACCESS_KEY_ID, "");
+    assert.equal(codexAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(codexAllowlisted.AWS_SESSION_TOKEN, "");
+    assert.equal(codexAllowlisted.aws_case_token, "");
+    assert.equal(codexAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(codexAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(codexAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(codexAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(codexAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(codexAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(codexAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const claudeAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_ACCESS_KEY_ID: "", AWS_SESSION_TOKEN: "" }, allowlistedSource, {
+        agent: "ClaudeAgent"
+      })
+    };
+    assert.equal(claudeAllowlisted.AWS_ACCESS_KEY_ID, "AKIA0123456789ABCDEF");
+    assert.equal(claudeAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(claudeAllowlisted.AWS_SESSION_TOKEN, "claude-route-token");
+    assert.equal(claudeAllowlisted.aws_case_token, "case-variant-claude-token");
+    assert.equal(claudeAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(claudeAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(claudeAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(claudeAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(claudeAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(claudeAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(claudeAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const explicitlyRestored = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ CUSTOM_SHARED_TOKEN: "configured-active-token" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(explicitlyRestored.CUSTOM_SHARED_TOKEN, "configured-active-token");
+    const configuredCodexCredential = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_CUSTOM_TOKEN: "configured-for-codex" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(configuredCodexCredential.AWS_CUSTOM_TOKEN, "configured-for-codex");
     assert.throws(
       () => workflowControlChildEnvironment({}, { ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: "NOT-AN-ENV" }),
       /provider credential environment list is invalid/u
@@ -7670,17 +7894,23 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       }
     }
   };
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const { assertCurrentCloudAgentCredentialEnvironment, compileSmithersWorkflow } = await import("../src/smithers.js");
+  const cloudEnv = {
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+      "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+    AWS_REGION: "us-east-1",
+    AWS_SESSION_TOKEN: "secret",
+    aws_case_token: "case-variant-claude-token",
+    CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+    MAINNET_RPC_URL: "https://rpc.invalid",
+    PRIVATE_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`
+  };
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
-    env: {
-      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "claude_code_use_bedrock,AWS_REGION,AWS_SESSION_TOKEN,MAINNET_RPC_URL",
-      CLAUDE_CODE_USE_BEDROCK: "1",
-      AWS_REGION: "us-east-1",
-      AWS_SESSION_TOKEN: "secret",
-      MAINNET_RPC_URL: "https://rpc.invalid"
-    },
+    env: cloudEnv,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-cloud-nodes",
@@ -7696,20 +7926,37 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     timeoutSeconds: 1800
   });
   assert.deepEqual(discovery.execution.agentCredentialEnv, [
-    "OPENAI_API_KEY",
-    "CLAUDE_CODE_USE_BEDROCK",
     "AWS_REGION",
-    "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
     "MAINNET_RPC_URL",
+    "OPENAI_API_KEY",
     "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
   ]);
   assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
+    "AWS_ACCESS_KEY_ID",
     "AWS_REGION",
-    "CLAUDE_CODE_USE_BEDROCK",
     "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
     "MAINNET_RPC_URL",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+    "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
+    "aws_case_token"
   ]);
+  assert.doesNotThrow(() =>
+    assertCurrentCloudAgentCredentialEnvironment(
+      plan.value!.resolved_config,
+      compiled.tasks,
+      Object.fromEntries(Object.entries(cloudEnv).reverse())
+    )
+  );
+  assert.throws(
+    () =>
+      assertCurrentCloudAgentCredentialEnvironment(plan.value!.resolved_config, compiled.tasks, {
+        ...cloudEnv,
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`
+      }),
+    /cloud agent credential classification changed after workflow compilation/u
+  );
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
@@ -7785,7 +8032,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
   const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
   assert.ok(discovery);
   assert.equal(discovery.agentRef, "KimiAgent");
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]);
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "KIMI_BASE_URL", "MOONSHOT_API_KEY"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -9295,10 +9542,9 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   );
   fs.chmodSync(pinnedRunner.target, 0o755);
   const controllerEnvironment = fakeSmithersEnv(project);
-  const installer = writeFakeNpmInstaller(project);
+  writeFakeNpmInstaller(project);
   const env = {
     ...controllerEnvironment,
-    ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: undefined,
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     OPENAI_API_KEY: "configured-agent-key",
@@ -10318,14 +10564,13 @@ test("startRun ignores target-local Smithers in favor of an operator install", a
   const logPath = path.join(project, "local-smithers.log");
   const executedAsLogPath = path.join(project, "local-smithers-executed-as.log");
   writeFakeInstalledSmithers(project);
-  const installer = writeFakeNpmInstaller(project);
+  writeFakeNpmInstaller(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
     env: {
       PATH: "",
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: logPath,
       SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath
     }
@@ -11397,7 +11642,6 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
     projectRoot: project,
     runId: "bootstrap-smithers-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11415,7 +11659,7 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
       missing = await startRun({
         projectRoot: project,
         runId: "controller-parent-required",
-        env: { ULTRAFUZZ_TRUSTED_BIN: requiredInstaller.binDir, SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
+        env: { SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
       });
     assert.equal(missing.ok, false);
     assert.match(JSON.stringify(missing.diagnostics), /dependency is unavailable/u);
@@ -11424,10 +11668,11 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
     const packageRoot = fs.readFileSync(installer.npmLogPath, "utf8").match(/--prefix (\S+)/u)?.[1];
     assert.ok(packageRoot);
     fs.appendFileSync(path.join(packageRoot, "node_modules", "smthrs", "index.js"), "// hostile\n");
+    installer.activate();
     const tampered = await startRun({
       projectRoot: project,
       runId: "controller-cache-tamper",
-      env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+      env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
     });
     assert.equal(tampered.ok, false);
     assert.match(JSON.stringify(tampered.diagnostics), /operator controller changed after installation/u);
@@ -11442,7 +11687,7 @@ test("operator controller locks require a canonical 64-byte SHA-512 integrity", 
   const run = await startRun({
     projectRoot: project,
     runId: "short-controller-integrity",
-    env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+    env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
   });
   assert.equal(run.ok, false);
   assert.match(JSON.stringify(run.diagnostics), /not registry-integrity bound/u);
@@ -11468,7 +11713,6 @@ test("startRun retries a workflow runner install the registry fails transiently"
     projectRoot: project,
     runId: "transient-install-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11496,7 +11740,6 @@ test("startRun does not retry a workflow runner install the registry rejects per
     projectRoot: project,
     runId: "permanent-install-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11551,7 +11794,6 @@ test("startRun resolves the generated workspace as of a fixed instant, not the l
     projectRoot: project,
     runId: "pinned-resolution-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11609,7 +11851,6 @@ test("startRun ignores a stale target-local Smithers package", async () => {
     projectRoot: project,
     runId: "stale-smithers-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11637,7 +11878,6 @@ test("startRun ignores a target-local Smithers shim that points outside the pinn
     projectRoot: project,
     runId: "repaired-smithers-shim-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -13836,10 +14076,12 @@ test("syncRun aborts or times out a blocked inspection child without durable mut
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-blocked-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const inspectionStartedMarker = path.join(project, "inspection-started");
   fs.writeFileSync(
     smithers,
     `#!${process.execPath}
 if (process.argv[2] === "inspect") {
+  require("node:fs").writeFileSync(${JSON.stringify(inspectionStartedMarker)}, String(Date.now()));
   setInterval(() => {}, 1000);
 } else {
   process.stdout.write('{"ok":true}\\n');
@@ -13858,27 +14100,56 @@ if (process.argv[2] === "inspect") {
   const before = fs.readFileSync(statePath, "utf8");
 
   const controller = new AbortController();
-  const abortTimer = setTimeout(() => controller.abort(), 50);
-  const abortStartedAt = Date.now();
-  const cancelled = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { signal: controller.signal }
-  );
-  clearTimeout(abortTimer);
+  let abortIssuedAt: number | undefined;
+  const abortPoll = setInterval(() => {
+    if (abortIssuedAt !== undefined || !fs.existsSync(inspectionStartedMarker)) return;
+    clearInterval(abortPoll);
+    abortIssuedAt = Date.now();
+    controller.abort();
+  }, 10);
+  let abortFallbackFired = false;
+  const abortFallback = setTimeout(() => {
+    abortFallbackFired = true;
+    controller.abort();
+  }, 60_000);
+  const cancelled = await (async () => {
+    try {
+      return await syncRun({ projectRoot: project, runId: "sync-blocked-child", env }, { signal: controller.signal });
+    } finally {
+      clearInterval(abortPoll);
+      clearTimeout(abortFallback);
+    }
+  })();
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
-  assert.ok(Date.now() - abortStartedAt < responsiveTerminationBudgetMs);
+  assert.equal(abortFallbackFired, false);
+  assert.notEqual(abortIssuedAt, undefined);
+  assert.ok(Date.now() - abortIssuedAt! < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
-  const deadlineStartedAt = Date.now();
+  fs.rmSync(inspectionStartedMarker, { force: true });
+  const deadlineRun = await startRun({ projectRoot: project, runId: "sync-blocked-deadline", env });
+  assert.equal(deadlineRun.ok, true, JSON.stringify(deadlineRun.diagnostics));
+  const deadlineStatePath = path.join(deadlineRun.value!.run_root, "state.json");
+  const deadlineStateBefore = fs.readFileSync(deadlineStatePath, "utf8");
+  const deadlineClock = 1_000;
+  const inspectionTimeoutMs = 5_000;
   const expired = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { deadlineMs: deadlineStartedAt + 100 }
+    { projectRoot: project, runId: "sync-blocked-deadline", env },
+    {
+      deadlineMs: deadlineClock + inspectionTimeoutMs,
+      now: () => (fs.existsSync(inspectionStartedMarker) ? deadlineClock + inspectionTimeoutMs : deadlineClock)
+    }
   );
   assert.equal(expired.ok, false);
-  assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
-  assert.ok(Date.now() - deadlineStartedAt < responsiveTerminationBudgetMs);
-  assert.equal(fs.readFileSync(statePath, "utf8"), before);
+  assert.ok(
+    expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"),
+    JSON.stringify(expired.diagnostics)
+  );
+  assert.equal(fs.existsSync(inspectionStartedMarker), true);
+  const inspectionStartedAt = Number(fs.readFileSync(inspectionStartedMarker, "utf8"));
+  assert.ok(Date.now() - inspectionStartedAt < inspectionTimeoutMs * 2);
+  assert.equal(fs.readFileSync(deadlineStatePath, "utf8"), deadlineStateBefore);
 });
 
 test("syncRun requires the deterministic verifier task to succeed", async () => {
@@ -14878,18 +15149,23 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const env = fakeSmithersEnv(project);
   const credentialLog = path.join(project, "lifecycle-credential-env.log");
   const retryCredentialLog = path.join(project, "lifecycle-retry-credential-env.log");
+  const sensitiveEnvironmentLog = path.join(project, "lifecycle-sensitive-environment.log");
   const hostileCredential = "must-not-cross-sealed-lifecycle-boundary";
+  env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = `${env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? ""},OPENAI_SESSION_TOKEN,SMITHERS_FAKE_SENSITIVE_ENV_LOG`;
+  env.OPENAI_SESSION_TOKEN = "custom-sensitive-route-value";
   env.AWS_SECRET_ACCESS_KEY = hostileCredential;
   env.OPENAI_API_KEY = "sealed-primary-key";
   env.DEEPSEEK_API_KEY = "sealed-fallback-key";
   env.SMITHERS_FAKE_ENV_LOG = credentialLog;
   env.SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG = retryCredentialLog;
+  env.SMITHERS_FAKE_SENSITIVE_ENV_LOG = sensitiveEnvironmentLog;
   const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|\n");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   fs.writeFileSync(credentialLog, "", "utf8");
   fs.writeFileSync(retryCredentialLog, "", "utf8");
+  fs.writeFileSync(sensitiveEnvironmentLog, "", "utf8");
   const sealedPlan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
     rendered_prompts: Array<{
       rendered_prompt_path: string;
@@ -15023,6 +15299,22 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     assert.equal(sealedTasks.smithers_run_id, "ultrafuzz-lifecycle-run");
   }
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const sensitiveEnvironmentEntries = fs
+    .readFileSync(sensitiveEnvironmentLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => line.split("|"));
+  for (const command of ["up", "replay", "fork"]) {
+    assert.ok(
+      sensitiveEnvironmentEntries.some(
+        ([observedCommand, sensitiveNames, customValue]) =>
+          observedCommand === command &&
+          sensitiveNames?.split(",").includes("OPENAI_SESSION_TOKEN") &&
+          customValue === "custom-sensitive-route-value"
+      ),
+      `${command} must receive the custom sensitive allowlist metadata and value`
+    );
+  }
   assert.match(
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
@@ -15052,6 +15344,97 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     );
   }
 });
+
+test(
+  "marker-less sealed legacy controllers permit empty sensitive sets and reject sensitive lifecycle actions",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const env = fakeSmithersEnv(project);
+    const capabilityDeclaration =
+      'export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =\n  "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;\n\n';
+    const environmentTemplateSuffix = path.join("templates", "smithers", "agents", "environment.tsx");
+    const originalReadFileSync = fs.readFileSync;
+    const readFileSyncDescriptor = Object.getOwnPropertyDescriptor(fs, "readFileSync")!;
+    let markerlessTemplateReads = 0;
+    Object.defineProperty(fs, "readFileSync", {
+      ...readFileSyncDescriptor,
+      value: (...args: unknown[]) => {
+        const contents = Reflect.apply(originalReadFileSync, fs, args) as string | Buffer;
+        if (!String(args[0]).endsWith(environmentTemplateSuffix)) return contents;
+        const source = typeof contents === "string" ? contents : contents.toString("utf8");
+        assert.ok(source.includes(capabilityDeclaration));
+        markerlessTemplateReads += 1;
+        const markerless = source.replace(capabilityDeclaration, "");
+        return typeof contents === "string" ? markerless : Buffer.from(markerless, "utf8");
+      }
+    });
+    const run = await (async () => {
+      try {
+        assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+        writeSmallTopology(project);
+        const started = await startRun({ projectRoot: project, runId: "markerless-legacy-lifecycle", env });
+        return started;
+      } finally {
+        Object.defineProperty(fs, "readFileSync", readFileSyncDescriptor);
+      }
+    })();
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(markerlessTemplateReads >= 2);
+    const evidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (evidence.ok) {
+      const sealedEnvironment = evidence.verifiedControl.executionFiles.find(
+        (file) => file.snapshotPath === ".smithers/agents/environment.ts"
+      );
+      assert.ok(sealedEnvironment);
+      assert.doesNotMatch(
+        sealedEnvironment.contents.toString("utf8"),
+        /ultrafuzz\.provider-scoped-sensitive-environment\.v1/u
+      );
+    }
+
+    const compatibleEnv = {
+      ...env,
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_LOG"
+    };
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+    const compatibleResume = await resumeRun({
+      projectRoot: project,
+      runId: run.value!.run_id,
+      force: true,
+      env: compatibleEnv
+    });
+    assert.equal(compatibleResume.ok, true, JSON.stringify(compatibleResume.diagnostics));
+    assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
+
+    const sensitiveEnv = {
+      ...env,
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_LOG,OPENAI_SESSION_TOKEN",
+      OPENAI_SESSION_TOKEN: "custom-sensitive-route-value"
+    };
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+    const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+    const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+    const actions = [
+      ["resume", () => resumeRun({ projectRoot: project, runId: run.value!.run_id, force: true, env: sensitiveEnv })],
+      ["replay", () => replayRun({ projectRoot: project, runId: run.value!.run_id, env: sensitiveEnv })],
+      ["fork", () => forkRun({ projectRoot: project, runId: run.value!.run_id, forkFrame: 44, env: sensitiveEnv })]
+    ] as const;
+    for (const [action, submit] of actions) {
+      const result = await submit();
+      assert.equal(result.ok, false, `${action} unexpectedly accepted marker-less sensitive environment evidence`);
+      assert.equal(result.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+      assert.match(
+        result.diagnostics[0]?.message ?? "",
+        /sealed controller predates provider-scoped sensitive allowlisted environment handling.*start a new run/u
+      );
+      assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+      assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
+    }
+  }
+);
 
 test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
   const project = tempProject();
@@ -16540,7 +16923,6 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   fs.chmodSync(smithers, 0o755);
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: smithers,
     MODAL_TOKEN_ID: "provider-one",
     MODAL_TOKEN_SECRET: "provider-two"

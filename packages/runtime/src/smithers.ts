@@ -39,13 +39,19 @@ import {
   serializeResolvedConfigToml,
   type ResolvedConfig
 } from "@ultrafuzz/config";
-import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
+import { isPathInside, isSensitiveSecretValue, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import { DATA_GOVERNANCE_PROVENANCE_PATH, effectiveRouteEnvironment } from "./data-governance.js";
+import {
+  DATA_GOVERNANCE_PROVENANCE_PATH,
+  effectiveRouteEnvironment,
+  isCredentialLikeEnvironmentVariableName,
+  routeOwnsCredentialLikeEnvironmentVariable
+} from "./data-governance.js";
 import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
+import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
 import {
   enablePinnedSubmoduleWorktreeConfig,
   pinnedSubmoduleExecutionFiles,
@@ -109,6 +115,7 @@ const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
 interface OperatorControllerProject {
+  npm: OperatorNpmProvision;
   root: string;
   seal: string;
 }
@@ -3331,6 +3338,7 @@ async function ensureSmithersDependencies(
     requirePinnedRunner?: boolean;
     packageLock?: boolean;
     npmCli?: string;
+    assertNpmCli?: () => void;
   } = {}
 ): Promise<void> {
   if (explicitSmithersExecutable(env) !== undefined && control.requirePinnedRunner !== true) {
@@ -3394,25 +3402,31 @@ async function ensureSmithersDependencies(
     }
   }
   await withTransientNpmRegistryRetry(
-    () =>
-      execFileAsync(
-        control.npmCli === undefined ? "npm" : process.execPath,
-        [
-          ...(control.npmCli === undefined ? [] : [control.npmCli]),
-          ...smithersDependencyInstallArgs({
-            prefix: packageRoot,
-            registry: "https://registry.npmjs.org",
-            packageLock: control.packageLock
-          })
-        ],
-        {
-          cwd: projectRoot,
-          env: smithersCommandEnv(projectRoot, env),
-          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-          ...(control.signal === undefined ? {} : { signal: control.signal }),
-          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-        }
-      ),
+    async () => {
+      control.assertNpmCli?.();
+      try {
+        return await execFileAsync(
+          control.npmCli === undefined ? "npm" : process.execPath,
+          [
+            ...(control.npmCli === undefined ? [] : [control.npmCli]),
+            ...smithersDependencyInstallArgs({
+              prefix: packageRoot,
+              registry: "https://registry.npmjs.org",
+              packageLock: control.packageLock
+            })
+          ],
+          {
+            cwd: projectRoot,
+            env: smithersCommandEnv(projectRoot, env),
+            maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+            ...(control.signal === undefined ? {} : { signal: control.signal }),
+            ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+          }
+        );
+      } finally {
+        control.assertNpmCli?.();
+      }
+    },
     control.signal === undefined ? {} : { signal: control.signal }
   );
   const validationError = installedSmithersValidationError(projectRoot);
@@ -3447,8 +3461,8 @@ async function operatorControllerProjectRoot(
   env: Record<string, string | undefined> | undefined,
   control: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<string> {
-  const npmCli = trustedOperatorNpmCli(targetRoot, env);
-  let project = operatorControllerProjects.get(npmCli);
+  const npmAuthority = resolveOperatorNpmAuthority(targetRoot, env);
+  let project = operatorControllerProjects.get(npmAuthority.cacheKey);
   const fresh = project === undefined;
   if (project === undefined) {
     project = (async () => {
@@ -3459,6 +3473,7 @@ async function operatorControllerProjectRoot(
             control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
             SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
           ),
+          npm = npmAuthority.provision(root),
           packageRoot = path.join(root, ".smithers");
         fs.mkdirSync(packageRoot, { mode: 0o700 });
         writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson());
@@ -3467,24 +3482,29 @@ async function operatorControllerProjectRoot(
           timeoutMs,
           requirePinnedRunner: true,
           packageLock: true,
-          npmCli
+          npmCli: npm.cliPath,
+          assertNpmCli: npm.assertCurrent
         });
-        return { root, seal: operatorControllerProjectSeal(root) };
+        return { npm, root, seal: operatorControllerProjectSeal(root) };
       } catch (error) {
         disposeOperatorControllerRoot(root);
         throw error;
       }
     })();
-    operatorControllerProjects.set(npmCli, project);
+    operatorControllerProjects.set(npmAuthority.cacheKey, project);
   }
   let resolved: OperatorControllerProject | undefined;
   try {
     resolved = await project;
-    if (!fresh && operatorControllerProjectSeal(resolved.root) !== resolved.seal)
-      throw new Error("operator controller changed after installation");
+    if (!fresh) {
+      resolved.npm.assertCurrent();
+      if (operatorControllerProjectSeal(resolved.root) !== resolved.seal)
+        throw new Error("operator controller changed after installation");
+    }
     return resolved.root;
   } catch (error) {
-    if (operatorControllerProjects.get(npmCli) === project) operatorControllerProjects.delete(npmCli);
+    if (operatorControllerProjects.get(npmAuthority.cacheKey) === project)
+      operatorControllerProjects.delete(npmAuthority.cacheKey);
     if (resolved !== undefined) disposeOperatorControllerRoot(resolved.root);
     throw error;
   }
@@ -3523,6 +3543,7 @@ function registerOperatorControllerRoot(root: string): void {
   process.once("exit", () => {
     for (const candidate of operatorControllerRoots) {
       try {
+        makeOperatorControllerTreeRemovable(candidate);
         fs.rmSync(candidate, { recursive: true, force: true });
       } catch {
         continue;
@@ -3534,33 +3555,20 @@ function registerOperatorControllerRoot(root: string): void {
 
 function disposeOperatorControllerRoot(root: string): void {
   operatorControllerRoots.delete(root);
+  makeOperatorControllerTreeRemovable(root);
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function trustedOperatorNpmCli(targetRoot: string, env: Record<string, string | undefined> | undefined): string {
-  const trustedBin = env?.[ULTRAFUZZ_TRUSTED_BIN_ENV] ?? process.env[ULTRAFUZZ_TRUSTED_BIN_ENV];
-  if (trustedBin !== undefined && !path.isAbsolute(trustedBin))
-    throw new Error("operator trusted-bin path must be absolute");
-  const launcher =
-      trustedBin === undefined
-        ? path.join(
-            path.dirname(process.execPath),
-            ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
-          )
-        : path.join(trustedBin, process.platform === "win32" ? "npm-cli.js" : "npm"),
-    npmCli = fs.realpathSync(launcher),
-    relative = path.relative(path.resolve(targetRoot), npmCli),
-    stat = fs.lstatSync(npmCli);
-  if (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== "..") ||
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    (stat.mode & 0o022) !== 0
-  )
-    throw new Error("operator npm CLI must be a non-writable regular file outside the target repository");
-  return npmCli;
+function makeOperatorControllerTreeRemovable(root: string): void {
+  if (!fs.existsSync(root)) return;
+  const stat = fs.lstatSync(root);
+  if (stat.isSymbolicLink()) return;
+  if (!stat.isDirectory()) {
+    if (stat.isFile()) fs.chmodSync(root, 0o600);
+    return;
+  }
+  fs.chmodSync(root, 0o700);
+  for (const name of fs.readdirSync(root)) makeOperatorControllerTreeRemovable(path.join(root, name));
 }
 
 function assertOperatorPackageLock(packageRoot: string): void {
@@ -4126,6 +4134,7 @@ function compileTask(input: {
           input.config.execution.mode,
           entry.agentRef,
           input.config.agents[entry.agentRef],
+          input.config.agents,
           input.env
         )
       )
@@ -4301,19 +4310,82 @@ function cloudAgentCredentialEnv(
   executionMode: ResolvedConfig["execution"]["mode"],
   agentRef: string,
   agent: ResolvedConfig["agents"][string] | undefined,
+  configuredAgents: ResolvedConfig["agents"],
   env: NodeJS.ProcessEnv
 ): string[] {
   if (executionMode !== "cloud" || agent === undefined) return [];
   const names = agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : [];
   if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
   const routes = effectiveRouteEnvironment(agentRef, env);
-  const extra = (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "")
-    .split(",")
-    .map((name) => name.trim().toUpperCase())
-    .filter((name) => env[name]?.trim());
-  names.push(...routes.map(([name]) => name), ...extra);
+  const configuredCredentials = configuredAgentCredentialEnvironmentVariableNames(configuredAgents);
+  let hasSensitiveExtra = false;
+  const extra = allowlistedCloudEnvironmentEntries(env).filter(([name, value]) => {
+    if (configuredCredentials.has(name.toUpperCase())) return false;
+    const sensitive = isCredentialLikeEnvironmentVariableName(name) || isSensitiveSecretValue(value);
+    if (sensitive && !routeOwnsCredentialLikeEnvironmentVariable(agentRef, name)) return false;
+    if (sensitive) hasSensitiveExtra = true;
+    return true;
+  });
+  names.push(...routes.map(([name]) => name), ...extra.map(([name]) => name));
   if (extra.length > 0) names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
+  if (hasSensitiveExtra) names.push("ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES");
+  return [...new Set(names)].sort();
+}
+
+export function assertCurrentCloudAgentCredentialEnvironment(
+  config: ResolvedConfig,
+  tasks: readonly SmithersTaskManifestTask[],
+  env: NodeJS.ProcessEnv
+): void {
+  if (config.execution.mode !== "cloud") return;
+  for (const task of tasks) {
+    const expected = [
+      ...new Set(
+        task.agentChain.flatMap((entry) =>
+          cloudAgentCredentialEnv(
+            config.execution.mode,
+            entry.agentRef,
+            config.agents[entry.agentRef],
+            config.agents,
+            env
+          )
+        )
+      )
+    ].sort();
+    const sealed = [...new Set(task.execution.agentCredentialEnv)].sort();
+    if (JSON.stringify(expected) !== JSON.stringify(sealed)) {
+      throw new Error(
+        `cloud agent credential classification changed after workflow compilation for task ${task.smithersNodeId}; start a new run`
+      );
+    }
+  }
+}
+
+function configuredAgentCredentialEnvironmentVariableNames(agents: ResolvedConfig["agents"]): Set<string> {
+  const names = new Set<string>();
+  for (const [agentRef, agent] of Object.entries(agents)) {
+    if (agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
+    names.add(agent.apiKeyEnv.toUpperCase());
+    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.add("MOONSHOT_API_KEY");
+  }
   return names;
+}
+
+function allowlistedCloudEnvironmentEntries(env: NodeJS.ProcessEnv): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  const normalizedNames = new Set<string>();
+  for (const rawName of (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
+    const name = rawName.trim();
+    if (name.length === 0) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
+    }
+    normalizedNames.add(name.toUpperCase());
+  }
+  for (const [name, value] of Object.entries(env)) {
+    if (value?.trim() && normalizedNames.has(name.toUpperCase())) entries.push([name, value]);
+  }
+  return entries;
 }
 
 function artifactAncestorNodeIds(nodeId: string, nodes: readonly ExpandedNode[]): string[] {

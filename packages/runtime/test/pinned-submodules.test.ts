@@ -27,6 +27,7 @@ import {
   sealWorkflowControlFiles,
   verifyWorkflowControlSnapshot
 } from "../src/workflow-integrity.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
@@ -527,9 +528,11 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
 
 test("pinned local and cloud compilation carry the exact manifest through sealed execution closures", async (context) => {
   const fixture = nestedSubmoduleFixture();
+  const npmInstaller = writeFakeNpmInstaller(fixture.source);
   context.after(() => {
     makeTreeWritable(fixture.root);
     fs.rmSync(fixture.root, { recursive: true, force: true });
+    fs.rmSync(npmInstaller.binDir, { recursive: true, force: true });
   });
 
   const snapshot = capturePinnedSubmoduleSnapshot(fixture.source);
@@ -558,10 +561,11 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.ok(workflowSource.includes(expectation.manifest_sha256));
   assert.match(workflowSource, /"pinnedSubmodules": \{/u);
 
-  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
+  const executionEnvironment = {
     SMITHERS_BIN: "/bin/true",
     ULTRAFUZZ_TRUSTED_BIN: trustedBin
-  });
+  };
+  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
   const pinnedPaths = executionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
@@ -649,10 +653,11 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   const cloudTaskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(cloudCompiled.tasksPath));
   assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
 
-  const cloudExecutionFiles = await smithersExecutionControlFiles(cloudCompiled, cloudPlan.value!.layout, {
-    SMITHERS_BIN: "/bin/true",
-    ULTRAFUZZ_TRUSTED_BIN: trustedBin
-  });
+  const cloudExecutionFiles = await smithersExecutionControlFiles(
+    cloudCompiled,
+    cloudPlan.value!.layout,
+    executionEnvironment
+  );
   const cloudPinnedPaths = cloudExecutionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);

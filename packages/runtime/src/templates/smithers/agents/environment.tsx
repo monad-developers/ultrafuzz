@@ -4,6 +4,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 
+export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
+  "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
+
 const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_BIN",
   "SMITHERS_CLI_SRC_DIR",
@@ -19,6 +22,7 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
+  "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
   "ULTRAFUZZ_TRUSTED_BIN",
   "ULTRAFUZZ_VALIDATOR_BUILD",
   "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
@@ -55,7 +59,11 @@ const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
   KimiAgent: ["KIMI_", "MOONSHOT_"]
 };
-const ROUTE_ENV_SECRET = /(?:API_?KEY|AUTH|CREDENTIAL|PASSWORD|SECRET|TOKEN)/u;
+const NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES = new Set(["AZURE_EXTENSION_DIR"]);
+// Keep this generated, dependency-free boundary in parity with
+// @ultrafuzz/security's isSensitiveEnvironmentName contract.
+const SENSITIVE_ENVIRONMENT_NAME_PATTERN =
+  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CLIENT_?SECRET|CREDENTIALS?|AUTH(?:ORIZATION)?)(?:_|$)/iu;
 const ROUTE_PROXY_ENV = [
   "ALL_PROXY",
   "HTTP_PROXY",
@@ -91,6 +99,7 @@ export function workflowControlChildEnvironment(
   for (const [name, value] of Object.entries(additions)) {
     if (value !== undefined) child[name] = value;
   }
+  if (route !== undefined) restoreRouteScopedAllowlistedCredentials(child, source, route.agent);
   for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) child[name] = "";
   for (const [name, value] of Object.entries(child)) {
     if (roots.some((root) => environmentPath(value).includes(root))) child[name] = "";
@@ -100,6 +109,12 @@ export function workflowControlChildEnvironment(
 }
 
 function providerCredentialEnvironmentVariables(source: Record<string, string | undefined>): string[] {
+  const names = new Set<string>(configuredProviderCredentialEnvironmentVariables(source));
+  for (const name of sensitiveAgentEnvironmentVariableNames(source)) names.add(name);
+  return [...names].sort();
+}
+
+function configuredProviderCredentialEnvironmentVariables(source: Record<string, string | undefined>): string[] {
   const names = new Set<string>(BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES);
   for (const name of (source.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES ?? "").split(",")) {
     const trimmed = name.trim();
@@ -109,7 +124,99 @@ function providerCredentialEnvironmentVariables(source: Record<string, string | 
     }
     names.add(trimmed);
   }
+  const normalized = new Set([...names].map((name) => name.toUpperCase()));
+  for (const name of Object.keys(source)) {
+    if (normalized.has(name.toUpperCase())) names.add(name);
+  }
   return [...names].sort();
+}
+
+function allowlistedEnvironmentVariables(
+  source: Record<string, string | undefined>
+): Array<{ name: string; upper: string }> {
+  const variables = new Map<string, { name: string; upper: string }>();
+  for (const name of (source.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) continue;
+    if (!ENVIRONMENT_VARIABLE_PATTERN.test(trimmed)) {
+      throw new Error("controller agent environment allowlist is invalid");
+    }
+    const upper = trimmed.toUpperCase();
+    if (!variables.has(upper)) variables.set(upper, { name: trimmed, upper });
+  }
+  return [...variables.values()];
+}
+
+function isCredentialLikeEnvironmentVariableName(name: string): boolean {
+  return SENSITIVE_ENVIRONMENT_NAME_PATTERN.test(name);
+}
+
+function sensitiveAgentEnvironmentVariableNames(source: Record<string, string | undefined>): string[] {
+  const names = new Set<string>();
+  for (const name of (source.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES ?? "").split(",")) {
+    const trimmed = name.trim();
+    if (trimmed.length === 0) continue;
+    if (!ENVIRONMENT_VARIABLE_PATTERN.test(trimmed)) {
+      throw new Error("controller sensitive agent environment list is invalid");
+    }
+    addLogicalEnvironmentVariableNames(names, source, trimmed);
+  }
+  for (const { name, upper } of allowlistedEnvironmentVariables(source)) {
+    if (!isCredentialLikeEnvironmentVariableName(upper)) continue;
+    addLogicalEnvironmentVariableNames(names, source, name);
+  }
+  return [...names].sort();
+}
+
+function addLogicalEnvironmentVariableNames(
+  names: Set<string>,
+  source: Record<string, string | undefined>,
+  name: string
+): void {
+  const upper = name.toUpperCase();
+  names.add(name);
+  names.add(upper);
+  for (const sourceName of Object.keys(source)) {
+    if (sourceName.toUpperCase() === upper) names.add(sourceName);
+  }
+}
+
+function routeOwnsCredentialLikeEnvironmentVariable(agent: WorkflowRouteAgent, name: string): boolean {
+  const upper = name.toUpperCase();
+  let longestPrefix = -1;
+  const owners = new Set<string>();
+  for (const [candidate, prefixes] of Object.entries(ROUTE_ENV_PREFIXES)) {
+    for (const prefix of prefixes) {
+      if (!upper.startsWith(prefix) || prefix.length < longestPrefix) continue;
+      if (prefix.length > longestPrefix) {
+        longestPrefix = prefix.length;
+        owners.clear();
+      }
+      owners.add(candidate);
+    }
+  }
+  return owners.has(agent);
+}
+
+function restoreRouteScopedAllowlistedCredentials(
+  child: Record<string, string>,
+  source: Record<string, string | undefined>,
+  agent: WorkflowRouteAgent
+): void {
+  const configuredCredentials = new Set(
+    configuredProviderCredentialEnvironmentVariables(source).map((name) => name.toUpperCase())
+  );
+  const sensitiveNames = new Set(sensitiveAgentEnvironmentVariableNames(source));
+  for (const variable of allowlistedEnvironmentVariables(source)) {
+    if (![variable.name, variable.upper].some((name) => sensitiveNames.has(name))) continue;
+    if (!routeOwnsCredentialLikeEnvironmentVariable(agent, variable.upper)) continue;
+    if (configuredCredentials.has(variable.upper)) continue;
+    for (const name of Object.keys(source)) {
+      if (name.toUpperCase() !== variable.upper) continue;
+      const value = source[name];
+      if (value !== undefined) child[name] = value;
+    }
+  }
 }
 
 function assertWorkflowDataRoute(
@@ -194,7 +301,9 @@ function claudeSettingsAffectRoute(bytes: Buffer): boolean {
     const upper = name.toUpperCase();
     return (
       ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].includes(upper) ||
-      (!ROUTE_ENV_SECRET.test(upper) && ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
+      (!NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES.has(upper) &&
+        !isCredentialLikeEnvironmentVariableName(upper) &&
+        ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
     );
   });
 }
@@ -208,17 +317,21 @@ function effectiveRouteEnvironment(
   );
   for (const name of ROUTE_PROXY_ENV) names.add(name);
   for (const name of Object.keys(env))
-    if (!ROUTE_ENV_SECRET.test(name) && ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix)))
+    if (
+      !isCredentialLikeEnvironmentVariableName(name) &&
+      ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix))
+    )
       names.add(name);
   if (agent === "CodexAgent") names.add("OPENAI_BASE_URL");
   if (agent === "KimiAgent") names.add("KIMI_BASE_URL");
+  for (const name of NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES) names.delete(name);
   names.delete("KIMI_CODE_HOME");
   names.delete("KIMI_SHARE_DIR");
   return [...names].sort().flatMap((name): Array<[string, string]> => {
     const value = env[name];
     return value !== undefined &&
       value.trim() !== "" &&
-      !ROUTE_ENV_SECRET.test(name) &&
+      !isCredentialLikeEnvironmentVariableName(name) &&
       (ROUTE_PROXY_ENV.includes(name as never) || ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix)))
       ? [[name, value]]
       : [];
