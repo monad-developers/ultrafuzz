@@ -1130,17 +1130,40 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const runningState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status: string;
     nodes: Record<string, Record<string, unknown>>;
+    last_transition_at: string;
+    controller_lease: {
+      status: string;
+      duration_ms: number;
+      renewed_at: string;
+      expires_at: string;
+      recovery_attempts: number;
+    };
     workflow_deadline_at?: string;
   };
   const firstNodeId = Object.keys(runningState.nodes)[0]!;
   // These fixtures deliberately exercise multi-day elapsed durations. Keep
   // the synthetic run live so status synchronization does not correctly time
-  // it out at the real workflow deadline before duration rendering is tested.
-  runningState.workflow_deadline_at = new Date(Date.now() + 7 * 86_400_000).toISOString();
+  // it out or park it for controller loss before duration rendering is tested.
+  const fixtureNowMs = Date.now();
+  const fixtureNow = new Date(fixtureNowMs).toISOString();
+  const fixtureLeaseDurationMs = 7 * 86_400_000;
+  const fixtureStepStartedAt = new Date(fixtureNowMs - 600_000).toISOString();
+  runningState.last_transition_at = fixtureNow;
+  runningState.controller_lease = {
+    ...runningState.controller_lease,
+    status: "active",
+    duration_ms: fixtureLeaseDurationMs,
+    renewed_at: fixtureNow,
+    expires_at: new Date(fixtureNowMs + fixtureLeaseDurationMs).toISOString()
+  };
+  runningState.workflow_deadline_at = new Date(fixtureNowMs + fixtureLeaseDurationMs).toISOString();
   runningState.nodes[firstNodeId] = {
     ...runningState.nodes[firstNodeId],
     status: "running",
-    started_at: new Date(Date.now() - 600_000).toISOString()
+    started_at: fixtureStepStartedAt,
+    wait_since: fixtureStepStartedAt,
+    wait_reason: "active",
+    next_eligible_action: "task-complete"
   };
   fs.writeFileSync(statePath, `${JSON.stringify(runningState, null, 2)}\n`, "utf8");
 
@@ -1150,27 +1173,31 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
   assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
-  assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
+  assert.match(statusText.stdout, /^Time on current step: \d+ minutes on project-discovery$/mu);
 
   // Duration rendering is pure; exercise its boundaries without repeatedly
   // synchronizing synthetic node clocks through the fake workflow runner.
   for (const [elapsedSeconds, expected] of [
     [30, "less than a minute"],
     [60, "1 minute"],
+    [600, "10 minutes"],
     [5_400, "1h 30m"],
     [3 * 86_400, "3d 00h"]
   ] as const) {
     assert.equal(formatStatusDuration(elapsedSeconds), expected);
   }
 
-  // Restore the 10-minute step for the watch assertions below.
+  // Restore the running step for the watch assertions below.
   const restored = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     nodes: Record<string, Record<string, unknown>>;
   };
   restored.nodes[firstNodeId] = {
     ...restored.nodes[firstNodeId],
     status: "running",
-    started_at: new Date(Date.now() - 600_000).toISOString()
+    started_at: fixtureStepStartedAt,
+    wait_since: fixtureStepStartedAt,
+    wait_reason: "active",
+    next_eligible_action: "task-complete"
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
