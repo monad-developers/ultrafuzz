@@ -12,7 +12,7 @@ overrides:
   '@effect/sql-sqlite-bun': 4.0.0-beta.105
 
 patchedDependencies:
-  npm@11.19.0: a999c0367cdf5643218295b355eb941e8b4f54c07dd25dab8aad9985cf941f88
+  npm@11.19.0: beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f
 
 importers:
 
@@ -312,7 +312,7 @@ importers:
         version: 2.0.3
       npm:
         specifier: 11.19.0
-        version: 11.19.0(patch_hash=a999c0367cdf5643218295b355eb941e8b4f54c07dd25dab8aad9985cf941f88)
+        version: 11.19.0(patch_hash=beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f)
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
@@ -11605,7 +11605,7 @@ snapshots:
 
   node-releases@2.0.50: {}
 
-  npm@11.19.0(patch_hash=a999c0367cdf5643218295b355eb941e8b4f54c07dd25dab8aad9985cf941f88): {}
+  npm@11.19.0(patch_hash=beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f): {}
 
   object-assign@4.1.1: {}
 
