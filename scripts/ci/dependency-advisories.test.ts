@@ -86,6 +86,18 @@ describe("production dependency advisory policy", () => {
           "dependency advisory exception 1 rationale must be a bounded string without edge whitespace or control characters"
       },
       {
+        field: "reachability",
+        exception: { ...validException(), reachability: "\u0000Invalid reachability evidence." },
+        semanticError:
+          "dependency advisory exception 1 reachability must be a bounded string without edge whitespace or control characters"
+      },
+      {
+        field: "rationale",
+        exception: { ...validException(), rationale: "Invalid rationale.\u007f" },
+        semanticError:
+          "dependency advisory exception 1 rationale must be a bounded string without edge whitespace or control characters"
+      },
+      {
         field: "tracking_issue",
         exception: { ...validException(), tracking_issue: `#${"1".repeat(2_000)}` },
         semanticError:

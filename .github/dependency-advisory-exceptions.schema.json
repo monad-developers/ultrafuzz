@@ -19,7 +19,7 @@
       "type": "string",
       "minLength": 10,
       "maxLength": 2000,
-      "pattern": "^\\S[^\\u0000-\\u001f\\u007f]*\\S$"
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f][^\\u0000-\\u001f\\u007f]*[^\\s\\u0000-\\u001f\\u007f]$"
     },
     "exception": {
       "type": "object",
