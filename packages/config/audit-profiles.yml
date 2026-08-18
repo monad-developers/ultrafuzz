@@ -29,22 +29,6 @@ profiles:
     intended_use: General-purpose audits using the editable project topology.
     settings: {}
 
-  fuzz-only:
-    description: Pre-v0.1.0 fuzzing workflow without threat-model or goal-fanout strategies.
-    intended_use: Benchmark comparisons and audits that only need the established fuzzing workflow.
-    topology_path: topologies/fuzz-only.yml
-    settings: {}
-
-  thorough:
-    description: Broader and deeper investigation at higher cost.
-    intended_use: High-assurance audits with additional strategy and dynamic-goal breadth.
-    settings:
-      strategy_loops: 3
-      dynamic_strategies_enumerator: 5
-      max_parallel_agents: 4
-      max_parallel_nodes: 8
-      workflow_deadline_seconds: 86400
-
   exhaustive:
     description: Maximum practical built-in coverage and reasoning.
     intended_use: Highest-cost release or critical-system investigations.
