@@ -4749,7 +4749,7 @@ nodes:
 
   const plan = await planRun({ projectRoot: project, runId: "group-timeout", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const { compileSmithersWorkflow, topologyRuntimeContextForTimeout } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
@@ -4780,21 +4780,15 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  const expectedRuntimeContext = [
-    "## Topology Runtime Context",
-    "",
-    "- Timeout: 1200 seconds total.",
-    "- Finalization reserve: 200 seconds.",
-    "- Working budget before finalization: 1000 seconds.",
-    "- Stop starting new delegated or tool work when the finalization reserve begins.",
-    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs."
-  ].join("\n");
+  const expectedRuntimeContext = topologyRuntimeContextForTimeout(1_200_000);
   assert.equal(
     workflowSource.includes(`"runtimeContext": ${JSON.stringify(expectedRuntimeContext)}`),
     true,
     workflowSource
   );
-  assert.match(workflowSource, /\$\{task\.runtimeContext\}\\n\\n\$\{operatorPrompt\}/u);
+  assert.match(workflowSource, /const fullTaskPrompt = renderEmbeddedPromptTemplate/u);
+  assert.match(workflowSource, /runtime_context: task\.runtimeContext/u);
+  assert.match(workflowSource, /operator_prompt: operatorPrompt/u);
 });
 
 test("topology runtime context keeps a bounded finalization reserve", async () => {
