@@ -19,6 +19,7 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   findingFuzzerBackendProvenance,
+  INVARIANT_PINNED_SOURCE_REF,
   invariantPinnedSourceRefExists,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_COVERAGE_EVIDENCE_FILES,
@@ -27,6 +28,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   readArtifactManifest,
   readRegularFileSnapshot,
+  readRunMetadataDocument,
   readSinglyLinkedRegularFileSnapshotInside,
   readRunState,
   parseStrictJsonBytes,
@@ -629,7 +631,7 @@ function verifyInvariantLedgerProducerArtifacts(
     // the claim "this target has no invariant". That claim now needs
     // `no_invariants_justification` above.
     for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-      verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+      verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
     }
     return diagnostics;
   }
@@ -682,7 +684,7 @@ function verifyInvariantLedgerProducerArtifacts(
   // be enforced when nothing consumes `result`. On this branch the ledger carries entries, and
   // those remain byte-checked against the pinned source below.
   for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-    verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+    verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
   }
   for (const [entryIndex, entry] of parsed.value.entries.entries()) {
     if (sourceProof !== undefined) {
@@ -800,7 +802,7 @@ function verifyCanonicalPropertiesProducerArtifacts(
   // that workspace has already been reclaimed the check is a no-op, exactly as it is on discovery.
   const discoveryWorkspace = path.join(layout.workspacesDir, ledgerProducer.authority.attempt_id);
   for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
-    verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+    verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
   }
   if (ledger.value.entries.length === 0 && (ledger.value.scan_probes?.length ?? 0) > 0) {
     verifyNoInvariantsJustification(ledger.value.no_invariants_justification, ledgerPath, diagnostics);
@@ -1495,6 +1497,7 @@ function verifyNoInvariantsJustification(
 }
 
 function verifyInvariantProbePath(
+  layout: RunLayout,
   workspacePath: string,
   relativePath: string,
   probeIndex: number,
@@ -1580,7 +1583,7 @@ function verifyInvariantProbePath(
         });
         return;
       }
-      verifyInvariantProbeSourcePin(workspacePath, relativePath, bytes, diagnosticPath, diagnostics);
+      verifyInvariantProbeSourcePin(layout, workspacePath, relativePath, bytes, diagnosticPath, diagnostics);
     }
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
@@ -1590,19 +1593,27 @@ function verifyInvariantProbePath(
 
 /**
  * The generated workflow refuses any probe source that is not tracked, unmodified,
- * and byte-identical to the pinned commit, but only when the pinned ref exists. The
- * gate used to skip that check entirely, so `ultrafuzz validate` accepted ledgers the
+ * and byte-identical to the pinned commit, but only when the run records the pinned
+ * source ref. The gate used to skip that check entirely, so `ultrafuzz validate` accepted ledgers the
  * run then killed the node over (issue #301). Both halves now come from one shared
- * validator, including the "only when pinned" condition.
+ * validator, including the "only when pinned" condition. Legacy runs without source
+ * provenance retain the workflow's live-ref fallback, but a recorded ordinary run
+ * cannot be misclassified by a stale benchmark ref (issue #650).
  */
 function verifyInvariantProbeSourcePin(
+  layout: RunLayout,
   workspacePath: string,
   relativePath: string,
   bytes: Buffer,
   diagnosticPath: string,
   diagnostics: RuntimeDiagnostic[]
 ): void {
-  if (!invariantPinnedSourceRefExists(workspacePath)) return;
+  const recordedSourceRef = readRunMetadataDocument(layout.runMetadataPath, layout.runId).source_ref;
+  const usesPinnedSource =
+    recordedSourceRef === undefined
+      ? invariantPinnedSourceRefExists(workspacePath)
+      : recordedSourceRef === INVARIANT_PINNED_SOURCE_REF;
+  if (!usesPinnedSource) return;
   const pinned = checkInvariantSourcePinned({ workspacePath, relativePath, bytes });
   if (pinned.ok) return;
   diagnostics.push({

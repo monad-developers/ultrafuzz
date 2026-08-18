@@ -219,12 +219,56 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("archives the recorded launch revision after the checkout branch moves", async () => {
+    const fixture = createProjectFixture({ divergentSource: true });
+    const sourceRevision = fixture.governedCommit;
+    const sourceRef = "refs/ultrafuzz/runs/run-one/source";
+    execFileSync("git", ["update-ref", sourceRef, sourceRevision], { cwd: fixture.root });
+    fixture.input.source_revision = sourceRevision;
+    fixture.input.source_ref = sourceRef;
+
+    // Simulate a long run whose launch branch is reset before this cloud node
+    // is materialized. The run-owned ref remains the archive authority.
+    execFileSync("git", ["reset", "--quiet", "--hard", fixture.parentCommit], { cwd: fixture.root });
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-recorded-source-"));
+    try {
+      await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "recorded source handoff test" });
+      expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
+        sourceRevision
+      );
+      expect(execFileSync("git", ["rev-parse", sourceRef], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
+        sourceRevision
+      );
+      expect(fs.readFileSync(path.join(extracted, "develop-only.txt"), "utf8")).toBe("develop\n");
+    } finally {
+      archive.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a recorded source ref owned by a different run", async () => {
+    const fixture = createProjectFixture();
+    try {
+      fixture.input.source_revision = fixture.governedCommit;
+      fixture.input.source_ref = "refs/ultrafuzz/runs/run-foreign/source";
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /source ref does not belong/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("preserves pinned source identity and fails closed without its ref", async () => {
     const fixture = createProjectFixture({ pinnedSubmodules: true });
     const pinnedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: fixture.root,
       encoding: "utf8"
     }).trim();
+    fixture.input.source_revision = pinnedCommit;
+    fixture.input.source_ref = "refs/heads/ultrafuzz-pinned";
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
     const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-pinned-handoff-"));
     try {
@@ -2443,6 +2487,7 @@ function createProjectFixture(
     pinnedSubmodules?: boolean;
     committedSymlink?: boolean;
     governanceDirty?: boolean;
+    divergentSource?: boolean;
   } = {}
 ) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
@@ -2511,6 +2556,14 @@ function createProjectFixture(
     cwd: root
   });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+  const parentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  if (options.divergentSource === true) {
+    execFileSync("git", ["switch", "--quiet", "-c", "develop"], { cwd: root });
+    fs.rmSync(path.join(root, "source.txt"));
+    fs.writeFileSync(path.join(root, "develop-only.txt"), "develop\n");
+    execFileSync("git", ["add", "--all", "--", "source.txt", "develop-only.txt"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "develop source"], { cwd: root });
+  }
   if (options.pinnedSubmodules === true) {
     execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${"d".repeat(40)},vendor/dependency`], {
       cwd: root
@@ -2678,6 +2731,8 @@ function createProjectFixture(
   return {
     root,
     input,
+    parentCommit,
+    governedCommit,
     mutableWorkflowPath,
     mutablePromptPath,
     cleanup: () => {

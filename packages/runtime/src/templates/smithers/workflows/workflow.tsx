@@ -460,7 +460,12 @@ const authorizedDefensiveSecurityContext = [
 ].join("\n");
 
 function sourceUsesPinnedBranch(): boolean {
-  return invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef);
+  const recordedRefs = new Set(taskSpecs.flatMap((task) => (task.sourceRef === null ? [] : [task.sourceRef])));
+  if (recordedRefs.size > 1) throw new Error("workflow tasks disagree on their recorded source ref");
+  const recordedRef = recordedRefs.values().next().value as string | undefined;
+  return recordedRef === undefined
+    ? invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef)
+    : recordedRef === pinnedSourceRef;
 }
 function readGovernedSource(): { commit: string; tree: string } | undefined {
   const governancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
@@ -485,6 +490,25 @@ function assertGovernedWorkspaceSource(task: (typeof taskSpecs)[number]): void {
   if (governedSource === undefined || task.execution.mode !== "local") return;
   if (targetIdentity(task.workspacePath).commit !== governedSource.commit)
     throw new Error("task workspace is not the acknowledged source commit");
+}
+
+function assertWorkspaceSourceRevision(task: (typeof taskSpecs)[number]): void {
+  if (task.sourceRevision === null) return;
+  const workspaceRoot = realpathSync(task.workspacePath);
+  const git = (revision: string): string =>
+    execFileSync("git", ["rev-parse", "--verify", revision], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+      .trim()
+      .toLowerCase();
+  const head = git("HEAD^{commit}");
+  const sourceRef = task.sourceRef === null ? task.sourceRevision : git(`${task.sourceRef}^{commit}`);
+  if (head !== task.sourceRevision || sourceRef !== task.sourceRevision) {
+    throw new Error(`source-revision failure: workspace ${task.attemptId} does not match the recorded launch commit`);
+  }
 }
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
@@ -1349,6 +1373,7 @@ function artifactAwareAgent(
       // Restore the prepared roots immediately before each selected attempt so
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
+        assertWorkspaceSourceRevision(task);
         resetTaskArtifactsForRetry(task);
       }
       // Automatic retries are deliberately error-agnostic. Start a fresh
@@ -1561,6 +1586,7 @@ function prepareArtifactMirror(
 ): z.infer<typeof preparationOutput> {
   const evidenceMode = options.evidenceMode ?? "create";
   const workspaceRoot = realpathSync(task.workspacePath);
+  if (options.replayWorkspacePatches !== false) assertWorkspaceSourceRevision(task);
   if (options.pinnedSubmodules === "verify") {
     verifyPinnedSubmodulesFromExecutionSnapshot({
       executionSnapshotRoot: task.executionSnapshotRoot,
@@ -6656,6 +6682,9 @@ export default smithers((ctx) => {
                     run_id: __ULTRAFUZZ_RUN_ID_LITERAL__,
                     task_id: task.id,
                     attempt_id: task.attemptId,
+                    ...(task.sourceRevision === null
+                      ? {}
+                      : { source_revision: task.sourceRevision, source_ref: task.sourceRef }),
                     execution_generation: cloudExecutionGeneration,
                     execution_snapshot_root: cloudSnapshotRelativePath(
                       task.executionSnapshotRoot,
@@ -6709,10 +6738,13 @@ export default smithers((ctx) => {
               key={task.id}
               path={task.workspacePath}
               branch={task.branch}
-              {...(usesPinnedSource ? { baseBranch: pinnedSourceBranch } : {})}
-              {...(!usesPinnedSource && task.execution.mode === "local" && governedSource
-                ? { baseBranch: governedSource.commit }
-                : {})}
+              {...(usesPinnedSource
+                ? { baseBranch: pinnedSourceBranch }
+                : task.sourceRevision !== null
+                  ? { baseBranch: task.sourceRevision }
+                  : task.execution.mode === "local" && governedSource
+                    ? { baseBranch: governedSource.commit }
+                    : {})}
             >
               <Task
                 id={task.preparationId}

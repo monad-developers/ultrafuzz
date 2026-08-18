@@ -24,6 +24,8 @@ const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
 const NON_NUL_STRING_PATTERN = "^[^\\u0000]+$";
 const ENVIRONMENT_VARIABLE_PATTERN = "^[A-Za-z_][A-Za-z0-9_]{0,127}$";
 const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
+const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
+const RUN_SOURCE_REF = /^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u;
 const SCHEMA_BINDING_FIELDS = [
   "schemaFile",
   "schemaId",
@@ -44,6 +46,12 @@ const safePathValueJsonSchema = {
   minLength: 1,
   maxLength: 4_096,
   pattern: NON_NUL_STRING_PATTERN
+} as const;
+
+const sourceIdentityValueJsonSchema = {
+  type: "string",
+  minLength: 1,
+  maxLength: 256
 } as const;
 
 const pinnedSubmodulePathJsonSchema = {
@@ -323,7 +331,9 @@ const smithersTaskMetadataJsonSchema = {
         primitive: { const: "worktree" },
         path: safePathValueJsonSchema,
         repoPath: safePathValueJsonSchema,
-        trustModel: { const: "skip-permissions" }
+        trustModel: { const: "skip-permissions" },
+        sourceRevision: sourceIdentityValueJsonSchema,
+        sourceRef: sourceIdentityValueJsonSchema
       }
     },
     artifacts: {
@@ -372,6 +382,8 @@ export const smithersTaskManifestJsonSchema = {
     run_id: { type: "string", pattern: SAFE_ID_PATTERN },
     smithers_run_id: nonEmptyStringJsonSchema,
     workflow_name: nonEmptyStringJsonSchema,
+    source_revision: sourceIdentityValueJsonSchema,
+    source_ref: sourceIdentityValueJsonSchema,
     pinned_submodules: { anyOf: [{ type: "null" }, pinnedSubmoduleExpectationJsonSchema] },
     tasks: {
       type: "array",
@@ -422,6 +434,8 @@ export const smithersTaskManifestJsonSchema = {
           },
           modelName: nonEmptyStringJsonSchema,
           reasoningEffort: nonEmptyStringJsonSchema,
+          sourceRevision: sourceIdentityValueJsonSchema,
+          sourceRef: sourceIdentityValueJsonSchema,
           dependencies: {
             type: "array",
             uniqueItems: true,
@@ -533,6 +547,8 @@ export interface SmithersTaskManifestMetadata {
     path: string;
     repoPath: string;
     trustModel: "skip-permissions";
+    sourceRevision?: string;
+    sourceRef?: string;
   };
   artifacts: {
     dir: string;
@@ -575,6 +591,8 @@ export interface SmithersTaskManifestTask {
   agentChain: SmithersTaskManifestAgentChainEntry[];
   modelName?: string;
   reasoningEffort?: string;
+  sourceRevision?: string;
+  sourceRef?: string;
   dependencies: string[];
   dependencySmithersNodeIds: string[];
   timeoutMs: number;
@@ -609,6 +627,8 @@ export interface SmithersTaskManifestDocument {
   run_id: string;
   smithers_run_id: string;
   workflow_name: string;
+  source_revision?: string;
+  source_ref?: string;
   pinned_submodules: SmithersPinnedSubmoduleExpectation | null;
   tasks: SmithersTaskManifestTask[];
 }
@@ -648,6 +668,22 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
   const byVerifierNodeId = new Map<string, SmithersTaskManifestTask>();
 
   assertPinnedSubmoduleExpectation(manifest);
+  if ((manifest.source_revision === undefined) !== (manifest.source_ref === undefined)) {
+    throw new Error("Smithers task manifest source revision and ref must be recorded together");
+  }
+  if (
+    (manifest.source_revision !== undefined && !GIT_OBJECT_ID.test(manifest.source_revision)) ||
+    (manifest.source_ref !== undefined && !RUN_SOURCE_REF.test(manifest.source_ref))
+  ) {
+    throw new Error("Smithers task manifest source revision binding is invalid");
+  }
+  if (
+    manifest.source_ref !== undefined &&
+    manifest.source_ref !== "refs/heads/ultrafuzz-pinned" &&
+    manifest.source_ref !== `refs/ultrafuzz/runs/${manifest.run_id}/source`
+  ) {
+    throw new Error("Smithers task manifest source ref does not belong to its run");
+  }
 
   for (const task of manifest.tasks) {
     assertUniqueTaskIdentity(byAttemptId, task.attemptId, task, "attempt ID");
@@ -668,6 +704,14 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       task.metadata.run.smithersWorkflowName !== manifest.workflow_name
     ) {
       throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched run identity metadata`);
+    }
+    if (
+      task.sourceRevision !== manifest.source_revision ||
+      task.sourceRef !== manifest.source_ref ||
+      task.metadata.workspace.sourceRevision !== manifest.source_revision ||
+      task.metadata.workspace.sourceRef !== manifest.source_ref
+    ) {
+      throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched source revision metadata`);
     }
     if (
       task.metadata.node.attemptId !== task.attemptId ||

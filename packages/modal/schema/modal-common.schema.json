@@ -678,6 +678,10 @@
     "nodeInput": {
       "type": "object",
       "additionalProperties": false,
+      "dependentRequired": {
+        "source_revision": ["source_ref"],
+        "source_ref": ["source_revision"]
+      },
       "required": [
         "schema_version",
         "run_id",
@@ -698,6 +702,11 @@
         "run_id": { "$ref": "#/$defs/nonEmptyString" },
         "task_id": { "$ref": "#/$defs/nonEmptyString" },
         "attempt_id": { "$ref": "#/$defs/safeId" },
+        "source_revision": { "$ref": "#/$defs/gitObjectId" },
+        "source_ref": {
+          "type": "string",
+          "pattern": "^refs/(?:heads/ultrafuzz-pinned|ultrafuzz/runs/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/source)$"
+        },
         "execution_generation": { "$ref": "#/$defs/safeId" },
         "execution_snapshot_root": { "$ref": "#/$defs/boundedPath" },
         "workflow_path": { "$ref": "#/$defs/boundedPath" },

@@ -27,6 +27,12 @@
     "source_run_id": {
       "$ref": "#/$defs/safeId"
     },
+    "source_revision": {
+      "$ref": "#/$defs/gitObjectId"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/runSourceRef"
+    },
     "mode": {
       "enum": ["run", "resume", "replay", "fork"]
     },
@@ -197,6 +203,15 @@
     "safeId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runSourceRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
     },
     "sha256": {
       "type": "string",

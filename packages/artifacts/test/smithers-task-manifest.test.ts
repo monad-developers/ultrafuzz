@@ -222,6 +222,20 @@ test("rejects duplicate JSON keys before schema validation", () => {
   assert.throws(() => parseSmithersTaskManifestBytes(Buffer.from(duplicate)), /duplicate property name/u);
 });
 
+test("rejects a source ref owned by a different run", () => {
+  assert.throws(
+    () =>
+      parseSmithersTaskManifestBytes(
+        bytes({
+          ...manifest(),
+          source_revision: "c".repeat(40),
+          source_ref: "refs/ultrafuzz/runs/run-foreign/source"
+        })
+      ),
+    /source ref does not belong/u
+  );
+});
+
 test("rejects duplicate task identities and unresolved verifier dependencies", () => {
   assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([task(), task()]))), /repeats attempt ID/u);
 

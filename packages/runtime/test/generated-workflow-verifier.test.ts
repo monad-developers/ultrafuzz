@@ -127,7 +127,7 @@ test("the workflow runner can project the generated workflow input into its inpu
 });
 
 function loadArtifactAwareAgent(
-  options: { onReset?: () => void } = {}
+  options: { onReset?: () => void; onSourceVerify?: () => void } = {}
 ): (
   task: unknown,
   chainIndex: number,
@@ -143,6 +143,7 @@ function loadArtifactAwareAgent(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   return new Function(
+    "assertWorkspaceSourceRevision",
     "resetTaskArtifactsForRetry",
     "authoritativeFinalReportCoverageArgs",
     "authoritativeFinalReportAgentExecutionArgs",
@@ -154,6 +155,7 @@ function loadArtifactAwareAgent(
     "sensitiveEnvironmentValues",
     `${helper}; return artifactAwareAgent;`
   )(
+    () => options.onSourceVerify?.(),
     () => options.onReset?.(),
     (_task: unknown, args: unknown) => args,
     (_task: unknown, args: unknown) => args,
@@ -4475,7 +4477,15 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.ok(proofEnd > proofStart, source);
   assert.ok(workflowStart > proofStart, source);
   assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
-  assert.match(source, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/u);
+  assert.match(
+    source,
+    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision/u
+  );
+  assert.match(source, /function assertWorkspaceSourceRevision/u);
+  assert.match(source, /git\("HEAD\^\{commit\}"\)/u);
+  assert.match(source, /head !== task\.sourceRevision \|\| sourceRef !== task\.sourceRevision/u);
+  assert.match(source, /if \(firstGenerationForAttempt\) \{\s*assertWorkspaceSourceRevision\(task\)/u);
+  assert.match(source, /replayWorkspacePatches !== false\) assertWorkspaceSourceRevision\(task\)/u);
   assert.match(source, /if \(!usesPinnedSource\) return/u);
   assert.match(source, /preservePinnedSourceProof\(task\)/u);
   assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
@@ -4491,6 +4501,36 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
   assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
+});
+
+test("recorded source identity, not later ref creation, selects pinned worktree mode", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function sourceUsesPinnedBranch");
+  const helperEnd = source.indexOf("\nfunction readGovernedSource", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const evaluate = (refs: Array<string | null>, mutablePinnedRefExists: boolean): boolean =>
+    new Function(
+      "taskSpecs",
+      "pinnedSourceRef",
+      "invariantPinnedSourceRefExists",
+      `${helper}; return sourceUsesPinnedBranch();`
+    )(
+      refs.map((sourceRef) => ({ sourceRef })),
+      "refs/heads/ultrafuzz-pinned",
+      () => mutablePinnedRefExists
+    ) as boolean;
+
+  assert.equal(evaluate(["refs/ultrafuzz/runs/run-one/source"], true), false);
+  assert.equal(evaluate(["refs/heads/ultrafuzz-pinned"], false), true);
+  assert.equal(evaluate([null], true), true);
+  assert.throws(
+    () => evaluate(["refs/ultrafuzz/runs/run-one/source", "refs/heads/ultrafuzz-pinned"], true),
+    /disagree on their recorded source ref/u
+  );
 });
 
 test("generated Smithers cloud source proof records the sealed submodule expectation", () => {
@@ -4745,9 +4785,13 @@ test("generated Smithers pinned source proof rejects any previously published by
 
 test("agent retries are error-agnostic fresh generations with Smithers' effective prompt", async () => {
   let resets = 0;
+  let sourceVerifications = 0;
   const calls: Array<Record<string, unknown> | undefined> = [];
   const arbitraryFailure = new Error("opaque provider failure 731");
-  const artifactAwareAgent = loadArtifactAwareAgent({ onReset: () => (resets += 1) });
+  const artifactAwareAgent = loadArtifactAwareAgent({
+    onReset: () => (resets += 1),
+    onSourceVerify: () => (sourceVerifications += 1)
+  });
   const prompt = "the original task prompt";
   const wrapped = artifactAwareAgent({ agentChain: [{}] }, 0, prompt, {
     async generate(args: unknown): Promise<unknown> {
@@ -4780,6 +4824,7 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
 
   assert.deepEqual(result, { ok: true });
   assert.equal(resets, 2);
+  assert.equal(sourceVerifications, 2);
   assert.equal(calls[1]?.prompt, "worktree isolation\n\nthe original task prompt\n\nstructured output contract");
   assert.equal("messages" in (calls[1] ?? {}), false);
   assert.equal(calls[1]?.resumeSession, undefined);

@@ -468,6 +468,7 @@ export async function createModalNodeHandoffArchive(
   projectRoot: string,
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
+  assertRecordedSourceInput(input);
   const root = fs.realpathSync(path.resolve(projectRoot));
   const gitExecutable = trustedGitExecutable(root);
   const runRoot = checkedPath(root, input.run_root, "run root");
@@ -493,7 +494,19 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    if (pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)) {
+    if (input.source_revision !== undefined && input.source_ref !== undefined) {
+      if (input.source_revision !== governedSource.commit) {
+        throw new Error("recorded cloud source revision does not match the governed source commit");
+      }
+      if (
+        input.source_ref === INVARIANT_PINNED_SOURCE_REF &&
+        pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)
+      ) {
+        createPinnedGitBaseline(root, staging, temporaryRoot, gitExecutable, governedSource);
+      } else {
+        createRecordedGitBaseline(root, staging, temporaryRoot, gitExecutable, input.source_revision, input.source_ref);
+      }
+    } else if (pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)) {
       createPinnedGitBaseline(root, staging, temporaryRoot, gitExecutable, governedSource);
     } else {
       const baseArchive = path.join(temporaryRoot, "base.tar");
@@ -538,6 +551,25 @@ export async function createModalNodeHandoffArchive(
   } catch (error) {
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
+  }
+}
+
+function assertRecordedSourceInput(input: ModalNodeSandboxInput): void {
+  if ((input.source_revision === undefined) !== (input.source_ref === undefined)) {
+    throw new Error("cloud source revision and ref must be supplied together");
+  }
+  if (input.source_revision === undefined || input.source_ref === undefined) return;
+  if (!/^[0-9a-f]{40}$/u.test(input.source_revision)) throw new Error("cloud source revision is invalid");
+  if (
+    !/^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u.test(
+      input.source_ref
+    )
+  ) {
+    throw new Error("cloud source ref is invalid");
+  }
+  const expectedRunRef = `refs/ultrafuzz/runs/${input.run_id}/source`;
+  if (input.source_ref !== INVARIANT_PINNED_SOURCE_REF && input.source_ref !== expectedRunRef) {
+    throw new Error("cloud source ref does not belong to the requested run");
   }
 }
 
@@ -682,6 +714,90 @@ function createPinnedGitBaseline(
   }).trim();
   if (revisionCount !== "1" || remotes !== "") {
     throw new Error("pinned cloud source clone is not isolated");
+  }
+}
+
+function createRecordedGitBaseline(
+  sourceRoot: string,
+  projectRoot: string,
+  scratchRoot: string,
+  gitExecutable: string,
+  sourceRevision: string,
+  sourceRef: string
+): void {
+  const environment = deterministicGitEnvironment(gitExecutable);
+  const refRevision = execFileSync(gitExecutable, ["rev-parse", "--verify", `${sourceRef}^{commit}`], {
+    cwd: sourceRoot,
+    env: environment,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+    .trim()
+    .toLowerCase();
+  if (refRevision !== sourceRevision) {
+    throw new Error("recorded cloud source ref does not identify the recorded revision");
+  }
+
+  const template = path.join(scratchRoot, "git-template");
+  fs.mkdirSync(template, { mode: 0o700 });
+  execFileSync(
+    gitExecutable,
+    ["init", "--quiet", "--initial-branch=main", "--object-format=sha1", `--template=${template}`],
+    {
+      cwd: projectRoot,
+      env: environment,
+      stdio: "ignore"
+    }
+  );
+  execFileSync(
+    gitExecutable,
+    ["fetch", "--quiet", "--no-tags", "--depth=1", pathToFileURL(sourceRoot).href, `+${sourceRef}:${sourceRef}`],
+    { cwd: projectRoot, env: environment, stdio: "ignore" }
+  );
+  execFileSync(gitExecutable, ["reset", "--quiet", "--hard", sourceRevision], {
+    cwd: projectRoot,
+    env: environment,
+    stdio: "ignore"
+  });
+
+  const gitRoot = path.join(projectRoot, ".git");
+  for (const entry of fs.readdirSync(gitRoot)) {
+    if (!["objects", "shallow"].includes(entry)) {
+      fs.rmSync(path.join(gitRoot, entry), { recursive: true, force: true });
+    }
+  }
+  fs.rmSync(path.join(gitRoot, "objects", "info"), { recursive: true, force: true });
+  const recordedRefPath = path.join(gitRoot, ...sourceRef.split("/"));
+  fs.mkdirSync(path.dirname(recordedRefPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(gitRoot, "HEAD"),
+    sourceRef.startsWith("refs/heads/") ? `ref: ${sourceRef}\n` : `${sourceRevision}\n`,
+    { mode: 0o600 }
+  );
+  fs.writeFileSync(recordedRefPath, `${sourceRevision}\n`, { mode: 0o600 });
+  const publishingIndex = path.join(gitRoot, "index.publishing");
+  execFileSync(gitExecutable, ["read-tree", sourceRevision], {
+    cwd: projectRoot,
+    env: { ...environment, GIT_INDEX_FILE: publishingIndex },
+    stdio: "ignore"
+  });
+  fs.chmodSync(publishingIndex, 0o600);
+  fs.renameSync(publishingIndex, path.join(gitRoot, "index"));
+
+  const stagedRevision = execFileSync(gitExecutable, ["rev-parse", "HEAD^{commit}"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  const stagedRef = execFileSync(gitExecutable, ["rev-parse", `${sourceRef}^{commit}`], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (stagedRevision !== sourceRevision || stagedRef !== sourceRevision) {
+    throw new Error("recorded cloud source baseline changed commit identity");
   }
 }
 
