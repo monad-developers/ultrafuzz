@@ -6,6 +6,7 @@ import path from "node:path";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 
+import { BENCHMARK_FULL_MAX_PARALLEL_RUNS, BENCHMARK_FULL_MAX_PARALLEL_TARGETS } from "../src/benchmark-manifest.js";
 import { EVAL_SUITE_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
 import { assertHeldOutPathsAbsent } from "../src/runner.js";
 import {
@@ -116,6 +117,11 @@ function expectSchemaParity(document: unknown, expected: boolean): void {
 }
 
 describe("eval suite loading and planning", () => {
+  it("keeps concurrency ceilings at four times the largest built-in lane", () => {
+    expect(MAX_EVAL_PARALLEL_TARGETS).toBe(4 * BENCHMARK_FULL_MAX_PARALLEL_TARGETS);
+    expect(MAX_EVAL_PARALLEL_RUNS).toBe(4 * BENCHMARK_FULL_MAX_PARALLEL_RUNS);
+  });
+
   it("keeps the eval dimension cap aligned between JSON Schema and Zod", () => {
     const document = suiteDocument();
     const run = objectField(document, "run");

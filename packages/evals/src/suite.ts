@@ -34,10 +34,10 @@ export const DEFAULT_ARTIFACT_MAX_FILE_BYTES = 5_000_000;
 export const DEFAULT_RECALL_THRESHOLD = 0.7;
 /** Absolute work and allocation bound for target x variant x trial expansion. */
 export const MAX_EVAL_MATRIX_ROWS = 100_000;
-/** Hard ceiling for target-level concurrency (2x the largest built-in lane). */
-export const MAX_EVAL_PARALLEL_TARGETS = 16;
-/** Hard ceiling for concurrently launched/scored rows (above the built-in maximum of 20). */
-export const MAX_EVAL_PARALLEL_RUNS = 32;
+/** Hard ceiling for target-level concurrency (4x the largest built-in lane). */
+export const MAX_EVAL_PARALLEL_TARGETS = 32;
+/** Hard ceiling for concurrently launched/scored rows (4x the largest built-in lane). */
+export const MAX_EVAL_PARALLEL_RUNS = 80;
 
 export const EVAL_WORKFLOW_INPUT_RESERVED_KEYS = [
   "benchmark_execution",
