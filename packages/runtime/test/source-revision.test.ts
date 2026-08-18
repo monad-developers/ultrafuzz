@@ -11,12 +11,43 @@ import { cleanRun, initProject, planRun } from "../src/index.js";
 import { compileSmithersWorkflow } from "../src/smithers.js";
 import { captureRunSourceRevision } from "../src/source-revision.js";
 
+function writeSourceRevisionTopology(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: stdout.txt
+        contract: ultrafuzz/text@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - project-discovery
+`,
+    "utf8"
+  );
+}
+
 test("run planning binds local task worktrees to the launch checkout commit", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-revision-"));
   const git = (args: string[]): string =>
     execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSourceRevisionTopology(project);
     git(["init", "--quiet", "--initial-branch=main"]);
     git(["config", "user.name", "Ultrafuzz Test"]);
     git(["config", "user.email", "test@invalid"]);
@@ -129,6 +160,7 @@ test("planning captures source before repository reads and publishes no ref when
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-race-"));
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSourceRevisionTopology(project);
     gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
     gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
     gitAt(project, ["config", "user.email", "test@invalid"]);
@@ -166,6 +198,7 @@ test("multi-run cleanup deletes source refs atomically", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-clean-atomic-"));
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSourceRevisionTopology(project);
     gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
     gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
     gitAt(project, ["config", "user.email", "test@invalid"]);
@@ -205,6 +238,7 @@ test("failed directory cleanup preserves the run source ref", async () => {
   const originalRmSync = fs.rmSync;
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    writeSourceRevisionTopology(project);
     gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
     gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
     gitAt(project, ["config", "user.email", "test@invalid"]);
