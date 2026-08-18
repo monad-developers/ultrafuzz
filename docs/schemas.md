@@ -32,6 +32,8 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:references:reference-cache-manifest:1`
 - `urn:ultrafuzz:schema:runtime:workflow-control-integrity:2`
 - `urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1`
+- `urn:ultrafuzz:schema:runtime:data-governance-policy:1`
+- `urn:ultrafuzz:schema:runtime:data-disclosure-acknowledgements:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:4`
 
 The generated-tests v3 schema describes an atomic strict UTF-8 text bundle.
@@ -85,6 +87,13 @@ joins, projected-key uniqueness, filesystem and Git facts, digest relationships,
 and other contextual rules remain named host semantic gates. Exit `1` means the
 artifact author must correct the document. Exit `2` is a schema, invocation, or
 tool setup failure. The validator never repairs either file.
+
+Campaign governance policy and acknowledgement inputs follow that split. Their
+registered schemas enforce closed shapes, canonical text and timestamp forms,
+and Unicode code-point length limits. Runtime semantic gates enforce projected
+destination uniqueness, exact destination-policy coverage, and canonical policy
+array ordering. Runtime parsing returns accepted values unchanged; it never
+trims or reorders them.
 
 ## Breaking Contract Policy
 

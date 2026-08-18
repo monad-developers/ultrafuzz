@@ -10,7 +10,7 @@ export const KIMI_CODE_VERSION = "0.29.1";
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for
 // `@effect/platform-node-shared: ^4.0.0-beta.105`, an open caret over
-// prereleases, and the generated workspace is installed with
+// prereleases, and each ephemeral generated workspace is installed with
 // `--package-lock=false`. Unpinned, two cloud containers resuming the same run
 // at different times install different `@effect/*` builds, and a newer beta that
 // needs Effect APIs absent from the pinned core breaks every run including
@@ -74,7 +74,7 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 
 // The pin list above closes the hazard one package at a time, and only for
 // packages that have already broken a run. What it cannot cover is the rest of
-// the transitive closure: the generated workspace installs with
+// the transitive closure: an ephemeral generated workspace installs with
 // `--package-lock=false`, so every open range below the pins re-resolves against
 // whatever npm holds at that instant. Two costs follow. A version published
 // minutes ago can be selected before its tarball has propagated to the CDN edge
@@ -137,19 +137,25 @@ export interface SmithersInstallCommandOptions {
   readonly prefix: string;
   /** Registry to install from; omitted, npm uses the ambient configuration. */
   readonly registry?: string;
+  /** Record registry integrity hashes for an operator-owned controller install. */
+  readonly packageLock?: boolean;
 }
 
 /**
- * The argv both installers of the generated workspace run. Shared so the
- * resolution cutoff cannot be present on one path and missing on the other.
+ * Shared argv for operator and ephemeral dependency installs, keeping the
+ * resolution cutoff present on both paths.
  */
-export function smithersDependencyInstallArgs({ prefix, registry }: SmithersInstallCommandOptions): string[] {
+export function smithersDependencyInstallArgs({
+  prefix,
+  registry,
+  packageLock
+}: SmithersInstallCommandOptions): string[] {
   return [
     "install",
     "--prefix",
     prefix,
     "--ignore-scripts",
-    "--package-lock=false",
+    `--package-lock=${packageLock === true ? "true" : "false"}`,
     `--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`,
     ...(registry === undefined ? [] : [`--registry=${registry}`]),
     "--no-audit",

@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
+import { STOCK_AGENT_IDS } from "./agents.js";
 import { MAX_TIMEOUT_SECONDS } from "./constants.js";
 import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
 
@@ -10,7 +11,6 @@ export const RESOLVED_CONFIG_SCHEMA_FILENAME = "resolved-config.schema.json" as 
 const NON_WHITESPACE_PATTERN = /.*\S.*/u;
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const AGENT_ID_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 const NODE_ID_PATTERN = /^[a-z0-9_][a-z0-9_-]{0,127}$/u;
 const EVAL_PROVIDER_ID_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
 const HTTPS_ENDPOINT_PATTERN = /^https:\/\/\S+$/u;
@@ -110,14 +110,14 @@ const modalExecutionProviderSchema = z
     credentialEnv: z
       .array(environmentVariableNameSchema)
       .length(2)
-      .refine((names) => new Set(names).size === names.length)
+      .refine((names) => names.join(",") === "MODAL_TOKEN_ID,MODAL_TOKEN_SECRET")
   })
   .strict();
 
 const modelProfileSchema = z
   .object({
     id: z.string().regex(PROFILE_ID_PATTERN),
-    agent: z.string().regex(AGENT_ID_PATTERN),
+    agent: z.enum(STOCK_AGENT_IDS),
     model: nonWhitespaceStringSchema.optional(),
     reasoning: nonWhitespaceStringSchema.optional(),
     timeoutSeconds: timeoutSecondsSchema.optional()
@@ -220,7 +220,7 @@ const modelProfilesSchema = z
   .refine((profiles) => Object.keys(profiles).length > 0, { message: "models.profiles must not be empty" });
 
 const agentConfigsSchema = z
-  .record(z.string().regex(AGENT_ID_PATTERN), agentConfigSchema)
+  .partialRecord(z.enum(STOCK_AGENT_IDS), agentConfigSchema)
   .refine((agents) => Object.keys(agents).length > 0, { message: "agents must not be empty" })
   .superRefine((agents, context) => {
     if (agents.DeepSeekAgent?.auth === "subscription") {

@@ -71,8 +71,7 @@ api_key_env = "OPENAI_API_KEY"
 [agents.ClaudeAgent]
 # "subscription" uses your logged-in Claude Code CLI (`claude -p`); no API key needed,
 # and ANTHROPIC_API_KEY is cleared so the subscription wins. Switch to "api-key" to
-# bill against the Anthropic API instead (reads ANTHROPIC_API_KEY unless api_key_env
-# names another variable).
+# bill against the Anthropic API instead (reads canonical ANTHROPIC_API_KEY).
 #
 # Per permissions.trust_model below, this agent runs with Claude Code's permission
 # checks bypassed, so tasks get unattended filesystem and shell access inside their
@@ -82,8 +81,7 @@ auth = "subscription"
 [agents.KimiAgent]
 # "subscription" uses your logged-in Kimi Code CLI from KIMI_CODE_HOME or
 # ~/.kimi-code. Switch to "api-key" to bill against a Kimi/Moonshot-compatible
-# API key instead (reads KIMI_API_KEY unless api_key_env names another variable,
-# such as MOONSHOT_API_KEY).
+# API key instead; KIMI_API_KEY is canonical and MOONSHOT_API_KEY remains a fallback.
 auth = "subscription"
 
 [agents.DeepSeekAgent]

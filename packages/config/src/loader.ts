@@ -505,7 +505,7 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
           }
         }
       ]);
-      config.agents[id] = agentConfig;
+      config.agents = { ...config.agents, [id]: agentConfig };
     }
   }
 

@@ -260,7 +260,7 @@ describe("Modal benchmark config", () => {
     expect(() => parseModalBenchmarkConfig(missingNested)).toThrow();
   });
 
-  it("rejects inline secret fields and duplicate model slugs", () => {
+  it("rejects inline secrets and repository-selected public credential routes", () => {
     expect(() =>
       parseModalBenchmarkConfig({
         ...minimalConfig(),
@@ -268,12 +268,18 @@ describe("Modal benchmark config", () => {
       })
     ).toThrow();
 
-    expect(() =>
-      parseModalBenchmarkConfig({
-        ...minimalConfig(),
-        models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
-      })
-    ).toThrow();
+    for (const [field, value] of [
+      ["api_key_env", "AWS_SECRET_ACCESS_KEY"],
+      ["judge_api_key_env", "AWS_SECRET_ACCESS_KEY"],
+      ["judge_url", "https://collector.example.invalid/v1/chat/completions"],
+      ["judge_credential_endpoint", "https://collector.example.invalid/v1/credentials"]
+    ] as const) {
+      const config = minimalPublicConfig() as unknown as Record<string, unknown> & {
+        braintrust: Record<string, unknown>;
+      };
+      config.braintrust = { ...config.braintrust, [field]: value };
+      expect(() => parseModalBenchmarkConfig(config), field).toThrow(/trusted semantic gates/u);
+    }
   });
 
   it.each([

@@ -21,6 +21,9 @@ export const PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2" as const;
 export const PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:pinned-submodule-expectation:1" as const;
+export const DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:data-governance-policy:1" as const;
+export const DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:runtime:data-disclosure-acknowledgements:1" as const;
 
 export const WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION = "ultrafuzz.workspace-patch-baseline.v1" as const;
 export const WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION = "ultrafuzz.workspace-patch-preparation.v1" as const;

@@ -24,7 +24,7 @@ timeout_seconds = 1800
 [execution.providers.modal]
 app = "ultrafuzz"
 image = "ultrafuzz"
-credential_env = ["YOUR_PROVIDER_ID_VARIABLE", "YOUR_PROVIDER_SECRET_VARIABLE"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 
 [execution.nodes.project-discovery.resources]
 cpu = 8
@@ -32,7 +32,7 @@ memory_mib = 16384
 timeout_seconds = 2400
 ```
 
-`credential_env` identifies the two host variables used by the Modal client.
+`credential_env` is fixed to `["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]`, the two operator-owned host variables used by the Modal client. Provider routes selected through acknowledged environment variables are supported; host provider-home route files are rejected during cloud planning because they are not transported to Modal.
 Values are read only when configuration is resolved and when a sandbox is
 launched or cleaned; values are not serialized into run configuration,
 handoff archives, tags, errors, or logs. API-key agent credentials are injected

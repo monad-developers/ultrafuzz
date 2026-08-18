@@ -1,12 +1,14 @@
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  assertRunPlanDocument,
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -17,6 +19,7 @@ import {
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   readRunPlanDocument,
+  sha256Bytes,
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATES,
   SMITHERS_RUN_STATUSES,
@@ -24,15 +27,24 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
   type RunLayout,
+  type RunDataGovernanceReference,
   type SmithersTaskManifestAgentChainEntry,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestMetadata,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { resolveExecutionResources, serializeResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
-import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
+import {
+  resolveExecutionResources,
+  serializeResolvedConfigJsonBytes,
+  serializeResolvedConfigToml,
+  type ResolvedConfig
+} from "@ultrafuzz/config";
+import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
+import { DATA_GOVERNANCE_PROVENANCE_PATH, effectiveRouteEnvironment } from "./data-governance.js";
+import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
+import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import {
   enablePinnedSubmoduleWorktreeConfig,
@@ -56,6 +68,7 @@ import {
 import { assertRuntimeDocument, parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import {
   acquireSmithersExecutableAnchor,
+  assertExecutableOutsideRoot,
   bindSmithersExecutableCapability,
   smithersExecutableCapability,
   type SmithersExecutableAnchor
@@ -69,6 +82,7 @@ import {
 import {
   assertSmithersPackageManifest,
   migrateStockSmithers032PackageManifest,
+  renderSmithersPackageJson,
   SMITHERS_BIN_PATH,
   SMITHERS_VERSION,
   smithersDependencyInstallArgs
@@ -94,6 +108,16 @@ const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
+interface OperatorControllerProject {
+  root: string;
+  seal: string;
+}
+
+const operatorControllerProjects = new Map<string, Promise<OperatorControllerProject>>(),
+  operatorControllerRoots = new Set<string>();
+let operatorControllerCleanupRegistered = false;
+const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {",
+  SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
 const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        child = spawn("bun", [cliPath, ...childArgs], {
           detached: true,
           stdio: ["ignore", fd, fd],
@@ -107,7 +131,7 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
           cliPath,
           ...childArgs,
         ]);
-        child = spawn("bun", childSnapshotTransfer?.args ?? [cliPath, ...childArgs], {
+        child = spawn(process.execPath, [...ultrafuzzBunStartupArgs, ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
           detached: true,
           stdio:
             childSnapshotTransfer === undefined
@@ -131,7 +155,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         const supervisorFd = openSync(logFile, "a");
         let supervisor;
         try {
-          supervisor = spawn("bun", supervisorSnapshotTransfer?.args ?? supervisorArgs, {
+          supervisor = spawn(process.execPath, [...ultrafuzzBunStartupArgs, ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
             detached: true,
             stdio:
               supervisorSnapshotTransfer === undefined
@@ -155,10 +179,12 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn(op
     });`;
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescriptorValue =
       process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR?.trim();
+    const snapshotSourceRoot = process.env.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT?.trim();
     const snapshotProcessRoot = process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT?.trim();
     const snapshotPersistedRoot = process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT?.trim();
     const snapshotTransferDeclared =
       snapshotDescriptorValue !== undefined ||
+      snapshotSourceRoot !== undefined ||
       snapshotProcessRoot !== undefined ||
       snapshotPersistedRoot !== undefined;
     const parsedSnapshotDescriptor = Number(snapshotDescriptorValue ?? "");
@@ -174,6 +200,10 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
         snapshotDescriptor === undefined || !snapshotProcessRoot
           ? undefined
           : statSync(snapshotProcessRoot);
+      const sourceStat =
+        snapshotDescriptor === undefined || !snapshotSourceRoot
+          ? undefined
+          : statSync(snapshotSourceRoot);
       const persistedStat =
         snapshotDescriptor === undefined || !snapshotPersistedRoot
           ? undefined
@@ -181,17 +211,21 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       if (
         snapshotDescriptor === undefined ||
         processStat === undefined ||
+        sourceStat === undefined ||
         persistedStat === undefined ||
         snapshotProcessRoot !== expectedProcessRoot ||
         !processStat.isDirectory() ||
+        !sourceStat.isDirectory() ||
         !persistedStat.isDirectory() ||
         processStat.dev !== persistedStat.dev ||
-        processStat.ino !== persistedStat.ino
+        processStat.ino !== persistedStat.ino ||
+        sourceStat.dev !== persistedStat.dev ||
+        sourceStat.ino !== persistedStat.ino
       ) {
         throw new Error("detached resume execution snapshot transfer capability is no longer current");
       }
     }
-    const snapshotRoots = [snapshotProcessRoot, snapshotPersistedRoot].filter(
+    const snapshotRoots = [snapshotSourceRoot, snapshotProcessRoot, snapshotPersistedRoot].filter(
       (value) => value !== undefined && value.length > 1,
     );
     const rewriteSnapshotArgument = (value) => {
@@ -203,7 +237,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       }
       return value;
     };
-    const child = spawn(options.executable ?? "bun", args.map(rewriteSnapshotArgument), {
+    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
       cwd,
       stdio:
         snapshotDescriptor === undefined
@@ -242,7 +276,10 @@ const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resol
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
   "process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));";
+const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
+const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
+const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
 
 // Ultrafuzz invokes this process through a descriptor held by its controller.
 // Each detached descendant receives that directory atomically as fd 3, opens a
@@ -250,6 +287,7 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC
 // This avoids every parent-exit race around /proc/<parent>/fd/<n> pathnames.
 const ultrafuzzInheritedSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR";
 const ultrafuzzProcessSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR";
+const ultrafuzzSnapshotSourceRootEnv = "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT";
 const ultrafuzzProcessSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT";
 const ultrafuzzPersistedSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT";
 
@@ -302,21 +340,24 @@ function ultrafuzzSnapshotDescriptor(value) {
 
 function ultrafuzzExecutionSnapshotChildTransfer(args) {
   const descriptorValue = process.env[ultrafuzzProcessSnapshotDescriptorEnv]?.trim();
+  const sourceRoot = process.env[ultrafuzzSnapshotSourceRootEnv]?.trim();
   const processRoot = process.env[ultrafuzzProcessSnapshotRootEnv]?.trim();
   const persistedRoot = process.env[ultrafuzzPersistedSnapshotRootEnv]?.trim();
   const transferDeclared =
-    descriptorValue !== undefined || processRoot !== undefined || persistedRoot !== undefined;
+    descriptorValue !== undefined || sourceRoot !== undefined || processRoot !== undefined || persistedRoot !== undefined;
   if (!transferDeclared) return undefined;
 
   const descriptor = ultrafuzzSnapshotDescriptor(descriptorValue ?? "");
-  if (descriptor === undefined || !processRoot || !persistedRoot) {
+  if (descriptor === undefined || !sourceRoot || !processRoot || !persistedRoot) {
     throw new Error("process execution snapshot transfer capability is incomplete or invalid");
   }
 
   const expectedProcessRoot = "/proc/" + process.pid + "/fd/" + descriptor;
   if (
     processRoot !== expectedProcessRoot ||
+    !statSync(sourceRoot).isDirectory() ||
     !statSync(processRoot).isDirectory() ||
+    realpathSync(sourceRoot) !== realpathSync(persistedRoot) ||
     realpathSync(processRoot) !== realpathSync(persistedRoot)
   ) {
     throw new Error("process execution snapshot transfer capability is no longer current");
@@ -324,7 +365,7 @@ function ultrafuzzExecutionSnapshotChildTransfer(args) {
   return {
     descriptor,
     args: args.map((value) =>
-      rewriteUltrafuzzExecutionSnapshotValue(value, [processRoot, persistedRoot], "/proc/self/fd/3")
+      rewriteUltrafuzzExecutionSnapshotValue(value, [sourceRoot, processRoot, persistedRoot], "/proc/self/fd/3")
     ),
     env: { [ultrafuzzInheritedSnapshotDescriptorEnv]: "3" },
   };
@@ -334,6 +375,7 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
   const inheritedDescriptorValue = process.env[ultrafuzzInheritedSnapshotDescriptorEnv]?.trim();
   delete process.env[ultrafuzzInheritedSnapshotDescriptorEnv];
   delete process.env[ultrafuzzProcessSnapshotDescriptorEnv];
+  delete process.env[ultrafuzzSnapshotSourceRootEnv];
   delete process.env[ultrafuzzProcessSnapshotRootEnv];
   delete process.env[ultrafuzzPersistedSnapshotRootEnv];
 
@@ -355,20 +397,20 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
     }
     return;
   }
-  const sourceRoot = dirname(dirname(configPath));
+  const configuredSourceRoot = dirname(dirname(configPath));
   if (inheritedDescriptorValue !== undefined && inheritedDescriptorValue !== "3") {
     throw new Error("inherited execution snapshot descriptor must be fixed fd 3");
   }
   const inheritedDescriptor = inheritedDescriptorValue === undefined ? undefined : 3;
-  if (inheritedDescriptor === undefined && !/^\\/proc\\/[0-9]+\\/fd\\/[0-9]+$/u.test(sourceRoot)) return;
+  if (inheritedDescriptor === undefined && !/^\\/proc\\/[0-9]+\\/fd\\/[0-9]+$/u.test(configuredSourceRoot)) return;
 
   const { persistedWorkflowPath, persistedRoot } =
     ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue);
-  const acquisitionRoot =
-    inheritedDescriptor === undefined ? sourceRoot : "/proc/self/fd/" + inheritedDescriptor;
+  const sourceRoot = inheritedDescriptor === undefined ? configuredSourceRoot : "/proc/self/fd/" + inheritedDescriptor;
+  const acquisitionRoot = sourceRoot;
   let descriptor;
   try {
-    descriptor = openSync(acquisitionRoot, "r");
+    descriptor = inheritedDescriptor ?? openSync(acquisitionRoot, "r");
     const processRoot = "/proc/" + process.pid + "/fd/" + descriptor;
     const processStat = statSync(processRoot);
     if (
@@ -382,7 +424,7 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
       if (value !== undefined && name !== "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH") {
         process.env[name] = rewriteUltrafuzzExecutionSnapshotValue(
           value,
-          [sourceRoot, acquisitionRoot, persistedRoot],
+          [configuredSourceRoot, sourceRoot, persistedRoot],
           processRoot,
         );
       }
@@ -390,7 +432,7 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
     for (let index = 0; index < process.argv.length; index += 1) {
       process.argv[index] = rewriteUltrafuzzExecutionSnapshotValue(
         process.argv[index],
-        [sourceRoot, acquisitionRoot, persistedRoot],
+        [configuredSourceRoot, sourceRoot, persistedRoot],
         processRoot,
       );
     }
@@ -400,6 +442,7 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
     }
 
     process.env[ultrafuzzProcessSnapshotDescriptorEnv] = String(descriptor);
+    process.env[ultrafuzzSnapshotSourceRootEnv] = sourceRoot;
     process.env[ultrafuzzProcessSnapshotRootEnv] = processRoot;
     process.env[ultrafuzzPersistedSnapshotRootEnv] = persistedRoot;
     process.env.SMITHERS_MONITOR_SUPPRESS = "1";
@@ -407,8 +450,6 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
     throw error;
-  } finally {
-    if (inheritedDescriptor !== undefined) closeSync(inheritedDescriptor);
   }
   // This descriptor is the process-scoped execution capability. The kernel
   // closes it when this CLI, detached engine, or supervisor exits.
@@ -651,6 +692,7 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
         }`;
 
 export type SmithersCompatibilityPatchId =
+  | "local_delegation"
   | "detached_snapshot_transfer"
   | "supervisor_descriptor"
   | "resume_snapshot_transfer"
@@ -659,6 +701,7 @@ export type SmithersCompatibilityPatchId =
   | "workflow_path_import"
   | "workflow_path_persistence"
   | "process_snapshot_anchor"
+  | "manifest_relaunch"
   | "post_failure_workflow_path"
   | "replay_workflow_path"
   | "replay_workflow_metadata"
@@ -704,6 +747,14 @@ export interface SmithersCompatibilityPatch {
 // must re-verify each anchor against the newly pinned release instead of assuming
 // the workaround still lands.
 export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch[] = [
+  {
+    id: "local_delegation",
+    packageName: "smthrs",
+    sourceRelativePath: SMITHERS_BIN_PATH,
+    patchable: SMITHERS_BIN_LOCAL_DELEGATION_SOURCE,
+    patched: SMITHERS_BIN_LOCAL_DELEGATION_PATCH,
+    upstreamAbsent: ["ULTRAFUZZ_DISABLE_LOCAL_SMITHERS_DELEGATION"]
+  },
   {
     id: "detached_snapshot_transfer",
     packageName: "@smthrs/cli",
@@ -769,6 +820,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
     patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
     upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
+  },
+  {
+    id: "manifest_relaunch",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/index.js",
+    patchable: SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE,
+    patched: SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH,
+    upstreamAbsent: ["relaunchSnapshotTransfer"]
   },
   {
     id: "post_failure_workflow_path",
@@ -984,8 +1043,10 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "TMP",
   "TMPDIR",
   "TZ",
+  "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
+  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
   ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
@@ -1007,6 +1068,11 @@ const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_NODE_ID",
   "SMITHERS_RUN_ID",
   "SMITHERS_SNAPSHOT_SOCK"
+]);
+const SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES = new Set([
+  "SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS",
+  "SMITHERS_KEEP_WORKTREES",
+  "SMITHERS_MONITOR_SUPPRESS"
 ]);
 export type SmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
 export type SmithersRunState = Exclude<(typeof SMITHERS_RUN_STATES)[number], "unknown">;
@@ -1055,6 +1121,9 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  env?: Record<string, string | undefined>;
+  controllerSourceDigest?: string;
+  dataGovernance?: RunDataGovernanceReference;
 }
 
 export interface NodeAttemptProvenance {
@@ -1082,11 +1151,14 @@ export interface CompiledSmithersWorkflow {
   expandedGraphPath: string;
   configPath: string;
   resolvedConfigPath: string;
+  executionConfigPath: string;
   inputPath: string;
   tasksPath: string;
   logsDir: string;
   pinnedSubmodules?: PinnedSubmoduleExpectation;
   productionSourceRoots?: string[];
+  controllerSourceDigest: string;
+  dataGovernance?: RunDataGovernanceReference;
 }
 
 export interface SubmitSmithersInput {
@@ -1192,6 +1264,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       .map((attempt) =>
         compileTask({
           config: input.config,
+          env: input.env ?? {},
           graph: input.graph,
           node,
           attempt,
@@ -1215,6 +1288,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const configPath = path.join(smithersDir, "config.fingerprint-input");
   const resolvedConfigPath = path.join(smithersDir, "resolved-config.json");
   const resolvedConfigBytes = serializeResolvedConfigJsonBytes(input.config);
+  const executionConfigPath = path.join(smithersDir, "execution-config.toml");
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -1244,10 +1318,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     expandedGraphPath,
     configPath,
     resolvedConfigPath,
+    executionConfigPath,
     inputPath,
     tasksPath,
     logsDir,
     productionSourceRoots: input.config.permissions.productionSourceRoots,
+    controllerSourceDigest: input.controllerSourceDigest ?? inspectControllerSource(projectRoot).digest,
+    ...(input.dataGovernance === undefined ? {} : { dataGovernance: input.dataGovernance }),
     ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
   };
   writePreparedWorkflowFile(
@@ -1263,6 +1340,12 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     "workflow config fingerprint input"
   );
   writePreparedWorkflowFile(input.runLayout.root, resolvedConfigPath, resolvedConfigBytes, "resolved workflow config");
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    executionConfigPath,
+    serializeResolvedConfigToml(input.config),
+    "reviewed workflow execution config"
+  );
   const taskManifest: SmithersTaskManifestDocument = {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
@@ -1336,12 +1419,14 @@ export async function smithersExecutionControlFiles(
   const externalRunner = explicitSmithersExecutable(env) !== undefined;
   const useExternalRunnerForExecutionClosure =
     externalRunner && compiled.tasks.every((task) => task.execution.mode !== "cloud");
-  if (!useExternalRunnerForExecutionClosure) {
-    await ensureSmithersDependencies(compiled.projectRoot, env, {
-      timeoutMs: SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
-      requirePinnedRunner: true
-    });
-  }
+  const dependencyProjectRoot = useExternalRunnerForExecutionClosure
+    ? compiled.projectRoot
+    : await operatorControllerProjectRoot(compiled.projectRoot, env);
+  (() => {
+    const candidate = path.join(layout.root, "smithers", "execution-tsconfig.json");
+    writeFileDurable(candidate, "{}\n");
+    add(candidate, "tsconfig.json");
+  })();
 
   for (const file of pinnedSubmoduleExecutionFiles(compiled.projectRoot, compiled.pinnedSubmodules)) {
     add(file.sourcePath, file.snapshotPath);
@@ -1350,6 +1435,14 @@ export async function smithersExecutionControlFiles(
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
   const plan = readRunPlanDocument(planPath, layout.runId);
+  const governancePath = (() => {
+    const candidate = path.join(layout.root, plan.data_governance.path),
+      bytes = readRegularFileSnapshot(candidate, 1024 * 1024);
+    if (sha256Bytes(bytes) !== plan.data_governance.sha256)
+      throw new Error("campaign data-governance provenance does not match the immutable run plan");
+    return candidate;
+  })();
+  add(governancePath, `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
   const plannedPrompts = new Map<string, Record<string, unknown>>();
   for (const value of plan.rendered_prompts) {
     if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
@@ -1371,10 +1464,10 @@ export async function smithersExecutionControlFiles(
     );
   }
 
-  const projectConfigPath = path.join(compiled.projectRoot, "ultrafuzz.toml");
-  if (fs.existsSync(projectConfigPath)) add(projectConfigPath, "controls/ultrafuzz.toml");
+  add(compiled.executionConfigPath, "controls/ultrafuzz.toml");
   add(compiled.resolvedConfigPath, "controls/resolved-config.json");
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
+  assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);
   for (const sourcePath of walkExecutionFiles(agentsRoot)) {
     const source = fs.readFileSync(sourcePath, "utf8");
     if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
@@ -1430,7 +1523,7 @@ export async function smithersExecutionControlFiles(
   }
 
   const dependencyMap = collectWorkflowExecutionDependencies({
-    projectRoot: compiled.projectRoot,
+    projectRoot: dependencyProjectRoot,
     modules: [...modulesByRoot.values()],
     externalRunner: useExternalRunnerForExecutionClosure,
     add
@@ -1446,6 +1539,22 @@ export async function smithersExecutionControlFiles(
   return [...files.values()].sort((left, right) =>
     compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
   );
+}
+
+export function assertSealedDataGovernance(
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
+  expected: RunDataGovernanceReference,
+  runId: string
+): void {
+  const planFile = executionFiles.find((file) => file.snapshotPath === "controls/plan.json"),
+    governanceFile = executionFiles.find((file) => file.snapshotPath === `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
+  if (planFile === undefined || governanceFile === undefined) throw new Error("sealed data governance is incomplete");
+  const plan = assertRunPlanDocument(parseStrictJsonBytes(planFile.contents), runId);
+  if (
+    JSON.stringify(plan.data_governance) !== JSON.stringify(expected) ||
+    sha256Bytes(governanceFile.contents) !== expected.sha256
+  )
+    throw new Error("sealed data governance differs from the authenticated launch decision");
 }
 
 interface WorkflowPackageManifest {
@@ -1492,8 +1601,11 @@ function collectWorkflowExecutionDependencies(input: {
   const executablePaths = new Set<string>();
   const smithersRoot = path.join(input.projectRoot, ".smithers");
   const rootPackageJson = path.join(smithersRoot, "package.json");
+  const rootPackageLock = path.join(smithersRoot, "package-lock.json");
   const rootManifest = fs.existsSync(rootPackageJson) ? readWorkflowPackageManifest(rootPackageJson) : {};
   if (fs.existsSync(rootPackageJson)) input.add(rootPackageJson, "dependencies/root-package.json");
+  if (!input.externalRunner) assertOperatorPackageLock(smithersRoot);
+  if (fs.existsSync(rootPackageLock)) input.add(rootPackageLock, "dependencies/root-package-lock.json");
   // An explicit local runner replaces only the root Smithers dependency set.
   // Module issuers still need their external runtime dependencies in the
   // sealed closure because the runner loads those modules from the snapshot.
@@ -1518,7 +1630,13 @@ function collectWorkflowExecutionDependencies(input: {
         dependencies[dependency.name] = module.id;
         continue;
       }
-      const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name);
+      const dependencyRoot = resolveWorkflowPackageDependency(
+        issuer.root,
+        dependency.name,
+        issuer.id === "root" || isPathInside(path.join(smithersRoot, "node_modules"), issuer.root)
+          ? smithersRoot
+          : undefined
+      );
       if (dependencyRoot === undefined) {
         if (dependency.optional) continue;
         throw new Error(`workflow dependency is unavailable for snapshot: ${issuer.id} -> ${dependency.name}`);
@@ -1630,12 +1748,22 @@ function workflowPackageDependencies(manifest: WorkflowPackageManifest): Array<{
     .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
 }
 
-function resolveWorkflowPackageDependency(issuerRoot: string, dependency: string): string | undefined {
+function resolveWorkflowPackageDependency(
+  issuerRoot: string,
+  dependency: string,
+  controllerRoot?: string
+): string | undefined {
   if (!isWorkflowPackageName(dependency)) throw new Error(`workflow dependency name is invalid: ${dependency}`);
   let current = path.resolve(issuerRoot);
   for (;;) {
     const candidate = path.join(current, "node_modules", ...dependency.split("/"));
-    if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+    if (fs.existsSync(candidate)) {
+      const resolved = fs.realpathSync(candidate);
+      if (controllerRoot !== undefined && !isPathInside(path.join(controllerRoot, "node_modules"), resolved))
+        throw new Error(`workflow dependency escapes the private controller install: ${dependency}`);
+      return resolved;
+    }
+    if (current === controllerRoot) return undefined;
     const parent = path.dirname(current);
     if (parent === current) return undefined;
     current = parent;
@@ -2500,6 +2628,7 @@ export async function runSmithersInspectionCommand(input: {
   args: readonly string[];
   projectRoot: string;
   env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<SmithersCommandSnapshot> {
@@ -2509,6 +2638,7 @@ export async function runSmithersInspectionCommand(input: {
       args: command,
       projectRoot: input.projectRoot,
       env: input.env,
+      environmentVariableNames: input.environmentVariableNames,
       signal: input.signal,
       timeoutMs: input.timeoutMs
     });
@@ -3178,33 +3308,30 @@ async function prepareSmithersExecutableEnvironment(
   env: Record<string, string | undefined> | undefined,
   control: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<Record<string, string | undefined> | undefined> {
-  // A linked run already carries a non-forgeable capability for the executable
-  // copied into its sealed dependency closure. Do not consult, patch, or
-  // reinstall the mutable project-owned runner tree before honoring it.
-  if (smithersExecutableCapability(env) !== undefined) {
-    return env;
+  if (smithersExecutableCapability(env) !== undefined) return env;
+  const explicit = explicitSmithersExecutable(env);
+  if (explicit !== undefined) {
+    assertExecutableOutsideRoot(explicit, projectRoot);
+    return bindSmithersExecutableCapability({ ...(env ?? {}) }, explicit, projectRoot);
   }
-  await ensureSmithersDependencies(projectRoot, env, control);
-  if (explicitSmithersExecutable(env) !== undefined) {
-    return env;
-  }
-  const local = localSmithersExecutable(projectRoot);
-  if (!fs.existsSync(local)) return env;
+  if (hasWorkflowExecutionSnapshotCapability(env)) throw new Error("sealed workflow has no runner capability");
 
-  // Dependency verification above pins the package version, validates the
-  // command shim, and applies every compatibility patch before this authority
-  // is granted. Execute the package's real script rather than attesting a
-  // platform-specific .bin shim, which also keeps the capability portable to
-  // Windows where the shim is a command file without a shebang.
-  const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+  const controllerRoot = await operatorControllerProjectRoot(projectRoot, env, control);
+  const packageRoot = resolveInstalledSmithersPackageRoot(controllerRoot);
   const executable = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
-  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable);
+  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable, projectRoot);
 }
 
 async function ensureSmithersDependencies(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
-  control: { signal?: AbortSignal; timeoutMs?: number; requirePinnedRunner?: boolean } = {}
+  control: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    requirePinnedRunner?: boolean;
+    packageLock?: boolean;
+    npmCli?: string;
+  } = {}
 ): Promise<void> {
   if (explicitSmithersExecutable(env) !== undefined && control.requirePinnedRunner !== true) {
     return;
@@ -3246,6 +3373,7 @@ async function ensureSmithersDependencies(
   if (installedSmithersValidationError(projectRoot) === undefined) {
     try {
       applySmithersCompatibilityPatches(projectRoot);
+      if (control.packageLock === true) assertOperatorPackageLock(packageRoot);
       return;
     } catch (error) {
       // `installedSmithersValidationError` only inspects the top-level runner, so
@@ -3268,8 +3396,15 @@ async function ensureSmithersDependencies(
   await withTransientNpmRegistryRetry(
     () =>
       execFileAsync(
-        "npm",
-        smithersDependencyInstallArgs({ prefix: packageRoot, registry: "https://registry.npmjs.org" }),
+        control.npmCli === undefined ? "npm" : process.execPath,
+        [
+          ...(control.npmCli === undefined ? [] : [control.npmCli]),
+          ...smithersDependencyInstallArgs({
+            prefix: packageRoot,
+            registry: "https://registry.npmjs.org",
+            packageLock: control.packageLock
+          })
+        ],
         {
           cwd: projectRoot,
           env: smithersCommandEnv(projectRoot, env),
@@ -3291,6 +3426,7 @@ async function ensureSmithersDependencies(
   }
   try {
     applySmithersCompatibilityPatches(projectRoot);
+    if (control.packageLock === true) assertOperatorPackageLock(packageRoot);
   } catch (error) {
     // Surface what the pre-install attempt saw. Without it a reinstall that cannot
     // fix the tree reports only its second-hand symptom, losing the specific reason
@@ -3306,8 +3442,158 @@ async function ensureSmithersDependencies(
 // permanently unpatchable tree fails fast instead of reinstalling on every command.
 const repairedSmithersInstalls = new Set<string>();
 
-function applySmithersCompatibilityPatches(projectRoot: string): void {
+async function operatorControllerProjectRoot(
+  targetRoot: string,
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number } = {}
+): Promise<string> {
+  const npmCli = trustedOperatorNpmCli(targetRoot, env);
+  let project = operatorControllerProjects.get(npmCli);
+  const fresh = project === undefined;
+  if (project === undefined) {
+    project = (async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-controller-"));
+      registerOperatorControllerRoot(root);
+      try {
+        const timeoutMs = Math.min(
+            control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
+            SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
+          ),
+          packageRoot = path.join(root, ".smithers");
+        fs.mkdirSync(packageRoot, { mode: 0o700 });
+        writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson());
+        await ensureSmithersDependencies(root, env, {
+          signal: control.signal,
+          timeoutMs,
+          requirePinnedRunner: true,
+          packageLock: true,
+          npmCli
+        });
+        return { root, seal: operatorControllerProjectSeal(root) };
+      } catch (error) {
+        disposeOperatorControllerRoot(root);
+        throw error;
+      }
+    })();
+    operatorControllerProjects.set(npmCli, project);
+  }
+  let resolved: OperatorControllerProject | undefined;
+  try {
+    resolved = await project;
+    if (!fresh && operatorControllerProjectSeal(resolved.root) !== resolved.seal)
+      throw new Error("operator controller changed after installation");
+    return resolved.root;
+  } catch (error) {
+    if (operatorControllerProjects.get(npmCli) === project) operatorControllerProjects.delete(npmCli);
+    if (resolved !== undefined) disposeOperatorControllerRoot(resolved.root);
+    throw error;
+  }
+}
+
+function operatorControllerProjectSeal(projectRoot: string): string {
+  const files = new Map<string, string>();
+  collectWorkflowExecutionDependencies({
+    projectRoot,
+    modules: [],
+    externalRunner: false,
+    add: (sourcePath, snapshotPath) => {
+      if (files.has(snapshotPath)) throw new Error(`operator controller has a duplicate path: ${snapshotPath}`);
+      files.set(snapshotPath, fs.realpathSync(sourcePath));
+    }
+  });
+  const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v1\0");
+  for (const [snapshotPath, sourcePath] of [...files].sort(([left], [right]) =>
+    compareWorkflowExecutionStrings(left, right)
+  )) {
+    const stat = fs.lstatSync(sourcePath, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("operator controller contains a non-regular file");
+    hash
+      .update(snapshotPath)
+      .update("\0")
+      .update(`${stat.dev}:${stat.ino}:${stat.mode}:${stat.nlink}:${stat.size}\0`)
+      .update(fs.readFileSync(sourcePath));
+  }
+  return hash.digest("hex");
+}
+
+function registerOperatorControllerRoot(root: string): void {
+  operatorControllerRoots.add(root);
+  if (operatorControllerCleanupRegistered) return;
+  operatorControllerCleanupRegistered = true;
+  process.once("exit", () => {
+    for (const candidate of operatorControllerRoots) {
+      try {
+        fs.rmSync(candidate, { recursive: true, force: true });
+      } catch {
+        continue;
+      }
+    }
+    operatorControllerRoots.clear();
+  });
+}
+
+function disposeOperatorControllerRoot(root: string): void {
+  operatorControllerRoots.delete(root);
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
+function trustedOperatorNpmCli(targetRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const trustedBin = env?.[ULTRAFUZZ_TRUSTED_BIN_ENV] ?? process.env[ULTRAFUZZ_TRUSTED_BIN_ENV];
+  if (trustedBin !== undefined && !path.isAbsolute(trustedBin))
+    throw new Error("operator trusted-bin path must be absolute");
+  const launcher =
+      trustedBin === undefined
+        ? path.join(
+            path.dirname(process.execPath),
+            ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
+          )
+        : path.join(trustedBin, process.platform === "win32" ? "npm-cli.js" : "npm"),
+    npmCli = fs.realpathSync(launcher),
+    relative = path.relative(path.resolve(targetRoot), npmCli),
+    stat = fs.lstatSync(npmCli);
+  if (
+    relative === "" ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== "..") ||
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    (stat.mode & 0o022) !== 0
+  )
+    throw new Error("operator npm CLI must be a non-writable regular file outside the target repository");
+  return npmCli;
+}
+
+function assertOperatorPackageLock(packageRoot: string): void {
+  const lockPath = path.join(packageRoot, "package-lock.json"),
+    lock = parseStrictJsonBytes(readRegularFileSnapshot(lockPath, MAX_PACKAGE_MANAGER_MANIFEST_BYTES), {
+      maxBytes: MAX_PACKAGE_MANAGER_MANIFEST_BYTES,
+      maxDepth: MAX_PACKAGE_MANAGER_MANIFEST_DEPTH,
+      maxItems: MAX_PACKAGE_MANAGER_MANIFEST_ITEMS,
+      maxProperties: MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES
+    });
+  if (!isObjectRecord(lock) || lock.lockfileVersion !== 3 || !isObjectRecord(lock.packages))
+    throw new Error("operator controller install requires a current package lock");
+  for (const [location, value] of Object.entries(lock.packages)) {
+    if (location === "") continue;
+    const encodedIntegrity =
+        isObjectRecord(value) && typeof value.integrity === "string" ? value.integrity.slice("sha512-".length) : "",
+      decodedIntegrity = Buffer.from(encodedIntegrity, "base64");
+    if (
+      !isObjectRecord(value) ||
+      typeof value.resolved !== "string" ||
+      !value.resolved.startsWith("https://registry.npmjs.org/") ||
+      typeof value.integrity !== "string" ||
+      !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(value.integrity) ||
+      decodedIntegrity.byteLength !== 64 ||
+      decodedIntegrity.toString("base64") !== encodedIntegrity
+    )
+      throw new Error(`operator controller lock entry is not registry-integrity bound: ${location}`);
+  }
+}
+
+export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
+  const runnerRoots = smithersDependencyRootCandidates(nodeModules, "smthrs");
   const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/cli");
   const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/scheduler");
   const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/engine");
@@ -3317,6 +3603,7 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
   // install: fail instead of silently skipping the resume-durability patches and
   // letting the run proceed unpatched. The caller repairs this by reinstalling.
   if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0) return;
+  if (runnerRoots.length !== 1) throw new Error("pinned workflow runner resolved an incomplete public entrypoint");
   if (cliRoots.length !== 1) {
     throw new Error("pinned workflow runner resolved an incomplete CLI implementation");
   }
@@ -3324,16 +3611,27 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
     throw new Error("pinned workflow runner resolved an incomplete resume implementation");
   }
   const packageRoot = cliRoots[0]!;
+  const runnerSource = path.join(runnerRoots[0]!, ...SMITHERS_BIN_PATH.split("/"));
   const packageJson = path.join(packageRoot, "package.json");
   const cliSource = path.join(packageRoot, "src", "index.js");
   const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
+  assertRegularFileInside(nodeModules, runnerSource, "installed Smithers public entrypoint");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
   const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
   if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_VERSION}`);
   }
+  writeFileDurable(
+    runnerSource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(runnerSource, "utf8"),
+      SMITHERS_BIN_LOCAL_DELEGATION_SOURCE,
+      SMITHERS_BIN_LOCAL_DELEGATION_PATCH,
+      "target-local runner delegation"
+    )
+  );
   let cliContents = fs.readFileSync(cliSource, "utf8");
   for (const [source, patched, label] of [
     [
@@ -3349,6 +3647,7 @@ function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
       "process-owned execution snapshot"
     ],
+    [SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE, SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH, "manifest-conflict relaunch"],
     [SMITHERS_CLI_POST_FAILURE_PATH_SOURCE, SMITHERS_CLI_POST_FAILURE_PATH_PATCH, "post-failure workflow path"],
     [SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH, "replay workflow path"],
     [
@@ -3751,8 +4050,9 @@ function smithersCommandEnv(
     }
     if (
       value !== undefined &&
+      !["BUN_INSPECT_PRELOAD", "BUN_OPTIONS", "NODE_OPTIONS", "NODE_PATH"].includes(normalizedKey) &&
       (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
-        (normalizedKey.startsWith("SMITHERS_") &&
+        (SMITHERS_CONTROLLER_ENVIRONMENT_VARIABLES.has(normalizedKey) &&
           !SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES.has(normalizedKey)) ||
         forwarded.has(normalizedKey))
     ) {
@@ -3768,13 +4068,19 @@ export function composeSmithersCommandPath(
   source: Readonly<Record<string, string | undefined>>
 ): string {
   const trustedBin = source[ULTRAFUZZ_TRUSTED_BIN_ENV];
-  const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  // Preserve the caller's PATH representation for workflow-engine compatibility,
-  // while keeping the authenticated CLI and project-local Smithers binaries first.
-  // Required-command preflight intentionally accepts only stable absolute entries,
-  // because task commands execute from fresh worktrees rather than this checkout.
-  return [trustedBin, localBin, source.PATH]
-    .filter((entry): entry is string => typeof entry === "string")
+  const target = path.resolve(projectRoot);
+  const canonicalTarget = fs.realpathSync(target);
+  const callerEntries = (source.PATH ?? "").split(path.delimiter).filter((entry) => {
+    if (!path.isAbsolute(entry)) return false;
+    if (isPathInside(target, path.resolve(entry))) return isPreparedForgeGuardBin(projectRoot, entry);
+    try {
+      return !isPathInside(canonicalTarget, fs.realpathSync(entry));
+    } catch {
+      return false;
+    }
+  });
+  return [trustedBin, ...callerEntries]
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
 }
 
@@ -3784,6 +4090,7 @@ function smithersBinaryName(): string {
 
 function compileTask(input: {
   config: ResolvedConfig;
+  env: NodeJS.ProcessEnv;
   graph: ExpandedGraph;
   node: ExpandedNode;
   attempt: NodeAttemptProvenance;
@@ -3815,7 +4122,12 @@ function compileTask(input: {
   const agentCredentialEnv = [
     ...new Set(
       agentChain.flatMap((entry) =>
-        cloudAgentCredentialEnv(input.config.execution.mode, entry.agentRef, input.config.agents[entry.agentRef])
+        cloudAgentCredentialEnv(
+          input.config.execution.mode,
+          entry.agentRef,
+          input.config.agents[entry.agentRef],
+          input.env
+        )
       )
     )
   ];
@@ -3988,11 +4300,19 @@ function assertInvariantCampaignTimeoutBudget(
 function cloudAgentCredentialEnv(
   executionMode: ResolvedConfig["execution"]["mode"],
   agentRef: string,
-  agent: ResolvedConfig["agents"][string] | undefined
+  agent: ResolvedConfig["agents"][string] | undefined,
+  env: NodeJS.ProcessEnv
 ): string[] {
-  if (executionMode !== "cloud" || agent?.auth !== "api-key" || agent.apiKeyEnv === undefined) return [];
-  const names = [agent.apiKeyEnv];
-  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY", "KIMI_BASE_URL");
+  if (executionMode !== "cloud" || agent === undefined) return [];
+  const names = agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : [];
+  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+  const routes = effectiveRouteEnvironment(agentRef, env);
+  const extra = (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "")
+    .split(",")
+    .map((name) => name.trim().toUpperCase())
+    .filter((name) => env[name]?.trim());
+  names.push(...routes.map(([name]) => name), ...extra);
+  if (extra.length > 0) names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
   return names;
 }
 

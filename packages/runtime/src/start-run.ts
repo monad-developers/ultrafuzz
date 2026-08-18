@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  assertRunPlanDocument,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   NODE_PROVENANCE_FAILURE_CATEGORIES,
@@ -26,10 +27,9 @@ import {
   type RunRecoveryProvenance,
   type RunLayout,
   type AppendEventInput,
-  type SmithersTaskManifestDocument,
-  type SmithersTaskManifestTask
+  type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, type ResolvedConfig } from "@ultrafuzz/config";
+import { parseResolvedConfigJsonBytes, validateAgentConfigs, type ResolvedConfig } from "@ultrafuzz/config";
 import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
@@ -47,10 +47,13 @@ import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
+import { assertControllerExecutionSnapshotDigest } from "./controller-source.js";
+import { targetIdentity } from "./data-governance.js";
 import {
   compileSmithersWorkflow,
   requestSmithersPause,
   runSmithersLifecycleCommand,
+  assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
@@ -92,9 +95,15 @@ export interface LinkedWorkflowEvidence {
 const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_BIN",
   "SMITHERS_CLI_SRC_DIR",
+  "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
+  "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
+  "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
+  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+  "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
   "ULTRAFUZZ_MODAL_MODULE",
+  "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
   "ULTRAFUZZ_TRUSTED_BIN",
@@ -103,11 +112,23 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
   "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
   "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
+  "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT",
   "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
 ]);
+const MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES = [
+  "ALL_PROXY",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "all_proxy",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy"
+] as const;
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
+    enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
       requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
   });
@@ -137,7 +158,10 @@ export async function startRun(input: StartRunInput) {
       workflowName: `ultrafuzz-${plan.run_id}`,
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,
-      operatorInput: input.workflowInput
+      operatorInput: input.workflowInput,
+      env: { ...process.env, ...(input.env ?? {}) },
+      controllerSourceDigest: plan.controller_source_digest,
+      dataGovernance: plan.data_governance
     });
     const prepared = await persistSmithersEvidence(plan.layout, plan.graph, compiled, input.env, forbiddenSecretValues);
     appendEvent(plan.layout, {
@@ -183,6 +207,19 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
+    assertCurrentDataGovernanceTarget(
+      plan.validation.project_root,
+      prepared.verifiedControl.executionFiles,
+      plan.data_governance.path,
+      [
+        plan.layout.root,
+        path.join(plan.validation.project_root, ".ultrafuzz", "runs"),
+        path.join(plan.validation.project_root, ".smithers", "node_modules"),
+        path.join(plan.validation.project_root, ".smithers", "workflows")
+      ]
+    );
+    const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -190,13 +227,13 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: { ...trustedCli.env, ...prepared.executionSnapshot.env },
+      env: providerScopedControllerEnvironment(
+        { ...trustedCli.env, ...prepared.executionSnapshot.env },
+        providerCredentialNames
+      ),
       environmentVariableNames: mergeEnvironmentVariableNames(
-        agentEnvironmentVariableNames(
-          plan.resolved_config,
-          compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
-          forgeGuard.env
-        ),
+        agentEnvironmentVariableNames(plan.resolved_config, activeAgentRefs, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       ),
@@ -563,6 +600,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
       });
     }
+    const linkedAgentRefs = linkedWorkflowAgentRefs(evidence.verifiedControl.contents.tasks);
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -584,9 +623,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env),
+      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames),
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
@@ -744,6 +784,9 @@ async function persistSmithersEvidence(
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, layout);
+  assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, compiled.controllerSourceDigest);
+  if (compiled.dataGovernance === undefined) throw new Error("compiled workflow is missing data governance");
+  assertSealedDataGovernance(verifiedControl.executionFiles, compiled.dataGovernance, compiled.runId);
   const executionSnapshot = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout,
@@ -873,6 +916,11 @@ export async function readLinkedWorkflowEvidence(
     }
 
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout);
+    const sealedPlan = verifiedControl.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
+    if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
+    const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);
+    assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, plan.controller_source_digest);
+    assertSealedDataGovernance(verifiedControl.executionFiles, plan.data_governance, runId);
     const taskDocument = parseSealedTaskManifest(verifiedControl.contents);
     const compiledRunId = workflow.compiled_run_id;
     if (
@@ -1284,23 +1332,13 @@ function linkedWorkflowEnvironmentVariableNames(
   taskContents: Buffer,
   env: Record<string, string | undefined> | undefined
 ): string[] {
-  const tasks = linkedWorkflowTasks(taskContents);
-  const names = agentEnvironmentVariableNames(
-    config,
-    tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef)),
-    env
-  );
-  for (const task of tasks) {
-    const execution = objectRecord(task.execution);
-    pushEnvironmentVariableNames(names, execution.agentCredentialEnv);
-    const modal = objectRecord(execution.modal);
-    pushEnvironmentVariableNames(names, modal.credentialEnv);
-  }
-  return [...new Set(names)].sort();
+  return agentEnvironmentVariableNames(config, linkedWorkflowAgentRefs(taskContents), env);
 }
 
-function linkedWorkflowTasks(contents: Buffer): SmithersTaskManifestTask[] {
-  return parseSmithersTaskManifestBytes(contents).tasks;
+function linkedWorkflowAgentRefs(taskContents: Buffer): string[] {
+  return parseSmithersTaskManifestBytes(taskContents).tasks.flatMap((task) =>
+    task.agentChain.map((profile) => profile.agentRef)
+  );
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
@@ -1317,11 +1355,46 @@ function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]
 
 export function linkedWorkflowExecutionEnvironment(
   evidence: LinkedWorkflowEvidence,
-  credentials: Record<string, string | undefined> | undefined
+  credentials: Record<string, string | undefined> | undefined,
+  providerCredentialNames: readonly string[] = []
 ): Record<string, string | undefined> {
   // Snapshot-controlled paths are applied last so caller credentials can add
   // secrets but cannot redirect any verified workflow input.
-  return { ...(credentials ?? {}), ...evidence.executionSnapshot.env };
+  return providerScopedControllerEnvironment(
+    { ...(credentials ?? {}), ...evidence.executionSnapshot.env },
+    providerCredentialNames
+  );
+}
+
+function providerScopedControllerEnvironment(
+  source: Record<string, string | undefined>,
+  providerCredentialNames: readonly string[]
+): Record<string, string | undefined> {
+  return {
+    ...source,
+    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: [...new Set(providerCredentialNames)].sort().join(",")
+  };
+}
+
+function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {
+  const activeAgentRefs = new Set(agentRefs);
+  const names: string[] = [];
+  for (const [agentRef, agent] of Object.entries(config.agents)) {
+    if (!activeAgentRefs.has(agentRef) || agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
+    assertCredentialEnvironmentVariableName(agent.apiKeyEnv);
+    names.push(agent.apiKeyEnv);
+    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+  }
+  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
+    const provider = config.execution.providers[config.execution.provider];
+    if (provider !== undefined) {
+      for (const name of provider.credentialEnv) {
+        assertCredentialEnvironmentVariableName(name);
+        names.push(name);
+      }
+    }
+  }
+  return [...new Set(names)].sort();
 }
 
 function agentEnvironmentVariableNames(
@@ -1331,6 +1404,7 @@ function agentEnvironmentVariableNames(
 ): string[] {
   const activeAgentRefs = new Set(agentRefs);
   const names: string[] = [];
+  if (activeAgentRefs.size > 0) names.push("ULTRAFUZZ_PROVIDER_HOME_ROOT", ...MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES);
   for (const [agentRef, agent] of Object.entries(config.agents)) {
     if (!activeAgentRefs.has(agentRef)) continue;
     if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {
@@ -1339,17 +1413,13 @@ function agentEnvironmentVariableNames(
       if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
     }
     if (agentRef === "KimiAgent") {
-      names.push("KIMI_BASE_URL");
+      names.push("KIMI_BASE_URL", "KIMI_CODE_HOME", "KIMI_SHARE_DIR");
       if (agent.auth === "subscription") {
-        names.push(
-          "KIMI_CODE_HOME",
-          "KIMI_SHARE_DIR",
-          "ULTRAFUZZ_KIMI_SESSION_HOME",
-          "ULTRAFUZZ_KIMI_SHARED_AUTH_HOME",
-          "ULTRAFUZZ_MODAL_REMOTE_ROOT"
-        );
+        names.push("ULTRAFUZZ_KIMI_SESSION_HOME", "ULTRAFUZZ_KIMI_SHARED_AUTH_HOME", "ULTRAFUZZ_MODAL_REMOTE_ROOT");
       }
     }
+    if (agentRef === "ClaudeAgent") names.push("CLAUDE_CONFIG_DIR");
+    if (agentRef === "CodexAgent") names.push("OPENAI_BASE_URL");
   }
   if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
     const provider = config.execution.providers[config.execution.provider];
@@ -1359,10 +1429,12 @@ function agentEnvironmentVariableNames(
   }
   const extra = env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
   if (extra !== undefined && extra.trim() !== "") {
+    names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
     for (const name of extra.split(",").map((value) => value.trim())) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
         throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
       }
+      assertCredentialEnvironmentVariableName(name);
       names.push(name);
     }
   }
@@ -1392,6 +1464,18 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function assertCurrentDataGovernanceTarget(
+  projectRoot: string,
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
+  governancePath: string,
+  controllerOwnedPaths: string[]
+): void {
+  const sealed = executionFiles.find((file) => file.snapshotPath === `controls/${governancePath}`),
+    expected = objectRecord(objectRecord(parseStrictJsonBytes(sealed?.contents ?? Buffer.alloc(0))).target);
+  if (JSON.stringify(targetIdentity(projectRoot, controllerOwnedPaths)) !== JSON.stringify(expected))
+    throw new Error("campaign source changed after its data-disclosure acknowledgement");
+}
+
 function parseSealedResolvedConfig(
   executionFiles: readonly { snapshotPath: string; contents: Buffer }[]
 ): ResolvedConfig {
@@ -1399,7 +1483,10 @@ function parseSealedResolvedConfig(
   if (sealedConfig === undefined) {
     throw new Error("sealed workflow execution snapshot is missing its resolved configuration");
   }
-  return parseResolvedConfigJsonBytes(sealedConfig.contents);
+  const config = parseResolvedConfigJsonBytes(sealedConfig.contents);
+  const diagnostic = validateAgentConfigs(config.agents)[0];
+  if (diagnostic !== undefined) throw new Error(`sealed agent policy is invalid: ${diagnostic.message}`);
+  return config;
 }
 
 function parseSealedExpandedGraph(contents: Buffer): ExpandedGraph {

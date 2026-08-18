@@ -83,12 +83,14 @@ test("schema-backed producers require an explicit trusted CLI entrypoint", () =>
   assert.equal(prepareTrustedCliEnvironment({ layout, required: false }).active, false);
 });
 
-test("trusted CLI identity is schema-valid, preflighted, and ordered before every shadow binary", () => {
+test("trusted CLI identity is schema-valid and target PATH entries cannot shadow it", () => {
   const root = temporaryRoot();
   const layout = createRunLayout({ projectRoot: root, runId: "trusted-path" });
   const entrypoint = fakeCliEntrypoint(root);
   const callerBin = path.join(root, "target-bin");
   const localBin = path.join(root, ".smithers", "node_modules", ".bin");
+  const externalBin = temporaryRoot();
+  const targetLink = path.join(externalBin, "target-link");
   fs.mkdirSync(callerBin, { recursive: true });
   fs.mkdirSync(localBin, { recursive: true });
   for (const directory of [callerBin, localBin]) {
@@ -96,11 +98,12 @@ test("trusted CLI identity is schema-valid, preflighted, and ordered before ever
     fs.writeFileSync(shadow, "#!/bin/sh\nexit 77\n", "utf8");
     fs.chmodSync(shadow, 0o500);
   }
+  fs.symlinkSync(callerBin, targetLink, process.platform === "win32" ? "junction" : "dir");
 
   const trusted = prepareTrustedCliEnvironment({
     layout,
     cliEntrypoint: entrypoint,
-    env: { PATH: callerBin },
+    env: { PATH: [callerBin, localBin, targetLink, externalBin, "relative-bin", ""].join(path.delimiter) },
     required: true
   });
   assert.equal(trusted.active, true);
@@ -115,7 +118,7 @@ test("trusted CLI identity is schema-valid, preflighted, and ordered before ever
 
   const commandPath = composeSmithersCommandPath(root, trusted.env);
   const entries = commandPath.split(path.delimiter);
-  assert.deepEqual(entries.slice(0, 3), [trusted.env[ULTRAFUZZ_TRUSTED_BIN_ENV], localBin, callerBin]);
+  assert.deepEqual(entries, [trusted.env[ULTRAFUZZ_TRUSTED_BIN_ENV], externalBin]);
   const output = execFileSync(
     "ultrafuzz",
     [

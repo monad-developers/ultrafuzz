@@ -344,14 +344,14 @@ function applyPromptMetadataLayer(
           )
         );
       }
-      const existing = config.models.profiles[id];
-      config.models.profiles[id] = {
+      const existing = Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
+      setOwn(config.models.profiles, id, {
         id,
         agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
         model: profile.model ?? existing?.model,
         reasoning: profile.reasoning ?? existing?.reasoning,
         timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
-      };
+      });
       if (id === DEFAULT_MODEL_PROFILE_ID) {
         config.models.synthesizedDefault = false;
       }
@@ -505,14 +505,14 @@ function applyProjectConfigLayer(
             )
           );
         }
-        const existing = config.models.profiles[id];
-        config.models.profiles[id] = {
+        const existing = Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
+        setOwn(config.models.profiles, id, {
           id,
           agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
           model: profile.model ?? existing?.model,
           reasoning: profile.reasoning ?? existing?.reasoning,
           timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
-        };
+        });
       }
     }
   }
@@ -526,7 +526,11 @@ function applyProjectConfigLayer(
   }
   if (layer.agents) {
     for (const [id, agent] of Object.entries(layer.agents).sort()) {
-      config.agents[id] = normalizeAgentConfig(agent, config.agents[id]);
+      setOwn(
+        config.agents,
+        id,
+        normalizeAgentConfig(agent, Object.hasOwn(config.agents, id) ? config.agents[id] : undefined)
+      );
     }
   }
   if (layer.permissions) {
@@ -663,6 +667,10 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
   };
 }
 
+function setOwn<T>(record: Record<string, T>, id: string, value: T): void {
+  Object.defineProperty(record, id, { configurable: true, enumerable: true, value, writable: true });
+}
+
 function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
   const diagnostics: ConfigDiagnostic[] = [];
   const sameAgentAttempts = config.retry.sameAgentAttempts;
@@ -721,7 +729,7 @@ function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
       continue;
     }
     seen.add(profileId);
-    if (config.models.profiles[profileId] === undefined) {
+    if (!Object.hasOwn(config.models.profiles, profileId)) {
       diagnostics.push(
         diagnostic(
           "CONFIG_RETRY_AGENT_UNKNOWN",

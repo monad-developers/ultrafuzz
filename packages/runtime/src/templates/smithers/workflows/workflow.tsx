@@ -71,6 +71,7 @@ const {
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
   smithersTaskAgentId,
+  targetIdentity,
   validateWorkspacePatchCapture,
   verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
@@ -449,6 +450,7 @@ const untrustedContentBoundary =
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
+const governedSource = readGovernedSource();
 const authorizedDefensiveSecurityContext = [
   "## Authorized Defensive Security Context",
   "",
@@ -459,6 +461,30 @@ const authorizedDefensiveSecurityContext = [
 
 function sourceUsesPinnedBranch(): boolean {
   return invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef);
+}
+function readGovernedSource(): { commit: string; tree: string } | undefined {
+  const governancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+  if (governancePath === undefined) return undefined;
+  const governance = parseStrictJsonBytes(readRegularFileSnapshot(governancePath, 1024 * 1024)),
+    policy = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.policy) ? governance.policy : {},
+    target = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.target) ? governance.target : {},
+    { sensitivity } = policy,
+    { commit, tree, dirty } = target;
+  if (sensitivity === "private" && dirty !== false) throw new Error("private campaign source is not clean");
+  if (
+    typeof commit === "string" &&
+    typeof tree === "string" &&
+    /^[a-f0-9]{40,64}$/u.test(commit) &&
+    /^[a-f0-9]{40,64}$/u.test(tree)
+  )
+    return { commit, tree };
+  if (sensitivity === "private") throw new Error("private campaign source commit is invalid");
+  return undefined;
+}
+function assertGovernedWorkspaceSource(task: (typeof taskSpecs)[number]): void {
+  if (governedSource === undefined || task.execution.mode !== "local") return;
+  if (targetIdentity(task.workspacePath).commit !== governedSource.commit)
+    throw new Error("task workspace is not the acknowledged source commit");
 }
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
@@ -1184,7 +1210,7 @@ function baseAgentForProfile(
   task: (typeof taskSpecs)[number],
   profile: (typeof taskSpecs)[number]["agentChain"][number]
 ): AgentLike | AgentLike[] | undefined {
-  const factory = agentFactories[profile.agentRef];
+  const factory = Object.hasOwn(agentFactories, profile.agentRef) ? agentFactories[profile.agentRef] : undefined;
   if (typeof factory !== "function") {
     throw new Error(`agent factory is not registered: ${profile.agentRef}`);
   }
@@ -6684,6 +6710,9 @@ export default smithers((ctx) => {
               path={task.workspacePath}
               branch={task.branch}
               {...(usesPinnedSource ? { baseBranch: pinnedSourceBranch } : {})}
+              {...(!usesPinnedSource && task.execution.mode === "local" && governedSource
+                ? { baseBranch: governedSource.commit }
+                : {})}
             >
               <Task
                 id={task.preparationId}
@@ -6696,7 +6725,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => prepareArtifactMirror(task)}
+                {() => (assertGovernedWorkspaceSource(task), prepareArtifactMirror(task))}
               </Task>
               <Task
                 id={task.id}

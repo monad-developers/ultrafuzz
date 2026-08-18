@@ -42,6 +42,33 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Campaign data governance
+
+Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY`
+to a complete strict JSON document that matches the canonical
+[data-governance policy schema](../packages/runtime/schema/data-governance-policy.schema.json).
+The policy needs one `destination_policies` row for every declared source or
+artifact destination. The first failed private launch reports the exact route
+IDs and the policy and input digests.
+
+The schema validates the portable document shape. Runtime semantic gates also
+require unique destination-policy rows, exact coverage of the declared
+destination union, and ascending array order. Text values cannot have leading
+or trailing whitespace. Ultrafuzz rejects noncanonical input instead of
+silently trimming or reordering it.
+
+Put reviewed acknowledgement records in
+`ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS` as an array that matches the
+canonical
+[data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
+Acknowledgements bind the policy, effective inputs, prompt, routes, and
+Git/worktree identity. A runtime semantic gate rejects more than one
+acknowledgement for the same destination. Any change makes an acknowledgement
+stale. Credential values are never persisted. Private standalone Modal evals
+remain fail-closed pending the separate R-26 disclosure authorization. Public
+Modal runs record `cloud:modal`. These controls are not a sandbox or egress
+filter: YOLO agents remain unrestricted.
+
 ## Production dependency advisories
 
 CI and release validation run `pnpm security:dependency-advisories`. The gate
@@ -87,10 +114,20 @@ contract that the CI policy validates.
 
 ## Agent process environment
 
-Workflow processes receive the active agents' configured API-key variables,
-normal process essentials, and `SMITHERS_*` variables. Other host variables are
-not inherited automatically. This reduces accidental credential disclosure but
-does not isolate an unrestricted agent from the host.
+The workflow controller receives only the active agents' configured API-key
+variables, normal process essentials, and a named allowlist of controller
+variables. There is no wildcard `SMITHERS_*` forwarding. Before each model
+process starts, the generated adapter blanks every inactive built-in or
+dynamically configured provider credential and provider home, then restores
+only that invocation's credential and home. Other host variables are not
+inherited automatically.
+
+`HOME` remains a normal process essential and is intentionally forwarded.
+Subscription-backed CLIs may keep credential-rich state beneath it, and a
+same-UID YOLO agent can read files available to the operator regardless of
+environment filtering. Per-child credential scoping reduces accidental and
+cross-provider disclosure; it is not an OS isolation boundary or a promise that
+subscription credentials are inaccessible to an unrestricted local agent.
 
 Schema-backed tasks also receive a host-managed `ultrafuzz` launcher before
 target-controlled `PATH` entries. Its pinned CLI, schema-bundle, and validator

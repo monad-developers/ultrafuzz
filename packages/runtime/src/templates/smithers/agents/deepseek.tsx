@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
-import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { parseStrictJson } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
@@ -30,7 +30,6 @@ type DeepSeekSmithersUsage = {
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
-const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
 const DEEPSEEK_RESULT_MAX_BYTES = 1024 * 1024;
 const DEEPSEEK_RESULT_MAX_DEPTH = 32;
 const DEEPSEEK_RESULT_MAX_ITEMS = 10_000;
@@ -58,6 +57,8 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
     ...(reasoningEffort === undefined ? {} : { extraArgs: ["--effort", reasoningEffort] }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     permissionMode: "bypassPermissions",
+    // DeepSeek has a fixed route and needs no Claude settings source.
+    settingSources: "",
     env: workflowControlChildEnvironment(),
     ...deepSeekAuthOptions()
   });
@@ -95,48 +96,53 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
 
   override async buildCommand(params: DeepSeekCommandParams): Promise<DeepSeekCommand> {
     this.pendingUsage = undefined;
+    this.opts.settingSources = "";
     const command = await super.buildCommand(params);
     const opts = this.opts as DeepSeekAgentOptions;
     return {
       ...command,
-      env: workflowControlChildEnvironment({
-        ...command.env,
-        // Claude Code's documented custom-provider credential is
-        // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
-        // Anthropic credential can never win over the DeepSeek route.
-        ANTHROPIC_API_KEY: "",
-        ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
-        ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
-        // Keep first-party Claude auth, alternate provider routing, and host
-        // proxies from competing with the explicit DeepSeek endpoint/token.
-        ANTHROPIC_CONFIG_DIR: "",
-        ANTHROPIC_CUSTOM_HEADERS: "",
-        ANTHROPIC_FEDERATION_RULE_ID: "",
-        ANTHROPIC_IDENTITY_TOKEN: "",
-        ANTHROPIC_IDENTITY_TOKEN_FILE: "",
-        ANTHROPIC_ORGANIZATION_ID: "",
-        ANTHROPIC_PROFILE: "",
-        ANTHROPIC_UNIX_SOCKET: "",
-        CCR_OAUTH_TOKEN_FILE: "",
-        CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: "",
-        CLAUDE_CODE_HOST_AUTH_ENV_VAR: "",
-        CLAUDE_CODE_HOST_CREDS_FILE: "",
-        CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
-        CLAUDE_CODE_OAUTH_TOKEN: "",
-        CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "",
-        CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "",
-        CLAUDE_CODE_REMOTE_SETTINGS_PATH: "",
-        CLAUDE_CODE_USE_ANTHROPIC_AWS: "",
-        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "",
-        CLAUDE_CODE_USE_BEDROCK: "",
-        CLAUDE_CODE_USE_FOUNDRY: "",
-        CLAUDE_CODE_USE_GATEWAY: "",
-        CLAUDE_CODE_USE_MANTLE: "",
-        CLAUDE_CODE_USE_VERTEX: "",
-        // Claude treats an empty secure-storage override as "use the default".
-        // Point it at the same isolated root as the rest of its session state.
-        CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
-      })
+      env: workflowControlChildEnvironment(
+        {
+          ...command.env,
+          // Claude Code's documented custom-provider credential is
+          // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
+          // Anthropic credential can never win over the DeepSeek route.
+          ANTHROPIC_API_KEY: "",
+          ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
+          ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
+          // Keep first-party Claude auth, alternate provider routing, and host
+          // proxies from competing with the explicit DeepSeek endpoint/token.
+          ANTHROPIC_CONFIG_DIR: "",
+          ANTHROPIC_CUSTOM_HEADERS: "",
+          ANTHROPIC_FEDERATION_RULE_ID: "",
+          ANTHROPIC_IDENTITY_TOKEN: "",
+          ANTHROPIC_IDENTITY_TOKEN_FILE: "",
+          ANTHROPIC_ORGANIZATION_ID: "",
+          ANTHROPIC_PROFILE: "",
+          ANTHROPIC_UNIX_SOCKET: "",
+          CCR_OAUTH_TOKEN_FILE: "",
+          CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: "",
+          CLAUDE_CODE_HOST_AUTH_ENV_VAR: "",
+          CLAUDE_CODE_HOST_CREDS_FILE: "",
+          CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
+          CLAUDE_CODE_OAUTH_TOKEN: "",
+          CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "",
+          CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "",
+          CLAUDE_CODE_REMOTE_SETTINGS_PATH: "",
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "",
+          CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "",
+          CLAUDE_CODE_USE_BEDROCK: "",
+          CLAUDE_CODE_USE_FOUNDRY: "",
+          CLAUDE_CODE_USE_GATEWAY: "",
+          CLAUDE_CODE_USE_MANTLE: "",
+          CLAUDE_CODE_USE_VERTEX: "",
+          // Claude treats an empty secure-storage override as "use the default".
+          // Point it at the same isolated root as the rest of its session state.
+          CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
+        },
+        process.env,
+        { agent: "DeepSeekAgent" }
+      )
     };
   }
 
@@ -171,7 +177,7 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
   }
   return {
     ultrafuzzApiKey: requiredEnv(config.api_key_env ?? "DEEPSEEK_API_KEY"),
-    configDir: resolveConfigDir(config.config_dir ?? DEEPSEEK_CLAUDE_CONFIG_DIR)
+    configDir: resolveProviderHome("deepseek", config.config_dir)
   };
 }
 
@@ -191,13 +197,6 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.DeepSeekAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.DeepSeekAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }
 
 function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEffort | undefined {
