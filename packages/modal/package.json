@@ -2,6 +2,7 @@
   "name": "@ultrafuzz/modal",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ultrafuzz-modal": "./dist/cli.js"
