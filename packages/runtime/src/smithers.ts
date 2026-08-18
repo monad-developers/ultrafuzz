@@ -51,6 +51,7 @@ import {
 import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
+import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
 import {
   enablePinnedSubmoduleWorktreeConfig,
   pinnedSubmoduleExecutionFiles,
@@ -114,6 +115,7 @@ const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
 interface OperatorControllerProject {
+  npm: OperatorNpmProvision;
   root: string;
   seal: string;
 }
@@ -3336,6 +3338,7 @@ async function ensureSmithersDependencies(
     requirePinnedRunner?: boolean;
     packageLock?: boolean;
     npmCli?: string;
+    assertNpmCli?: () => void;
   } = {}
 ): Promise<void> {
   if (explicitSmithersExecutable(env) !== undefined && control.requirePinnedRunner !== true) {
@@ -3399,25 +3402,31 @@ async function ensureSmithersDependencies(
     }
   }
   await withTransientNpmRegistryRetry(
-    () =>
-      execFileAsync(
-        control.npmCli === undefined ? "npm" : process.execPath,
-        [
-          ...(control.npmCli === undefined ? [] : [control.npmCli]),
-          ...smithersDependencyInstallArgs({
-            prefix: packageRoot,
-            registry: "https://registry.npmjs.org",
-            packageLock: control.packageLock
-          })
-        ],
-        {
-          cwd: projectRoot,
-          env: smithersCommandEnv(projectRoot, env),
-          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-          ...(control.signal === undefined ? {} : { signal: control.signal }),
-          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-        }
-      ),
+    async () => {
+      control.assertNpmCli?.();
+      try {
+        return await execFileAsync(
+          control.npmCli === undefined ? "npm" : process.execPath,
+          [
+            ...(control.npmCli === undefined ? [] : [control.npmCli]),
+            ...smithersDependencyInstallArgs({
+              prefix: packageRoot,
+              registry: "https://registry.npmjs.org",
+              packageLock: control.packageLock
+            })
+          ],
+          {
+            cwd: projectRoot,
+            env: smithersCommandEnv(projectRoot, env),
+            maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+            ...(control.signal === undefined ? {} : { signal: control.signal }),
+            ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+          }
+        );
+      } finally {
+        control.assertNpmCli?.();
+      }
+    },
     control.signal === undefined ? {} : { signal: control.signal }
   );
   const validationError = installedSmithersValidationError(projectRoot);
@@ -3452,8 +3461,8 @@ async function operatorControllerProjectRoot(
   env: Record<string, string | undefined> | undefined,
   control: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<string> {
-  const npmCli = trustedOperatorNpmCli(targetRoot, env);
-  let project = operatorControllerProjects.get(npmCli);
+  const npmAuthority = resolveOperatorNpmAuthority(targetRoot, env);
+  let project = operatorControllerProjects.get(npmAuthority.cacheKey);
   const fresh = project === undefined;
   if (project === undefined) {
     project = (async () => {
@@ -3464,6 +3473,7 @@ async function operatorControllerProjectRoot(
             control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
             SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
           ),
+          npm = npmAuthority.provision(root),
           packageRoot = path.join(root, ".smithers");
         fs.mkdirSync(packageRoot, { mode: 0o700 });
         writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson());
@@ -3472,24 +3482,29 @@ async function operatorControllerProjectRoot(
           timeoutMs,
           requirePinnedRunner: true,
           packageLock: true,
-          npmCli
+          npmCli: npm.cliPath,
+          assertNpmCli: npm.assertCurrent
         });
-        return { root, seal: operatorControllerProjectSeal(root) };
+        return { npm, root, seal: operatorControllerProjectSeal(root) };
       } catch (error) {
         disposeOperatorControllerRoot(root);
         throw error;
       }
     })();
-    operatorControllerProjects.set(npmCli, project);
+    operatorControllerProjects.set(npmAuthority.cacheKey, project);
   }
   let resolved: OperatorControllerProject | undefined;
   try {
     resolved = await project;
-    if (!fresh && operatorControllerProjectSeal(resolved.root) !== resolved.seal)
-      throw new Error("operator controller changed after installation");
+    if (!fresh) {
+      resolved.npm.assertCurrent();
+      if (operatorControllerProjectSeal(resolved.root) !== resolved.seal)
+        throw new Error("operator controller changed after installation");
+    }
     return resolved.root;
   } catch (error) {
-    if (operatorControllerProjects.get(npmCli) === project) operatorControllerProjects.delete(npmCli);
+    if (operatorControllerProjects.get(npmAuthority.cacheKey) === project)
+      operatorControllerProjects.delete(npmAuthority.cacheKey);
     if (resolved !== undefined) disposeOperatorControllerRoot(resolved.root);
     throw error;
   }
@@ -3528,6 +3543,7 @@ function registerOperatorControllerRoot(root: string): void {
   process.once("exit", () => {
     for (const candidate of operatorControllerRoots) {
       try {
+        makeOperatorControllerTreeRemovable(candidate);
         fs.rmSync(candidate, { recursive: true, force: true });
       } catch {
         continue;
@@ -3539,33 +3555,20 @@ function registerOperatorControllerRoot(root: string): void {
 
 function disposeOperatorControllerRoot(root: string): void {
   operatorControllerRoots.delete(root);
+  makeOperatorControllerTreeRemovable(root);
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function trustedOperatorNpmCli(targetRoot: string, env: Record<string, string | undefined> | undefined): string {
-  const trustedBin = env?.[ULTRAFUZZ_TRUSTED_BIN_ENV] ?? process.env[ULTRAFUZZ_TRUSTED_BIN_ENV];
-  if (trustedBin !== undefined && !path.isAbsolute(trustedBin))
-    throw new Error("operator trusted-bin path must be absolute");
-  const launcher =
-      trustedBin === undefined
-        ? path.join(
-            path.dirname(process.execPath),
-            ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
-          )
-        : path.join(trustedBin, process.platform === "win32" ? "npm-cli.js" : "npm"),
-    npmCli = fs.realpathSync(launcher),
-    relative = path.relative(path.resolve(targetRoot), npmCli),
-    stat = fs.lstatSync(npmCli);
-  if (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) && relative !== "..") ||
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    (stat.mode & 0o022) !== 0
-  )
-    throw new Error("operator npm CLI must be a non-writable regular file outside the target repository");
-  return npmCli;
+function makeOperatorControllerTreeRemovable(root: string): void {
+  if (!fs.existsSync(root)) return;
+  const stat = fs.lstatSync(root);
+  if (stat.isSymbolicLink()) return;
+  if (!stat.isDirectory()) {
+    if (stat.isFile()) fs.chmodSync(root, 0o600);
+    return;
+  }
+  fs.chmodSync(root, 0o700);
+  for (const name of fs.readdirSync(root)) makeOperatorControllerTreeRemovable(path.join(root, name));
 }
 
 function assertOperatorPackageLock(packageRoot: string): void {

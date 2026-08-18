@@ -32,6 +32,7 @@ const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
   KimiAgent: ["KIMI_", "MOONSHOT_"]
 };
+const NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES = new Set(["AZURE_EXTENSION_DIR"]);
 const ROUTE_PROXY_ENV = [
   "ALL_PROXY",
   "HTTP_PROXY",
@@ -365,7 +366,8 @@ function claudeSettingsAffectRoute(bytes: Buffer): boolean {
     const upper = name.toUpperCase();
     return (
       ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].includes(upper) ||
-      (!isCredentialLikeEnvironmentVariableName(upper) &&
+      (!NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES.has(upper) &&
+        !isCredentialLikeEnvironmentVariableName(upper) &&
         ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
     );
   });
@@ -383,6 +385,7 @@ export function effectiveRouteEnvironment(agent: string, env: NodeJS.ProcessEnv)
       names.add(name);
   if (agent === "CodexAgent") names.add("OPENAI_BASE_URL");
   if (agent === "KimiAgent") names.add("KIMI_BASE_URL");
+  for (const name of NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES) names.delete(name);
   names.delete("KIMI_CODE_HOME");
   names.delete("KIMI_SHARE_DIR");
   return [...names].sort().flatMap((name): Array<[string, string]> => {

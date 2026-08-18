@@ -69,12 +69,13 @@ import {
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
-import { modelDestination } from "../src/data-governance.js";
+import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
@@ -160,10 +161,16 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     .map((name) => name.trim())
     .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
     .join(",");
+  const ambientRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent", "KimiAgent"]
+      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
+      .map((name) => [name, undefined])
+  );
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
       env: {
+        ...ambientRouteEnvironment,
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
         ALL_PROXY: undefined,
@@ -1261,68 +1268,6 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
   fs.chmodSync(paths.shim, 0o755);
   writeFakeInstalledSmithersDependencies(project);
   return paths;
-}
-
-// `failures` makes the fake npm exit non-zero for its first N invocations, so a test
-// can drive the install retry loop. The npm log doubles as the attempt counter.
-function writeFakeNpmInstaller(
-  project: string,
-  failures: {
-    count: number;
-    stderr: readonly string[];
-    integrity?: string;
-    imported?: string;
-    optional?: string;
-    required?: string;
-  } = { count: 0, stderr: [] }
-): {
-  binDir: string;
-  npmLogPath: string;
-  smithersLogPath: string;
-} {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-fake-npm-"));
-  const npm = path.join(binDir, "npm");
-  const npmLogPath = path.join(project, "npm-install.log");
-  const smithersLogPath = path.join(project, "local-smithers.log");
-  const dependencies = [
-    ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
-    ["@smthrs/tool-context", SMITHERS_VERSION],
-    ["react", "19.2.4"],
-    ["smthrs", SMITHERS_VERSION],
-    ["zod", "4.4.3"]
-  ];
-  fs.writeFileSync(
-    npm,
-    [
-      'import fs from "node:fs";',
-      'import path from "node:path";',
-      `const args = process.argv.slice(2), log = ${JSON.stringify(npmLogPath)};`,
-      'fs.appendFileSync(log, `${args.join(" ")}\\n`);',
-      `if (fs.readFileSync(log, "utf8").trimEnd().split("\\n").length <= ${failures.count}) { ${failures.stderr.map((line) => `process.stderr.write(${JSON.stringify(`${line}\n`)});`).join(" ")} process.exit(1); }`,
-      `const prefix = args[args.indexOf("--prefix") + 1], dependencies = ${JSON.stringify(dependencies)}, packages = { '': JSON.parse(fs.readFileSync(path.join(prefix, 'package.json'), 'utf8')) };`,
-      `const integrity = ${JSON.stringify(failures.integrity ?? `sha512-${Buffer.alloc(64).toString("base64")}`)};`,
-      "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." +
-        JSON.stringify({
-          ...(failures.optional === undefined ? {} : { optionalDependencies: { [failures.optional]: "1.0.0" } }),
-          ...(failures.required === undefined ? {} : { dependencies: { [failures.required]: "1.0.0" } })
-        }) +
-        " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }",
-      "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
-      `fs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n')});`,
-      "fs.chmodSync(target, 0o755);",
-      "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);",
-      "fs.writeFileSync(path.join(prefix, 'package-lock.json'), `${JSON.stringify({ name: 'ultrafuzz-smithers', lockfileVersion: 3, requires: true, packages })}\\n`);"
-    ].join("\n"),
-    "utf8"
-  );
-  const optionalRunner =
-    (failures.imported ?? failures.optional) === undefined
-      ? undefined
-      : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_CLOUD_ENV_LOG) fs.writeFileSync(process.env.SMITHERS_FAKE_CLOUD_ENV_LOG, (process.env.MODAL_TOKEN_ID ?? "") + "|" + (process.env.MODAL_TOKEN_SECRET ?? "") + "\\n");\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
-  if (optionalRunner !== undefined)
-    fs.appendFileSync(npm, `\nfs.writeFileSync(target, ${JSON.stringify(optionalRunner)});\n`);
-  fs.chmodSync(npm, 0o500);
-  return { binDir, npmLogPath, smithersLogPath };
 }
 
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
@@ -2935,6 +2880,34 @@ test("planned routes equal final generated-adapter validation", { skip: !running
       else process.env[name] = value;
     }
   }
+});
+
+test("generated Claude route validation ignores Azure CLI extension plumbing", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const snapshot = path.join(project, "route-snapshot");
+  const authority = path.join(snapshot, "controls", "data-governance.json");
+  const claudeHome = path.join(project, "claude-home");
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.mkdirSync(claudeHome);
+  fs.writeFileSync(
+    path.join(claudeHome, "settings.json"),
+    '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
+    "utf8"
+  );
+  fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
+  const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+  const child = workflowControlChildEnvironment(
+    { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
+    {
+      AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+    },
+    { agent: "ClaudeAgent", configDir: claudeHome }
+  );
+  assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
 });
 
 test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => {
@@ -9382,10 +9355,9 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   );
   fs.chmodSync(pinnedRunner.target, 0o755);
   const controllerEnvironment = fakeSmithersEnv(project);
-  const installer = writeFakeNpmInstaller(project);
+  writeFakeNpmInstaller(project);
   const env = {
     ...controllerEnvironment,
-    ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: undefined,
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     OPENAI_API_KEY: "configured-agent-key",
@@ -10405,14 +10377,13 @@ test("startRun ignores target-local Smithers in favor of an operator install", a
   const logPath = path.join(project, "local-smithers.log");
   const executedAsLogPath = path.join(project, "local-smithers-executed-as.log");
   writeFakeInstalledSmithers(project);
-  const installer = writeFakeNpmInstaller(project);
+  writeFakeNpmInstaller(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
     env: {
       PATH: "",
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: logPath,
       SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath
     }
@@ -11484,7 +11455,6 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
     projectRoot: project,
     runId: "bootstrap-smithers-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11502,7 +11472,7 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
       missing = await startRun({
         projectRoot: project,
         runId: "controller-parent-required",
-        env: { ULTRAFUZZ_TRUSTED_BIN: requiredInstaller.binDir, SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
+        env: { SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
       });
     assert.equal(missing.ok, false);
     assert.match(JSON.stringify(missing.diagnostics), /dependency is unavailable/u);
@@ -11511,10 +11481,11 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
     const packageRoot = fs.readFileSync(installer.npmLogPath, "utf8").match(/--prefix (\S+)/u)?.[1];
     assert.ok(packageRoot);
     fs.appendFileSync(path.join(packageRoot, "node_modules", "smthrs", "index.js"), "// hostile\n");
+    installer.activate();
     const tampered = await startRun({
       projectRoot: project,
       runId: "controller-cache-tamper",
-      env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+      env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
     });
     assert.equal(tampered.ok, false);
     assert.match(JSON.stringify(tampered.diagnostics), /operator controller changed after installation/u);
@@ -11529,7 +11500,7 @@ test("operator controller locks require a canonical 64-byte SHA-512 integrity", 
   const run = await startRun({
     projectRoot: project,
     runId: "short-controller-integrity",
-    env: { ULTRAFUZZ_TRUSTED_BIN: installer.binDir, SMITHERS_FAKE_LOG: installer.smithersLogPath }
+    env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
   });
   assert.equal(run.ok, false);
   assert.match(JSON.stringify(run.diagnostics), /not registry-integrity bound/u);
@@ -11555,7 +11526,6 @@ test("startRun retries a workflow runner install the registry fails transiently"
     projectRoot: project,
     runId: "transient-install-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11583,7 +11553,6 @@ test("startRun does not retry a workflow runner install the registry rejects per
     projectRoot: project,
     runId: "permanent-install-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11638,7 +11607,6 @@ test("startRun resolves the generated workspace as of a fixed instant, not the l
     projectRoot: project,
     runId: "pinned-resolution-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11696,7 +11664,6 @@ test("startRun ignores a stale target-local Smithers package", async () => {
     projectRoot: project,
     runId: "stale-smithers-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -11724,7 +11691,6 @@ test("startRun ignores a target-local Smithers shim that points outside the pinn
     projectRoot: project,
     runId: "repaired-smithers-shim-run",
     env: {
-      ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -13920,10 +13886,12 @@ test("syncRun aborts or times out a blocked inspection child without durable mut
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-blocked-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const inspectionStartedMarker = path.join(project, "inspection-started");
   fs.writeFileSync(
     smithers,
     `#!${process.execPath}
 if (process.argv[2] === "inspect") {
+  require("node:fs").writeFileSync(${JSON.stringify(inspectionStartedMarker)}, String(Date.now()));
   setInterval(() => {}, 1000);
 } else {
   process.stdout.write('{"ok":true}\\n');
@@ -13942,27 +13910,56 @@ if (process.argv[2] === "inspect") {
   const before = fs.readFileSync(statePath, "utf8");
 
   const controller = new AbortController();
-  const abortTimer = setTimeout(() => controller.abort(), 50);
-  const abortStartedAt = Date.now();
-  const cancelled = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { signal: controller.signal }
-  );
-  clearTimeout(abortTimer);
+  let abortIssuedAt: number | undefined;
+  const abortPoll = setInterval(() => {
+    if (abortIssuedAt !== undefined || !fs.existsSync(inspectionStartedMarker)) return;
+    clearInterval(abortPoll);
+    abortIssuedAt = Date.now();
+    controller.abort();
+  }, 10);
+  let abortFallbackFired = false;
+  const abortFallback = setTimeout(() => {
+    abortFallbackFired = true;
+    controller.abort();
+  }, 60_000);
+  const cancelled = await (async () => {
+    try {
+      return await syncRun({ projectRoot: project, runId: "sync-blocked-child", env }, { signal: controller.signal });
+    } finally {
+      clearInterval(abortPoll);
+      clearTimeout(abortFallback);
+    }
+  })();
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
-  assert.ok(Date.now() - abortStartedAt < 2_000);
+  assert.equal(abortFallbackFired, false);
+  assert.notEqual(abortIssuedAt, undefined);
+  assert.ok(Date.now() - abortIssuedAt! < 2_000);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
-  const deadlineStartedAt = Date.now();
+  fs.rmSync(inspectionStartedMarker, { force: true });
+  const deadlineRun = await startRun({ projectRoot: project, runId: "sync-blocked-deadline", env });
+  assert.equal(deadlineRun.ok, true, JSON.stringify(deadlineRun.diagnostics));
+  const deadlineStatePath = path.join(deadlineRun.value!.run_root, "state.json");
+  const deadlineStateBefore = fs.readFileSync(deadlineStatePath, "utf8");
+  const deadlineClock = 1_000;
+  const inspectionTimeoutMs = 5_000;
   const expired = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { deadlineMs: deadlineStartedAt + 100 }
+    { projectRoot: project, runId: "sync-blocked-deadline", env },
+    {
+      deadlineMs: deadlineClock + inspectionTimeoutMs,
+      now: () => (fs.existsSync(inspectionStartedMarker) ? deadlineClock + inspectionTimeoutMs : deadlineClock)
+    }
   );
   assert.equal(expired.ok, false);
-  assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
-  assert.ok(Date.now() - deadlineStartedAt < 2_000);
-  assert.equal(fs.readFileSync(statePath, "utf8"), before);
+  assert.ok(
+    expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"),
+    JSON.stringify(expired.diagnostics)
+  );
+  assert.equal(fs.existsSync(inspectionStartedMarker), true);
+  const inspectionStartedAt = Number(fs.readFileSync(inspectionStartedMarker, "utf8"));
+  assert.ok(Date.now() - inspectionStartedAt < inspectionTimeoutMs * 2);
+  assert.equal(fs.readFileSync(deadlineStatePath, "utf8"), deadlineStateBefore);
 });
 
 test("syncRun requires the deterministic verifier task to succeed", async () => {
@@ -16624,7 +16621,6 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   fs.chmodSync(smithers, 0o755);
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    ULTRAFUZZ_TRUSTED_BIN: installer.binDir,
     SMITHERS_BIN: smithers,
     MODAL_TOKEN_ID: "provider-one",
     MODAL_TOKEN_SECRET: "provider-two"

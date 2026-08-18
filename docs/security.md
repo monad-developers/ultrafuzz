@@ -112,6 +112,15 @@ complete example are maintained in the checked-in
 Keep the file's `$schema` reference so editors and reviewers use the same
 contract that the CI policy validates.
 
+The inventory also opens installed packages that declare bundled dependencies,
+validates their bounded no-symlink package trees, and submits every exact bundled
+version to the same advisory endpoint. This matters for the private workflow
+controller's pinned npm: pnpm otherwise reports npm as one opaque package and
+omits the packages npm ships inside itself. The lockfile-bound npm patch carries
+the official `brace-expansion` 5.0.9 and `ip-address` 10.3.1 runtime files until
+upstream npm bundles those fixed releases; the operator npm closure digest and
+the advisory inventory both fail if that composition drifts.
+
 ## Agent process environment
 
 The workflow controller receives only the active agents' configured API-key
@@ -135,6 +144,14 @@ identity are preflighted with a real fixture before model work, and every
 registered schema path is checked against its pinned digest. This keeps the
 producer and host on the same contract; it does not turn same-UID local agent
 execution into an OS security boundary.
+
+The workflow engine is installed by the controller rather than from the target
+repository. Ultrafuzz verifies the complete closure of its exact npm dependency,
+copies that closure into the target-specific private controller directory, and
+makes every copied directory and file read-only. It checks the closure before
+and after the script-disabled, registry-pinned install and again before cache
+reuse. The runner toolcache npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority;
+the latter remains only the run-owned validator launcher directory.
 
 Workflows that intentionally need additional variables can opt in explicitly:
 

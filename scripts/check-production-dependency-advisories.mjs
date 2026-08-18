@@ -21,6 +21,7 @@ const dateOnly = /^\d{4}-\d{2}-\d{2}$/u;
 const maximumExceptionDays = 30;
 const maximumAuditBytes = 16 * 1024 * 1024;
 const maximumExceptionBytes = 1024 * 1024;
+const maximumPackageManifestBytes = 1024 * 1024;
 const maximumAuditItems = 100_000;
 const exactPackageVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const cweIdentifier = /^CWE-[1-9]\d*$/u;
@@ -270,11 +271,14 @@ function enumerateProductionDependencies() {
   return productionAuditRequestFromPnpmList(parseProductionDependencyListCommandResult(result));
 }
 
-export function productionAuditRequestFromPnpmList(document) {
+export function productionAuditRequestFromPnpmList(document, inventoryRoot = root) {
   if (!Array.isArray(document) || document.length === 0 || document.length > 1_000) {
     throw new Error("production dependency enumeration uses an unsupported workspace schema");
   }
+  const canonicalInventoryRoot = canonicalProductionDependencyInventoryRoot(inventoryRoot);
   const versionsByPackage = new Map();
+  const inspectedPackageRoots = new Set();
+  const inventoryBudget = { bytes: 0, items: 0 };
   const pending = [...document];
   let visited = 0;
   while (pending.length > 0) {
@@ -306,9 +310,16 @@ export function productionAuditRequestFromPnpmList(document) {
             throw new Error(`production dependency ${packageName} is not resolved from the approved registry`);
           }
           const registryPackageName = packageNameFromPnpmDescriptor(packageName, descriptor.from, version);
-          const versions = versionsByPackage.get(registryPackageName) ?? new Set();
-          versions.add(version);
-          versionsByPackage.set(registryPackageName, versions);
+          addProductionDependencyVersion(versionsByPackage, registryPackageName, version);
+          inspectBundledProductionDependencies({
+            descriptor,
+            expectedName: registryPackageName,
+            expectedVersion: version,
+            inventoryRoot: canonicalInventoryRoot,
+            inspectedPackageRoots,
+            inventoryBudget,
+            versionsByPackage
+          });
         }
         pending.push(descriptor);
       }
@@ -324,6 +335,276 @@ export function productionAuditRequestFromPnpmList(document) {
     throw new Error("production dependency audit request is too large");
   }
   return request;
+}
+
+function canonicalProductionDependencyInventoryRoot(inventoryRoot) {
+  return canonicalInventoryDirectory(inventoryRoot, undefined, "production dependency inventory root");
+}
+
+function inspectBundledProductionDependencies(input) {
+  const label = `installed production dependency ${input.expectedName}`;
+  const packageRoot = canonicalInventoryDirectory(input.descriptor.path, input.inventoryRoot, `${label} path`, true);
+  if (packageRoot === undefined) return;
+  const relative = path.relative(input.inventoryRoot, packageRoot);
+  if (!relative.split(path.sep).includes("node_modules")) {
+    throw new Error(`${label} path escapes the dependency inventory`);
+  }
+  const manifest = readProductionPackageManifest(packageRoot, label, input.inventoryBudget);
+  if (manifest.name !== input.expectedName || manifest.version !== input.expectedVersion) {
+    throw new Error(`${label} manifest does not match ${input.expectedName}@${input.expectedVersion}`);
+  }
+  if (input.inspectedPackageRoots.has(packageRoot)) return;
+  input.inspectedPackageRoots.add(packageRoot);
+
+  const bundledNames = bundledDependencyNames(manifest, input.expectedName);
+  if (bundledNames.length === 0) return;
+  const bundledManifests = new Map([[packageRoot, manifest]]);
+  const pending = [path.join(packageRoot, "node_modules")];
+  let direct = true;
+  while (pending.length > 0) {
+    const nodeModules = canonicalInventoryDirectory(
+      pending.pop(),
+      packageRoot,
+      `installed production dependency ${input.expectedName} bundle`
+    );
+    const packages = bundledPackageDirectories(nodeModules, input.expectedName, input.inventoryBudget);
+    if (direct) {
+      const installedNames = new Set(packages.map(({ alias }) => alias));
+      for (const name of bundledNames) {
+        if (!installedNames.has(name)) {
+          throw new Error(`installed production dependency ${input.expectedName} declares missing bundle ${name}`);
+        }
+      }
+      direct = false;
+    }
+    for (const candidate of packages) {
+      const bundledRoot = canonicalInventoryDirectory(
+        candidate.packagePath,
+        packageRoot,
+        `installed production dependency ${input.expectedName} bundle package`
+      );
+      if (input.inspectedPackageRoots.has(bundledRoot)) continue;
+      input.inspectedPackageRoots.add(bundledRoot);
+      const bundledManifest = readProductionPackageManifest(
+        bundledRoot,
+        "bundled production dependency",
+        input.inventoryBudget
+      );
+      if (
+        !isPackageName(bundledManifest.name) ||
+        typeof bundledManifest.version !== "string" ||
+        !exactPackageVersion.test(bundledManifest.version)
+      ) {
+        throw new Error("bundled production dependency manifest must contain an exact package name and version");
+      }
+      if (bundledManifest.name !== candidate.alias) {
+        throw new Error(
+          `bundled production dependency alias ${candidate.alias} does not match manifest name ${bundledManifest.name}`
+        );
+      }
+      bundledManifests.set(bundledRoot, bundledManifest);
+      addProductionDependencyVersion(input.versionsByPackage, bundledManifest.name, bundledManifest.version);
+      const nested = path.join(bundledRoot, "node_modules");
+      try {
+        fs.lstatSync(nested);
+        pending.push(nested);
+      } catch (error) {
+        if (!isMissingPathError(error)) {
+          throw new Error(`bundled production dependency ${bundledManifest.name} node_modules is unavailable`, {
+            cause: error
+          });
+        }
+      }
+    }
+  }
+  validateBundledDependencyClosure(bundledManifests, packageRoot, input.inventoryBudget);
+}
+
+function isMissingPathError(error) {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function bundledDependencyNames(manifest, packageName) {
+  const declared = [manifest.bundleDependencies, manifest.bundledDependencies].filter((value) => value !== undefined);
+  if (declared.length === 0) return [];
+  const normalized = declared.map((value) => {
+    if (value === false) return [];
+    let names;
+    if (value === true) {
+      names = [];
+      for (const field of ["dependencies", "optionalDependencies"]) {
+        if (manifest[field] !== undefined && !isRecord(manifest[field])) {
+          throw new Error(`installed production dependency ${packageName} has invalid bundle metadata`);
+        }
+        names.push(...Object.keys(manifest[field] ?? {}));
+      }
+    } else if (Array.isArray(value) && value.length <= maximumAuditItems) names = value;
+    else {
+      throw new Error(`installed production dependency ${packageName} has invalid bundle metadata`);
+    }
+    if (names.some((name) => !isPackageName(name)) || new Set(names).size !== names.length) {
+      throw new Error(`installed production dependency ${packageName} has invalid bundle package names`);
+    }
+    return [...names].sort();
+  });
+  if (normalized.length === 2 && JSON.stringify(normalized[0]) !== JSON.stringify(normalized[1])) {
+    throw new Error(`installed production dependency ${packageName} has conflicting bundle metadata`);
+  }
+  return normalized[0];
+}
+
+function bundledPackageDirectories(nodeModules, owner, inventoryBudget) {
+  const entries = fs
+    .readdirSync(nodeModules, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name));
+  consumeProductionInventoryItems(inventoryBudget, entries.length);
+  const packages = [];
+  for (const entry of entries) {
+    if (entry.name === ".bin") {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error(`installed production dependency ${owner} bundle has an invalid .bin entry`);
+      }
+      continue;
+    }
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(`installed production dependency ${owner} bundle has an invalid package entry`);
+    }
+    if (!entry.name.startsWith("@")) {
+      if (!isPackageName(entry.name)) {
+        throw new Error(`installed production dependency ${owner} bundle has an invalid package name`);
+      }
+      packages.push({ alias: entry.name, packagePath: path.join(nodeModules, entry.name) });
+      continue;
+    }
+    const scope = path.join(nodeModules, entry.name);
+    const scoped = fs
+      .readdirSync(scope, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    consumeProductionInventoryItems(inventoryBudget, scoped.length);
+    for (const candidate of scoped) {
+      const alias = `${entry.name}/${candidate.name}`;
+      if (!candidate.isDirectory() || candidate.isSymbolicLink() || !isPackageName(alias)) {
+        throw new Error(`installed production dependency ${owner} bundle has an invalid scoped package`);
+      }
+      packages.push({ alias, packagePath: path.join(scope, candidate.name) });
+    }
+  }
+  return packages;
+}
+
+function validateBundledDependencyClosure(bundledManifests, bundleRoot, inventoryBudget) {
+  for (const [packageRoot, manifest] of bundledManifests) {
+    const optional = new Set(
+      manifestDependencyNames(manifest.optionalDependencies, manifest.name, "optionalDependencies")
+    );
+    const required = manifestDependencyNames(manifest.dependencies, manifest.name, "dependencies").filter(
+      (name) => !optional.has(name)
+    );
+    consumeProductionInventoryItems(inventoryBudget, required.length + optional.size);
+    for (const name of required) {
+      if (!resolvesInsideBundle(bundledManifests, packageRoot, bundleRoot, name)) {
+        throw new Error(`bundled production dependency ${manifest.name} requires missing dependency ${name}`);
+      }
+    }
+  }
+}
+
+function manifestDependencyNames(value, owner, field) {
+  if (value === undefined) return [];
+  if (!isRecord(value) || Object.keys(value).length > maximumAuditItems) {
+    throw new Error(`bundled production dependency ${owner} has invalid ${field}`);
+  }
+  for (const [name, specifier] of Object.entries(value)) {
+    if (
+      !isPackageName(name) ||
+      typeof specifier !== "string" ||
+      specifier.length === 0 ||
+      specifier.length > 2_000 ||
+      hasAsciiControl(specifier)
+    ) {
+      throw new Error(`bundled production dependency ${owner} has invalid ${field}`);
+    }
+  }
+  return Object.keys(value).sort();
+}
+
+function resolvesInsideBundle(bundledManifests, packageRoot, bundleRoot, dependencyName) {
+  let current = packageRoot;
+  for (;;) {
+    const candidate = path.join(current, "node_modules", ...dependencyName.split("/"));
+    if (bundledManifests.has(candidate)) return true;
+    if (current === bundleRoot) return false;
+    const parent = path.dirname(current);
+    if (!isContainedRelativePath(path.relative(bundleRoot, parent))) return false;
+    current = parent;
+  }
+}
+
+function canonicalInventoryDirectory(value, boundary, label, allowMissing = false) {
+  if (typeof value !== "string" || !path.isAbsolute(value) || value.length > 4_096 || hasAsciiControl(value)) {
+    throw new Error(`${label} must be an absolute bounded path`);
+  }
+  let originalStat;
+  let canonical;
+  try {
+    originalStat = fs.lstatSync(value);
+    canonical = fs.realpathSync(value);
+  } catch (error) {
+    // `pnpm list` reports platform-specific optional packages that are not
+    // installed. Their exact outer versions remain in the registry request.
+    if (allowMissing && isMissingPathError(error)) return undefined;
+    throw new Error(`${label} is unavailable`, { cause: error });
+  }
+  if (!originalStat.isDirectory() || originalStat.isSymbolicLink()) {
+    throw new Error(`${label} must be a real directory`);
+  }
+  if (boundary !== undefined && !isContainedRelativePath(path.relative(boundary, canonical))) {
+    throw new Error(`${label} escapes its inventory boundary`);
+  }
+  return canonical;
+}
+
+function readProductionPackageManifest(packageRoot, label, inventoryBudget) {
+  const manifestPath = path.join(packageRoot, "package.json");
+  let stat;
+  try {
+    stat = fs.lstatSync(manifestPath);
+  } catch (error) {
+    throw new Error(`${label} manifest is unavailable`, { cause: error });
+  }
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    !Number.isSafeInteger(stat.size) ||
+    stat.size > maximumPackageManifestBytes
+  ) {
+    throw new Error(`${label} manifest must be a bounded regular file`);
+  }
+  consumeProductionInventoryItems(inventoryBudget, 1);
+  inventoryBudget.bytes += stat.size;
+  if (inventoryBudget.bytes > maximumAuditBytes) {
+    throw new Error("production dependency package manifests are too large");
+  }
+  const manifest = readJson(manifestPath, maximumPackageManifestBytes, `${label} manifest`);
+  if (!isRecord(manifest)) throw new Error(`${label} manifest must be an object`);
+  return manifest;
+}
+
+function consumeProductionInventoryItems(inventoryBudget, count) {
+  inventoryBudget.items += count;
+  if (!Number.isSafeInteger(inventoryBudget.items) || inventoryBudget.items > maximumAuditItems) {
+    throw new Error("production dependency bundled inventory is too large");
+  }
+}
+
+function addProductionDependencyVersion(versionsByPackage, packageName, version) {
+  const versions = versionsByPackage.get(packageName) ?? new Set();
+  versions.add(version);
+  versionsByPackage.set(packageName, versions);
+}
+
+function isContainedRelativePath(relative) {
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 export function strictProductionAuditFromBulkResponse(bulk, request) {

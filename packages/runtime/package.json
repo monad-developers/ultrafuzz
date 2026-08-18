@@ -31,6 +31,7 @@
     "@ultrafuzz/topology": "workspace:*",
     "entities": "7.0.1",
     "mdast-util-from-markdown": "2.0.3",
+    "npm": "11.19.0",
     "proper-lockfile": "4.1.2",
     "typescript": "6.0.3",
     "zod": "4.4.3"
