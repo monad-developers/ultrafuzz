@@ -57,31 +57,39 @@ export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexA
 function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
+  const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);
   if (auth === "api-key") {
-    const apiKey = requiredEnv(config.api_key_env ?? "OPENAI_API_KEY");
-    return { apiKey, env: { CODEX_API_KEY: apiKey } };
+    const credentialEnv = config.api_key_env ?? "OPENAI_API_KEY";
+    const apiKey = requiredEnv(credentialEnv);
+    const env: Record<string, string> = { CODEX_API_KEY: apiKey, [credentialEnv]: apiKey };
+    addCodexProviderRoute(env, configDir);
+    return { apiKey, ...(configDir === undefined ? {} : { configDir }), env };
   }
   if (auth === "subscription") {
-    const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);
     const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };
-    // An operator-supplied route always wins; only fill the gap.
-    if ((process.env.OPENAI_BASE_URL ?? "").trim() === "") {
-      const baseUrl = codexProviderBaseUrl(configDir);
-      if (baseUrl !== undefined) env.OPENAI_BASE_URL = baseUrl;
-    }
+    addCodexProviderRoute(env, configDir);
     return { ...(configDir === undefined ? {} : { configDir }), env };
   }
   throw new Error(`unsupported CodexAgent auth mode in ultrafuzz.toml: ${auth}`);
 }
 
+function addCodexProviderRoute(env: Record<string, string>, configDir: string | undefined): void {
+  // An operator-supplied route always wins; only fill the gap.
+  if ((process.env.OPENAI_BASE_URL ?? "").trim() !== "") {
+    return;
+  }
+  const baseUrl = codexProviderBaseUrl(configDir);
+  if (baseUrl !== undefined) env.OPENAI_BASE_URL = baseUrl;
+}
+
 /**
- * Resolve the endpoint the Codex CLI will actually call. Subscription auth
- * carries no API key, so the engine's credential preflight falls back to the
- * public API; a CLI pointed at a gateway, proxy, or Azure deployment is then
- * reported as unauthenticated even though it is correctly configured. Reading
- * the CLI's own provider routing keeps the preflight and the CLI on one
- * endpoint. Any unreadable, malformed, or incomplete configuration falls back
- * to today's behaviour rather than failing the run.
+ * Resolve the endpoint the Codex CLI will actually call. Smithers validates a
+ * Codex key against OPENAI_BASE_URL, so a CLI pointed at a gateway, proxy, or
+ * Azure deployment is otherwise reported as unauthenticated even though it is
+ * correctly configured. Reading the CLI's own provider routing keeps the
+ * preflight and the CLI on one endpoint for API-key and subscription auth. Any
+ * unreadable, malformed, or incomplete configuration falls back to today's
+ * behaviour rather than failing the run.
  */
 function codexProviderBaseUrl(configDir: string | undefined): string | undefined {
   const home = resolveCodexHome(configDir);

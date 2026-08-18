@@ -7,7 +7,9 @@ import {
   type SpawnSyncReturns
 } from "node:child_process";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1239,8 +1241,11 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
-  assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
+  assert.match(codexAgentText, /const credentialEnv = config\.api_key_env \?\? "OPENAI_API_KEY"/);
+  assert.match(codexAgentText, /\[credentialEnv\]: apiKey/);
+  assert.match(codexAgentText, /return { apiKey, \.\.\.\(configDir === undefined \? \{\} : \{ configDir \}\), env }/);
   assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
+  assert.match(codexAgentText, /function addCodexProviderRoute/);
   assert.match(codexAgentText, /function codexProviderBaseUrl/);
   assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
   assert.match(codexAgentText, /createCodexAgent/);
@@ -2185,6 +2190,120 @@ test(
       else process.env.CODEX_HOME = previous.codexHome;
       if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
       else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
+  }
+);
+
+test(
+  "generated CodexAgent API-key auth preflights the configured custom provider with its named credential",
+  { skip: !runningUnderBun },
+  async (context) => {
+    const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    const realCodexCliAvailable = codexVersion.status === 0 && codexVersion.stdout.includes("codex-cli");
+    const requests: Array<{ authorization: string | undefined; url: string | undefined }> = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        authorization: request.headers.authorization,
+        url: request.url
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"data":[]}');
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    server.unref();
+
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const codexHome = path.join(project, "openrouter-codex");
+    fs.mkdirSync(codexHome, { recursive: true });
+    const address = server.address() as AddressInfo;
+    const providerBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+    fs.writeFileSync(
+      path.join(codexHome, "config.toml"),
+      [
+        'model_provider = "openrouter"',
+        "",
+        "[model_providers.openrouter]",
+        `base_url = "${providerBaseUrl}"`,
+        'wire_api = "responses"',
+        "",
+        "[model_providers.openrouter.auth]",
+        'command = "node"',
+        'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "OPENROUTER_API_KEY"]'
+      ].join("\n"),
+      "utf8"
+    );
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          [
+            "[agents.CodexAgent]",
+            'auth = "api-key"',
+            'api_key_env = "OPENROUTER_API_KEY"',
+            `config_dir = ${JSON.stringify(codexHome)}`
+          ].join("\n")
+        ),
+      "utf8"
+    );
+
+    const previous = {
+      baseUrl: process.env.OPENAI_BASE_URL,
+      codexHome: process.env.CODEX_HOME,
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouterKey: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "openrouter-test-key";
+    delete process.env.CODEX_HOME;
+    delete process.env.OPENAI_BASE_URL;
+    try {
+      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      const agent = createCodexAgent() as {
+        opts: {
+          apiKey: string;
+          configDir: string;
+          env: Record<string, string>;
+        };
+        preflight(options?: { rootDir?: string }): Promise<void>;
+      };
+      assert.equal(agent.opts.apiKey, "openrouter-test-key");
+      assert.equal(agent.opts.configDir, codexHome);
+      assert.equal(agent.opts.env.OPENAI_BASE_URL, providerBaseUrl);
+      assert.equal(agent.opts.env.OPENROUTER_API_KEY, "openrouter-test-key");
+
+      if (!realCodexCliAvailable) {
+        context.skip("real Codex CLI is not installed; provider routing assertions still ran");
+        return;
+      }
+      await agent.preflight({ rootDir: project });
+      assert.equal(requests.length, 2);
+      assert.deepEqual(
+        requests,
+        Array.from({ length: 2 }, () => ({
+          authorization: "Bearer openrouter-test-key",
+          url: "/v1/models"
+        }))
+      );
+    } finally {
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = previous.baseUrl;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouterKey;
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
     }
   }
 );
