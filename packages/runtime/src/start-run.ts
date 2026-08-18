@@ -15,6 +15,7 @@ import {
   parseStrictJsonBytes,
   readRunMetadataDocument,
   readRunState,
+  sensitiveEnvironmentValues,
   updateRunStatus,
   validateSafeId,
   writeJsonDurable,
@@ -136,6 +137,12 @@ export async function startRun(input: StartRunInput) {
   }
 
   const plan = planned.value;
+  const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env, [
+    ...Object.values(plan.resolved_config.agents).flatMap((agent) =>
+      agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : []
+    ),
+    ...(plan.resolved_config.execution.providers.modal?.credentialEnv ?? [])
+  ]);
   let releaseControlLock: () => Promise<void>;
   try {
     releaseControlLock = await acquireWorkflowControlLock(plan.layout);
@@ -156,7 +163,7 @@ export async function startRun(input: StartRunInput) {
       controllerSourceDigest: plan.controller_source_digest,
       dataGovernance: plan.data_governance
     });
-    const prepared = await persistSmithersEvidence(plan.layout, plan.graph, compiled, input.env);
+    const prepared = await persistSmithersEvidence(plan.layout, plan.graph, compiled, input.env, forbiddenSecretValues);
     appendEvent(plan.layout, {
       eventType: "workflow-compiled",
       status: "succeeded",
@@ -167,10 +174,11 @@ export async function startRun(input: StartRunInput) {
         workflow_link_id: prepared.workflowLinkId,
         task_count: compiled.tasks.length,
         workflow_path: path.relative(plan.layout.root, prepared.executionSnapshot.workflowPath)
-      }
+      },
+      forbiddenSecretValues
     });
 
-    updateRunStatus(plan.layout, "running");
+    updateRunStatus(plan.layout, "running", undefined, { forbiddenSecretValues });
     const controllerInvocation = appendEvent(plan.layout, {
       eventType: "workflow-submitting",
       status: "running",
@@ -180,7 +188,8 @@ export async function startRun(input: StartRunInput) {
         control_generation: prepared.verifiedControl.generation,
         workflow_link_id: prepared.workflowLinkId,
         action: "start"
-      }
+      },
+      forbiddenSecretValues
     });
 
     const forgeGuard = prepareForgeGuardEnvironment({
@@ -239,7 +248,8 @@ export async function startRun(input: StartRunInput) {
         workflow_link_id: prepared.workflowLinkId,
         controller_invocation_id: controllerInvocation.event_id,
         controller_invoked_at: controllerInvocation.timestamp
-      }
+      },
+      forbiddenSecretValues
     });
     return runtimeResult(true, {
       run_id: plan.layout.runId,
@@ -252,11 +262,12 @@ export async function startRun(input: StartRunInput) {
     });
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
-    updateRunStatus(plan.layout, "failed");
+    updateRunStatus(plan.layout, "failed", undefined, { forbiddenSecretValues });
     appendEvent(plan.layout, {
       eventType: "workflow-submit-failed",
       status: "failed",
-      payload: workflowSubmissionFailureEventPayload(diagnostic)
+      payload: workflowSubmissionFailureEventPayload(diagnostic),
+      forbiddenSecretValues
     });
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
@@ -733,7 +744,8 @@ async function persistSmithersEvidence(
   layout: RunLayout,
   graph: PlannedGraph,
   compiled: CompiledSmithersWorkflow,
-  env: Record<string, string | undefined> | undefined
+  env: Record<string, string | undefined> | undefined,
+  forbiddenSecretValues: readonly string[]
 ): Promise<{
   verifiedControl: VerifiedWorkflowControlSnapshot;
   executionSnapshot: MaterializedWorkflowExecutionSnapshot;
@@ -821,7 +833,7 @@ async function persistSmithersEvidence(
       executionSnapshot: runRelativePath(layout, executionSnapshot.root)
     }
   };
-  writeRunState(layout, state);
+  writeRunState(layout, state, { forbiddenSecretValues });
   const committedWorkflowLink = finalizeWorkflowRunLink(layout, workflowLink);
   return { verifiedControl, executionSnapshot, workflowLinkId: committedWorkflowLink.link_id };
 }

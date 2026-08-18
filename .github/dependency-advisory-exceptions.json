@@ -1,0 +1,5 @@
+{
+  "$schema": "./dependency-advisory-exceptions.schema.json",
+  "schema_version": "ultrafuzz.dependency-advisory-exceptions.v1",
+  "exceptions": []
+}
