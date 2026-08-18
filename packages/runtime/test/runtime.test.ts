@@ -197,9 +197,12 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
 
 async function loadGeneratedCodexAgent(project: string): Promise<{
   CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+    preflight(options?: { rootDir?: string }): Promise<void>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command: string;
       args: string[];
       env?: Record<string, string>;
+      stdin?: string;
       cleanup?: () => Promise<void>;
     }>;
   };
@@ -241,9 +244,12 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   );
   const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+      preflight(options?: { rootDir?: string }): Promise<void>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command: string;
         args: string[];
         env?: Record<string, string>;
+        stdin?: string;
         cleanup?: () => Promise<void>;
       }>;
     };
@@ -1246,8 +1252,9 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /return { apiKey, \.\.\.\(configDir === undefined \? \{\} : \{ configDir \}\), env }/);
   assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
   assert.match(codexAgentText, /function addCodexProviderRoute/);
-  assert.match(codexAgentText, /function codexProviderBaseUrl/);
-  assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
+  assert.match(codexAgentText, /function codexProviderRouting/);
+  assert.match(codexAgentText, /function validateOpenRouterCredential/);
+  assert.match(codexAgentText, /env\.OPENAI_BASE_URL = routing\.route\.baseUrl/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
@@ -2162,9 +2169,9 @@ test(
       );
       assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
 
-      // An operator-supplied route always wins.
+      // The selected provider remains authoritative over an ambient route.
       process.env.OPENAI_BASE_URL = "https://operator.example/v1";
-      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
       delete process.env.OPENAI_BASE_URL;
 
       // Default provider, unknown provider, and a provider without base_url all
@@ -2197,17 +2204,97 @@ test(
 test(
   "generated CodexAgent API-key auth preflights the configured custom provider with its named credential",
   { skip: !runningUnderBun },
-  async (context) => {
+  async () => {
     const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
     const realCodexCliAvailable = codexVersion.status === 0 && codexVersion.stdout.includes("codex-cli");
-    const requests: Array<{ authorization: string | undefined; url: string | undefined }> = [];
+    let acceptCredential = true;
+    const requests: Array<{ authorization: string | undefined; method: string | undefined; url: string | undefined }> =
+      [];
     const server = createServer((request, response) => {
       requests.push({
         authorization: request.headers.authorization,
+        method: request.method,
         url: request.url
       });
+      if (request.method === "POST" && request.url === "/v1/responses") {
+        const outputText = { type: "output_text", text: "fixture-ok", annotations: [], logprobs: [] };
+        const message = {
+          id: "msg_fixture",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [outputText]
+        };
+        const completed = {
+          id: "resp_fixture",
+          object: "response",
+          created_at: 1,
+          status: "completed",
+          model: "fixture-model",
+          output: [message],
+          parallel_tool_calls: true,
+          tool_choice: "auto",
+          tools: [],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 1,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 2
+          }
+        };
+        const events = [
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { ...message, status: "in_progress", content: [] }
+          },
+          {
+            type: "response.content_part.added",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            part: { ...outputText, text: "" }
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            delta: outputText.text,
+            logprobs: []
+          },
+          {
+            type: "response.output_text.done",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            text: outputText.text,
+            logprobs: []
+          },
+          {
+            type: "response.content_part.done",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            part: outputText
+          },
+          { type: "response.output_item.done", output_index: 0, item: message },
+          { type: "response.completed", response: completed }
+        ];
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(
+          `${events.map((event, sequence_number) => `data: ${JSON.stringify({ ...event, sequence_number })}`).join("\n\n")}\n\ndata: [DONE]\n\n`
+        );
+        return;
+      }
+      if (request.url === "/v1/key" && !acceptCredential) {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end('{"error":{"message":"invalid fixture key"}}');
+        return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
-      response.end('{"data":[]}');
+      response.end(request.url === "/v1/key" ? '{"data":{"label":"fixture"}}' : '{"data":[]}');
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -2223,21 +2310,16 @@ test(
     fs.mkdirSync(codexHome, { recursive: true });
     const address = server.address() as AddressInfo;
     const providerBaseUrl = `http://127.0.0.1:${address.port}/v1`;
-    fs.writeFileSync(
-      path.join(codexHome, "config.toml"),
-      [
-        'model_provider = "openrouter"',
-        "",
-        "[model_providers.openrouter]",
-        `base_url = "${providerBaseUrl}"`,
-        'wire_api = "responses"',
-        "",
-        "[model_providers.openrouter.auth]",
-        'command = "node"',
-        'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "OPENROUTER_API_KEY"]'
-      ].join("\n"),
-      "utf8"
-    );
+    const codexConfigPath = path.join(codexHome, "config.toml");
+    const openRouterCodexConfig = [
+      'model_provider = "openrouter"',
+      "",
+      "[model_providers.openrouter]",
+      'name = "OpenRouter fixture"',
+      `base_url = "${providerBaseUrl}"`,
+      'wire_api = "responses"',
+      'env_key = "OPENROUTER_API_KEY"'
+    ].join("\n");
     fs.writeFileSync(
       configPath,
       fs
@@ -2263,9 +2345,22 @@ test(
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.OPENROUTER_API_KEY = "openrouter-test-key";
     delete process.env.CODEX_HOME;
-    delete process.env.OPENAI_BASE_URL;
+    process.env.OPENAI_BASE_URL = "http://127.0.0.1:1/ambient-must-not-receive-key";
     try {
       const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      // A dedicated Codex home is not itself evidence of a custom provider.
+      // Keep normal OpenAI/ambient routing when config.toml is absent or only
+      // contains default-provider settings.
+      const noCodexConfigAgent = createCodexAgent() as {
+        opts: { configDir: string; env: Record<string, string> };
+      };
+      assert.equal(noCodexConfigAgent.opts.configDir, codexHome);
+      assert.equal(noCodexConfigAgent.opts.env.OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(codexConfigPath, 'model = "gpt-5.5"\n', "utf8");
+      const defaultProviderAgent = createCodexAgent() as typeof noCodexConfigAgent;
+      assert.equal(defaultProviderAgent.opts.env.OPENAI_BASE_URL, undefined);
+
+      fs.writeFileSync(codexConfigPath, openRouterCodexConfig, "utf8");
       const agent = createCodexAgent() as {
         opts: {
           apiKey: string;
@@ -2273,6 +2368,13 @@ test(
           env: Record<string, string>;
         };
         preflight(options?: { rootDir?: string }): Promise<void>;
+        buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+          command: string;
+          args: string[];
+          env?: Record<string, string>;
+          stdin?: string;
+          cleanup?: () => Promise<void>;
+        }>;
       };
       assert.equal(agent.opts.apiKey, "openrouter-test-key");
       assert.equal(agent.opts.configDir, codexHome);
@@ -2280,18 +2382,100 @@ test(
       assert.equal(agent.opts.env.OPENROUTER_API_KEY, "openrouter-test-key");
 
       if (!realCodexCliAvailable) {
-        context.skip("real Codex CLI is not installed; provider routing assertions still ran");
         return;
       }
       await agent.preflight({ rootDir: project });
-      assert.equal(requests.length, 2);
-      assert.deepEqual(
-        requests,
-        Array.from({ length: 2 }, () => ({
+      assert.deepEqual(requests, [
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/models" },
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/models" },
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/key" }
+      ]);
+
+      const command = await agent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = spawnSync(command.command, command.args, {
+          cwd: project,
+          encoding: "utf8",
+          env: { ...process.env, ...agent.opts.env, ...command.env },
+          input: command.stdin,
+          timeout: 20_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+        assert.deepEqual(requests.at(-1), {
           authorization: "Bearer openrouter-test-key",
-          url: "/v1/models"
-        }))
+          method: "POST",
+          url: "/v1/responses"
+        });
+      } finally {
+        await command.cleanup?.();
+      }
+
+      acceptCredential = false;
+      await assert.rejects(
+        agent.preflight({ rootDir: project }),
+        /OpenRouter credential is invalid \(401 Unauthorized\)/u
       );
+      assert.deepEqual(requests.at(-1), {
+        authorization: "Bearer openrouter-test-key",
+        method: "GET",
+        url: "/v1/key"
+      });
+
+      // Codex accepts literal strings and comments after table headers, while
+      // the generated adapters intentionally share a smaller TOML reader. If
+      // route discovery cannot decode otherwise valid Codex TOML, preflight
+      // must not send the provider key to an inherited/default endpoint. The
+      // real CLI remains the authoritative parser and still executes it.
+      acceptCredential = true;
+      requests.length = 0;
+      fs.writeFileSync(
+        path.join(codexHome, "config.toml"),
+        [
+          "model_provider = 'openrouter'",
+          "",
+          "[model_providers.openrouter] # valid TOML outside the shared reader's subset",
+          "name = 'OpenRouter fixture'",
+          `base_url = '${providerBaseUrl}'`,
+          "wire_api = 'responses'",
+          "env_key = 'OPENROUTER_API_KEY'"
+        ].join("\n"),
+        "utf8"
+      );
+      const alternateTomlAgent = createCodexAgent() as typeof agent;
+      assert.equal(alternateTomlAgent.opts.env.OPENAI_BASE_URL, "");
+      await alternateTomlAgent.preflight({ rootDir: project });
+      assert.deepEqual(requests, []);
+
+      const alternateTomlCommand = await alternateTomlAgent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = spawnSync(alternateTomlCommand.command, alternateTomlCommand.args, {
+          cwd: project,
+          encoding: "utf8",
+          env: { ...process.env, ...alternateTomlAgent.opts.env, ...alternateTomlCommand.env },
+          input: alternateTomlCommand.stdin,
+          timeout: 20_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+        assert.deepEqual(requests, [
+          {
+            authorization: "Bearer openrouter-test-key",
+            method: "POST",
+            url: "/v1/responses"
+          }
+        ]);
+      } finally {
+        await alternateTomlCommand.cleanup?.();
+      }
     } finally {
       if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
       else process.env.OPENAI_BASE_URL = previous.baseUrl;

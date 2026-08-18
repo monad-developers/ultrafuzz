@@ -70,10 +70,7 @@ model_provider = "openrouter"
 name = "OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 wire_api = "responses"
-
-[model_providers.openrouter.auth]
-command = "node"
-args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? '')", "OPENROUTER_API_KEY"]
+env_key = "OPENROUTER_API_KEY"
 ```
 
 Then export `OPENROUTER_API_KEY` before `ultrafuzz run`. The generated adapter
