@@ -437,6 +437,7 @@ async function loadGeneratedOpenRouterAgent(
   },
   testInstrumentation?: {
     acknowledgeProvisionalRateLimit?: boolean;
+    expireRetryDeadlineBeforeReplacementBuild?: number;
   }
 ): Promise<{
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
@@ -562,6 +563,36 @@ async function loadGeneratedOpenRouterAgent(
     }`
     );
     assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter provisional transition source");
+    openRouterSource = replaced;
+  }
+  const expirationBuild = testInstrumentation?.expireRetryDeadlineBeforeReplacementBuild;
+  if (expirationBuild !== undefined) {
+    assert.equal(
+      Number.isSafeInteger(expirationBuild) && expirationBuild > 0,
+      true,
+      "generated OpenRouter deadline expiration build must be a positive integer"
+    );
+    const counterFrom = 'const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");';
+    const counterReplacement = `${counterFrom}\nlet openRouterTestReplacementBuildCount = 0;`;
+    let replaced = openRouterSource.replace(counterFrom, counterReplacement);
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter attempt-deadline source");
+    openRouterSource = replaced;
+
+    const deadlineFrom = "    const deadlineError = openRouterAttemptDeadlineError(params.options);";
+    replaced = openRouterSource.replace(
+      deadlineFrom,
+      `    const instrumentedAttemptDeadlines = (params.options as Record<PropertyKey, unknown>)[
+      OPENROUTER_ATTEMPT_DEADLINES
+    ] as OpenRouterAttemptDeadlines | undefined;
+    if (
+      instrumentedAttemptDeadlines?.retryDeadlineMs !== undefined &&
+      ++openRouterTestReplacementBuildCount >= ${expirationBuild}
+    ) {
+      instrumentedAttemptDeadlines.retryDeadlineMs = performance.now() - 1;
+    }
+${deadlineFrom}`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter build deadline source");
     openRouterSource = replaced;
   }
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
@@ -4658,7 +4689,10 @@ test(
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
           prompt: "Preserve the provider 429 when idle-timeout recovery exhausts",
-          timeout: { idleMs: 100, totalMs: 5_000 },
+          // The idle clock includes the watchdog and fixture process startup.
+          // Leave enough launch headroom that this exercises a child which
+          // emitted a 429 and then went idle, not a pre-output startup timeout.
+          timeout: { idleMs: 500, totalMs: 5_000 },
           onStderr: (text) => {
             idleExhaustionStderr += text;
           }
@@ -4695,6 +4729,88 @@ test(
       assert.equal(finalReleaseOrder.includes("stderr"), true);
       assert.equal(finalReleaseOrder.includes("event"), true);
       assert.equal(finalReleaseOrder.at(-1), "completion");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter retains the last real 429 when a replacement build crosses the retry deadline",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        jitterFraction: 0
+      },
+      { expireRetryDeadlineBeforeReplacementBuild: 2 }
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-oversized";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+    try {
+      let finalStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Cross the retry deadline after deciding to replace the final real attempt",
+          onStderr: (text) => {
+            finalStderr += text;
+          }
+        }),
+        (error: unknown) => {
+          assert.match(String(error), /request id: fixture-2\b/u);
+          return true;
+        }
+      );
+
+      // Two provider children ran. The instrumented third replacement crossed
+      // its deadline inside buildCommand, before it could increment the child
+      // fixture counter or append a journal entry.
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(readOpenRouterRetryFixtureJournal(fixture.journal).length, 2);
+      assert.doesNotMatch(finalStderr, /request id: fixture-1\b/u);
+      assert.equal((finalStderr.match(/request id: fixture-2\b/gu) ?? []).length, 1);
+      assert.doesNotMatch(finalStderr, /request id: fixture-3\b/u);
+      assert.equal(finalStderr.length <= OPENROUTER_TEST_STDERR_PENDING_LIMIT * 2, true);
+
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
