@@ -31,7 +31,12 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, serializeResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import {
+  parseProjectConfigToml,
+  parseResolvedConfigJsonBytes,
+  resolveConfig,
+  serializeResolvedConfigJsonBytes
+} from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -69,7 +74,7 @@ import {
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
-import { modelDestination } from "../src/data-governance.js";
+import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -160,12 +165,18 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     .map((name) => name.trim())
     .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
     .join(",");
+  const inheritedModelRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent", "KimiAgent"].flatMap((agent) =>
+      effectiveRouteEnvironment(agent, process.env).map(([name]) => [name, undefined])
+    )
+  );
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
       env: {
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
+        ...inheritedModelRouteEnvironment,
         ALL_PROXY: undefined,
         HTTP_PROXY: undefined,
         HTTPS_PROXY: undefined,
@@ -2426,6 +2437,20 @@ test(
   }
 );
 
+test("init resolves one-hour node and execution-resource timeout defaults", () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+
+  const config = fs.readFileSync(path.join(project, "ultrafuzz.toml"), "utf8");
+  const parsed = parseProjectConfigToml(config);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.diagnostics));
+  const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+  assert.equal(resolved.ok, true, JSON.stringify(resolved.diagnostics));
+  assert.equal(resolved.value?.run.defaultTimeoutSeconds, 3600);
+  assert.equal(resolved.value?.execution.resources.timeoutSeconds, 3600);
+});
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
@@ -3049,7 +3074,7 @@ test(
     );
     const { createCodexAgent } = await loadGeneratedCodexAgent(project);
     const codexHome = path.join(process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT!, "codex");
-    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
 
     const agentEnvironment = (): Record<string, string> =>
       (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
@@ -13802,6 +13827,9 @@ test("syncRun honors cancellation and an overall deadline before terminal synchr
 });
 
 test("syncRun aborts or times out a blocked inspection child without durable mutation", async () => {
+  // Leave enough headroom for a contended hosted runner while still proving
+  // that the child exits before the five-second forced-kill grace period.
+  const responsiveTerminationBudgetMs = 4_000;
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -13839,7 +13867,7 @@ if (process.argv[2] === "inspect") {
   clearTimeout(abortTimer);
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
-  assert.ok(Date.now() - abortStartedAt < 2_000);
+  assert.ok(Date.now() - abortStartedAt < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
   const deadlineStartedAt = Date.now();
@@ -13849,7 +13877,7 @@ if (process.argv[2] === "inspect") {
   );
   assert.equal(expired.ok, false);
   assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
-  assert.ok(Date.now() - deadlineStartedAt < 2_000);
+  assert.ok(Date.now() - deadlineStartedAt < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 });
 

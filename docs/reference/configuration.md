@@ -28,7 +28,7 @@ forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
 forge_rayon_threads = 1
 workspace_mode = "git-worktree"
-default_timeout_seconds = 1800
+default_timeout_seconds = 3600
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 
@@ -39,7 +39,7 @@ retention_days = 30
 [execution.resources]
 cpu = 4
 memory_mib = 8192
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [models]
 default = "default"
@@ -48,7 +48,7 @@ default = "default"
 agent = "CodexAgent"
 model = "gpt-5.5"
 reasoning = "xhigh"
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [retry]
 same_agent_attempts = 1
@@ -122,7 +122,7 @@ empty path components, and dot components fail validation.
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
-| `default_timeout_seconds`   | integer | Default node timeout in seconds.                                            |
+| `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
 | `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
 
@@ -152,8 +152,8 @@ eval watchers.
 `execution.mode` defaults to `local`. Set it to `cloud`, select a supported
 provider, and configure that provider to place every expanded agentic attempt in
 a fresh sandbox. `retention_days` defaults to `30`. The default resource table
-sets `cpu`, `memory_mib`, and `timeout_seconds`; logical topology nodes may
-override any resource in `[execution.nodes.<node-id>.resources]`.
+sets `cpu`, `memory_mib`, and a one-hour `timeout_seconds`; logical topology
+nodes may override any resource in `[execution.nodes.<node-id>.resources]`.
 
 Cloud provider configuration names credential variables but never stores their
 values. Missing credentials, unsupported provider/auth combinations, invalid
@@ -171,7 +171,7 @@ default = "default"
 agent = "CodexAgent"
 model = "gpt-5.5"
 reasoning = "xhigh"
-timeout_seconds = 1800
+timeout_seconds = 3600
 ```
 
 Profile IDs must use safe ASCII identifier characters. Each profile supports:
@@ -186,6 +186,11 @@ Profile IDs must use safe ASCII identifier characters. Each profile supports:
 If topology does not select `model_profiles`, an agentic node uses the
 configured default profile only. Multi-model fan-out must be explicit in a
 topology node or group default.
+
+The effective agent timeout uses this precedence: a topology node or group
+timeout, then the model profile timeout, then `[run].default_timeout_seconds`.
+Keep cloud execution-resource timeouts at least as large as the effective agent
+timeout so the provider sandbox does not end first.
 
 Generated defaults may include `[models] synthesized_default = true` when the
 default profile was synthesized by the scaffold.

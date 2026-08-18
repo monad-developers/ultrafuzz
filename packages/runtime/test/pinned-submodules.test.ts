@@ -58,6 +58,30 @@ nodes:
   );
 }
 
+function writeTrustedNpmLauncher(root: string): string {
+  const binDir = path.join(root, "trusted-bin");
+  const launcher = path.join(binDir, process.platform === "win32" ? "npm-cli.js" : "npm");
+  const npmCli = fs.realpathSync(
+    path.join(
+      path.dirname(process.execPath),
+      ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
+    )
+  );
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    launcher,
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, [${JSON.stringify(npmCli)}, ...process.argv.slice(2)], { stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
+    "utf8"
+  );
+  fs.chmodSync(launcher, 0o555);
+  return binDir;
+}
+
 test("sealed recursive submodules hydrate a real task worktree without child Git metadata", (context) => {
   const fixture = nestedSubmoduleFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
@@ -512,6 +536,7 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.ok(snapshot !== undefined);
   const manifestPath = writePinnedSubmoduleSnapshot(fixture.source, snapshot);
   const expectation = pinnedSubmoduleExpectation(snapshot);
+  const trustedBin = writeTrustedNpmLauncher(fixture.root);
   removeChildGitMetadata(fixture.source, snapshot.top_level_roots);
 
   const initialized = initProject({ projectRoot: fixture.source, force: true });
@@ -534,7 +559,8 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.match(workflowSource, /"pinnedSubmodules": \{/u);
 
   const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
-    SMITHERS_BIN: "/bin/true"
+    SMITHERS_BIN: "/bin/true",
+    ULTRAFUZZ_TRUSTED_BIN: trustedBin
   });
   const pinnedPaths = executionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
@@ -624,7 +650,8 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
 
   const cloudExecutionFiles = await smithersExecutionControlFiles(cloudCompiled, cloudPlan.value!.layout, {
-    SMITHERS_BIN: "/bin/true"
+    SMITHERS_BIN: "/bin/true",
+    ULTRAFUZZ_TRUSTED_BIN: trustedBin
   });
   const cloudPinnedPaths = cloudExecutionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
