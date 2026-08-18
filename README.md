@@ -47,6 +47,7 @@ If you need to install any dependencies, ask for my approval first.
 - [EVMBench integration](benchmarks/evmbench/README.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
+- [Licensing](docs/licensing.md)
 
 ## Evals
 
@@ -57,3 +58,20 @@ Longitudinal results from the public benchmark suite. See [Eval Suites](docs/ref
 ![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)
 
 ![UltrafuzzBench model performance versus cost](docs/assets/eval-history/performance-cost.svg)
+
+## Security review
+
+Ultrafuzz has been through an automated, AI-assisted security review whose findings were then reviewed and
+dispositioned by a maintainer. That review is **not** a formal third-party security audit and must not be read as one:
+no independent auditor has assessed this code, and automated scanners do not constitute an audit.
+
+Residual risk was explicitly accepted rather than eliminated. Agents run in YOLO / bypass-permissions mode, so
+Ultrafuzz deliberately ships without OS or container sandboxing for agent execution, without agent network-egress
+allowlists, without command allowlists or in-run approval prompts, and without mediated agent filesystem reads. Treat
+launching a campaign as authorizing arbitrary code execution on your machine and against your credentials. See
+[Security](docs/security.md) for the current posture.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Every workspace package declares `"license": "MIT"`. See
+[Licensing](docs/licensing.md) for the copyright attribution evidence and for why the project ships no NOTICE file.
