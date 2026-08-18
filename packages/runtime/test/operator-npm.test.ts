@@ -10,16 +10,30 @@ import { bundledOperatorNpmClosureForValidation, resolveOperatorNpmAuthority } f
 
 test("the release-pinned operator npm closure is complete and reproducible", () => {
   assert.deepEqual(bundledOperatorNpmClosureForValidation(), {
-    bytes: 12_230_534,
-    digest: "4823bc9e925ce3ddecaa33d5d7fd01b1de0ba3c395332a58bcbbc481c2a1cdbe",
-    directories: 461,
-    files: 1_954
+    bytes: 12_223_470,
+    digest: "21e3d464bd4418f10c34d70ac8fa19a0d64bcd9c52c932221517bd586b005d7b",
+    directories: 460,
+    files: 1_943
   });
 });
 
 test("the operator npm backports retain their security behavior", () => {
   const require = createRequire(import.meta.url);
   const npmRoot = path.dirname(require.resolve("npm/package.json"));
+  assert.deepEqual(
+    Object.fromEntries(
+      ["brace-expansion", "ip-address", "tar", "undici"].map((name) => [
+        name,
+        (require(path.join(npmRoot, "node_modules", name, "package.json")) as { version: string }).version
+      ])
+    ),
+    {
+      "brace-expansion": "5.0.9",
+      "ip-address": "10.5.0",
+      tar: "7.5.22",
+      undici: "6.28.0"
+    }
+  );
   const braceExpansion = require(path.join(npmRoot, "node_modules", "brace-expansion")) as {
     expand: (value: string, options: { max: number; maxLength: number }) => string[];
   };
@@ -45,7 +59,9 @@ test("operator npm runs only from a private read-only snapshot", (context) => {
 
   const authority = resolveOperatorNpmAuthority(targetRoot, undefined);
   const provision = authority.provision(controllerRoot);
+  const snapshotRoot = path.dirname(path.dirname(provision.cliPath));
   assert.equal(path.relative(targetRoot, provision.cliPath).startsWith(`..${path.sep}`), true);
+  assert.equal(fs.existsSync(path.join(snapshotRoot, "node_modules", ".bin")), false);
   assert.equal(fs.lstatSync(provision.cliPath).mode & 0o777, 0o400);
   assert.equal(
     execFileSync(process.execPath, [provision.cliPath, "--version"], {
@@ -55,6 +71,17 @@ test("operator npm runs only from a private read-only snapshot", (context) => {
     }).trim(),
     "11.19.0"
   );
+  provision.assertCurrent();
+
+  const snapshotNodeModules = path.join(snapshotRoot, "node_modules");
+  const generatedBin = path.join(snapshotNodeModules, ".bin");
+  fs.chmodSync(snapshotNodeModules, 0o700);
+  fs.mkdirSync(generatedBin, { mode: 0o500 });
+  fs.chmodSync(snapshotNodeModules, 0o500);
+  assert.throws(() => provision.assertCurrent(), /snapshot contains generated bin shims/u);
+  fs.chmodSync(snapshotNodeModules, 0o700);
+  fs.rmdirSync(generatedBin);
+  fs.chmodSync(snapshotNodeModules, 0o500);
   provision.assertCurrent();
 
   fs.chmodSync(provision.cliPath, 0o600);

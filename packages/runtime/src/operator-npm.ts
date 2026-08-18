@@ -4,12 +4,13 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 const OPERATOR_NPM_VERSION = "11.19.0";
-const OPERATOR_NPM_CLOSURE_SHA256 = "4823bc9e925ce3ddecaa33d5d7fd01b1de0ba3c395332a58bcbbc481c2a1cdbe";
+const OPERATOR_NPM_CLOSURE_SHA256 = "21e3d464bd4418f10c34d70ac8fa19a0d64bcd9c52c932221517bd586b005d7b";
 const OPERATOR_NPM_MAX_FILES = 10_000;
 const OPERATOR_NPM_MAX_DIRECTORIES = 2_500;
 const OPERATOR_NPM_MAX_BYTES = 64 * 1024 * 1024;
 const OPERATOR_NPM_MAX_DEPTH = 32;
 const OPERATOR_NPM_SNAPSHOT_DIRECTORY = "operator-npm";
+const OPERATOR_NPM_OMITTED_BIN_DIRECTORY = "node_modules/.bin";
 let testOperatorNpmCli: string | undefined;
 
 interface OperatorNpmClosure {
@@ -162,6 +163,13 @@ function inspectOperatorNpmClosure(root: string, requireReadOnly = false): Opera
   const visit = (absolute: string, relative: string, depth: number): void => {
     if (depth > OPERATOR_NPM_MAX_DEPTH) throw new Error("operator npm closure is too deeply nested");
     const stat = fs.lstatSync(absolute);
+    if (relative === OPERATOR_NPM_OMITTED_BIN_DIRECTORY) {
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("operator npm generated bin entry must be a real directory");
+      }
+      if (requireReadOnly) throw new Error("operator npm snapshot contains generated bin shims");
+      return;
+    }
     if (stat.isSymbolicLink()) throw new Error(`operator npm closure contains a symbolic link: ${relative}`);
     if (stat.isDirectory()) {
       directories += 1;
@@ -203,16 +211,27 @@ function copyOperatorNpmClosure(sourceRoot: string, destinationRoot: string): vo
   let bytes = 0,
     directories = 0,
     files = 0;
-  const copy = (source: string, destination: string, depth: number): void => {
+  const copy = (source: string, destination: string, relative: string, depth: number): void => {
     if (depth > OPERATOR_NPM_MAX_DEPTH) throw new Error("operator npm source is too deeply nested");
     const stat = fs.lstatSync(source);
+    if (relative === OPERATOR_NPM_OMITTED_BIN_DIRECTORY) {
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new Error("operator npm generated bin entry must be a real directory");
+      }
+      return;
+    }
     if (stat.isSymbolicLink()) throw new Error("operator npm source changed to a symbolic link during snapshot");
     if (stat.isDirectory()) {
       directories += 1;
       if (directories > OPERATOR_NPM_MAX_DIRECTORIES) throw new Error("operator npm source has too many directories");
       fs.mkdirSync(destination, { mode: 0o700 });
       for (const name of fs.readdirSync(source).sort()) {
-        copy(path.join(source, name), path.join(destination, name), depth + 1);
+        copy(
+          path.join(source, name),
+          path.join(destination, name),
+          relative === "." ? name : `${relative}/${name}`,
+          depth + 1
+        );
       }
       fs.chmodSync(destination, 0o500);
       return;
@@ -229,7 +248,7 @@ function copyOperatorNpmClosure(sourceRoot: string, destinationRoot: string): vo
     fs.writeFileSync(destination, contents, { flag: "wx", mode: 0o600 });
     fs.chmodSync(destination, 0o400);
   };
-  copy(sourceRoot, destinationRoot, 0);
+  copy(sourceRoot, destinationRoot, ".", 0);
 }
 
 function assertOperatorNpmSnapshot(snapshotRoot: string): void {

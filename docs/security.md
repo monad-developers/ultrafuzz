@@ -116,10 +116,17 @@ The inventory also opens installed packages that declare bundled dependencies,
 validates their bounded no-symlink package trees, and submits every exact bundled
 version to the same advisory endpoint. This matters for the private workflow
 controller's pinned npm: pnpm otherwise reports npm as one opaque package and
-omits the packages npm ships inside itself. The lockfile-bound npm patch carries
-the official `brace-expansion` 5.0.9 and `ip-address` 10.3.1 runtime files until
-upstream npm bundles those fixed releases; the operator npm closure digest and
-the advisory inventory both fail if that composition drifts.
+omits the packages npm ships inside itself. The lockfile-bound npm patch mirrors
+the green npm v11 upstream fixes in `npm/cli#9842` and `npm/cli#9872`: bundled
+`brace-expansion` 5.0.9, `ip-address` 10.5.0, `tar` 7.5.22, and `undici` 6.28.0.
+The patch can be removed when an upstream npm release carries those versions;
+the operator npm closure digest and advisory inventory both fail if that
+composition drifts. Pnpm's generated `node_modules/.bin` shims are excluded from
+the private snapshot because they embed installation-specific absolute paths and
+the controller invokes npm's pinned CLI directly; the snapshot test also proves
+that no such shim directory is copied. Socket's duplicate obfuscated-code
+warnings refer to npm's official bundled/minified distribution; no warning is
+suppressed, and registry integrity plus the closure digest cover those bytes.
 
 ## Agent process environment
 
