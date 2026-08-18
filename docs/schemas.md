@@ -32,6 +32,8 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:references:reference-cache-manifest:1`
 - `urn:ultrafuzz:schema:runtime:workflow-control-integrity:2`
 - `urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1`
+- `urn:ultrafuzz:schema:runtime:data-governance-policy:1`
+- `urn:ultrafuzz:schema:runtime:data-disclosure-acknowledgements:1`
 - `urn:ultrafuzz:schema:topology:expanded-graph:4`
 
 The generated-tests v3 schema describes an atomic strict UTF-8 text bundle.

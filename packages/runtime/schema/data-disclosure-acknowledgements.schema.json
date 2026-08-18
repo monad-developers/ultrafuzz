@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:data-disclosure-acknowledgements:1",
+  "title": "Ultrafuzz campaign data-disclosure acknowledgements",
+  "type": "array",
+  "maxItems": 128,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "schema_version",
+      "destination",
+      "policy_digest",
+      "input_digest",
+      "acknowledged_by",
+      "acknowledged_at"
+    ],
+    "properties": {
+      "schema_version": { "const": "ultrafuzz.data-disclosure-acknowledgement.v1" },
+      "destination": {
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^(model|cloud|artifact):[a-z0-9][a-z0-9._-]{0,127}$"
+      },
+      "policy_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "input_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+      "acknowledged_by": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "\\S"
+      },
+      "acknowledged_at": {
+        "type": "string",
+        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+      }
+    }
+  }
+}

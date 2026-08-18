@@ -19,6 +19,11 @@ import {
 } from "../src/data-governance.js";
 import { initProject } from "../src/init.js";
 import { planRun } from "../src/plan-run.js";
+import {
+  DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+  DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID
+} from "../src/runtime-contracts.js";
+import { validateRuntimeJsonSchema } from "../src/schema-registry.js";
 import { assertSealedDataGovernance } from "../src/smithers.js";
 import type { PlannedGraph } from "../src/types.js";
 function repository(): string {
@@ -102,6 +107,8 @@ test("private policy acknowledgements bind exact routes, prompts, and target byt
     acknowledged_by: "reviewer@example.invalid",
     acknowledged_at: "2026-08-17T00:00:00.000Z"
   };
+  assert.equal(validateRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, JSON.parse(policyJson)).ok, true);
+  assert.equal(validateRuntimeJsonSchema(DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID, [acknowledgement]).ok, true);
   const env = {
     [DATA_GOVERNANCE_POLICY_ENV]: policyJson,
     [DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV]: JSON.stringify([acknowledgement])

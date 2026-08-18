@@ -7,6 +7,11 @@ import { parseStrictJsonBytes, readSinglyLinkedRegularFileSnapshotInside } from 
 import type { ResolvedConfig } from "@ultrafuzz/config";
 import { z } from "zod";
 import { retryFallbackProfileIds } from "./retry-chain.js";
+import {
+  DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+  DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID
+} from "./runtime-contracts.js";
+import { assertRuntimeJsonSchema } from "./schema-registry.js";
 import type { PlannedGraph, RuntimeDiagnostic } from "./types.js";
 import { sha256Stable } from "./utils.js";
 export const DATA_GOVERNANCE_POLICY_ENV = "ULTRAFUZZ_DATA_GOVERNANCE_POLICY" as const,
@@ -220,15 +225,19 @@ export function parseDataGovernancePolicy(value: string | undefined): DataGovern
       destination_policies: [],
       openrouter_model_allowlist: []
     };
-  return validated(policySchema, parseJson(value, DATA_GOVERNANCE_POLICY_ENV), DATA_GOVERNANCE_POLICY_ENV);
+  const parsed = parseJson(value, DATA_GOVERNANCE_POLICY_ENV);
+  assertRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, parsed, DATA_GOVERNANCE_POLICY_ENV);
+  return validated(policySchema, parsed, DATA_GOVERNANCE_POLICY_ENV);
 }
 export function parseAcknowledgements(value: string | undefined): DataDisclosureAcknowledgement[] {
   if (value === undefined || value.trim() === "") return [];
-  return validated(
-    acknowledgementsSchema,
-    parseJson(value, DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV),
+  const parsed = parseJson(value, DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV);
+  assertRuntimeJsonSchema(
+    DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+    parsed,
     DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV
   );
+  return validated(acknowledgementsSchema, parsed, DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV);
 }
 function publicBenchmarkPolicy(required: ReturnType<typeof requiredDestinations>): DataGovernancePolicy {
   const destinations = [...new Set([...required.source, ...required.artifact])].sort();

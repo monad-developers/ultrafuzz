@@ -16,6 +16,8 @@ import {
 
 import {
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
+  DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+  DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
@@ -71,6 +73,10 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 
 export const cleanAuditJsonSchema = loadSchemaDocument("clean-audit.schema.json");
 export const cloudExecutionGenerationJsonSchema = loadSchemaDocument("cloud-execution-generation.schema.json");
+export const dataDisclosureAcknowledgementsJsonSchema = loadSchemaDocument(
+  "data-disclosure-acknowledgements.schema.json"
+);
+export const dataGovernancePolicyJsonSchema = loadSchemaDocument("data-governance-policy.schema.json");
 export const invariantSuiteBaselineJsonSchema = loadSchemaDocument("invariant-suite-baseline.schema.json");
 export const invariantSuiteHandoffJsonSchema = loadSchemaDocument("invariant-suite-handoff.schema.json");
 export const invariantWorkspaceSnapshotJsonSchema = loadSchemaDocument("invariant-workspace-snapshot.schema.json");
@@ -90,6 +96,8 @@ export const workspacePatchPreparationJsonSchema = loadSchemaDocument("workspace
 export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   cleanAuditJsonSchema,
   cloudExecutionGenerationJsonSchema,
+  dataDisclosureAcknowledgementsJsonSchema,
+  dataGovernancePolicyJsonSchema,
   invariantSuiteBaselineJsonSchema,
   invariantSuiteHandoffJsonSchema,
   invariantWorkspaceSnapshotJsonSchema,
@@ -116,6 +124,18 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
     id: CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "cloudExecutionGenerationJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "data-disclosure-acknowledgements.schema.json": {
+    id: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "dataDisclosureAcknowledgementsJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "data-governance-policy.schema.json": {
+    id: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "dataGovernancePolicyJsonSchema",
     semanticGates: Object.freeze([])
   },
   "invariant-suite-baseline.schema.json": {
