@@ -5,6 +5,16 @@ import { builtInPromptRoot } from "./assets.js";
 
 export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
 
+const AGENT_PREAMBLE_TEMPLATE_FILES = {
+  "agent-prompt": "agent-prompt.mdx",
+  "authorized-defensive-security-context": "authorized-defensive-security-context.mdx",
+  "retry-failure": "retry-failure.mdx",
+  "topology-runtime-context": "topology-runtime-context.mdx",
+  "untrusted-content-boundary": "untrusted-content-boundary.mdx"
+} as const;
+
+export type AgentPreambleTemplateName = keyof typeof AGENT_PREAMBLE_TEMPLATE_FILES;
+
 export const SUPPORTED_TEMPLATE_VARIABLES = [
   "repo_path",
   "workspace_path",
@@ -436,6 +446,45 @@ function loadOutputContractTemplate(relativePath: string): string {
 
 function outputContractTemplateRoot(): string {
   return path.join(builtInPromptRoot(), "_templates", "output-contract");
+}
+
+const agentPreambleTemplateCache = new Map<AgentPreambleTemplateName, string>();
+
+/** Load one trusted global-agent prompt fragment from the packaged MDX assets. */
+export function loadAgentPreambleTemplate(name: AgentPreambleTemplateName): string {
+  const cached = agentPreambleTemplateCache.get(name);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const template = readFileSync(
+    path.join(builtInPromptRoot(), "_templates", "agent-preamble", AGENT_PREAMBLE_TEMPLATE_FILES[name]),
+    "utf8"
+  ).trimEnd();
+  agentPreambleTemplateCache.set(name, template);
+  return template;
+}
+
+/** Render a trusted global-agent MDX fragment without reinterpreting inserted values. */
+export function renderAgentPreambleTemplate(
+  name: AgentPreambleTemplateName,
+  variables: Readonly<Record<string, string>> = {}
+): string {
+  const unused = new Set(Object.keys(variables));
+  const rendered = loadAgentPreambleTemplate(name).replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/gu, (_, key: string) => {
+    const value = variables[key];
+    if (value === undefined) {
+      throw new PromptError("missing-template-variable", `missing agent preamble template variable: ${key}`);
+    }
+    unused.delete(key);
+    return value;
+  });
+  if (unused.size > 0) {
+    throw new PromptError(
+      "invalid-render-input",
+      `unknown agent preamble template variable: ${Array.from(unused).sort().join(", ")}`
+    );
+  }
+  return rendered;
 }
 
 export function writeRenderedPrompt(result: PromptRenderResult): string {
