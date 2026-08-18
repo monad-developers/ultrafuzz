@@ -37,6 +37,14 @@ const MAX_RUNTIME_SCHEMA_BYTES = 2 * 1024 * 1024;
 
 export const MATERIALIZE_AUDIT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:materialize-audit:1" as const;
 export const CLEAN_AUDIT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:clean-audit:1" as const;
+export const DATA_GOVERNANCE_POLICY_SEMANTIC_GATES = Object.freeze([
+  "data-governance-destination-policy-uniqueness",
+  "data-governance-destination-policy-coverage",
+  "data-governance-canonical-ordering"
+] as const);
+export const DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES = Object.freeze([
+  "data-disclosure-acknowledgement-destination-uniqueness"
+] as const);
 
 export interface RuntimeSchemaMetadata {
   id: string;
@@ -130,13 +138,13 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
     id: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "dataDisclosureAcknowledgementsJsonSchema",
-    semanticGates: Object.freeze([])
+    semanticGates: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES
   },
   "data-governance-policy.schema.json": {
     id: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "dataGovernancePolicyJsonSchema",
-    semanticGates: Object.freeze([])
+    semanticGates: DATA_GOVERNANCE_POLICY_SEMANTIC_GATES
   },
   "invariant-suite-baseline.schema.json": {
     id: INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,

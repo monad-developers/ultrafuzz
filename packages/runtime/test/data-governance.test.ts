@@ -13,8 +13,10 @@ import {
   DATA_GOVERNANCE_POLICY_SCHEMA_VERSION,
   DATA_GOVERNANCE_PROVENANCE_PATH,
   modelDestination,
+  parseAcknowledgements,
   parseDataGovernancePolicy,
   prepareDataGovernance,
+  type DataGovernancePolicy,
   targetIdentity
 } from "../src/data-governance.js";
 import { initProject } from "../src/init.js";
@@ -23,7 +25,12 @@ import {
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
   DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID
 } from "../src/runtime-contracts.js";
-import { validateRuntimeJsonSchema } from "../src/schema-registry.js";
+import {
+  DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES,
+  DATA_GOVERNANCE_POLICY_SEMANTIC_GATES,
+  runtimeSchemaRegistry,
+  validateRuntimeJsonSchema
+} from "../src/schema-registry.js";
 import { assertSealedDataGovernance } from "../src/smithers.js";
 import type { PlannedGraph } from "../src/types.js";
 function repository(): string {
@@ -60,8 +67,8 @@ function policy(
     openRouterModels?: string[];
   } = {}
 ): string {
-  const source = options.source ?? ["model:openai"];
-  const artifact = options.artifact ?? [];
+  const source = [...(options.source ?? ["model:openai"])].sort();
+  const artifact = [...(options.artifact ?? [])].sort();
   const destinations = [...new Set([...source, ...artifact])].sort();
   return JSON.stringify({
     schema_version: DATA_GOVERNANCE_POLICY_SCHEMA_VERSION,
@@ -69,7 +76,7 @@ function policy(
     source_destinations: source,
     artifact_destinations: artifact,
     destination_policies: destinations.map(destinationPolicy),
-    openrouter_model_allowlist: options.openRouterModels ?? []
+    openrouter_model_allowlist: [...(options.openRouterModels ?? [])].sort()
   });
 }
 const prepare = (projectRoot: string, env: Record<string, string | undefined>, operatorPrompt = "review target") =>
@@ -126,6 +133,160 @@ test("private policy acknowledgements bind exact routes, prompts, and target byt
   for (const result of stale) assert.equal(result.provenance.acknowledgement_status, "pending");
   fs.writeFileSync(path.join(root, "oversized.bin"), Buffer.alloc(16 * 1024 * 1024 + 1));
   assert.throws(() => prepare(root, env), /file exceeds the 16777216-byte limit/u);
+});
+test("governance JSON Schemas and runtime parsers have scalar acceptance parity", () => {
+  const validPolicy = JSON.parse(policy()) as DataGovernancePolicy,
+    validAcknowledgement = {
+      schema_version: DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+      destination: "model:openai",
+      policy_digest: "a".repeat(64),
+      input_digest: "b".repeat(64),
+      acknowledged_by: "reviewer@example.invalid",
+      acknowledged_at: "2026-08-17T00:00:00.000Z"
+    },
+    impossibleTimestamp = { ...validAcknowledgement, acknowledged_at: "2026-99-99T99:99:99.999Z" },
+    leapSecondTimestamp = { ...validAcknowledgement, acknowledged_at: "2026-12-31T23:59:60.000Z" },
+    whitespaceAcknowledgement = { ...validAcknowledgement, acknowledged_by: " reviewer@example.invalid " },
+    c1ModelPolicy = structuredClone(validPolicy),
+    whitespacePolicy = structuredClone(validPolicy),
+    unicodePolicy = structuredClone(validPolicy),
+    trailingNewlinePolicy = structuredClone(validPolicy);
+  c1ModelPolicy.openrouter_model_allowlist = [`vendor/\u0085model`];
+  whitespacePolicy.destination_policies[0]!.processor = " reviewed ";
+  unicodePolicy.destination_policies[0]!.processor = "😀".repeat(3_000);
+  trailingNewlinePolicy.source_destinations = ["model:openai\n"];
+  trailingNewlinePolicy.destination_policies[0]!.destination = "model:openai\n";
+
+  const cases = [
+    {
+      name: "valid policy",
+      schemaId: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+      value: validPolicy,
+      expected: true,
+      parse: () => parseDataGovernancePolicy(JSON.stringify(validPolicy))
+    },
+    {
+      name: "impossible acknowledgement timestamp",
+      schemaId: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+      value: [impossibleTimestamp],
+      expected: false,
+      parse: () => parseAcknowledgements(JSON.stringify([impossibleTimestamp]))
+    },
+    {
+      name: "non-ECMAScript leap-second timestamp",
+      schemaId: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+      value: [leapSecondTimestamp],
+      expected: false,
+      parse: () => parseAcknowledgements(JSON.stringify([leapSecondTimestamp]))
+    },
+    {
+      name: "C1 control in model ID",
+      schemaId: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+      value: c1ModelPolicy,
+      expected: false,
+      parse: () => parseDataGovernancePolicy(JSON.stringify(c1ModelPolicy))
+    },
+    {
+      name: "leading and trailing policy whitespace",
+      schemaId: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+      value: whitespacePolicy,
+      expected: false,
+      parse: () => parseDataGovernancePolicy(JSON.stringify(whitespacePolicy))
+    },
+    {
+      name: "leading and trailing acknowledgement whitespace",
+      schemaId: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
+      value: [whitespaceAcknowledgement],
+      expected: false,
+      parse: () => parseAcknowledgements(JSON.stringify([whitespaceAcknowledgement]))
+    },
+    {
+      name: "3,000 astral characters",
+      schemaId: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+      value: unicodePolicy,
+      expected: true,
+      parse: () => parseDataGovernancePolicy(JSON.stringify(unicodePolicy))
+    },
+    {
+      name: "destination with a trailing newline",
+      schemaId: DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
+      value: trailingNewlinePolicy,
+      expected: false,
+      parse: () => parseDataGovernancePolicy(JSON.stringify(trailingNewlinePolicy))
+    }
+  ] as const;
+
+  for (const entry of cases) {
+    const schemaAccepted = validateRuntimeJsonSchema(entry.schemaId, entry.value).ok;
+    let runtimeAccepted = true;
+    try {
+      entry.parse();
+    } catch {
+      runtimeAccepted = false;
+    }
+    assert.equal(schemaAccepted, entry.expected, `${entry.name}: unexpected JSON Schema result`);
+    assert.equal(runtimeAccepted, schemaAccepted, `${entry.name}: runtime parser disagrees with JSON Schema`);
+  }
+  assert.deepEqual(parseDataGovernancePolicy(JSON.stringify(unicodePolicy)), unicodePolicy);
+});
+test("governance semantic gates reject projected duplicates, incomplete coverage, and noncanonical order", () => {
+  const validPolicy = JSON.parse(
+      policy({ source: ["model:z", "model:a"], openRouterModels: ["vendor/z", "vendor/a"] })
+    ) as DataGovernancePolicy,
+    missingPolicy = structuredClone(validPolicy),
+    duplicatePolicy = structuredClone(validPolicy),
+    unorderedPolicy = structuredClone(validPolicy),
+    acknowledgement = {
+      schema_version: DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION,
+      destination: "model:a",
+      policy_digest: "a".repeat(64),
+      input_digest: "b".repeat(64),
+      acknowledged_by: "reviewer@example.invalid",
+      acknowledged_at: "2026-08-17T00:00:00.000Z"
+    },
+    duplicateAcknowledgements = [acknowledgement, { ...acknowledgement, input_digest: "c".repeat(64) }];
+  validPolicy.destination_policies[0]!.processor = "reviewed value";
+  missingPolicy.destination_policies.pop();
+  duplicatePolicy.destination_policies.push({
+    ...duplicatePolicy.destination_policies[0]!,
+    processor: "second row"
+  });
+  unorderedPolicy.source_destinations.reverse();
+
+  assert.deepEqual(parseDataGovernancePolicy(JSON.stringify(validPolicy)), validPolicy);
+  assert.equal(validateRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, missingPolicy).ok, true);
+  assert.throws(
+    () => parseDataGovernancePolicy(JSON.stringify(missingPolicy)),
+    new RegExp(DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[1], "u")
+  );
+  assert.equal(validateRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, duplicatePolicy).ok, true);
+  assert.throws(
+    () => parseDataGovernancePolicy(JSON.stringify(duplicatePolicy)),
+    new RegExp(DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[0], "u")
+  );
+  assert.equal(validateRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, unorderedPolicy).ok, true);
+  assert.throws(
+    () => parseDataGovernancePolicy(JSON.stringify(unorderedPolicy)),
+    new RegExp(DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[2], "u")
+  );
+  assert.equal(
+    validateRuntimeJsonSchema(DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID, duplicateAcknowledgements).ok,
+    true
+  );
+  assert.throws(
+    () => parseAcknowledgements(JSON.stringify(duplicateAcknowledgements)),
+    new RegExp(DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES[0], "u")
+  );
+
+  const registry = new Map(runtimeSchemaRegistry().map((entry) => [entry.id, entry]));
+  assert.deepEqual(
+    registry.get(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID)?.semanticGates,
+    DATA_GOVERNANCE_POLICY_SEMANTIC_GATES
+  );
+  assert.deepEqual(
+    registry.get(DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID)?.semanticGates,
+    DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES
+  );
 });
 test("policy pins explicit and home routes, Modal, and OpenRouter models", () => {
   const root = repository(),

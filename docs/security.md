@@ -42,16 +42,23 @@ The policy needs one `destination_policies` row for every declared source or
 artifact destination. The first failed private launch reports the exact route
 IDs and the policy and input digests.
 
+The schema validates the portable document shape. Runtime semantic gates also
+require unique destination-policy rows, exact coverage of the declared
+destination union, and ascending array order. Text values cannot have leading
+or trailing whitespace. Ultrafuzz rejects noncanonical input instead of
+silently trimming or reordering it.
+
 Put reviewed acknowledgement records in
 `ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS` as an array that matches the
 canonical
 [data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
 Acknowledgements bind the policy, effective inputs, prompt, routes, and
-Git/worktree identity. Any change makes them stale. Credential values are never
-persisted. Private standalone Modal evals remain fail-closed pending the
-separate R-26 disclosure authorization. Public Modal runs record `cloud:modal`.
-These controls are not a sandbox or egress filter: YOLO agents remain
-unrestricted.
+Git/worktree identity. A runtime semantic gate rejects more than one
+acknowledgement for the same destination. Any change makes an acknowledgement
+stale. Credential values are never persisted. Private standalone Modal evals
+remain fail-closed pending the separate R-26 disclosure authorization. Public
+Modal runs record `cloud:modal`. These controls are not a sandbox or egress
+filter: YOLO agents remain unrestricted.
 
 ## Agent process environment
 

@@ -88,6 +88,13 @@ and other contextual rules remain named host semantic gates. Exit `1` means the
 artifact author must correct the document. Exit `2` is a schema, invocation, or
 tool setup failure. The validator never repairs either file.
 
+Campaign governance policy and acknowledgement inputs follow that split. Their
+registered schemas enforce closed shapes, canonical text and timestamp forms,
+and Unicode code-point length limits. Runtime semantic gates enforce projected
+destination uniqueness, exact destination-policy coverage, and canonical policy
+array ordering. Runtime parsing returns accepted values unchanged; it never
+trims or reorders them.
+
 ## Breaking Contract Policy
 
 Each retained JSON handoff has one current versioned contract and one complete

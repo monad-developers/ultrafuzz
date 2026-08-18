@@ -5,13 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { parseStrictJsonBytes, readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
-import { z } from "zod";
 import { retryFallbackProfileIds } from "./retry-chain.js";
 import {
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
   DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID
 } from "./runtime-contracts.js";
-import { assertRuntimeJsonSchema } from "./schema-registry.js";
+import {
+  assertRuntimeJsonSchema,
+  DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES,
+  DATA_GOVERNANCE_POLICY_SEMANTIC_GATES
+} from "./schema-registry.js";
 import type { PlannedGraph, RuntimeDiagnostic } from "./types.js";
 import { sha256Stable } from "./utils.js";
 export const DATA_GOVERNANCE_POLICY_ENV = "ULTRAFUZZ_DATA_GOVERNANCE_POLICY" as const,
@@ -21,10 +24,7 @@ export const DATA_GOVERNANCE_POLICY_ENV = "ULTRAFUZZ_DATA_GOVERNANCE_POLICY" as 
   DATA_GOVERNANCE_POLICY_SCHEMA_VERSION = "ultrafuzz.data-governance-policy.v1" as const,
   DATA_GOVERNANCE_PROVENANCE_SCHEMA_VERSION = "ultrafuzz.data-governance-provenance.v1" as const,
   DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION = "ultrafuzz.data-disclosure-acknowledgement.v1" as const;
-const DESTINATION = /^(?:model|cloud|artifact):[a-z0-9][a-z0-9._-]{0,127}$/u,
-  MODEL_ID = /^[^\s\p{Cc}]+$/u,
-  DIGEST = /^[a-f0-9]{64}$/u,
-  MAX_GOVERNANCE_FILE_BYTES = 16 * 1024 * 1024,
+const MAX_GOVERNANCE_FILE_BYTES = 16 * 1024 * 1024,
   MAX_GOVERNANCE_TOTAL_BYTES = 64 * 1024 * 1024;
 const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   ClaudeAgent: ["ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "AZURE_", "CLOUD_ML_", "FOUNDRY_", "GOOGLE_"],
@@ -42,68 +42,32 @@ const ROUTE_PROXY_ENV = [
   "https_proxy",
   "no_proxy"
 ] as const;
-const textSchema = z
-    .string()
-    .max(4096)
-    .refine((value) => value.trim() !== "")
-    .transform((value) => value.trim()),
-  destinationSchema = z.string().max(128).regex(DESTINATION),
-  modelSchema = z.string().max(256).regex(MODEL_ID),
-  digestSchema = z.string().regex(DIGEST);
-const uniqueSorted = (schema: z.ZodString) =>
-  z
-    .array(schema)
-    .max(128)
-    .refine((entries) => new Set(entries).size === entries.length, "contains duplicate entries")
-    .transform((entries) => [...entries].sort());
-const destinationPolicySchema = z.strictObject({
-  destination: destinationSchema,
-  processor: textSchema,
-  region: textSchema,
-  retention_policy: textSchema,
-  training_policy: textSchema,
-  dpa_status: textSchema,
-  minimization_policy: textSchema,
-  data_handling_basis: textSchema
-});
-const policySchema = z
-  .strictObject({
-    schema_version: z.literal(DATA_GOVERNANCE_POLICY_SCHEMA_VERSION),
-    sensitivity: z.enum(["public", "private"]),
-    source_destinations: uniqueSorted(destinationSchema),
-    artifact_destinations: uniqueSorted(destinationSchema),
-    destination_policies: z
-      .array(destinationPolicySchema)
-      .max(128)
-      .transform((entries) => [...entries].sort((left, right) => left.destination.localeCompare(right.destination))),
-    openrouter_model_allowlist: uniqueSorted(modelSchema)
-  })
-  .refine(
-    (entry) =>
-      [...new Set([...entry.source_destinations, ...entry.artifact_destinations])].sort().join("\0") ===
-      entry.destination_policies.map((policy) => policy.destination).join("\0"),
-    { path: ["destination_policies"], message: "must describe every declared destination exactly once" }
-  );
-const acknowledgementSchema = z.strictObject({
-  schema_version: z.literal(DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION),
-  destination: destinationSchema,
-  policy_digest: digestSchema,
-  input_digest: digestSchema,
-  acknowledged_by: textSchema,
-  acknowledged_at: textSchema.refine(
-    (value) => Number.isFinite(Date.parse(value)) && new Date(Date.parse(value)).toISOString() === value,
-    "must be a canonical UTC timestamp"
-  )
-});
-const acknowledgementsSchema = z
-  .array(acknowledgementSchema)
-  .max(128)
-  .refine(
-    (entries) => new Set(entries.map((entry) => entry.destination)).size === entries.length,
-    "contains duplicate destinations"
-  );
-export type DataGovernancePolicy = z.infer<typeof policySchema>;
-export type DataDisclosureAcknowledgement = z.infer<typeof acknowledgementSchema>;
+export interface DataGovernanceDestinationPolicy {
+  destination: string;
+  processor: string;
+  region: string;
+  retention_policy: string;
+  training_policy: string;
+  dpa_status: string;
+  minimization_policy: string;
+  data_handling_basis: string;
+}
+export interface DataGovernancePolicy {
+  schema_version: typeof DATA_GOVERNANCE_POLICY_SCHEMA_VERSION;
+  sensitivity: "public" | "private";
+  source_destinations: string[];
+  artifact_destinations: string[];
+  destination_policies: DataGovernanceDestinationPolicy[];
+  openrouter_model_allowlist: string[];
+}
+export interface DataDisclosureAcknowledgement {
+  schema_version: typeof DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION;
+  destination: string;
+  policy_digest: string;
+  input_digest: string;
+  acknowledged_by: string;
+  acknowledged_at: string;
+}
 export interface DataGovernanceProvenance {
   schema_version: typeof DATA_GOVERNANCE_PROVENANCE_SCHEMA_VERSION;
   policy: DataGovernancePolicy;
@@ -227,7 +191,9 @@ export function parseDataGovernancePolicy(value: string | undefined): DataGovern
     };
   const parsed = parseJson(value, DATA_GOVERNANCE_POLICY_ENV);
   assertRuntimeJsonSchema(DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID, parsed, DATA_GOVERNANCE_POLICY_ENV);
-  return validated(policySchema, parsed, DATA_GOVERNANCE_POLICY_ENV);
+  const policy = parsed as DataGovernancePolicy;
+  assertDataGovernancePolicySemantics(policy);
+  return policy;
 }
 export function parseAcknowledgements(value: string | undefined): DataDisclosureAcknowledgement[] {
   if (value === undefined || value.trim() === "") return [];
@@ -237,7 +203,50 @@ export function parseAcknowledgements(value: string | undefined): DataDisclosure
     parsed,
     DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV
   );
-  return validated(acknowledgementsSchema, parsed, DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV);
+  const acknowledgements = parsed as DataDisclosureAcknowledgement[];
+  assertUniqueProjection(
+    acknowledgements,
+    (entry) => entry.destination,
+    DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES[0]
+  );
+  return acknowledgements;
+}
+function assertDataGovernancePolicySemantics(policy: DataGovernancePolicy): void {
+  assertUniqueProjection(
+    policy.destination_policies,
+    (entry) => entry.destination,
+    DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[0]
+  );
+  const declared = new Set([...policy.source_destinations, ...policy.artifact_destinations]),
+    described = new Set(policy.destination_policies.map((entry) => entry.destination)),
+    missing = [...declared].filter((entry) => !described.has(entry)).sort(),
+    extra = [...described].filter((entry) => !declared.has(entry)).sort();
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      `${DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[1]}: destination_policies must describe the exact declared destination union; missing=[${missing.join(", ")}]; extra=[${extra.join(", ")}]`
+    );
+  }
+  assertCanonicalOrder(policy.source_destinations, (entry) => entry, "source_destinations");
+  assertCanonicalOrder(policy.artifact_destinations, (entry) => entry, "artifact_destinations");
+  assertCanonicalOrder(policy.destination_policies, (entry) => entry.destination, "destination_policies");
+  assertCanonicalOrder(policy.openrouter_model_allowlist, (entry) => entry, "openrouter_model_allowlist");
+}
+function assertUniqueProjection<T>(entries: readonly T[], project: (entry: T) => string, gate: string): void {
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const key = project(entry);
+    if (seen.has(key)) throw new Error(`${gate}: duplicate projected destination ${JSON.stringify(key)}`);
+    seen.add(key);
+  }
+}
+function assertCanonicalOrder<T>(entries: readonly T[], project: (entry: T) => string, label: string): void {
+  for (let index = 1; index < entries.length; index += 1) {
+    if (project(entries[index - 1]!) > project(entries[index]!)) {
+      throw new Error(
+        `${DATA_GOVERNANCE_POLICY_SEMANTIC_GATES[2]}: ${label} must use ascending ECMAScript string order`
+      );
+    }
+  }
 }
 function publicBenchmarkPolicy(required: ReturnType<typeof requiredDestinations>): DataGovernancePolicy {
   const destinations = [...new Set([...required.source, ...required.artifact])].sort();
@@ -516,12 +525,6 @@ function parseJson(value: string, label: string): unknown {
   } catch (error) {
     throw new Error(`${label} must contain bounded strict JSON`, { cause: error });
   }
-}
-function validated<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success)
-    throw new Error(`${label} is invalid: ${parsed.error.issues[0]?.message ?? "validation failed"}`);
-  return parsed.data;
 }
 const hash = (value: crypto.BinaryLike): string => crypto.createHash("sha256").update(value).digest("hex");
 const errorDiagnostic = (code: string, message: string, pathValue: string): RuntimeDiagnostic => ({

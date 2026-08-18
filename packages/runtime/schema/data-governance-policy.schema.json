@@ -30,7 +30,7 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 256,
-        "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
+        "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$(?![\\s\\S])"
       }
     }
   },
@@ -38,7 +38,7 @@
     "destination": {
       "type": "string",
       "maxLength": 128,
-      "pattern": "^(model|cloud|artifact):[a-z0-9][a-z0-9._-]{0,127}$"
+      "pattern": "^(model|cloud|artifact):[a-z0-9][a-z0-9._-]{0,127}$(?![\\s\\S])"
     },
     "destinations": {
       "type": "array",
@@ -50,7 +50,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
-      "pattern": "\\S"
+      "pattern": "^(?:\\S|\\S[\\s\\S]*\\S)$(?![\\s\\S])"
     },
     "destinationPolicy": {
       "type": "object",
