@@ -30,6 +30,7 @@ import {
   type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
 import { parseResolvedConfigJsonBytes, validateAgentConfigs, type ResolvedConfig } from "@ultrafuzz/config";
+import { isSensitiveEnvironmentName, isSensitiveSecretValue } from "@ultrafuzz/security";
 import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
@@ -53,6 +54,7 @@ import {
   compileSmithersWorkflow,
   requestSmithersPause,
   runSmithersLifecycleCommand,
+  assertCurrentCloudAgentCredentialEnvironment,
   assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
@@ -106,6 +108,7 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
+  "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
   "ULTRAFUZZ_TRUSTED_BIN",
   "ULTRAFUZZ_VALIDATOR_BUILD",
   "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
@@ -220,6 +223,14 @@ export async function startRun(input: StartRunInput) {
     );
     const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
+    const submissionEnvironment = {
+      ...process.env,
+      ...providerScopedControllerEnvironment(
+        { ...trustedCli.env, ...prepared.executionSnapshot.env },
+        providerCredentialNames
+      )
+    };
+    assertCurrentCloudAgentCredentialEnvironment(plan.resolved_config, compiled.tasks, submissionEnvironment);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -227,13 +238,10 @@ export async function startRun(input: StartRunInput) {
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
-      env: providerScopedControllerEnvironment(
-        { ...trustedCli.env, ...prepared.executionSnapshot.env },
-        providerCredentialNames
-      ),
+      env: submissionEnvironment,
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(plan.resolved_config, activeAgentRefs, forgeGuard.env),
-        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       ),
@@ -561,6 +569,14 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
+    const taskDocument = parseSealedTaskManifest(evidence.verifiedControl.contents);
+    const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
+    const lifecycleEnvironment = {
+      ...process.env,
+      ...linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames)
+    };
+    assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -600,8 +616,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
       });
     }
-    const linkedAgentRefs = linkedWorkflowAgentRefs(evidence.verifiedControl.contents.tasks);
-    const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -623,10 +637,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
-      env: linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames),
+      env: lifecycleEnvironment,
       environmentVariableNames: mergeEnvironmentVariableNames(
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
-        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES"],
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
@@ -1372,8 +1386,33 @@ function providerScopedControllerEnvironment(
 ): Record<string, string | undefined> {
   return {
     ...source,
-    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: [...new Set(providerCredentialNames)].sort().join(",")
+    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: [...new Set(providerCredentialNames)].sort().join(","),
+    ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: sensitiveAllowlistedEnvironmentVariableNames({
+      ...process.env,
+      ...source
+    }).join(",")
   };
+}
+
+function sensitiveAllowlistedEnvironmentVariableNames(source: Record<string, string | undefined>): string[] {
+  const names = new Set<string>();
+  for (const entry of (source.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
+    const name = entry.trim();
+    if (name.length === 0) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
+    }
+    const upper = name.toUpperCase();
+    const matchingSourceNames = Object.keys(source).filter((sourceName) => sourceName.toUpperCase() === upper);
+    const values = matchingSourceNames
+      .map((sourceName) => source[sourceName])
+      .filter((value): value is string => value !== undefined);
+    if (!isSensitiveEnvironmentName(name) && !values.some((value) => isSensitiveSecretValue(value))) continue;
+    names.add(name);
+    names.add(upper);
+    for (const sourceName of matchingSourceNames) names.add(sourceName);
+  }
+  return [...names].sort();
 }
 
 function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {

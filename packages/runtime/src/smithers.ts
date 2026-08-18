@@ -39,10 +39,15 @@ import {
   serializeResolvedConfigToml,
   type ResolvedConfig
 } from "@ultrafuzz/config";
-import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
+import { isPathInside, isSensitiveSecretValue, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import { DATA_GOVERNANCE_PROVENANCE_PATH, effectiveRouteEnvironment } from "./data-governance.js";
+import {
+  DATA_GOVERNANCE_PROVENANCE_PATH,
+  effectiveRouteEnvironment,
+  isCredentialLikeEnvironmentVariableName,
+  routeOwnsCredentialLikeEnvironmentVariable
+} from "./data-governance.js";
 import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
@@ -4126,6 +4131,7 @@ function compileTask(input: {
           input.config.execution.mode,
           entry.agentRef,
           input.config.agents[entry.agentRef],
+          input.config.agents,
           input.env
         )
       )
@@ -4301,19 +4307,82 @@ function cloudAgentCredentialEnv(
   executionMode: ResolvedConfig["execution"]["mode"],
   agentRef: string,
   agent: ResolvedConfig["agents"][string] | undefined,
+  configuredAgents: ResolvedConfig["agents"],
   env: NodeJS.ProcessEnv
 ): string[] {
   if (executionMode !== "cloud" || agent === undefined) return [];
   const names = agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : [];
   if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
   const routes = effectiveRouteEnvironment(agentRef, env);
-  const extra = (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "")
-    .split(",")
-    .map((name) => name.trim().toUpperCase())
-    .filter((name) => env[name]?.trim());
-  names.push(...routes.map(([name]) => name), ...extra);
+  const configuredCredentials = configuredAgentCredentialEnvironmentVariableNames(configuredAgents);
+  let hasSensitiveExtra = false;
+  const extra = allowlistedCloudEnvironmentEntries(env).filter(([name, value]) => {
+    if (configuredCredentials.has(name.toUpperCase())) return false;
+    const sensitive = isCredentialLikeEnvironmentVariableName(name) || isSensitiveSecretValue(value);
+    if (sensitive && !routeOwnsCredentialLikeEnvironmentVariable(agentRef, name)) return false;
+    if (sensitive) hasSensitiveExtra = true;
+    return true;
+  });
+  names.push(...routes.map(([name]) => name), ...extra.map(([name]) => name));
   if (extra.length > 0) names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
+  if (hasSensitiveExtra) names.push("ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES");
+  return [...new Set(names)].sort();
+}
+
+export function assertCurrentCloudAgentCredentialEnvironment(
+  config: ResolvedConfig,
+  tasks: readonly SmithersTaskManifestTask[],
+  env: NodeJS.ProcessEnv
+): void {
+  if (config.execution.mode !== "cloud") return;
+  for (const task of tasks) {
+    const expected = [
+      ...new Set(
+        task.agentChain.flatMap((entry) =>
+          cloudAgentCredentialEnv(
+            config.execution.mode,
+            entry.agentRef,
+            config.agents[entry.agentRef],
+            config.agents,
+            env
+          )
+        )
+      )
+    ].sort();
+    const sealed = [...new Set(task.execution.agentCredentialEnv)].sort();
+    if (JSON.stringify(expected) !== JSON.stringify(sealed)) {
+      throw new Error(
+        `cloud agent credential classification changed after workflow compilation for task ${task.smithersNodeId}; start a new run`
+      );
+    }
+  }
+}
+
+function configuredAgentCredentialEnvironmentVariableNames(agents: ResolvedConfig["agents"]): Set<string> {
+  const names = new Set<string>();
+  for (const [agentRef, agent] of Object.entries(agents)) {
+    if (agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
+    names.add(agent.apiKeyEnv.toUpperCase());
+    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.add("MOONSHOT_API_KEY");
+  }
   return names;
+}
+
+function allowlistedCloudEnvironmentEntries(env: NodeJS.ProcessEnv): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  const normalizedNames = new Set<string>();
+  for (const rawName of (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
+    const name = rawName.trim();
+    if (name.length === 0) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
+    }
+    normalizedNames.add(name.toUpperCase());
+  }
+  for (const [name, value] of Object.entries(env)) {
+    if (value?.trim() && normalizedNames.has(name.toUpperCase())) entries.push([name, value]);
+  }
+  return entries;
 }
 
 function artifactAncestorNodeIds(nodeId: string, nodes: readonly ExpandedNode[]): string[] {

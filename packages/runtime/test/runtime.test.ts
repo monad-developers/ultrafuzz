@@ -3029,6 +3029,29 @@ test(
   }
 );
 
+test("linked workflow classifies sensitive allowlist values from the ambient environment", () => {
+  const names = ["ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "AMBIENT_RPC_URL"] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = "AMBIENT_RPC_URL";
+  process.env.AMBIENT_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`;
+  try {
+    const ambient = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, undefined);
+    assert.equal(ambient.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "AMBIENT_RPC_URL");
+
+    const explicitlyReplaced = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, {
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE",
+      FOUNDRY_PROFILE: "ci"
+    });
+    assert.equal(explicitlyReplaced.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test(
   "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
   { skip: !runningUnderBun },
@@ -4761,6 +4784,72 @@ test(
       assert.equal(providerScoped[name], "", `${name} leaked into the OpenAI child`);
     }
     assert.equal(providerScoped.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES, "");
+
+    const allowlistedSource = linkedWorkflowExecutionEnvironment(
+      { executionSnapshot: { env: {} } } as never,
+      {
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+          "AWS_ACCESS_KEY_ID,AWS_CUSTOM_TOKEN,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_AUTH,CUSTOM_SHARED_TOKEN,DATABASE_PASSWD,FOUNDRY_PROFILE,MAINNET_RPC_URL,SSH_PRIVATE_KEY",
+        AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+        AWS_CUSTOM_TOKEN: "configured-for-codex",
+        AWS_SESSION_TOKEN: "claude-route-token",
+        aws_case_token: "case-variant-claude-token",
+        CUSTOM_AUTH: "custom-auth-secret",
+        CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+        DATABASE_PASSWD: "database-password",
+        FOUNDRY_PROFILE: "ci",
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`,
+        SSH_PRIVATE_KEY: "private-key"
+      },
+      ["aws_custom_token"]
+    );
+    assert.ok(allowlistedSource.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES?.split(",").includes("MAINNET_RPC_URL"));
+    const codexAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({}, allowlistedSource, { agent: "CodexAgent" })
+    };
+    assert.equal(codexAllowlisted.AWS_ACCESS_KEY_ID, "");
+    assert.equal(codexAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(codexAllowlisted.AWS_SESSION_TOKEN, "");
+    assert.equal(codexAllowlisted.aws_case_token, "");
+    assert.equal(codexAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(codexAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(codexAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(codexAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(codexAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(codexAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(codexAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const claudeAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_ACCESS_KEY_ID: "", AWS_SESSION_TOKEN: "" }, allowlistedSource, {
+        agent: "ClaudeAgent"
+      })
+    };
+    assert.equal(claudeAllowlisted.AWS_ACCESS_KEY_ID, "AKIA0123456789ABCDEF");
+    assert.equal(claudeAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(claudeAllowlisted.AWS_SESSION_TOKEN, "claude-route-token");
+    assert.equal(claudeAllowlisted.aws_case_token, "case-variant-claude-token");
+    assert.equal(claudeAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(claudeAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(claudeAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(claudeAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(claudeAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(claudeAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(claudeAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const explicitlyRestored = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ CUSTOM_SHARED_TOKEN: "configured-active-token" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(explicitlyRestored.CUSTOM_SHARED_TOKEN, "configured-active-token");
+    const configuredCodexCredential = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_CUSTOM_TOKEN: "configured-for-codex" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(configuredCodexCredential.AWS_CUSTOM_TOKEN, "configured-for-codex");
     assert.throws(
       () => workflowControlChildEnvironment({}, { ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: "NOT-AN-ENV" }),
       /provider credential environment list is invalid/u
@@ -7645,17 +7734,23 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       }
     }
   };
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const { assertCurrentCloudAgentCredentialEnvironment, compileSmithersWorkflow } = await import("../src/smithers.js");
+  const cloudEnv = {
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+      "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+    AWS_REGION: "us-east-1",
+    AWS_SESSION_TOKEN: "secret",
+    aws_case_token: "case-variant-claude-token",
+    CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+    MAINNET_RPC_URL: "https://rpc.invalid",
+    PRIVATE_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`
+  };
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
-    env: {
-      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "claude_code_use_bedrock,AWS_REGION,AWS_SESSION_TOKEN,MAINNET_RPC_URL",
-      CLAUDE_CODE_USE_BEDROCK: "1",
-      AWS_REGION: "us-east-1",
-      AWS_SESSION_TOKEN: "secret",
-      MAINNET_RPC_URL: "https://rpc.invalid"
-    },
+    env: cloudEnv,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-cloud-nodes",
@@ -7671,20 +7766,37 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     timeoutSeconds: 1800
   });
   assert.deepEqual(discovery.execution.agentCredentialEnv, [
-    "OPENAI_API_KEY",
-    "CLAUDE_CODE_USE_BEDROCK",
     "AWS_REGION",
-    "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
     "MAINNET_RPC_URL",
+    "OPENAI_API_KEY",
     "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
   ]);
   assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
+    "AWS_ACCESS_KEY_ID",
     "AWS_REGION",
-    "CLAUDE_CODE_USE_BEDROCK",
     "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
     "MAINNET_RPC_URL",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+    "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
+    "aws_case_token"
   ]);
+  assert.doesNotThrow(() =>
+    assertCurrentCloudAgentCredentialEnvironment(
+      plan.value!.resolved_config,
+      compiled.tasks,
+      Object.fromEntries(Object.entries(cloudEnv).reverse())
+    )
+  );
+  assert.throws(
+    () =>
+      assertCurrentCloudAgentCredentialEnvironment(plan.value!.resolved_config, compiled.tasks, {
+        ...cloudEnv,
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`
+      }),
+    /cloud agent credential classification changed after workflow compilation/u
+  );
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
@@ -7760,7 +7872,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
   const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
   assert.ok(discovery);
   assert.equal(discovery.agentRef, "KimiAgent");
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]);
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "KIMI_BASE_URL", "MOONSHOT_API_KEY"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {

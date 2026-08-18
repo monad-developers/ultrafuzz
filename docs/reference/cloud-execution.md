@@ -37,7 +37,10 @@ Values are read only when configuration is resolved and when a sandbox is
 launched or cleaned; values are not serialized into run configuration,
 handoff archives, tags, errors, or logs. API-key agent credentials are injected
 through a per-launch Modal Secret. Subscription-based agent authentication is
-not supported by cloud node execution.
+not supported by cloud node execution. Credential-like names or values in
+`ULTRAFUZZ_AGENT_ENV_ALLOWLIST` are included only when their most-specific
+recognized route prefix belongs to the task's provider; ordinary allowlisted
+workflow inputs remain available to every task.
 
 An OpenRouter task uses the `api_key_env` configured for `OpenRouterAgent`
 (`OPENROUTER_API_KEY` by default). Only that named credential is forwarded for

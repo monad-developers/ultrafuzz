@@ -139,8 +139,18 @@ execution into an OS security boundary.
 Workflows that intentionally need additional variables can opt in explicitly:
 
 ```sh
-ULTRAFUZZ_AGENT_ENV_ALLOWLIST=FOUNDRY_PROFILE,MAINNET_RPC_URL ultrafuzz run
+ULTRAFUZZ_AGENT_ENV_ALLOWLIST=FOUNDRY_PROFILE ultrafuzz run
 ```
 
 The allowlist is operator-owned environment configuration, not project TOML.
+It is global only for ordinary workflow inputs. Credential-like names (for
+example, names containing `API_KEY`, `ACCESS_KEY`, `PRIVATE_KEY`, `PASSWORD`,
+`PASSWD`, `SECRET`, or `TOKEN`) and values matching maintained secret formats,
+including credential-bearing RPC URLs, are blanked from unrelated model
+children and omitted from unrelated Modal task secrets. A recognized
+provider-route prefix such as `AWS_` scopes the value to that route. Arbitrary
+unrecognized credentials are not supported and reach no model task. Stock
+agent API keys use their validated canonical `api_key_env`; the active adapter
+restores only its own key. Use only a credential-free RPC endpoint when an RPC
+URL must remain a global input.
 Do not add unrelated credentials merely to make them available to prompts.

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseStrictJsonBytes, readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
+import { isSensitiveEnvironmentName } from "@ultrafuzz/security";
 import { retryFallbackProfileIds } from "./retry-chain.js";
 import {
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
@@ -31,7 +32,6 @@ const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
   KimiAgent: ["KIMI_", "MOONSHOT_"]
 };
-const ROUTE_ENV_SECRET = /(?:API_?KEY|AUTH|CREDENTIAL|PASSWORD|SECRET|TOKEN)/u;
 const ROUTE_PROXY_ENV = [
   "ALL_PROXY",
   "HTTP_PROXY",
@@ -365,7 +365,8 @@ function claudeSettingsAffectRoute(bytes: Buffer): boolean {
     const upper = name.toUpperCase();
     return (
       ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].includes(upper) ||
-      (!ROUTE_ENV_SECRET.test(upper) && ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
+      (!isCredentialLikeEnvironmentVariableName(upper) &&
+        ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
     );
   });
 }
@@ -375,7 +376,10 @@ export function effectiveRouteEnvironment(agent: string, env: NodeJS.ProcessEnv)
   );
   for (const name of ROUTE_PROXY_ENV) names.add(name);
   for (const name of Object.keys(env))
-    if (!ROUTE_ENV_SECRET.test(name) && ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix)))
+    if (
+      !isCredentialLikeEnvironmentVariableName(name) &&
+      ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix))
+    )
       names.add(name);
   if (agent === "CodexAgent") names.add("OPENAI_BASE_URL");
   if (agent === "KimiAgent") names.add("KIMI_BASE_URL");
@@ -385,12 +389,39 @@ export function effectiveRouteEnvironment(agent: string, env: NodeJS.ProcessEnv)
     const value = env[name];
     return value !== undefined &&
       value.trim() !== "" &&
-      !ROUTE_ENV_SECRET.test(name) &&
+      !isCredentialLikeEnvironmentVariableName(name) &&
       (ROUTE_PROXY_ENV.includes(name as never) || ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix)))
       ? [[name, value]]
       : [];
   });
 }
+
+export function isCredentialLikeEnvironmentVariableName(name: string): boolean {
+  return isSensitiveEnvironmentName(name);
+}
+
+/**
+ * Assign an allowlisted credential-like variable to the provider route with
+ * the most specific matching prefix. For example, AZURE_OPENAI_* belongs to
+ * Codex rather than the broader Claude AZURE_* route.
+ */
+export function routeOwnsCredentialLikeEnvironmentVariable(agent: string, name: string): boolean {
+  const upper = name.toUpperCase();
+  let longestPrefix = -1;
+  const owners = new Set<string>();
+  for (const [candidate, prefixes] of Object.entries(ROUTE_ENV_PREFIXES)) {
+    for (const prefix of prefixes) {
+      if (!upper.startsWith(prefix) || prefix.length < longestPrefix) continue;
+      if (prefix.length > longestPrefix) {
+        longestPrefix = prefix.length;
+        owners.clear();
+      }
+      owners.add(candidate);
+    }
+  }
+  return owners.has(agent);
+}
+
 export function targetIdentity(
   projectRoot: string,
   ignoredPaths: readonly string[] = []

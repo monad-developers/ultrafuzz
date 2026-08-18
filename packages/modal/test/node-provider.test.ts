@@ -2161,6 +2161,51 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("binds only the compiled task's scoped allowlist entries into its Modal secret", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input.execution_snapshot_root);
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        AWS_SESSION_TOKEN: "claude-route-token",
+        CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN,FOUNDRY_PROFILE",
+        ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN"
+      }
+    });
+    fixture.input.agent_credential_env = [
+      "AWS_SESSION_TOKEN",
+      "FOUNDRY_PROFILE",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"
+    ];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({
+        AWS_SESSION_TOKEN: "claude-route-token",
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN,FOUNDRY_PROFILE",
+        ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN"
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive(fixture.input.execution_snapshot_root);
