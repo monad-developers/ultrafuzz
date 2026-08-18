@@ -42,6 +42,49 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+## Production dependency advisories
+
+CI and release validation run `pnpm security:dependency-advisories`. The gate
+enumerates the installed production graph with the repository-pinned pnpm,
+requires exact package versions resolved from `registry.npmjs.org`, and posts
+that bounded inventory directly to the fixed npm advisory bulk endpoint. It
+does not honor a configurable package-registry URL for security decisions. The
+raw response is size-bounded and parsed with the repository's strict JSON
+reader before validating every package, advisory ID, GitHub advisory URL,
+severity, range, CWE, and CVSS field. Aliased dependencies are audited under
+their registry package names. Invalid UTF-8 and unknown, missing, duplicate,
+partial, or error-bearing fields fail closed instead of relying on pnpm
+normalization, which can discard malformed registry records.
+
+The gate blocks every High or Critical production advisory unless
+`.github/dependency-advisory-exceptions.json` contains a current exception for
+that exact GHSA and package. Enumeration, registry, HTTP, response-size, schema,
+and JSON failures are blocking; an unavailable or malformed registry response
+is never treated as a clean audit. CI and release validation also run the policy
+fixture suite that exercises these fail-closed cases.
+
+Exceptions are temporary dispositions, not permanent suppressions. Each entry
+must record the severity, status, review date, expiry, accountable GitHub owner,
+tracking issue, reachability analysis, and rationale. An exception may last at
+most 30 days from `reviewed_on` and is valid through its `expires` date in UTC.
+CI rejects future-dated reviews, expired or overlong exceptions, severity
+mismatches, duplicate entries, unknown fields, and entries for advisories that
+no longer appear. Remove a stale entry in the same change that remediates its
+advisory.
+
+Allowed statuses are `not-reachable`, `remediation-in-progress`, and
+`risk-accepted`. A renewal requires a new review date and updated evidence in
+the tracking issue. Security owners should fix Critical advisories within seven
+days and High advisories within 30 days; use an exception only when the tracking
+issue documents why that target cannot be met and what compensating controls
+apply.
+
+The committed exception file starts empty. Its canonical field contract and a
+complete example are maintained in the checked-in
+[dependency-advisory exceptions schema](../.github/dependency-advisory-exceptions.schema.json).
+Keep the file's `$schema` reference so editors and reviewers use the same
+contract that the CI policy validates.
+
 ## Agent process environment
 
 Workflow processes receive the active agents' configured API-key variables,
