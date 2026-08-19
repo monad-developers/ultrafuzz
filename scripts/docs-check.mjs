@@ -102,8 +102,9 @@ if (missingFlagMentions.length > 0) {
 // The provider/harness pages build a version-gap argument on the harness
 // versions the Modal worker image installs. The image source is the single
 // source of truth: read the pins out of `runner.ts` and assert the docs print
-// the same literals, so a legitimate pin bump is a one-file edit and this check
-// cannot drift into a third copy of the numbers.
+// the same literals. This check keeps no copy of the version itself, so a pin
+// bump means editing `runner.ts` and every version literal the two pages
+// print — and nothing here.
 const runnerSource = "packages/modal/src/runner.ts";
 if (!existsSync(runnerSource)) {
   console.error(
@@ -131,9 +132,27 @@ for (const [pkg, pattern] of pinPatterns) {
     process.exit(1);
   }
   const pin = `${pkg}@${match[1]}`;
+  // Existence is not enough: the HTML plan prints each pin twice (§8 and §10),
+  // so a bump applied to one site only would still satisfy an `includes` test
+  // while the other site kept asserting the old version. Every printed literal
+  // has to be the current pin, and a stale one is reported with its line so the
+  // half-applied bump is named rather than just the file. A `.` is the only
+  // regex metacharacter an npm package name can contain, so escaping it is
+  // enough to build the literal pattern.
+  const literalPattern = new RegExp(`${pkg.replaceAll(".", "\\.")}@[\\d.]+`, "gu");
   for (const file of harnessDocs) {
-    if (!readFileSync(file, "utf8").includes(pin)) {
-      staleVersionPins.push(`${pin} in ${file}`);
+    const lines = readFileSync(file, "utf8").split("\n");
+    let printed = 0;
+    for (const [index, line] of lines.entries()) {
+      for (const literal of line.match(literalPattern) ?? []) {
+        printed += 1;
+        if (literal !== pin) {
+          staleVersionPins.push(`${file}:${index + 1} prints ${literal}, expected ${pin}`);
+        }
+      }
+    }
+    if (printed === 0) {
+      staleVersionPins.push(`${file} never prints ${pin}`);
     }
   }
 }

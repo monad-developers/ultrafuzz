@@ -18,8 +18,8 @@ self-contained HTML report — GitHub serves `.html` as plain text, so download 
 and open it in a browser. The two pages overlap but are **not** copies of each
 other, so neither is a substitute for the other:
 
-- **Only in the HTML plan:** §1 the verdict; §7 the severity-ranked risk
-  register with its mitigations; §9 the drafted issue bodies that became
+- **Only in the HTML plan:** §1 the verdict; §7 the risk register of severities
+  and mitigations; §9 the drafted issue bodies that became
   [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
   the §2 table of obsolete draft claims paired with their replacements; the
   Modal-portability evidence row of its §3.1 dsh table; and the row-by-row §3.1
@@ -511,6 +511,10 @@ interface QualifiedHarnessBinding {
   reasoning?: string;
   childEnv: Record<string, string>;
 }
+
+interface NodeRequirements {
+  events?: HarnessCapabilities["events"];
+}
 ```
 
 This is the normative spelling of the contract, and the same vocabulary appears
@@ -520,6 +524,14 @@ in the HTML plan's §5: `tools` is `filesystem` / `shell`, `events` is
 `"native-sandbox" | "external-sandbox-required"`. Diagnostics that name a
 capability must use these strings, so an operator can match an error back to
 this page.
+
+Capabilities are only half of the matching. A workflow node declares what it
+needs from a harness — a dashboard or telemetry node requires `events: "jsonl"`,
+while a node whose contract is "produce an artifact, exit zero" requires only
+`events: "final-text-only"` — and the validator matches that requirement against
+the binding's declared capability before launch, so a harness whose event class
+is below the node's requirement is rejected rather than scheduled and discovered
+mid-run. The HTML plan's §5.1 uses the same spelling.
 
 The summary block in
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviated
@@ -545,18 +557,19 @@ work, not a separate parser workstream. There is no session parser anywhere in
 this plan.
 
 The binding validator must reject an unsupported protocol, reasoning level,
-missing executable/version, unavailable cloud image, or missing credential
-before workflow launch. A harness that records no reasoning levels accepts no
-`reasoning` value at all, so setting one on such a binding is a validation
-error rather than a silently ignored field. `reasoningLevels` is optional for
-the same reason `cloudPortable` is, and the two spellings say different things:
-an **absent** `reasoningLevels` records that nothing was measured, while an
-**empty** `reasoningLevels` records that the surface _was_ measured and the
-harness accepts no level at all. Both make the validator reject a `reasoning`
-value, but only the empty array is a positive claim, so only a real measurement
-may write it. **Every harness candidate on this page omits the field today** —
-none declares an empty array either — because no reasoning level anywhere in
-this research reached a real provider:
+missing executable/version, unavailable cloud image, missing credential, or an
+event class below the node's requirement before workflow launch. A harness that
+records no reasoning levels accepts no `reasoning` value at all, so setting one
+on such a binding is a validation error rather than a silently ignored field.
+`reasoningLevels` is optional for the same reason `cloudPortable` is, and the
+two spellings say different things: an **absent** `reasoningLevels` records
+that nothing was measured, while an **empty** `reasoningLevels` records that
+the surface _was_ measured and the harness accepts no level at all. Both make
+the validator reject a `reasoning` value, but only the empty array is a
+positive claim, so only a real measurement may write it. **Every harness
+candidate on this page omits the field today** — none declares an empty array
+either — because no reasoning level anywhere in this research reached a real
+provider:
 
 | Harness     | Reasoning surface found                            | Why nothing is declared today                 | Owner            |
 | ----------- | -------------------------------------------------- | --------------------------------------------- | ---------------- |
@@ -770,8 +783,9 @@ shipped image does not install.** The Modal worker image pins
 `packages/modal/src/runner.ts`) and `@anthropic-ai/claude-code@2.1.207` (the
 `npm install -g` line in that file's `modalSecurityToolchainCommands()`), while
 the versions measured below are `codex-cli 0.147.0` and Claude Code `2.1.233`.
-Both pins are asserted against this page by `pnpm docs:check`, so moving one
-without updating this narrative fails the check rather than leaving it stale.
+`pnpm docs:check` asserts both pins against every place this page and the HTML
+plan print them, so moving a pin without updating each of those narratives fails
+the check rather than leaving one of them stale.
 PR #654 also left both pins untouched, so its real-CLI assertions ran against
 whatever `codex` was on `PATH`, not against the pinned image build. The Codex and
 Claude Code rows are therefore evidence about newer builds than the image ships:

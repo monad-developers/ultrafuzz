@@ -741,7 +741,8 @@
                     <code>deepseek-ai/deepseek-harness</code> exists, is MIT-licensed TypeScript, ships the
                     <code>dsh</code> CLI as <code>@deepseek-ai/dsh</code>, and heads the <em>Agent Integrations</em>
                     sidebar in DeepSeek's own API docs — as an outbound link to the harness's own site, since the docs
-                    host no page for it. Its own README, not the API docs, is what calls it a developer preview.
+                    host no page for it. Both its own README and DeepSeek's API docs — in the Quick Start's
+                    <em>Integrate with Agent Tools</em> section — call it a developer preview.
                   </td>
                 </tr>
                 <tr>
@@ -2231,8 +2232,8 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               <code>CODEX_CLI_VERSION</code> constant in <code>packages/modal/src/runner.ts</code>) and
               <code>@anthropic-ai/claude-code@2.1.207</code> (the <code>npm install -g</code> line in that file's
               <code>modalSecurityToolchainCommands()</code>) in the Modal worker image, so the Codex and Claude Code
-              rows are evidence about newer builds than the image ships — see §8. Both pins are asserted against these
-              pages by <code>pnpm docs:check</code>.
+              rows are evidence about newer builds than the image ships — see §8. <code>pnpm docs:check</code> asserts
+              both pins against every place these pages print them, including the §8 callout above.
             </li>
             <li>
               <code>packages/llm/llm-deepseek/src/index.ts</code> at commit <code>99f6f02</code>, read for the

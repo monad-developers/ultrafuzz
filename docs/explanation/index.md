@@ -29,8 +29,8 @@ are read differently:
 The two pages overlap but neither contains the other, so the split is worth
 knowing before you pick one:
 
-- **Only in the HTML plan:** **§1 Verdict**; **§7 Risks**, the severity-ranked
-  register with its mitigations; **§9 Proposed GitHub issues**, the drafted
+- **Only in the HTML plan:** **§1 Verdict**; **§7 Risks**, the register of
+  severities and mitigations; **§9 Proposed GitHub issues**, the drafted
   bodies that became
   [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
   the **§2** table of obsolete draft claims and their replacements; the
