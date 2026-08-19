@@ -1228,11 +1228,13 @@
               <code>thinking</code> (<code>enabled</code>/<code>disabled</code>) and
               <code>reasoningEffort</code> (<code>off</code>/<code>low</code>/<code>high</code>/<code>max</code>) in
               settings, with an omitted effort resolving to <code>high</code> — a settings-document field with no CLI
-              flag, which no request set. Only <strong>OpenCode</strong> exposes no surface at all:
-              <code>run --help</code> has no reasoning flag and its per-model config entries were never exercised. All
-              five bindings therefore declare an empty <code>reasoningLevels</code>, which records what was measured
-              rather than claiming a harness has no surface. <a href="#issue-b">#653-B (#659)</a> must publish Pi's
-              levels, <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
+              flag, which no request set. <strong>OpenCode</strong> exposes <code>--variant</code> on
+              <code>run --help</code>, documented there as "model variant (provider-specific reasoning effort, e.g.,
+              high, max, minimal)" — CLI inspection confirmed the flag, but no request in this research set it, and its
+              per-model config entries were never exercised either. All five bindings therefore declare an empty
+              <code>reasoningLevels</code>, which records what was measured rather than claiming a harness has no
+              surface. <a href="#issue-b">#653-B (#659)</a> must publish Pi's levels,
+              <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
               accepts a <code>reasoning</code> value. The two #663 rows are nominated rather than tracked, on the same
               footing as the error-classification callout below: that issue's body has to pick up the measurement before
@@ -1251,11 +1253,13 @@
               <code>Retry-After</code> are all unknown. That is a credential gap, not an oversight — the environment
               holds no <code>OPENROUTER_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>, or
               <code>ANTHROPIC_API_KEY</code>. G2 in §8 is where authenticated preflight behavior gets recorded and G5
-              and G6 are where the other two do; ownership is explicit: <a href="#issue-b">#653-B (#659)</a> for Pi,
-              <a href="#issue-e">#653-E (#662)</a> for OpenCode, and <a href="#issue-f">#653-F (#663)</a> for Codex and
-              Claude Code re-measured at the versions the shipped Modal image pins. The only measured retry fact
-              anywhere here is internal to dsh (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the
-              process.
+              and G6 are where the other two do. <strong>Ownership is explicit for two candidates only</strong>:
+              <a href="#issue-b">#653-B (#659)</a> owns Pi and <a href="#issue-e">#653-E (#662)</a> owns OpenCode,
+              because both issues already enumerate the measurements. <a href="#issue-f">#653-F (#663)</a> is
+              <strong>nominated, not assigned</strong>, for Codex and Claude Code re-measured at the versions the
+              shipped Modal image pins; that nomination becomes ownership only once #663's acceptance criteria are
+              extended. The only measured retry fact anywhere here is internal to dsh (<code>dsh-llm-retry</code>, §3.1)
+              and is not observable from outside the process.
             </p>
             <p>
               That last pointer is a gap in the issue tracker, not just in this report. #659 and #662 already scope the
@@ -1518,7 +1522,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               <h3>Phase 5 — default decision</h3>
               <p>
                 Choose the OpenRouter default from comparable real-provider results. Until then Codex remains the
-                shipped default by inertia, and that is stated rather than implied.
+                shipped default by grandfathering, and that is stated rather than implied.
               </p>
             </li>
           </ol>
@@ -1661,7 +1665,8 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
           <p>
             A pinned real CLI must clear every applicable gate against the real provider. Fake CLIs are for simple unit
             tests only; they never satisfy a gate or qualify a pairing. These ten are always called
-            <em>qualification gates</em>; "conformance suite" in §7 and §9 means only the test code that exercises them.
+            <em>qualification gates</em>; the "conformance suite" of §9 and the "conformance test" of §7 mean only the
+            test code that exercises them.
           </p>
           <div class="callout warn">
             <strong class="tag">"Pinned" means the version the shipped image installs</strong>
@@ -1704,7 +1709,9 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     enumerated G2 criterion names only the canary-credential half; it inherits this definition by its
                     <code>G1–G8</code> reference, and its body should pick up the preflight/401 clause explicitly.
                   </td>
-                  <td><span class="pill ok">passed locally</span></td>
+                  <td>
+                    <span class="pill warn">canary passed locally; authenticated preflight unmeasured</span>
+                  </td>
                 </tr>
                 <tr>
                   <td>G3 · Tool execution</td>
@@ -2012,16 +2019,17 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                 <dd>
                   Wrap Smithers' <code>OpenCodeAgent</code> with credential isolation and isolated config, data, and
                   cache roots; disable sharing, plugins, update checks, and remote model fetching. Reuse the Pi
-                  conformance suite. Exercise the per-model reasoning config entries this research did not, so the
-                  binding can declare real <code>reasoningLevels</code> rather than an empty list.
+                  conformance suite. Exercise the <code>--variant</code> reasoning-effort flag and the per-model
+                  reasoning config entries this research inspected but never ran, so the binding can declare real
+                  <code>reasoningLevels</code> rather than an empty list.
                 </dd>
                 <dt>Acceptance</dt>
                 <dd>
                   <ul>
                     <li>Gates G1–G8 pass against real OpenRouter.</li>
                     <li>
-                      The reasoning levels OpenCode actually accepts are measured and recorded, or the binding documents
-                      that it accepts none.
+                      The <code>--variant</code> values OpenCode actually accepts on an OpenRouter route are measured
+                      and recorded, or the binding documents that it accepts none.
                     </li>
                     <li>
                       No OpenCode state is written outside the run-scoped roots, verified by a filesystem assertion.
@@ -2075,6 +2083,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                       container performs no package installation.
                     </li>
                     <li><code>ultrafuzz doctor</code> reports per-harness cloud readiness.</li>
+                    <li>Local and Modal results agree for every approved harness.</li>
                   </ul>
                 </dd>
                 <dt>Depends on</dt>

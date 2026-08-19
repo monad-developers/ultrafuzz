@@ -124,13 +124,15 @@ rather than an oversight — see
 [Constraints That Block Qualification Today](#constraints-that-block-qualification-today).
 [G2](#qualification-gates) is where authenticated preflight behavior gets
 recorded, and [G5](#qualification-gates) and [G6](#qualification-gates) are where
-the other two do. Ownership is explicit:
-[#659](https://github.com/monad-developers/ultrafuzz/issues/659) for Pi,
-[#662](https://github.com/monad-developers/ultrafuzz/issues/662) for OpenCode,
-and [#663](https://github.com/monad-developers/ultrafuzz/issues/663) for Codex
-and Claude Code re-measured at the versions the shipped Modal image pins. The
-only measured retry fact on this page is internal to dsh (`dsh-llm-retry`) and
-is not observable from outside the process.
+the other two do. **Ownership is explicit for two candidates only**:
+[#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi and
+[#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns OpenCode,
+because both issues already enumerate the measurements.
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663) is **nominated,
+not assigned**, for Codex and Claude Code re-measured at the versions the shipped
+Modal image pins; that nomination becomes ownership only once #663's acceptance
+criteria are extended. The only measured retry fact on this page is internal to
+dsh (`dsh-llm-retry`) and is not observable from outside the process.
 
 That last pointer is a gap in the issue tracker, not just in this page. #659 and
 #662 already scope the measurements for Pi and OpenCode, but #663's body scopes
@@ -214,12 +216,14 @@ docs. No provider request was made._
 - **Binding.** Built-in OpenRouter support, `provider/model` selection, and
   explicit config entries for catalogue models; custom base URLs through AI SDK
   providers.
-- **Reasoning.** **No surface was measured, and none was found on the CLI**:
-  `run --help` exposes no reasoning flag, and any reasoning control would come
-  from those per-model config entries, which this research did not exercise. An
-  OpenCode binding declares no reasoning levels until
+- **Reasoning.** **Inspected, not exercised**: `run --help` on the real 1.18.18
+  binary exposes `--variant`, which it documents as "model variant
+  (provider-specific reasoning effort, e.g., high, max, minimal)"; the per-model
+  config entries can carry the same control and were not exercised either. No
+  request in this research set `--variant` or observed a level reaching a
+  provider, so an OpenCode binding declares an empty `reasoningLevels` until
   [#662](https://github.com/monad-developers/ultrafuzz/issues/662) measures
-  them.
+  which values each OpenRouter route actually accepts.
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
   Build agent exposes file, shell, search, and task tools.
 - **Events.** Raw JSON events, session IDs, continue/resume/fork, exported
@@ -277,9 +281,12 @@ commit
   wraps `@earendil-works/pi-ai` and can reach 38 catalogue providers including
   `openrouter`, plus hand-declared OpenAI-compatible gateways — but the base
   bundle mounts it **dormant with zero routes**; a route registers only when an
-  `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is
-  the shipped default (`agent-default-model` = `deepseek-official` /
-  `deepseek-v4-flash`), not a hard coupling.
+  `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. dsh's shipped
+  composition sets `agent-default-model` to `deepseek-official` /
+  `deepseek-v4-flash`, which is dsh's own model selection rather than a hard
+  coupling — and not a _shipped default_ in the sense
+  [rule 3](#recommended-pairing-policy) defines, which is reserved for Ultrafuzz
+  provider and harness selection.
 - **Reasoning.** **A surface exists in the adapter config but was never
   exercised.** `dsh-llm-deepseek` declares
   `thinking?: 'enabled' | 'disabled'` and
@@ -546,17 +553,17 @@ what was measured, not that the harness has no reasoning surface, and **every
 candidate on this page is empty today** because no reasoning level anywhere in
 this research reached a real provider:
 
-| Harness     | Reasoning surface found                            | Why the list is empty today                               | Owner |
-| ----------- | -------------------------------------------------- | --------------------------------------------------------- | ----- |
-| Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server             | #663  |
-| Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request                  | #663  |
-| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request                  | #659  |
-| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run                      | #661  |
-| OpenCode    | none found                                         | No reasoning flag on `run --help`; config never exercised | #662  |
+| Harness     | Reasoning surface found                            | Why the list is empty today                   | Owner |
+| ----------- | -------------------------------------------------- | --------------------------------------------- | ----- |
+| Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server | #663  |
+| Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request      | #663  |
+| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659  |
+| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661  |
+| OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662  |
 
-Four of the five have a known surface and one does not, but that difference does
-not change the declared value: only a measured level may be declared. Each list
-becomes non-empty as soon as its child issue measures real levels. The two #663
+All five have a known surface and none has a measured level, which is what the
+declared value records: only a measured level may be declared. Each list becomes
+non-empty as soon as its child issue measures real levels. The two #663
 rows are nominated rather than tracked, on the same footing as the
 error-classification rows in the
 [Comparison Matrix](#comparison-matrix): that issue's body has to pick up the
@@ -576,7 +583,7 @@ agreement are enumerated acceptance criteria on that issue today.
 Generic topology, prompts, and artifact verification never branch on a CLI
 name.
 
-### Credential and State Rules
+### Credential And State Rules
 
 These rules hold for every harness, not just the ones measured here. They are
 the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
@@ -797,10 +804,11 @@ Installed and executed in this environment:
   error classification, authenticated preflight behavior, and retry semantics
   unmeasured for every candidate, including the two _real run_ rows: no 401,
   429, rejected model ID,
-  or mid-stream disconnect was ever produced to classify. #659 owns Pi, #662
-  owns OpenCode, and #663 is nominated for Codex and Claude Code at the versions
-  the shipped Modal image pins, pending the acceptance-criteria extension noted
-  under [Comparison Matrix](#comparison-matrix).
+  or mid-stream disconnect was ever produced to classify. #659 owns Pi and #662
+  owns OpenCode; #663 is only nominated for Codex and Claude Code at the versions
+  the shipped Modal image pins, and stays nominated rather than owning them until
+  the acceptance-criteria extension noted under
+  [Comparison Matrix](#comparison-matrix) lands.
 - **DeepSeek Harness has no supported machine-readable output.** The repository
   states the JSONL event driver is test infrastructure. `@deepseek-ai/dsh-acp`
   publishes an ACP JSON-RPC stdio server, but it is not a dependency of the
@@ -857,7 +865,8 @@ The work is filed as bounded child issues of
 5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) — qualify
    OpenCode plus OpenRouter separately, including fully isolated state
    directories and disabled sharing, plugins, update checks, and model fetching,
-   plus the per-model reasoning config entries this research did not exercise.
+   plus the `--variant` reasoning-effort flag and the per-model reasoning config
+   entries this research inspected but never exercised.
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) — gate the
    Modal worker image on per-harness capability checks. It should also pick up
    the version reconciliation for the two harnesses Ultrafuzz already ships, and

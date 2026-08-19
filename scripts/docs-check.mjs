@@ -102,7 +102,14 @@ if (missingFlagMentions.length > 0) {
 // The provider/harness pages build a version-gap argument on the harness
 // versions the Modal worker image installs. Pin both ends: if a pin moves in the
 // image source without the docs following, that narrative goes stale silently.
-// Each entry is [pin, sourceFile, ...docsThatMustRestateIt].
+// Each entry is [pin, ...filesThatMustContainIt]: every listed file must contain
+// the literal pin string. The Codex pin needs two entries because the Modal image
+// never spells the installable literally — `runner.ts` declares
+// `CODEX_CLI_VERSION = "0.146.0"` and interpolates that constant into the install
+// command, so the source file is matched on the constant while the docs are
+// matched on the `@openai/codex@0.146.0` string they actually print. Claude Code
+// needs only one entry because `runner.ts` spells `@anthropic-ai/claude-code@2.1.207`
+// inline, so source and docs share a single literal.
 const pinnedHarnessVersions = [
   ['CODEX_CLI_VERSION = "0.146.0"', "packages/modal/src/runner.ts"],
   [
