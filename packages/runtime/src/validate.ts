@@ -162,7 +162,9 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
     execution_mode: config.execution.mode,
     ...(config.execution.provider === undefined ? {} : { execution_provider: config.execution.provider }),
     bindings: Object.entries(config.models.profiles)
-      .filter(([, profile]) => profile.harness !== undefined && profile.provider !== undefined && profile.model !== undefined)
+      .filter(
+        ([, profile]) => profile.harness !== undefined && profile.provider !== undefined && profile.model !== undefined
+      )
       .map(([profile, binding]) => {
         const provider = config.providers[binding.provider!];
         const harness = config.harnesses[binding.harness!];

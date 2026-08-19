@@ -344,7 +344,13 @@ model = "opaque/provider-model"
   const validation = await cli(project, ["validate", "--json"]);
   const value = parseJson(validation).data as { resolved_config: { bindings: Array<Record<string, string>> } };
   assert.deepEqual(value.resolved_config.bindings, [
-    { profile: "binding-report", harness: "test-runner", provider: "test-gateway", model: "opaque/provider-model", protocol: "openai-chat" }
+    {
+      profile: "binding-report",
+      harness: "test-runner",
+      provider: "test-gateway",
+      model: "opaque/provider-model",
+      protocol: "openai-chat"
+    }
   ]);
   assert.doesNotMatch(validation.stdout, /TEST_GATEWAY_KEY=|secret/u);
   const plain = await cli(project, ["validate"]);

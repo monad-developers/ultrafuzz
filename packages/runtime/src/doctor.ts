@@ -79,6 +79,12 @@ export async function diagnoseProject(input: DoctorInput) {
   const commandRequirements = [
     ...REQUIRED_TOOLCHAIN_COMMANDS.map((name) => ({ name, required: true })),
     ...topologyCommands.map((name) => ({ name, required: true })),
+    ...Object.values(resolved.config?.models.profiles ?? {})
+      .flatMap((profile) =>
+        profile.harness === undefined ? [] : [resolved.config?.harnesses[profile.harness]?.executable]
+      )
+      .filter((name): name is string => name !== undefined)
+      .map((name) => ({ name, required: true })),
     ...agentRefs.map((agentRef) => ({
       name: AGENT_EXECUTABLES[agentRef] ?? agentRef,
       // Only demand a CLI for agents whose executable Ultrafuzz actually
@@ -151,10 +157,10 @@ export async function diagnoseProject(input: DoctorInput) {
     project_root: projectRoot,
     ok: checks.every((check) => check.status !== "error"),
     checks,
-      validation: {
-        status: validationStatus,
-        policy_posture: policyPostureSummary(validation.value),
-        bindings: validation.value?.resolved_config?.bindings ?? []
+    validation: {
+      status: validationStatus,
+      policy_posture: policyPostureSummary(validation.value),
+      bindings: validation.value?.resolved_config?.bindings ?? []
     },
     toolchain,
     workflow_engine: {

@@ -25,6 +25,7 @@ export function qualifyHarnessBinding(input: {
   requirements?: NodeRequirements;
   env?: Record<string, string | undefined>;
   argv?: readonly string[];
+  executableCheckedByExecutionProvider?: boolean;
 }): { binding?: QualifiedHarnessBinding; diagnostics: ConfigDiagnostic[] } {
   const { profileId, provider, harness } = input;
   const env = input.env ?? process.env;
@@ -50,7 +51,7 @@ export function qualifyHarnessBinding(input: {
       harness.id,
       "version"
     ]);
-  if (!executableExists(harness.executable, env.PATH))
+  if (!input.executableCheckedByExecutionProvider && !executableExists(harness.executable, env.PATH))
     issue("CONFIG_BINDING_EXECUTABLE_MISSING", `harnesses.${harness.id}.executable is unavailable`, [
       "harnesses",
       harness.id,
@@ -92,7 +93,10 @@ export function qualifyHarnessBinding(input: {
       ["harnesses", harness.id, "state_root"]
     );
   else exemption = { stateRoot: harness.state.stateRoot, reason: "subscription credential persisted in harness state" };
-  if (harness.state.mode === "run-scoped" && (isAbsolute(harness.state.configSeedDir) || harness.state.configSeedDir.split(/[\\/]/u).includes("..")))
+  if (
+    harness.state.mode === "run-scoped" &&
+    (isAbsolute(harness.state.configSeedDir) || harness.state.configSeedDir.split(/[\\/]/u).includes(".."))
+  )
     issue(
       "CONFIG_BINDING_STATE_ROOT_UNSAFE",
       `harnesses.${harness.id}.config_seed_dir must be a project-relative seed; the launched state root is run-scoped`,
@@ -125,12 +129,18 @@ export function qualifyHarnessBinding(input: {
  * their existing adapter path until their forward bindings are configured.
  */
 export function qualifyModelProfile(
-  config: { models: { profiles: Record<string, { harness?: string; provider?: string; model?: string; reasoning?: string }> }; providers: Record<string, ProviderBinding>; harnesses: Record<string, HarnessCapabilities> },
+  config: {
+    execution: { mode: "local" | "cloud" };
+    models: { profiles: Record<string, { harness?: string; provider?: string; model?: string; reasoning?: string }> };
+    providers: Record<string, ProviderBinding>;
+    harnesses: Record<string, HarnessCapabilities>;
+  },
   profileId: string,
   options: Pick<Parameters<typeof qualifyHarnessBinding>[0], "env" | "argv" | "requirements"> = {}
 ): { binding?: QualifiedHarnessBinding; diagnostics: ConfigDiagnostic[] } {
   const profile = config.models.profiles[profileId];
-  if (profile === undefined || (profile.harness === undefined && profile.provider === undefined)) return { diagnostics: [] };
+  if (profile === undefined || (profile.harness === undefined && profile.provider === undefined))
+    return { diagnostics: [] };
   if (profile.harness === undefined || profile.provider === undefined) return { diagnostics: [] };
   const harness = config.harnesses[profile.harness];
   const provider = config.providers[profile.provider];
@@ -141,6 +151,7 @@ export function qualifyModelProfile(
     reasoning: profile.reasoning,
     harness,
     provider,
+    executableCheckedByExecutionProvider: config.execution.mode === "cloud",
     ...options
   });
 }

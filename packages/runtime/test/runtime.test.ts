@@ -136,8 +136,14 @@ model = "opaque-id"
   );
   const validation = await validateProject({ projectRoot: project, env: { PATH: process.env.PATH } });
   assert.equal(validation.ok, false);
-  assert.equal(validation.diagnostics.some((entry) => entry.path === "harnesses.invalid-launch.executable"), true);
-  assert.equal(validation.diagnostics.some((entry) => entry.path === "providers.invalid-launch.api_key_env"), true);
+  assert.equal(
+    validation.diagnostics.some((entry) => entry.path === "harnesses.invalid-launch.executable"),
+    true
+  );
+  assert.equal(
+    validation.diagnostics.some((entry) => entry.path === "providers.invalid-launch.api_key_env"),
+    true
+  );
 });
 
 function firstSymlinkUnder(root: string): string | undefined {

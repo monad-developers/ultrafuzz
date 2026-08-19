@@ -204,7 +204,16 @@ async function requiredCommandPreflightDiagnostics(
   resolvedConfig: ResolvedConfig,
   expandedGraph: ExpandedGraph
 ): Promise<RuntimeDiagnostic[]> {
-  const requiredCommands = [...new Set(expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []))].sort();
+  const requiredCommands = [
+    ...new Set([
+      ...expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []),
+      ...Object.values(resolvedConfig.models.profiles)
+        .flatMap((profile) =>
+          profile.harness === undefined ? [] : [resolvedConfig.harnesses[profile.harness]?.executable]
+        )
+        .filter((command): command is string => command !== undefined)
+    ])
+  ].sort();
   let commandProbes: Awaited<ReturnType<typeof probeCommandsForExecution>>;
   try {
     commandProbes =

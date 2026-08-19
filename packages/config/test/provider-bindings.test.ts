@@ -74,4 +74,15 @@ describe("provider harness qualification", () => {
     });
     expect(result.diagnostics.some((d) => d.code === "CONFIG_BINDING_ARGV_CREDENTIAL")).toBe(true);
   });
+  it("defers cloud executable checks to the execution provider", () => {
+    const result = qualifyHarnessBinding({
+      profileId: "m",
+      model: "x",
+      provider,
+      harness: { ...harness, executable: "remote-only-harness" },
+      env: { TEST_KEY: "secret" },
+      executableCheckedByExecutionProvider: true
+    });
+    expect(result.diagnostics).toEqual([]);
+  });
 });

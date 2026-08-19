@@ -39,7 +39,7 @@ model = "vendor/model:not-statically-allowlisted"
 `;
 
 describe("provider/harness config schema", () => {
-  it("parses and resolves independent provider, harness, and opaque model fields", () => {
+  it("parses, resolves, serializes, and reloads independent provider, harness, and opaque model fields", () => {
     const parsed = parseProjectConfigToml(bindingToml);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -52,7 +52,18 @@ describe("provider/harness config schema", () => {
       model: "vendor/model:not-statically-allowlisted"
     });
     expect(resolved.value.providers.gateway).toMatchObject({ auth: "api-key", credentialEnv: "GATEWAY_KEY" });
-    expect(serializeResolvedConfigToml(resolved.value)).not.toContain("secret-value");
+    const serialized = serializeResolvedConfigToml(resolved.value);
+    expect(serialized).toContain("[providers.gateway]");
+    expect(serialized).toContain("[harnesses.runner]");
+    expect(serialized).not.toContain("secret-value");
+    const reloaded = parseProjectConfigToml(serialized);
+    expect(reloaded.ok).toBe(true);
+    if (!reloaded.ok) return;
+    const reresolved = resolveConfig({ projectConfig: reloaded.value, env: {} });
+    expect(reresolved.ok).toBe(true);
+    if (!reresolved.ok) return;
+    expect(reresolved.value.providers.gateway).toEqual(resolved.value.providers.gateway);
+    expect(reresolved.value.harnesses.runner).toEqual(resolved.value.harnesses.runner);
   });
 
   it("names the profile field for missing references", () => {

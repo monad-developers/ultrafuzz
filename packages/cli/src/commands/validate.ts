@@ -27,7 +27,15 @@ export default class Validate extends Command {
           .map(([name, posture]) => `- ${name}: ${posture.status} - ${posture.summary}`)
           .join("\n");
         const bindings = value.resolved_config?.bindings ?? [];
-        const bindingLines = bindings.length === 0 ? "- none configured" : bindings.map((binding) => `- ${binding.profile}: harness=${binding.harness}, provider=${binding.provider}, model=${binding.model}${binding.protocol === undefined ? "" : `, protocol=${binding.protocol}`}`).join("\n");
+        const bindingLines =
+          bindings.length === 0
+            ? "- none configured"
+            : bindings
+                .map(
+                  (binding) =>
+                    `- ${binding.profile}: harness=${binding.harness}, provider=${binding.provider}, model=${binding.model}${binding.protocol === undefined ? "" : `, protocol=${binding.protocol}`}`
+                )
+                .join("\n");
         return `${entries}\nResolved bindings:\n${bindingLines}\n`;
       }),
       flags.json === true

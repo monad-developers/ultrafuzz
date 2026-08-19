@@ -293,6 +293,34 @@ export function serializeResolvedConfigToml(
       timeout_seconds: profile.timeoutSeconds
     });
   }
+  for (const [id, provider] of Object.entries(clone.providers)) {
+    pushTable(lines, tableName(["providers", id]), {
+      kind: provider.kind,
+      base_url: provider.baseUrl,
+      auth: provider.auth,
+      api_key_env: provider.auth === "api-key" ? provider.credentialEnv : undefined,
+      protocols: provider.protocols,
+      preflight: provider.preflight
+    });
+  }
+  for (const [id, harness] of Object.entries(clone.harnesses)) {
+    pushTable(lines, tableName(["harnesses", id]), {
+      kind: harness.kind,
+      executable: harness.executable,
+      version: harness.version,
+      config_seed_dir: harness.state.mode === "run-scoped" ? harness.state.configSeedDir : undefined,
+      state_root: harness.state.mode === "persistent" ? harness.state.stateRoot : undefined,
+      protocols: harness.protocols,
+      events: harness.events,
+      sessions: harness.sessions,
+      isolation: harness.isolation,
+      reasoning_levels: harness.reasoningLevels,
+      cloud_portable: harness.cloudPortable,
+      unattended: harness.unattended
+    });
+    pushTable(lines, tableName(["harnesses", id, "tools"]), harness.tools);
+    pushTable(lines, tableName(["harnesses", id, "usage"]), harness.usage);
+  }
   for (const [id, agent] of Object.entries(clone.agents)) {
     pushTable(lines, tableName(["agents", id]), {
       auth: agent.auth,
