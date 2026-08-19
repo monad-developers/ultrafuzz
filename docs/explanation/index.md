@@ -8,51 +8,18 @@ product model behind that contract.
 - [Topology, Prompts, and Artifacts](topology-prompts-artifacts.md)
 - [Agents, Workflow Boundary, and Safety](backends-safety.md)
 - [Provider-agnostic Coding Harness Research](provider-harness-research.md)
-- [Separating Provider, Harness, and Model (HTML report)](provider-harness-plan.html)
 - [Aave v4 Invariant Case Study](aave-v4-invariant-case-study.md)
 - [Monad Bugfinder Context](bugfinder.md)
 
-## Reading The Provider/Harness Pair
+## Reading The Provider/Harness Plan
 
-The two provider/harness pages are one piece of work in two formats, and they
-are read differently:
-
-- **[Provider-agnostic Coding Harness Research](provider-harness-research.md)**
-  is the GitHub-readable companion. It renders inline in the GitHub file
-  browser and carries the evidence, the capability contract, the numbered
-  qualification gates, and the full source list.
-- **[Separating Provider, Harness, and Model](provider-harness-plan.html)** is a
-  self-contained HTML report. GitHub serves `.html` files as plain text rather
-  than rendering them, so **download the file and open it in a browser** (or
-  view it from a local checkout) to read it as intended.
-
-The two pages overlap but neither contains the other, so the split is worth
-knowing before you pick one:
-
-- **Only in the HTML plan:** **§1 Verdict**; **§7 Risks**, the register of
-  severities and mitigations; **§9 Proposed GitHub issues**, the drafted
-  bodies that became
-  [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
-  the **§2** table of obsolete draft claims and their replacements; the
-  Modal-portability evidence row of its **§3.1** dsh table; and the row-by-row
-  **§3.1** detail behind findings the Markdown page states in condensed form
-  (packaging, retry, maintenance posture).
-- **Only in the Markdown research page:** the TOML configuration boundary, the
-  TypeScript capability interfaces, the legacy `agent = "…"` forward mapping for
-  **all four** shipped references — `CodexAgent`, `ClaudeAgent`, `DeepSeekAgent`,
-  and `KimiAgent` — with each one's `auth` and `config_dir` behavior (the plan
-  carries only the `DeepSeekAgent` row, in its **§2** obsolete-claims table and
-  its **§9-C** scope), the five dsh-specific gate items, and the full per-file
-  source list with every DeepSeek Harness URL pinned to a commit.
-- **On both:** the correction narrative, the candidate comparison and its
-  evidence provenance, the pairing policy, the capability-contract vocabulary,
-  the credential and state rules, and the numbered qualification gates G1–G10
-  that the child issues cite by number.
-- **On both in different form:** the HTML plan's **§6 Sequencing** is condensed
-  on the Markdown page into its "Next Work" list.
-
-Read the Markdown page for the evidence and the contract; open the HTML plan for
-the verdict, the risks, and the issue breakdown.
+The
+**[Provider-agnostic Coding Harness Research](provider-harness-research.md)**
+page is the complete GitHub-readable plan. It carries the recommendation and
+action summary, evidence matrix, configuration and capability contracts,
+qualification gates, child-issue mapping, constraints, and pinned source list.
+The former standalone HTML rendering was removed in response to maintainer
+review so the plan has one reviewable source of truth in Git.
 
 One exception to the preamble above: the provider/harness **capability contract**
 — the capability names and their exact spellings, the event-class comparison
@@ -61,4 +28,4 @@ relation, and the configuration invariants — _is_ normative for
 issues, and the Markdown research page is where it is stated. Until
 [SPECS.md](../SPECS.md) absorbs that contract, where the issue text and the
 research page disagree on a capability spelling, the research page wins. Nothing
-else on these two pages is normative.
+else on the page is normative.

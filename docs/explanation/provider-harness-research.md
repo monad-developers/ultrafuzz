@@ -28,11 +28,23 @@ recommended pairing; see
 [Recommended Pairing Policy](#recommended-pairing-policy) for how those two
 statuses differ.
 
-The companion [architecture plan](provider-harness-plan.html) is a
-self-contained HTML report — GitHub serves `.html` as plain text, so download
-it and open it in a browser to read it as intended. The two pages overlap but
-neither contains the other; the [explanation index](index.md) maps which
-material lives only on which page.
+## Recommended Plan And Action Items
+
+| Order | Action                                                                                                          | Tracking issue                                                   | Decision guard                                                                 |
+| ----- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 0     | Add separate provider, harness, and model references plus the binding validator.                                | [#658](https://github.com/monad-developers/ultrafuzz/issues/658) | Preserve every legacy profile and make no default change.                      |
+| 1     | Qualify Pi with OpenRouter as the first gateway-neutral candidate.                                              | [#659](https://github.com/monad-developers/ultrafuzz/issues/659) | Proposed default only after a pinned real CLI clears the real-provider gates.  |
+| 2a    | Rename the legacy `DeepSeekAgent` binding to the Claude Code + DeepSeek compatibility pairing it actually runs. | [#660](https://github.com/monad-developers/ultrafuzz/issues/660) | Terminology change only; preserve runtime behavior.                            |
+| 2b    | Add the first-party DeepSeek Harness (`dsh`) binding for DeepSeek V4.                                           | [#661](https://github.com/monad-developers/ultrafuzz/issues/661) | Final-text-only nodes and a small real-`dsh` smoke profile; no session parser. |
+| 3     | Qualify OpenCode as the second OpenRouter option.                                                               | [#662](https://github.com/monad-developers/ultrafuzz/issues/662) | Reuse the proven isolation contract, not ambient user state.                   |
+| 4     | Gate every approved harness in the pinned Modal worker image.                                                   | [#663](https://github.com/monad-developers/ultrafuzz/issues/663) | Local and Modal results must agree before default eligibility.                 |
+| 5     | Publish migration/operator docs and choose the OpenRouter default from comparable evidence.                     | [#664](https://github.com/monad-developers/ultrafuzz/issues/664) | Until then, Codex remains the grandfathered shipped OpenRouter default.        |
+
+The pairing recommendation is therefore: Codex for OpenAI, Claude Code for
+Anthropic, DeepSeek Harness as the proposed first-party DeepSeek V4 harness,
+Pi first and OpenCode second for OpenRouter, and existing cross-provider
+pairings retained as supported compatibility paths rather than recommended
+defaults.
 
 ## What "DeepSeek Code" Refers To
 
@@ -106,8 +118,9 @@ rather than an oversight — see
 [Constraints That Block Qualification Today](#constraints-that-block-qualification-today).
 [G2](#qualification-gates) is where authenticated preflight behavior gets
 recorded, and [G5](#qualification-gates) and [G6](#qualification-gates) are where
-the other two do. **Ownership is explicit for two of the five harness candidates
-only**: [#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi
+the other two do. **For these three dimensions, ownership is explicit for two
+of the five harness candidates only**:
+[#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi
 and [#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns
 OpenCode; the pointers for Codex, Claude Code, and dsh are nominations. Which
 cells are which, and the rule that decides it, are stated once under
@@ -115,9 +128,7 @@ cells are which, and the rule that decides it, are stated once under
 this page is internal to dsh: its `dsh-llm-retry` module runs provider retry at
 durable agent-step boundaries with the vendored pi-ai SDK's own `maxRetries`
 forced to zero, so one stream is one request. That is a composition-dump reading
-— the Retry evidence row of §3.1 of the
-[architecture plan](provider-harness-plan.html) carries it — and none of it is
-observable from outside the process.
+and none of it is observable from outside the process.
 
 The detail behind each row follows. Each subsection covers the same five
 dimensions in the same order: provider and model binding, the reasoning surface,
@@ -395,7 +406,8 @@ preflight = "authenticated-models"
 # of them. `auth = "api-key"` requires `api_key_env`; `auth = "subscription"`
 # forbids it, because the credential is a persisted session inside the paired
 # harness's own state root rather than a value in the child environment. These
-# are the two shipped subscription providers.
+# are two researched subscription providers. Kimi is the third shipped
+# persisted-session case and is mapped forward below.
 [providers.openai-subscription]
 kind = "openai"
 base_url = "https://api.openai.com/v1"
@@ -428,12 +440,12 @@ config_seed_dir = ".ultrafuzz/harness/dsh"
 [harnesses.codex-subscription]
 kind = "codex"
 version = "0.147.0"
-state_root = "~/.codex" # exported verbatim as CODEX_HOME; holds auth.json
+state_root = "/absolute/path/to/operator/.codex" # CODEX_HOME; holds auth.json
 
 [harnesses.claude-code-subscription]
 kind = "claude-code"
 version = "2.1.233"
-state_root = "~/.claude" # exported verbatim as CLAUDE_CONFIG_DIR
+state_root = "/absolute/path/to/operator/.claude" # CLAUDE_CONFIG_DIR
 
 [models.openrouter-sonnet]
 harness = "pi"
@@ -452,9 +464,10 @@ model = "deepseek-v4-pro"
 # adapter settings, but no run has exercised them, so this binding omits
 # `reasoningLevels` until the levels are measured (#661 nominated).
 
-# The two shipped subscription bindings. Neither profile names a credential
-# environment variable anywhere, and the validator records the
-# persisted-credential exemption of invariant 7 for both.
+# Two of the three shipped subscription bindings are shown here. Neither
+# profile names a credential environment variable, and the validator records
+# the persisted-credential exemption of invariant 7 for both. Kimi Code is the
+# third shipped binding and is mapped from the legacy configuration below.
 [models.codex-subscription]
 harness = "codex-subscription"
 provider = "openai-subscription"
@@ -479,15 +492,18 @@ important invariants are:
 5. A validated binding chooses a mutually supported wire protocol before any
    child is launched.
 6. `config_seed_dir` is a pre-run seed directory, never exported verbatim. The
-   composition is fixed: for every run the launcher creates the state root
-   `.ultrafuzz/runs/<run-id>/harness/<harness-id>/`, copies the declared
-   `config_seed_dir` in as that root's initial contents, and exports _that_ path
-   — never the declared literal — as `DSH_HOME`, `CODEX_HOME`, and the like. So
-   two runs never share a harness state root, and no run mutates the seed. Both
+   composition is fixed per invocation: the launcher creates
+   `.ultrafuzz/runs/<run-id>/harness/<harness-id>/<model-profile-id>/<node-id>/<attempt>/`,
+   copies the declared `config_seed_dir` in as that root's initial contents,
+   and exports _that_ path — never the declared literal — as `DSH_HOME`,
+   `CODEX_HOME`, and the like. The identifiers are normalized to filesystem-safe
+   path segments. Concurrent nodes using one harness with different providers
+   or model profiles therefore never share config, sessions, or caches; no run
+   mutates the seed. Both
    surfaces extend the campaign layout documented in
    [docs/index.md](../index.md), which lists `runs/` but no `harness/` entry
    today: `.ultrafuzz/harness/**` for the seeds and
-   `.ultrafuzz/runs/<run-id>/harness/**` for the state roots. The name is
+   `.ultrafuzz/runs/<run-id>/harness/**` for the invocation roots. The name is
    deliberately _not_ `config_dir`: `[agents.<id>].config_dir` is already a
    shipped key (`packages/config/src/loader.ts`) that Ultrafuzz exports
    **verbatim** as whichever state-root variable the selected CLI reads —
@@ -496,7 +512,7 @@ important invariants are:
    (`packages/runtime/src/templates/smithers/agents/`, documented in
    [docs/config.md](../config.md)). Seed-copy semantics are the opposite of that,
    so reusing the spelling would silently change what those variables mean for
-   every existing profile. Exemption 7 below is what keeps the shipped key
+   every existing profile. Invariant 7 below is what keeps the shipped key
    working.
 7. **Persisted-credential harnesses** — those whose credential lives _inside_
    their own state root rather than in the child environment — are a class, not
@@ -507,19 +523,18 @@ important invariants are:
    `CLAUDE_CONFIG_DIR` and the logged-in `claude -p` session it holds. (A third
    shipped binding, `KimiAgent`'s Kimi Code, is in the same class and is mapped
    forward below; it is not one of this page's researched candidates.) In each
-   case a run-scoped state root seeded from tracked config would contain no
-   session, and none could be seeded either: embedding a persistent OAuth token
-   in versioned config would violate the credential rules, which keep
-   credential values in the process environment only. Such harnesses instead
+   case a fresh run-scoped root would contain no session, and the launcher
+   cannot recreate one: it is machine- and account-specific state issued by an
+   interactive login. Such harnesses instead
    declare one **explicitly named, stable, writable `state_root` outside the run
-   scope** — the operator's real `~/.codex` or `~/.claude`, or whichever path
-   they name — and the validator records the exemption on the binding rather
-   than inferring it, so the isolation claim stays true of every binding that
-   does not declare one. The alternative, rejecting subscription auth as
+   scope** — an absolute path to the operator's real Codex, Claude, or Kimi
+   state directory — and the validator records the exemption on the binding
+   rather than inferring it, so the isolation claim stays true of every binding
+   that does not declare one. The alternative, rejecting subscription auth as
    unsupported, is not chosen: it is Ultrafuzz's shipped default for those
-   harnesses. Only bindings whose provider declares `auth = "api-key"` — every
-   provider binding in this page's tables — get the run-scoped root of
-   invariant 6.
+   harnesses. API-key bindings normally use the run-scoped root from invariant
+   6, but a legacy `config_dir` maps to persistent state to preserve shipped
+   behavior; that legal combination receives no persisted-credential exemption.
 
 Existing profiles keep working during migration. All four shipped
 `agent = "…"` references map forward to a harness and a provider:
@@ -551,10 +566,12 @@ behavior is what the mapping has to preserve:
   maps to `state_root`.
 - **`DeepSeekAgent`** (`agents/deepseek.tsx`). The one adapter that defaults to
   `auth = "api-key"` and rejects every other value, so it never takes the
-  exemption and always gets a run-scoped root. It is Claude Code against
+  persisted-credential exemption. It is Claude Code against
   `https://api.deepseek.com/anthropic`, with `config_dir` defaulting to
-  `.ultrafuzz/deepseek-claude`, and it is _not_ silently re-pointed at DeepSeek
-  Harness —
+  `.ultrafuzz/deepseek-claude`. Like every shipped legacy `config_dir`, that
+  value is exported verbatim today and therefore maps to persistent
+  `state_root`, not `config_seed_dir`; API-key + persistent is legal but carries
+  no exemption. The adapter is _not_ silently re-pointed at DeepSeek Harness —
   [#660](https://github.com/monad-developers/ultrafuzz/issues/660) is what makes
   the name say so.
 - **`KimiAgent`** (`agents/kimi.tsx`, executable `kimi` per
@@ -637,8 +654,8 @@ This is the normative spelling of the contract — normative for
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) and its child
 issues until [SPECS.md](../SPECS.md) absorbs it, which is the one carve-out from
 the "these pages are not normative" preamble in
-[the explanation index](index.md). The same vocabulary appears
-in the HTML plan's §5: `tools` is `filesystem` / `shell`, `events` is
+[the explanation index](index.md). In this vocabulary, `tools` is
+`filesystem` / `shell`, `events` is
 `"jsonl" | "rpc" | "final-text-only"`, `sessions` is
 `"none" | "resume" | "tree"`, and `isolation` is
 `"native-sandbox" | "external-sandbox-required"`. Diagnostics that name a
@@ -655,13 +672,17 @@ which a subscription provider names a credential variable; `HarnessState` is a
 second union, so a harness declares either a seed directory or one explicitly
 named persistent `stateRoot` and never both; and
 `persistedCredentialExemption` is where the validator _records_ the exemption it
-granted. The validator grants it only for a `subscription` provider paired with
-a `persistent` harness state, and rejects every other combination of the two
-before launch: a `subscription` provider on a `run-scoped` harness has no
-session to read, and an `api-key` provider on a `persistent` state root gets no
-exemption and stays subject to invariant 6. The Codex and Claude Code
-subscription profiles in the configuration boundary above are the two shipped
-bindings that take this path.
+granted. It grants that exemption only for a `subscription` provider paired
+with a `persistent` harness state. It rejects a `subscription` provider on a
+`run-scoped` harness because that root has no logged-in session. An `api-key`
+provider may use either state mode; when paired with a `persistent` root it is
+legal but receives no exemption from the isolation claim. For `api-key` auth,
+`credentialEnv` must resolve to a non-empty value before launch. For
+`subscription` auth, `credentialEnv` is absent and the provider's declared
+preflight must validate a usable logged-in session before workflow launch. The
+configuration boundary shows two of the three shipped subscription bindings,
+Codex and Claude Code; the legacy mapping below identifies Kimi Code as the
+third.
 
 Capabilities are only half of the matching. A workflow node declares what it
 needs from a harness — a dashboard or telemetry node requires `events: "jsonl"`,
@@ -669,7 +690,7 @@ while a node whose contract is "produce an artifact, exit zero" requires only
 `events: "final-text-only"` — and the validator matches that requirement against
 the binding's declared capability before launch, so a harness whose event class
 does not satisfy the node's requirement is rejected rather than scheduled and
-discovered mid-run. The HTML plan's §5.1 uses the same spelling.
+discovered mid-run.
 
 The comparison relation is a partial order, not a total one:
 `final-text-only` is below `jsonl`, so a harness declaring `jsonl` satisfies a
@@ -746,10 +767,13 @@ an absent `reasoningLevels` says: nothing was measured. The validator refuses to
 schedule such a binding onto a cloud node rather than reading the absence as
 `false` or assuming a default. What the subsections record is the _evidence_ for
 cloud portability rather than the declared boolean — Codex's existing adapter
-already runs in Modal workers, the Modal image installs Claude Code's pin, dsh's
-Modal evidence row is in §3.1 of the
-[architecture plan](provider-harness-plan.html), and Pi and OpenCode were never
-run in that image at all. Because the field is normative,
+already runs in Modal workers, the Modal image installs Claude Code's pin, and
+Pi and OpenCode were never run in that image at all. dsh has source-level
+portability evidence only: its Node requirement matches the image, its prebuilt
+sandbox runners cover Linux x64 and arm64, and a pre-baked profile needs no
+first-run package installation. The image still needs a usable runner and a
+writable pre-baked `DSH_HOME` or shell tools fail closed. Because the field is
+normative,
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns the
 declared value for all five, and unlike the dimensions above that pointer
 already resolves — see [Measurement Ownership](#measurement-ownership).
@@ -759,31 +783,34 @@ name.
 
 ### Credential And State Rules
 
-These rules hold for every harness, not just the ones measured here. They are
-the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
+These rules hold for every harness, not just the ones measured here.
 
 - `childEnv` is built from an empty or tightly allowlisted base, never
   inherited wholesale.
-- Exactly one provider credential is present, and it matches the endpoint the
-  harness will actually call.
+- For `auth = "api-key"`, `credentialEnv` resolves to exactly one non-empty
+  provider credential, and it matches the endpoint the harness will actually
+  call. For `auth = "subscription"`, no provider API-key variable is injected;
+  the declared preflight must validate the logged-in session before workflow
+  launch.
 - Credentials never appear in `argv`. This rules out Smithers' `PiAgent`
   `--api-key` path, which must be left unset in favour of an environment
   variable.
-- Every harness taking an env-var credential gets a run-scoped state root, so no
-  such run reads or writes an operator's real home. The carve-out is a **class**
-  rather than one harness: **persisted-credential harnesses**, whose credential
-  lives inside their own persisted state root instead of the child environment.
-  Ultrafuzz ships two of them, both under `auth = "subscription"` and both the
-  default mode for their harness — Codex, which reads `CODEX_HOME/auth.json`,
-  and Claude Code, which uses `CLAUDE_CONFIG_DIR` and the logged-in `claude -p`
-  session it holds. Those harnesses keep one explicitly named, stable, writable
-  `state_root` outside the run scope (invariant 7 of the
+- An API-key binding normally gets a run-scoped state root, so the run does not
+  read or write an operator's real home. A legacy `config_dir` may map an
+  API-key binding to persistent state to preserve shipped behavior, but that
+  legal combination receives no persisted-credential exemption. The carve-out
+  is a **class** rather than one harness: **persisted-credential harnesses**,
+  whose credential lives inside their own persisted state root instead of the
+  child environment. Ultrafuzz ships three under `auth = "subscription"`, the
+  default mode for each harness: Codex reads `CODEX_HOME/auth.json`; Claude Code
+  uses `CLAUDE_CONFIG_DIR` and its logged-in `claude -p` session; and Kimi Code
+  uses its logged-in Kimi home. Those harnesses keep one explicitly named,
+  stable, writable `state_root` outside the run scope (invariant 7 of the
   [configuration boundary](#proposed-configuration-boundary)) rather than being
-  rejected as unsupported, and each binding declares the exemption — recorded by
-  the validator, never inferred — so the isolation claim above stays true of
-  everything that does not declare it. Seeding the session instead is not an
-  option: embedding a persistent OAuth token in versioned config would violate
-  the environment-only rule above.
+  rejected as unsupported, and each binding declares the exemption — recorded
+  by the validator, never inferred — so the isolation claim above stays true of
+  everything that does not declare it. A fresh run-scoped root cannot reproduce
+  these machine- and account-specific sessions created by interactive login.
 - The invocation directory must not carry harness-readable configuration. For
   dsh that means proving no `.env` exists in the target worktree before launch,
   both because an unset name there would be adopted and because a
@@ -806,8 +833,7 @@ for process output in a unit test, but they never satisfy a gate and never
 qualify a pairing.
 
 The gates are numbered, and those numbers are the ones the child issues cite.
-They match §8 of the [architecture plan](provider-harness-plan.html) one for
-one. They are called _qualification gates_ everywhere; "conformance suite" means
+They are called _qualification gates_ everywhere; "conformance suite" means
 only the test code the child issues add to exercise them, never the gates
 themselves.
 
@@ -947,15 +973,15 @@ Real CLIs were used. Where no paid credential exists, requests were driven
 against a local deterministic OpenAI-compatible endpoint; those results are
 labelled as routing and isolation evidence, never as provider qualification.
 
-**The two harnesses Ultrafuzz already ships were measured at versions the
-shipped image does not install.** The Modal worker image pins
+**The two already-shipped harnesses measured in this research were measured at
+versions the shipped image does not install.** The Modal worker image pins
 `@openai/codex@0.146.0` (the `CODEX_CLI_VERSION` constant in
 `packages/modal/src/runner.ts`) and `@anthropic-ai/claude-code@2.1.207` (the
 `npm install -g` line in that file's `modalSecurityToolchainCommands()`), while
 the versions measured below are `codex-cli 0.147.0` and Claude Code `2.1.233`.
-`pnpm docs:check` asserts both pins against every place this page and the HTML
-plan print them, so moving a pin without updating each of those narratives fails
-the check rather than leaving one of them stale.
+`pnpm docs:check` asserts both pins against every place this page prints them,
+so moving a pin without updating each narrative fails the check rather than
+leaving one of them stale.
 PR #654 also left both pins untouched, so its real-CLI assertions ran against
 whatever `codex` was on `PATH`, not against the pinned image build. The Codex and
 Claude Code rows are therefore evidence about newer builds than the image ships:
@@ -1089,9 +1115,8 @@ Installed and executed in this environment:
 The work is filed as bounded child issues of
 [#653](https://github.com/monad-developers/ultrafuzz/issues/653):
 
-The numbering below is this page's own; the parenthesised phase is the
-sequencing step that §6 of the [architecture plan](provider-harness-plan.html)
-gives the same issue.
+The action table at the top of this page is the sequencing source of truth. The
+numbering below restates its phases with implementation detail.
 
 1. [#658](https://github.com/monad-developers/ultrafuzz/issues/658) (Phase 0) —
    implement the provider/harness/model schema and binding validator without
@@ -1109,9 +1134,10 @@ gives the same issue.
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
-   final-text-only fallback that warns rather than failing the run. This page also
-   nominates it for the reasoning measurement and for dsh's error classification,
-   preflight, and retry semantics — `dsh-llm-deepseek` declares `thinking` and
+   final-text-only fallback that warns rather than failing the run. This page
+   also nominates it for the reasoning measurement and for dsh's error
+   classification, preflight, and retry semantics — `dsh-llm-deepseek` declares
+   `thinking` and
    `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so those have to be
    driven through a real request before the binding may declare levels; see
    [Measurement Ownership](#measurement-ownership). Parsing the undocumented
@@ -1133,9 +1159,6 @@ gives the same issue.
    pairing-policy section above points at. The default decision itself waits on
    comparable real-provider results; until then Codex remains the shipped
    OpenRouter default, stated rather than implied.
-
-The architecture, sequencing, risks, gates, and bounded issue proposals are in
-[provider-harness-plan.html](provider-harness-plan.html).
 
 ## Sources
 

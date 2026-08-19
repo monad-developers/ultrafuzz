@@ -32,7 +32,6 @@ const requiredDocs = [
   "docs/explanation/backends-safety.md",
   "docs/explanation/bugfinder.md",
   "docs/explanation/campaigns.md",
-  "docs/explanation/provider-harness-plan.html",
   "docs/explanation/provider-harness-research.md",
   "docs/explanation/topology-prompts-artifacts.md",
   "docs/cli.md",
@@ -99,11 +98,11 @@ if (missingFlagMentions.length > 0) {
   process.exit(1);
 }
 
-// The provider/harness pages build a version-gap argument on the harness
+// The provider/harness page builds a version-gap argument on the harness
 // versions the Modal worker image installs. The image source is the single
 // source of truth: read the pins out of `runner.ts` and assert the docs print
 // the same literals. This check keeps no copy of the version itself, so a pin
-// bump means editing `runner.ts` and every version literal the two pages
+// bump means editing `runner.ts` and every version literal the page
 // print — and nothing here.
 const runnerSource = "packages/modal/src/runner.ts";
 if (!existsSync(runnerSource)) {
@@ -121,7 +120,7 @@ const pinPatterns = [
   ["@openai/codex", /CODEX_CLI_VERSION = "([^"]+)"/u],
   ["@anthropic-ai/claude-code", /@anthropic-ai\/claude-code@([\d.]+)/u]
 ];
-const harnessDocs = ["docs/explanation/provider-harness-research.md", "docs/explanation/provider-harness-plan.html"];
+const harnessDocs = ["docs/explanation/provider-harness-research.md"];
 const staleVersionPins = [];
 for (const [pkg, pattern] of pinPatterns) {
   const match = pattern.exec(runnerText);
@@ -132,10 +131,10 @@ for (const [pkg, pattern] of pinPatterns) {
     process.exit(1);
   }
   const pin = `${pkg}@${match[1]}`;
-  // Existence is not enough: the HTML plan prints each pin twice (§8 and §10),
-  // so a bump applied to one site only would still satisfy an `includes` test
-  // while the other site kept asserting the old version. Every printed literal
-  // has to be the current pin, and a stale one is reported with its line so the
+  // Existence is not enough: each pin appears in more than one narrative, so a
+  // bump applied to one site only would still satisfy an `includes` test while
+  // another site kept asserting the old version. Every printed literal has to
+  // be the current pin, and a stale one is reported with its line so the
   // half-applied bump is named rather than just the file. A `.` is the only
   // regex metacharacter an npm package name can contain, so escaping it is
   // enough to build the literal pattern.
@@ -158,7 +157,7 @@ for (const [pkg, pattern] of pinPatterns) {
 }
 if (staleVersionPins.length > 0) {
   console.error(
-    `Harness version pins out of sync between ${runnerSource} and the provider/harness docs: ${staleVersionPins.join(", ")}`
+    `Harness version pins out of sync between ${runnerSource} and the provider/harness document: ${staleVersionPins.join(", ")}`
   );
   process.exit(1);
 }
