@@ -5,6 +5,7 @@ Status: reviewed research for
 researched on 2026-08-18 and revised the same day after the issue's "DeepSeek
 Code" was corrected to mean
 [`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness).
+Last substantively revised 2026-08-19 under review.
 The follow-up work is filed as
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664),
 and this page is published by
@@ -13,12 +14,27 @@ recommendations below are proposals awaiting real-provider qualification, not
 shipped defaults.
 
 The companion [architecture plan](provider-harness-plan.html) is a
-self-contained HTML report — GitHub serves `.html` as plain text, so download
-it and open it in a browser. Its §1 (verdict), §7 (risk register), and §9
-(drafted issue bodies) have no counterpart here, and its §6 (sequencing) is
-condensed here into [Next Work](#next-work). Everything else appears on both
-pages, including the numbered qualification gates G1–G10 that the child issues
-cite by number.
+self-contained HTML report — GitHub serves `.html` as plain text, so download it
+and open it in a browser. The two pages overlap but are **not** copies of each
+other, so neither is a substitute for the other:
+
+- **Only in the HTML plan:** §1 the verdict; §7 the severity-ranked risk
+  register with its mitigations; §9 the drafted issue bodies that became
+  [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
+  the §2 table of obsolete draft claims paired with their replacements; and the
+  packaging, retry, Modal-portability, and maintenance-posture evidence rows of
+  its §3.1 dsh table.
+- **Only on this page:** the TOML configuration boundary, the TypeScript
+  `ProviderBinding` / `HarnessCapabilities` / `QualifiedHarnessBinding`
+  interfaces, the legacy `agent = "…"` forward mapping, the five dsh-specific
+  gate items, and the full per-file source list with every DeepSeek Harness URL
+  pinned to a commit rather than a branch.
+- **On both pages:** the correction narrative, the candidate comparison and its
+  evidence provenance, the pairing policy, the capability-contract vocabulary,
+  the credential and state rules, and the numbered qualification gates G1–G10
+  that the child issues cite by number.
+- **On both pages in different form:** the HTML plan's §6 sequencing is
+  condensed here into [Next Work](#next-work).
 
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
@@ -29,8 +45,11 @@ validation and release cadences:
 - the provider catalogue model ID.
 
 The current OpenRouter-through-Codex configuration is a supported compatibility
-path, not a decision that OpenRouter requires Codex or that Codex should remain
-the default.
+path that is also, by grandfathering, the default the current release ships. It
+is not a decision that OpenRouter requires Codex or that Codex should remain the
+recommended pairing; see
+[Recommended Pairing Policy](#recommended-pairing-policy) for how those two
+statuses differ.
 
 ## What "DeepSeek Code" Refers To
 
@@ -91,6 +110,23 @@ provider-API row declares nothing at all, because it is not a harness binding.
 | Claude Code 2.1.233                 | `jsonl` + schema            | `resume`                    | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek  |
 | DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only`           | `none`                      | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, final-text nodes |
 | Direct provider-API harness         | n/a — not a harness binding | n/a — not a harness binding | n/a — not a harness binding | design only                                    | Fallback; do not implement first                       |
+
+Three dimensions issue #653 asks about are **not** answered for any row whose
+provenance is _CLI inspection_: error classification, preflight behavior, and
+retry / rate-limit semantics. Nothing in this research provoked a 401, a 429, a
+rejected model ID, or a mid-stream disconnect from a real provider, so how each
+harness classifies those failures, what it retries, and whether it surfaces
+`Retry-After` are all unknown. That is a credential gap rather than an
+oversight — see
+[Constraints That Block Qualification Today](#constraints-that-block-qualification-today).
+[G5](#qualification-gates) and [G6](#qualification-gates) are where the answers
+get recorded, and ownership is explicit:
+[#659](https://github.com/monad-developers/ultrafuzz/issues/659) for Pi,
+[#662](https://github.com/monad-developers/ultrafuzz/issues/662) for OpenCode,
+and [#663](https://github.com/monad-developers/ultrafuzz/issues/663) for Codex
+and Claude Code re-measured at the versions the shipped Modal image pins. The
+only measured retry fact on this page is internal to dsh (`dsh-llm-retry`) and
+is not observable from outside the process.
 
 The detail behind each row follows. Each subsection covers the same four
 dimensions: provider and model binding, unattended tools and artifacts, events
@@ -259,15 +295,26 @@ _Evidence: design analysis only. Nothing was built or measured._
    provider routes: Pi first, OpenCode second. Both are _proposed_ defaults
    pending real-provider qualification; until a pinned real CLI clears the
    gates against real OpenRouter, Codex remains the shipped OpenRouter default.
-3. **Compatibility pairings stay allowed, never default.** Codex + OpenRouter
-   and Claude Code + DeepSeek's Anthropic endpoint keep working and keep their
-   documented migration path. Neither becomes the recommended shape for a new
-   project.
+3. **Compatibility pairings stay allowed, never recommended.** Codex +
+   OpenRouter and Claude Code + DeepSeek's Anthropic endpoint keep working and
+   keep their documented migration path. Neither is the shape this page
+   recommends for a new project.
+
+   Codex + OpenRouter holds two statuses at once, and the two words are not
+   interchangeable. **Shipped default** describes what the current release
+   actually launches when an operator selects OpenRouter and names no harness —
+   Codex, by grandfathering, because it is what already ships and nothing has
+   replaced it. **Recommended default** describes the advice in rule 2, which is
+   the gateway-neutral harness. Codex + OpenRouter keeps the first status until a
+   qualified replacement exists and never acquires the second; the two converge
+   at Phase 5.
+
 4. **Only evidence promotes a pairing.** This rule governs new and changed
-   defaults, not the ones already shipping. Codex + OpenAI, Claude Code +
-   Anthropic, Claude Code + DeepSeek, and Kimi as `KimiAgent` remain default
-   today without having cleared G1–G10, and that qualification debt is stated
-   here rather than implied — no gate run exists for any of them, and
+   defaults, not the ones already shipping. Codex + OpenAI, **Codex +
+   OpenRouter**, Claude Code + Anthropic, Claude Code + DeepSeek, and Kimi as
+   `KimiAgent` remain default today without having cleared G1–G10, and that
+   qualification debt is stated here rather than implied — no gate run exists for
+   any of them, and
    [#664](https://github.com/monad-developers/ultrafuzz/issues/664) records the
    status explicitly. Any new or promoted first-party pairing needs the
    qualification evidence described below, not a vendor claim.
@@ -638,7 +685,12 @@ Installed and executed in this environment:
 
 - **No `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, or `ANTHROPIC_API_KEY`** exists
   in the research environment, so no candidate has passed a real paid provider
-  request, cost telemetry check, or rate-limit diagnostic.
+  request, cost telemetry check, or rate-limit diagnostic. That is what leaves
+  error classification, authenticated preflight behavior, and retry semantics
+  unmeasured for every CLI-inspection candidate: no 401, 429, rejected model ID,
+  or mid-stream disconnect was ever produced to classify. #659 owns Pi, #662
+  owns OpenCode, and #663 owns Codex and Claude Code at the versions the shipped
+  Modal image pins.
 - **DeepSeek Harness has no supported machine-readable output.** The repository
   states the JSONL event driver is test infrastructure. `@deepseek-ai/dsh-acp`
   publishes an ACP JSON-RPC stdio server, but it is not a dependency of the
@@ -697,7 +749,10 @@ The work is filed as bounded child issues of
    directories and disabled sharing, plugins, update checks, and model fetching,
    plus the per-model reasoning config entries this research did not exercise.
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) — gate the
-   Modal worker image on per-harness capability checks.
+   Modal worker image on per-harness capability checks. It also owns the version
+   reconciliation for the two harnesses Ultrafuzz already ships, and with it the
+   error-classification, preflight, and retry measurements for Codex and Claude
+   Code at the pins the image installs.
 7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) — document
    the pairing policy and migration paths. The default decision itself waits on
    comparable real-provider results; until then Codex remains the shipped

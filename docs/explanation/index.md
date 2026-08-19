@@ -26,12 +26,26 @@ are read differently:
   than rendering them, so **download the file and open it in a browser** (or
   view it from a local checkout) to read it as intended.
 
-Most sections appear in both, including the numbered qualification gates
-G1–G10 that the child issues cite by number. Three are unique to the HTML plan:
-**§1 Verdict**, **§7 Risks** — the severity-ranked risk register with its
-mitigations — and **§9 Proposed GitHub issues**, the drafted issue bodies that
-became
-[#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664).
-The HTML plan's **§6 Sequencing** is condensed on the Markdown page into its
-"Next Work" list. Read the Markdown page for the evidence; open the HTML plan
-for the risks and the issue breakdown.
+The two pages overlap but neither contains the other, so the split is worth
+knowing before you pick one:
+
+- **Only in the HTML plan:** **§1 Verdict**; **§7 Risks**, the severity-ranked
+  register with its mitigations; **§9 Proposed GitHub issues**, the drafted
+  bodies that became
+  [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
+  the **§2** table of obsolete draft claims and their replacements; and the
+  packaging, retry, Modal-portability, and maintenance-posture evidence rows in
+  **§3.1**.
+- **Only in the Markdown research page:** the TOML configuration boundary, the
+  TypeScript capability interfaces, the legacy `agent = "…"` forward mapping, the
+  five dsh-specific gate items, and the full per-file source list with every
+  DeepSeek Harness URL pinned to a commit.
+- **On both:** the correction narrative, the candidate comparison and its
+  evidence provenance, the pairing policy, the capability-contract vocabulary,
+  the credential and state rules, and the numbered qualification gates G1–G10
+  that the child issues cite by number.
+- **On both in different form:** the HTML plan's **§6 Sequencing** is condensed
+  on the Markdown page into its "Next Work" list.
+
+Read the Markdown page for the evidence and the contract; open the HTML plan for
+the verdict, the risks, and the issue breakdown.

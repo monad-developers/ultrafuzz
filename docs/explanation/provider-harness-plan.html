@@ -616,7 +616,7 @@
         </p>
         <div class="meta">
           <span>Issue #653</span>
-          <span>Revised 2026-08-18</span>
+          <span>Revised 2026-08-19</span>
           <span>Status: reviewed, published for implementation</span>
           <span>
             Child issues
@@ -663,8 +663,9 @@
               pending real-provider qualification: a pinned real CLI must clear every applicable gate in §8 against the
               real provider, and no such run has happened — the research environment holds no
               <code>OPENROUTER_API_KEY</code> and no <code>DEEPSEEK_API_KEY</code>. In the interim
-              <strong>Codex CLI remains the shipped OpenRouter default</strong>, and DeepSeek keeps its existing Claude
-              Code compatibility pairing. Phase 5 records the decision once comparable real-provider results exist.
+              <strong>Codex CLI remains the grandfathered shipped OpenRouter default</strong> — it is what the current
+              release launches, not what §4 recommends for a new project — and DeepSeek keeps its existing Claude Code
+              compatibility pairing. Phase 5 records the decision once comparable real-provider results exist.
             </p>
           </div>
           <div class="grid">
@@ -692,7 +693,9 @@
               and different failure modes. A first-party harness tracks its own vendor's wire dialect and reasoning
               controls without translation, so it is the right default whenever the operator has already chosen that
               vendor. A gateway has no harness of its own, so it needs one designed for arbitrary provider routes.
-              Everything else is a compatibility path that stays supported and stays non-default.
+              Everything else is a compatibility path that stays supported and stays non-recommended — including Codex +
+              OpenRouter, which is at once the grandfathered default the current release ships and the pairing this
+              report declines to recommend to a new project.
             </p>
           </div>
         </section>
@@ -911,7 +914,7 @@
                     <code>session.jsonl.zstd</code> with plain <code>zstd -dc</code> yielded typed JSONL —
                     <code>tool/call</code> (name + arguments), <code>tool/result</code> (including the sandbox denial
                     text), <code>assistant/chunk</code> carrying
-                    <code>{"type":"usage","usage":{"inputTokens",…,"outputTokens"}}</code>,
+                    <code>{"type":"usage","usage":{"inputTokens":…,"outputTokens":…}}</code>,
                     <code>turn/start</code>/<code>turn/end</code> with a completion reason,
                     <code>step/start</code>/<code>step/end</code>, <code>sandbox/mode</code>, and
                     <code>request/header</code>. That is recorded as a measurement, not a plan: the format is
@@ -1225,6 +1228,24 @@
               <code>reasoning</code> value.
             </p>
           </div>
+          <div class="callout warn">
+            <strong class="tag"
+              >Error classification, preflight, and retry are unmeasured for the inspected CLIs</strong
+            >
+            <p>
+              Issue #653 asks for error classification, preflight behavior, and retry/rate-limit semantics per
+              candidate. For every <span class="pill warn">CLI inspection</span> row this report does
+              <em>not</em> answer that: no request in this research provoked a 401, a 429, a malformed-model rejection,
+              or a mid-stream disconnect from a real provider, so how each harness classifies those failures, what it
+              retries, and whether it surfaces <code>Retry-After</code> are all unknown. That is a credential gap, not
+              an oversight — the environment holds no <code>OPENROUTER_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>, or
+              <code>ANTHROPIC_API_KEY</code>. G5 and G6 in §8 are where the answers get recorded, and ownership is
+              explicit: <a href="#issue-b">#653-B (#659)</a> for Pi, <a href="#issue-e">#653-E (#662)</a> for OpenCode,
+              and <a href="#issue-f">#653-F (#663)</a> for Codex and Claude Code re-measured at the versions the shipped
+              Modal image pins. The only measured retry fact anywhere here is internal to dsh
+              (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the process.
+            </p>
+          </div>
         </section>
 
         <section id="policy">
@@ -1252,17 +1273,22 @@
               <h3>Compatibility stays legal</h3>
               <p>
                 Codex + OpenRouter and Claude Code + DeepSeek keep working with a documented migration path. They are
-                supported combinations, never the recommended shape for a new project.
+                supported combinations, never the <em>recommended</em> shape for a new project. Codex + OpenRouter holds
+                two statuses at once, and the difference is deliberate: <strong>shipped default</strong> describes what
+                the current release launches when an operator selects OpenRouter and names no harness, while
+                <strong>recommended default</strong> describes the advice this section gives a new project, which is the
+                gateway-neutral harness above. It keeps the first status by grandfathering, only because no replacement
+                has cleared the §8 gates; it never acquires the second. Phase 5 is where the two converge.
               </p>
             </div>
             <div class="card">
               <h3>Evidence promotes, claims do not</h3>
               <p>
                 A <em>new or changed</em> default requires a pinned real CLI clearing every gate in §8 against the real
-                provider. The pairings shipping today — Codex + OpenAI, Claude Code + Anthropic, Claude Code + DeepSeek,
-                and Kimi — stay default without having cleared G1–G10; that qualification debt is stated here rather
-                than implied, and <a href="#issue-g">#653-G (#664)</a> records the status explicitly. Any further
-                first-party pairing earns its place the same way.
+                provider. The pairings shipping today — Codex + OpenAI, <strong>Codex + OpenRouter</strong>, Claude Code
+                + Anthropic, Claude Code + DeepSeek, and Kimi — stay default without having cleared G1–G10; that
+                qualification debt is stated here rather than implied, and <a href="#issue-g">#653-G (#664)</a> records
+                the status explicitly. Any further first-party pairing earns its place the same way.
               </p>
             </div>
           </div>
@@ -2113,7 +2139,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
 
       <footer class="foot">
         <p>
-          Ultrafuzz · architecture and plan report for issue #653 · revised 2026-08-18. Reviewed and published for
+          Ultrafuzz · architecture and plan report for issue #653 · revised 2026-08-19. Reviewed and published for
           implementation: the child issues
           <a href="https://github.com/monad-developers/ultrafuzz/issues/658">#658</a>–<a
             href="https://github.com/monad-developers/ultrafuzz/issues/664"
