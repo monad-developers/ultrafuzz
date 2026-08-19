@@ -30,6 +30,8 @@ const TOP_LEVEL_KEYS = new Set([
   "execution",
   "models",
   "agents",
+  "providers",
+  "harnesses",
   "permissions",
   "invariants",
   "triage",
@@ -56,7 +58,26 @@ const EXECUTION_RESOURCE_KEYS = ["cpu", "memory_mib", "timeout_seconds"] as cons
 const EXECUTION_NODE_KEYS = ["resources"] as const;
 const EXECUTION_PROVIDER_KEYS = ["modal"] as const;
 const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env"] as const;
-const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
+const MODEL_PROFILE_KEYS = ["agent", "harness", "provider", "model", "reasoning", "timeout_seconds"] as const;
+const PROVIDER_KEYS = ["kind", "base_url", "auth", "api_key_env", "protocols", "preflight"] as const;
+const HARNESS_KEYS = [
+  "kind",
+  "executable",
+  "version",
+  "config_seed_dir",
+  "state_root",
+  "protocols",
+  "events",
+  "sessions",
+  "isolation",
+  "reasoning_levels",
+  "cloud_portable",
+  "unattended",
+  "tools",
+  "usage"
+] as const;
+const HARNESS_TOOL_KEYS = ["filesystem", "shell"] as const;
+const HARNESS_USAGE_KEYS = ["tokens", "cache", "cost"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
 const INVARIANT_KEYS = [
@@ -413,6 +434,20 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
           }
         },
         {
+          key: "harness",
+          type: "string",
+          assign: (value) => {
+            modelProfile.harness = value;
+          }
+        },
+        {
+          key: "provider",
+          type: "string",
+          assign: (value) => {
+            modelProfile.provider = value;
+          }
+        },
+        {
           key: "model",
           type: "string",
           assign: (value) => {
@@ -438,6 +473,179 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         ...config.models.profiles,
         [key]: modelProfile
       };
+    }
+  }
+
+  const providerTables = readTable(root, "providers", ["providers"], diagnostics);
+  if (providerTables) {
+    config.providers = {};
+    for (const [id, raw] of Object.entries(providerTables).sort()) {
+      if (!isPlainObject(raw)) {
+        pushTypeDiagnostic(["providers", id], "table", diagnostics);
+        continue;
+      }
+      const table = raw as Record<string, unknown>;
+      collectUnknownKeys(table, new Set(PROVIDER_KEYS), ["providers", id], diagnostics);
+      const provider: Record<string, unknown> = { id };
+      readScalarFields(table, ["providers", id], diagnostics, [
+        {
+          key: "kind",
+          type: "string",
+          assign: (v) => {
+            provider.kind = v;
+          }
+        },
+        {
+          key: "base_url",
+          type: "string",
+          assign: (v) => {
+            provider.baseUrl = v;
+          }
+        },
+        {
+          key: "api_key_env",
+          type: "string",
+          assign: (v) => {
+            provider.credentialEnv = v;
+          }
+        },
+        {
+          key: "protocols",
+          type: "string-array",
+          assign: (v) => {
+            provider.protocols = v;
+          }
+        },
+        {
+          key: "preflight",
+          type: "string",
+          assign: (v) => {
+            provider.preflight = v;
+          }
+        },
+        {
+          key: "auth",
+          type: "string",
+          assign: (v) => {
+            provider.auth = v;
+          }
+        }
+      ]);
+      config.providers[id] = provider as never;
+    }
+  }
+
+  const harnessTables = readTable(root, "harnesses", ["harnesses"], diagnostics);
+  if (harnessTables) {
+    config.harnesses = {};
+    for (const [id, raw] of Object.entries(harnessTables).sort()) {
+      if (!isPlainObject(raw)) {
+        pushTypeDiagnostic(["harnesses", id], "table", diagnostics);
+        continue;
+      }
+      const table = raw as Record<string, unknown>;
+      collectUnknownKeys(table, new Set(HARNESS_KEYS), ["harnesses", id], diagnostics);
+      const harness: Record<string, unknown> = { id };
+      readScalarFields(table, ["harnesses", id], diagnostics, [
+        {
+          key: "kind",
+          type: "string",
+          assign: (v) => {
+            harness.kind = v;
+          }
+        },
+        {
+          key: "executable",
+          type: "string",
+          assign: (v) => {
+            harness.executable = v;
+          }
+        },
+        {
+          key: "version",
+          type: "string",
+          assign: (v) => {
+            harness.version = v;
+          }
+        },
+        {
+          key: "protocols",
+          type: "string-array",
+          assign: (v) => {
+            harness.protocols = v;
+          }
+        },
+        {
+          key: "events",
+          type: "string",
+          assign: (v) => {
+            harness.events = v;
+          }
+        },
+        {
+          key: "sessions",
+          type: "string",
+          assign: (v) => {
+            harness.sessions = v;
+          }
+        },
+        {
+          key: "isolation",
+          type: "string",
+          assign: (v) => {
+            harness.isolation = v;
+          }
+        },
+        {
+          key: "reasoning_levels",
+          type: "string-array",
+          assign: (v) => {
+            harness.reasoningLevels = v;
+          }
+        },
+        {
+          key: "cloud_portable",
+          type: "boolean",
+          assign: (v) => {
+            harness.cloudPortable = v;
+          }
+        },
+        {
+          key: "unattended",
+          type: "boolean",
+          assign: (v) => {
+            harness.unattended = v;
+          }
+        }
+      ]);
+      const seed = typeof table.config_seed_dir === "string" ? table.config_seed_dir : undefined;
+      const stateRoot = typeof table.state_root === "string" ? table.state_root : undefined;
+      if (seed !== undefined) harness.state = { mode: "run-scoped", configSeedDir: seed };
+      if (stateRoot !== undefined) harness.state = { mode: "persistent", stateRoot };
+      if (seed !== undefined && stateRoot !== undefined)
+        diagnostics.push(
+          diagnostic(
+            "CONFIG_HARNESS_STATE_AMBIGUOUS",
+            "harnesses." + id + ".must declare exactly one of config_seed_dir or state_root",
+            ["harnesses", id],
+            "project-toml"
+          )
+        );
+      for (const [key, allowed] of [
+        ["tools", HARNESS_TOOL_KEYS],
+        ["usage", HARNESS_USAGE_KEYS]
+      ] as const) {
+        const nested = readConfigTable(table, key, allowed, diagnostics, ["harnesses", id, key]);
+        if (nested) {
+          const value: Record<string, boolean> = {};
+          for (const name of allowed)
+            readBoolean(nested, name, ["harnesses", id, key, name], diagnostics, (v) => {
+              value[name] = v;
+            });
+          harness[key] = value;
+        }
+      }
+      config.harnesses[id] = harness as never;
     }
   }
 
