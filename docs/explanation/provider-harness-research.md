@@ -185,9 +185,12 @@ _Evidence: real run (PR #654), upstream docs._
   (`packages/runtime/src/templates/smithers/agents/codex.tsx`). Provenance is
   upstream docs plus that in-repo adapter, not measurement — PR #654's requests
   went to a deterministic local server, so no level was ever exercised against a
-  real provider. A Codex binding therefore declares no `reasoningLevels`
-  until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
-  measures the levels at the version the shipped image pins.
+  real provider. A Codex binding therefore declares no `reasoningLevels` until
+  the levels are measured at the version the shipped image pins.
+  [#663](https://github.com/monad-developers/ultrafuzz/issues/663) is
+  **nominated** for that measurement, not assigned it: its filed acceptance
+  criteria cover the pinned Modal worker image and its capability checks but
+  name no reasoning surface, so it owns the measurement once they do.
 - **Unattended.** `codex exec` is non-interactive, has filesystem and shell
   tools, and supports a final-response JSON schema.
 - **Events.** JSONL events, persisted or ephemeral sessions, `exec resume`, and
@@ -269,9 +272,10 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
   drives with `["low", "high", "max"]`
   (`packages/runtime/src/templates/smithers/agents/deepseek.tsx`). Provenance is
   CLI inspection plus that in-repo adapter; no level was exercised against a
-  real provider, so a Claude Code binding declares no `reasoningLevels`
-  until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
-  measures them at the version the shipped image pins.
+  real provider, so a Claude Code binding declares no `reasoningLevels` until
+  the levels are measured at the version the shipped image pins. #663 is
+  **nominated** for that measurement on the same terms as for Codex above, not
+  assigned it, and owns it once its acceptance criteria name it.
 - **Unattended.** Print mode with confirmed schema, tool, effort, session, and
   permission surfaces.
 - **Events.** Streaming JSON with a response schema; sessions resume by ID.
