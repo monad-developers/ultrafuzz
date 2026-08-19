@@ -120,6 +120,8 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
     agents: Object.fromEntries(
       Object.entries(agents).map(([id, agent]) => [id, normalizeAgentConfig(id, agent, filePath)])
     ),
+    providers: {},
+    harnesses: {},
     permissions: normalizePermissions(permissions, filePath),
     invariants: {
       propertyPriorityThreshold: required(
