@@ -129,42 +129,15 @@ recorded, and [G5](#qualification-gates) and [G6](#qualification-gates) are wher
 the other two do. **Ownership is explicit for two of the five harness candidates
 only**: [#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi
 and [#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns
-OpenCode, because both issues already enumerate the measurements.
-[#663](https://github.com/monad-developers/ultrafuzz/issues/663) is **nominated,
-not assigned**, for Codex and Claude Code re-measured at the versions the shipped
-Modal image pins, and
+OpenCode, while [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
+is **nominated, not assigned**, for Codex and Claude Code at the versions the
+shipped Modal image pins, and
 [#661](https://github.com/monad-developers/ultrafuzz/issues/661) is likewise only
-**nominated** for dsh: its filed acceptance criteria require a real DeepSeek V4
-request but name no 401, 429, rejected-model-ID, or mid-stream-disconnect
-measurement, so dsh's error classification and authenticated preflight are
-unowned today. Either nomination becomes ownership only once that issue's own
-acceptance criteria are extended. The only measured retry fact on this page is
-internal to dsh (`dsh-llm-retry`) and is not observable from outside the process.
-
-Those nominations are gaps in the issue tracker, not just in this page. #659 and
-#662 already scope the error-classification measurements for Pi and OpenCode.
-#663's body, as read while this page was written, scopes only the pinned Modal
-worker image and its capability checks: its acceptance criteria are the `dsh`
-sandbox runner, the Landlock per-arch package, pre-baked state roots and offline
-cold boot, `ultrafuzz doctor` cloud readiness, and local/Modal agreement. None of
-them requires reconciling the Codex and Claude Code version pins, none requires
-producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement,
-and none covers the Codex and Claude Code reasoning-level measurements this page
-also nominates it for below. #661's body, read the same way, scopes the dsh
-adapter, its isolation, and the smoke profile, and names neither an
-error-classification measurement nor a reasoning surface. #662's body scopes the gates,
-the isolated state roots, and credential handling, and names no reasoning surface
-either.
-
-The rule rather than those snapshots is what governs, so this page stays correct
-whichever way the issues are edited: **an issue owns a measurement this page
-nominates it for exactly when its own acceptance criteria name it, and until they
-do that dimension is unowned rather than assigned.** That covers #663's Codex and
-Claude Code version reconciliation, error classification, preflight, retry, and
-reasoning levels; #661's dsh error classification, preflight, retry, and
-reasoning levels; and #662's OpenCode reasoning levels. This page defines what
-the measurements are; each issue decides when it has taken them on. Read the
-issues, not this paragraph, for their current state.
+**nominated** for dsh. The rule behind that distinction, and the per-issue
+snapshot behind each cell, are stated once under
+[Measurement Ownership](#measurement-ownership). The only measured retry fact on
+this page is internal to dsh (`dsh-llm-retry`) and is not observable from outside
+the process.
 
 The detail behind each row follows. Each subsection covers the same five
 dimensions in the same order: provider and model binding, the reasoning surface,
@@ -188,9 +161,8 @@ _Evidence: real run (PR #654), upstream docs._
   real provider. A Codex binding therefore declares no `reasoningLevels` until
   the levels are measured at the version the shipped image pins.
   [#663](https://github.com/monad-developers/ultrafuzz/issues/663) is
-  **nominated** for that measurement, not assigned it: its filed acceptance
-  criteria cover the pinned Modal worker image and its capability checks but
-  name no reasoning surface, so it owns the measurement once they do.
+  **nominated** for that measurement, not assigned it — see
+  [Measurement Ownership](#measurement-ownership).
 - **Unattended.** `codex exec` is non-interactive, has filesystem and shell
   tools, and supports a final-response JSON schema.
 - **Events.** JSONL events, persisted or ephemeral sessions, `exec resume`, and
@@ -244,9 +216,8 @@ docs. No provider request was made._
   provider, so an OpenCode binding declares no `reasoningLevels` until the
   values each OpenRouter route actually accepts are measured.
   [#662](https://github.com/monad-developers/ultrafuzz/issues/662) is
-  **nominated** for that measurement, not assigned it: its filed acceptance
-  criteria cover the gates, the isolated state roots, and credential handling
-  but name no reasoning surface, so it owns the measurement once they do.
+  **nominated** for that measurement, not assigned it — see
+  [Measurement Ownership](#measurement-ownership).
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
   Build agent exposes file, shell, search, and task tools.
 - **Events.** Raw JSON events, session IDs, continue/resume/fork, exported
@@ -275,7 +246,7 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
   real provider, so a Claude Code binding declares no `reasoningLevels` until
   the levels are measured at the version the shipped image pins. #663 is
   **nominated** for that measurement on the same terms as for Codex above, not
-  assigned it, and owns it once its acceptance criteria name it.
+  assigned it — see [Measurement Ownership](#measurement-ownership).
 - **Unattended.** Print mode with confirmed schema, tool, effort, session, and
   permission surfaces.
 - **Events.** Streaming JSON with a response schema; sessions resume by ID.
@@ -324,12 +295,11 @@ commit
   observed reaching the provider, so a dsh binding declares no
   `reasoningLevels` **until the surface is measured end to end**.
   [#661](https://github.com/monad-developers/ultrafuzz/issues/661) is
-  **nominated** for that measurement, not assigned it: its filed acceptance
-  criteria cover the adapter, its isolation, and the smoke profile but name no
-  reasoning surface, so it owns the measurement once they do. Whoever takes it
-  must publish the measured levels before the validator accepts a `reasoning`
-  value for dsh; the field is unsupported because it is unmeasured, not because
-  DeepSeek Harness lacks it.
+  **nominated** for that measurement, not assigned it — see
+  [Measurement Ownership](#measurement-ownership). Whoever takes it must publish
+  the measured levels before the validator accepts a `reasoning` value for dsh;
+  the field is unsupported because it is unmeasured, not because DeepSeek
+  Harness lacks it.
 - **Unattended.** `dsh --profile headless "task"` runs one task unattended and
   prints the final assistant text. 25 model-facing tools, including `bash`,
   `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`,
@@ -407,16 +377,16 @@ _Evidence: design analysis only. Nothing was built or measured._
    [#664](https://github.com/monad-developers/ultrafuzz/issues/664) in
    [Next Work](#next-work). Claude Code is likewise the shipped DeepSeek default
    by grandfathering, because it is the only pairing that reaches DeepSeek today,
-   while rule 1 recommends DeepSeek Harness once it is qualified. Neither pairing acquires the recommended status
-   before its replacement clears the gates, and rule 4 lists both under the
-   _shipped_ sense of the word.
+   while rule 1 recommends DeepSeek Harness once it is qualified. Neither
+   pairing acquires the recommended status before its replacement clears the
+   gates, and rule 4 lists both under the _shipped_ sense of the word.
 
 4. **Only evidence promotes a pairing.** This rule governs new and changed
    defaults, not the ones already shipping. Codex + OpenAI, **Codex +
    OpenRouter**, Claude Code + Anthropic, Claude Code + DeepSeek, and Kimi as
    `KimiAgent` remain _shipped_ defaults today without having cleared G1–G10,
-   and that qualification debt is stated here rather than implied — no gate run exists for
-   any of them, and
+   and that qualification debt is stated here rather than implied — no gate run
+   exists for any of them, and
    [#664](https://github.com/monad-developers/ultrafuzz/issues/664) records the
    status explicitly. Any new or promoted first-party pairing needs the
    qualification evidence described below, not a vendor claim.
@@ -607,10 +577,8 @@ way — which is why this table has five rows and not six.
 Only the Pi row is **tracked**: #659's acceptance criteria name the measurement
 in as many words ("Pi's reasoning levels, including `max`, are representable").
 The other four rows are **nominated rather than tracked**, on the same footing as
-the error-classification rows in the
-[Comparison Matrix](#comparison-matrix): the filed bodies of #661, #662, and
-#663 name no reasoning, variant, effort, or thinking measurement at all, so each
-owns its rows here once its own acceptance criteria name them, and not before.
+the error-classification rows in the [Comparison Matrix](#comparison-matrix),
+under the rule in [Measurement Ownership](#measurement-ownership).
 
 `cloudPortable` sits in the same position: no candidate declares a value here
 either, which is why the field is optional rather than a required `boolean`. A
@@ -626,8 +594,7 @@ Modal evidence row is in §3.1 of the
 run in that image at all. Because the field is normative,
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns the
 declared value for all five, and unlike the dimensions above that pointer
-already resolves: per-harness `ultrafuzz doctor` cloud readiness and local/Modal
-agreement are enumerated acceptance criteria on that issue today.
+already resolves — see [Measurement Ownership](#measurement-ownership).
 
 Generic topology, prompts, and artifact verification never branch on a CLI
 name.
@@ -688,9 +655,9 @@ measured here and the ones that image pins today.
   launched, not partway through a run. G2 was widened to cover preflight after
   [#659](https://github.com/monad-developers/ultrafuzz/issues/659) was filed, so
   that issue's enumerated G2 criterion named only the canary-credential half
-  when this page was written. The gate definition here is the normative one and #659
-  inherits it through its `G1–G8` reference, so the preflight/401 path is in
-  scope for that issue whether or not its own body restates the clause.
+  when this page was written. The gate definition here is the normative one and
+  #659 inherits it through its `G1–G8` reference, so the preflight/401 path is
+  in scope for that issue whether or not its own body restates the clause.
 - **G3 · Tool execution.** Exercise read, write/edit, and shell tools in a
   disposable worktree.
 - **G4 · Artifact contract.** Produce an artifact, then pass the existing
@@ -741,6 +708,55 @@ DeepSeek Harness adds five gate items of its own:
 - Prove which route is selected. The `deepseek-official` route adds a stable
   `x-deepseek-harness-user-id` header to every request, including to a
   configured gateway, and `DSH_TELEMETRY_DISABLED` does not suppress it.
+
+### Measurement Ownership
+
+Several dimensions on this page are unmeasured, and this page nominates a child
+issue for each of them. **Nomination is not assignment.** The rule, not any
+snapshot of the tracker, is what governs:
+
+> An issue owns a measurement this page nominates it for exactly when its own
+> acceptance criteria name it, and until they do that dimension is unowned
+> rather than assigned.
+
+That keeps this page correct whichever way the issues are edited. This page
+defines what the measurements are; each issue decides when it has taken them on.
+Read the issues, not this section, for their current state. The snapshot below is
+of the bodies filed as read on 2026-08-19.
+
+| Measurement                                                       | Codex          | Claude Code    | Pi            | OpenCode       | dsh            |
+| ----------------------------------------------------------------- | -------------- | -------------- | ------------- | -------------- | -------------- |
+| Error classification, authenticated preflight, retry (G2, G5, G6) | #663 nominated | #663 nominated | **#659 owns** | **#662 owns**  | #661 nominated |
+| Reasoning levels                                                  | #663 nominated | #663 nominated | **#659 owns** | #662 nominated | #661 nominated |
+| Version reconciliation against the pins the Modal image installs  | #663 nominated | #663 nominated | —             | —              | —              |
+| `cloudPortable` declared value                                    | **#663 owns**  | **#663 owns**  | **#663 owns** | **#663 owns**  | **#663 owns**  |
+
+Three of those pointers already resolve:
+
+- **#659 owns Pi.** Its acceptance criteria enumerate the G1–G8 measurements and
+  name the reasoning one in as many words ("Pi's reasoning levels, including
+  `max`, are representable").
+- **#662 owns OpenCode's** error classification, preflight, and retry, through
+  the same enumerated gates.
+- **#663 owns the `cloudPortable` declared value** for all five candidates:
+  per-harness `ultrafuzz doctor` cloud readiness and local/Modal agreement are
+  enumerated acceptance criteria on that issue today.
+
+The remaining cells are nominations, because the filed bodies do not name them:
+
+- **#663** otherwise scopes only the pinned Modal worker image and its
+  capability checks — the `dsh` sandbox runner, the Landlock per-arch package,
+  pre-baked state roots and offline cold boot, cloud readiness, and local/Modal
+  agreement. None of those requires reconciling the Codex and Claude Code
+  version pins, producing a 401, 429, rejected-model-ID, or
+  mid-stream-disconnect measurement, or exercising a reasoning level.
+- **#661** scopes the dsh adapter, its isolation, and the smoke profile. It
+  requires a real DeepSeek V4 request but names no 401, 429, rejected-model-ID,
+  or mid-stream-disconnect measurement and no reasoning surface, so dsh's error
+  classification and authenticated preflight are unowned today.
+- **#662** scopes the gates, the isolated state roots, and credential handling,
+  and names no reasoning, variant, effort, or thinking measurement, so its
+  reasoning cell is a nomination even though its gate cells are not.
 
 ## Evidence
 
@@ -853,12 +869,10 @@ Installed and executed in this environment:
   error classification, authenticated preflight behavior, and retry semantics
   unmeasured for every candidate, including the two _real run_ rows: no 401,
   429, rejected model ID,
-  or mid-stream disconnect was ever produced to classify. #659 owns Pi and #662
-  owns OpenCode; #663 is only nominated for Codex and Claude Code at the versions
-  the shipped Modal image pins, and #661 is only nominated for dsh, whose error
-  classification and authenticated preflight no filed issue owns today. Both stay
-  nominated rather than owning those dimensions until the acceptance-criteria
-  extension noted under [Comparison Matrix](#comparison-matrix) lands.
+  or mid-stream disconnect was ever produced to classify. Which issue owns each
+  of those measurements, and which pointers are nominations rather than
+  assignments, is recorded once under
+  [Measurement Ownership](#measurement-ownership).
 - **DeepSeek Harness has no supported machine-readable output.** The repository
   states the JSONL event driver is test infrastructure. `@deepseek-ai/dsh-acp`
   publishes an ACP JSON-RPC stdio server, but it is not a dependency of the
@@ -911,29 +925,26 @@ gives the same issue.
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
-   final-text-only fallback that warns rather than failing the run. This page also
-   **nominates** it for the reasoning measurement and for dsh's error
-   classification, preflight, and retry semantics: `dsh-llm-deepseek` declares
+   final-text-only fallback that warns rather than failing the run. This page
+   also **nominates** it for the reasoning measurement and for dsh's error
+   classification, preflight, and retry semantics — `dsh-llm-deepseek` declares
    `thinking` and `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so
    those have to be driven through a real request before the binding may declare
-   levels. Those nominations become ownership only once the issue's acceptance
-   criteria name them; see [Comparison Matrix](#comparison-matrix). Parsing the
-   undocumented `session.jsonl.zstd` format is explicitly out of scope.
+   levels — under the rule in
+   [Measurement Ownership](#measurement-ownership). Parsing the undocumented
+   `session.jsonl.zstd` format is explicitly out of scope.
 5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) (Phase 3) —
    qualify OpenCode plus OpenRouter separately, including fully isolated state
    directories and disabled sharing, plugins, update checks, and model fetching.
    This page also **nominates** it for the `--variant` reasoning-effort flag and
    the per-model reasoning config entries this research inspected but never
-   exercised; that nomination becomes ownership only once the issue's acceptance
-   criteria name them.
+   exercised; see [Measurement Ownership](#measurement-ownership).
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) (Phase 4) —
    gate the Modal worker image on per-harness capability checks. This page also
    nominates it for the version reconciliation between the two harnesses
    Ultrafuzz already ships, and with it the error-classification, preflight,
    retry, and reasoning-level measurements for Codex and Claude Code at the pins
-   the image installs. That nomination becomes ownership only once the issue's
-   acceptance criteria name those measurements; see
-   [Comparison Matrix](#comparison-matrix).
+   the image installs; see [Measurement Ownership](#measurement-ownership).
 7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) (Phase 5) —
    document the pairing policy and migration paths. This is the phase the
    pairing-policy section above points at. The default decision itself waits on
