@@ -19,8 +19,9 @@ page is the complete GitHub-readable plan. It carries the recommendation and
 action summary, evidence matrix, configuration and capability contracts,
 qualification gates, child-issue mapping, constraints, and pinned source list.
 
-One exception to the preamble above: the
+Two exceptions to the preamble above: the
 [capability contract](provider-harness-research.md#proposed-capability-contract)
-on that page is normative. Its exact scope and lifetime are stated there rather
-than restated here, so the two cannot drift apart. Nothing else on the page is
-normative.
+and the [qualification-gate definitions](provider-harness-research.md#qualification-gates)
+on that page are normative. Their exact scopes and lifetimes are stated there
+rather than restated here, so the two files cannot drift apart. Nothing else on
+the page is normative.

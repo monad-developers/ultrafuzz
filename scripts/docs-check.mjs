@@ -117,11 +117,13 @@ const runnerText = readFileSync(runnerSource, "utf8");
 // constant is what gets matched here and `@openai/codex@<v>` is what the docs
 // must print. Claude Code is spelled inline in the install command instead.
 // The version character classes admit prerelease spellings (`2.2.0-rc.1`,
-// `0.1.0+build`) as well as release ones. A narrower `[\d.]+` would silently
-// truncate a prerelease on both sides of the comparison, so a stale doc could
-// still pass; `VERSION_CHARS` is shared with `literalPattern` below so the two
-// halves of the check cannot disagree about what a version looks like.
-const VERSION_CHARS = "[\\w.+-]+";
+// `0.1.0+build`) as well as release ones, while requiring an alphanumeric final
+// character so adjacent sentence punctuation is not captured as part of a pin.
+// A narrower `[\d.]+` would silently truncate a prerelease on both sides of the
+// comparison, so a stale doc could still pass; `VERSION_CHARS` is shared with
+// `literalPattern` below so the two halves cannot disagree about what a version
+// looks like.
+const VERSION_CHARS = "[\\w.+-]*\\w";
 const pinPatterns = [
   ["@openai/codex", /CODEX_CLI_VERSION = "([^"]+)"/u],
   ["@anthropic-ai/claude-code", new RegExp(`@anthropic-ai\\/claude-code@(${VERSION_CHARS})`, "u")]

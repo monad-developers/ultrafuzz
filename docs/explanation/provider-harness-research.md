@@ -101,14 +101,14 @@ classes are incomparable under the relation in
 take two bindings. The direct provider-API row declares nothing at all, because
 it is not a harness binding.
 
-| Candidate                           | Events                      | Sessions                    | Isolation                   | Evidence                                       | Disposition                                            |
-| ----------------------------------- | --------------------------- | --------------------------- | --------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
-| Codex CLI 0.147.0                   | `jsonl` + schema            | `resume`                    | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path  |
-| Pi 0.84.2                           | `jsonl` + `rpc`             | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification     |
-| OpenCode 1.18.18                    | `jsonl`                     | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                      |
-| Claude Code 2.1.233                 | `jsonl` + schema            | `resume`                    | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek  |
-| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only`           | `none`                      | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, final-text nodes |
-| Direct provider-API harness         | n/a — not a harness binding | n/a — not a harness binding | n/a — not a harness binding | design only                                    | Fallback; do not implement first                       |
+| Candidate                           | Events                      | Sessions                    | Isolation                   | Evidence                                                       | Disposition                                            |
+| ----------------------------------- | --------------------------- | --------------------------- | --------------------------- | -------------------------------------------------------------- | ------------------------------------------------------ |
+| Codex CLI 0.147.0                   | `jsonl` + schema            | `resume`                    | `native-sandbox`            | real run (PR #654), upstream docs                              | First-party for OpenAI; OpenRouter compatibility path  |
+| Pi 0.84.2                           | `jsonl` + `rpc`             | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                                  | Proposed OpenRouter default, pending qualification     |
+| OpenCode 1.18.18                    | `jsonl`                     | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                                  | Proposed second OpenRouter option                      |
+| Claude Code 2.1.233                 | `jsonl` + schema            | `resume`                    | `external-sandbox-required` | CLI inspection, upstream docs                                  | First-party for Anthropic; compatibility for DeepSeek  |
+| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only`           | `none`                      | `native-sandbox`            | real run (local endpoint), upstream docs (source at `99f6f02`) | Proposed first-party for DeepSeek V4, final-text nodes |
+| Direct provider-API harness         | n/a — not a harness binding | n/a — not a harness binding | n/a — not a harness binding | none — design analysis only; no provenance class applies       | Fallback; do not implement first                       |
 
 Three dimensions issue #653 asks about are **not** answered for any candidate,
 because no row was exercised against a real paid provider: error classification,
@@ -550,6 +550,10 @@ Existing profiles keep working during migration. All four shipped
 | `DeepSeekAgent`  | `claude-code` | `deepseek`                                      |
 | `KimiAgent`      | `kimi-code`   | `kimi`                                          |
 
+Provider cells in this compatibility table name provider _kinds_, not concrete
+operator-chosen `[providers.<id>]` entries. The example above deliberately uses
+more specific IDs such as `openai-subscription` and `anthropic-subscription`.
+
 The three keys the shipped schema already accepts under `[agents.<id>]` —
 `auth`, `api_key_env`, and `config_dir` (`AGENT_KEYS` in
 `packages/config/src/loader.ts`) — map forward with them. `api_key_env` maps to
@@ -787,6 +791,9 @@ normative,
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns the
 declared value for all five, and unlike the dimensions above that pointer
 already resolves — see [Measurement Ownership](#measurement-ownership).
+Implementing the `NodeRequirements.cloudPortable` match is owned by
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658), whose acceptance
+criteria require missing cloud portability to fail before launch.
 
 Generic topology, prompts, and artifact verification never branch on a CLI
 name.
@@ -812,8 +819,9 @@ These rules hold for every harness, not just the ones measured here.
   is a **class** rather than one harness: **persisted-credential harnesses**,
   whose credential lives inside their own persisted state root instead of the
   child environment. Ultrafuzz ships three under `auth = "subscription"`, the
-  default mode for each harness: Codex reads `CODEX_HOME/auth.json`; Claude Code
-  uses `CLAUDE_CONFIG_DIR` and its logged-in `claude -p` session; and Kimi Code
+  default mode for each of those three legacy adapters: Codex reads
+  `CODEX_HOME/auth.json`; Claude Code uses `CLAUDE_CONFIG_DIR` and its logged-in
+  `claude -p` session; and Kimi Code
   uses its logged-in Kimi home. Those harnesses keep one explicitly named,
   stable, writable `state_root` outside the run scope (invariant 7 of the
   [configuration boundary](#proposed-configuration-boundary)) rather than being
@@ -897,6 +905,13 @@ Claude Code versions measured here and the ones that image pins today.
   configuration disabled.
 - **G10 · Provenance.** Record the CLI version, package integrity, provider
   request evidence, and any capability that remains unknown.
+
+G9 is owned by [#663](https://github.com/monad-developers/ultrafuzz/issues/663).
+G10 is owned by the Pi, dsh, and OpenCode qualification issues —
+[#659](https://github.com/monad-developers/ultrafuzz/issues/659),
+[#661](https://github.com/monad-developers/ultrafuzz/issues/661), and
+[#662](https://github.com/monad-developers/ultrafuzz/issues/662) — whose acceptance
+criteria require the provenance record before promotion.
 
 DeepSeek Harness adds five gate items of its own:
 
