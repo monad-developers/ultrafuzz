@@ -764,9 +764,7 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.jobs).not.toHaveProperty("pull-request-validation");
 
     const releaseValidation = workflow.jobs["release-validation"];
-    expect(releaseValidation?.name).toBe(
-      "${{ github.event_name == 'pull_request' && 'Full release validation (main/manual only)' || format('Full release validation ({0})', matrix.description) }}"
-    );
+    expect(releaseValidation?.name).toBe("Full release validation (${{ matrix.description }})");
     expect(releaseValidation?.if).toBe("github.event_name != 'pull_request'");
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
