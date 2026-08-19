@@ -1217,7 +1217,7 @@
             <strong class="tag">Reasoning is unmeasured for every candidate</strong>
             <p>
               The table has no <em>Reasoning</em> column because <em>no</em> row could honestly fill one: not one
-              reasoning level in this research reached a real provider. Four candidates do have a known surface.
+              reasoning level in this research reached a real provider. All five candidates do have a known surface.
               <strong>Codex</strong> takes <code>model_reasoning_effort</code>, which Ultrafuzz's existing adapter
               already drives (<code>packages/runtime/src/templates/smithers/agents/codex.tsx</code>), but PR #654's
               requests went to a deterministic local server. <strong>Claude Code</strong> takes <code>--effort</code>,
@@ -1237,8 +1237,8 @@
               <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
               accepts a <code>reasoning</code> value. The two #663 rows are nominated rather than tracked, on the same
-              footing as the error-classification callout below: that issue's body has to pick up the measurement before
-              the pointer resolves.
+              footing as the error-classification callout below: #663 owns these two measurements once its acceptance
+              criteria name them, and not before.
             </p>
           </div>
           <div class="callout warn">
@@ -1268,11 +1268,14 @@
               pre-baked state roots and offline cold boot, <code>ultrafuzz doctor</code> cloud readiness, and
               local/Modal agreement. None of them requires reconciling the Codex and Claude Code version pins, and none
               requires producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement — nor the Codex and
-              Claude Code reasoning-level measurements §3.2 also assigns to it.
-              <strong>#663's body must be extended with acceptance criteria for all three</strong>, and this report's
-              spelling governs — the same correction §5 asks for on #658's abbreviations. Until that edit lands, treat
-              Codex's and Claude Code's error classification, preflight, and retry semantics as unowned rather than
-              assigned.
+              Claude Code reasoning-level measurements §3.2 also nominates it for. The rule rather than that snapshot
+              governs, so this report stays correct whichever way the issue is edited:
+              <strong
+                >#663 owns Codex's and Claude Code's version reconciliation, error classification, preflight, retry, and
+                reasoning levels exactly when its acceptance criteria name them, and until they do those dimensions are
+                unowned rather than assigned.</strong
+              >
+              This report defines what the measurements are; the issue decides when it has taken them on.
             </p>
           </div>
         </section>
@@ -1373,6 +1376,7 @@
                 <span class="box">usage: tokens / cache / cost</span>
                 <span class="box">reasoningLevels: measured values only</span>
                 <span class="box">isolation: native-sandbox | external-sandbox-required</span>
+                <span class="box">cloudPortable: declared only when measured</span>
               </div>
             </div>
             <div class="flow">↓</div>
@@ -1400,8 +1404,9 @@
           <div class="callout">
             <strong class="tag">The spelling is part of the contract</strong>
             <p>
-              These are the normative capability names, identical to the <code>HarnessCapabilities</code> interface in
-              <a href="provider-harness-research.md">provider-harness-research.md</a>: <code>tools</code> is
+              These are the normative capability names, spelled exactly as the
+              <code>HarnessCapabilities</code> interface in
+              <a href="provider-harness-research.md">provider-harness-research.md</a> spells them: <code>tools</code> is
               <code>filesystem</code> / <code>shell</code>, <code>events</code> is
               <code>"jsonl" | "rpc" | "final-text-only"</code>, <code>sessions</code> is
               <code>"none" | "resume" | "tree"</code>, and <code>isolation</code> is
@@ -1412,16 +1417,24 @@
               <code>reasoningLevels</code> lists only levels a real request exercised against a real provider. An empty
               list makes the validator reject a <code>reasoning</code> value on that binding, but it records what was
               measured — it is not a claim that the harness has no reasoning surface. Every candidate in §3 is empty
-              today for exactly that reason, including Codex and Pi, whose surfaces are known but were only inspected;
-              no worked configuration on either page may set <code>reasoning</code> until a child issue measures levels.
+              today for exactly that reason, including Codex, whose surface is known from upstream docs and Ultrafuzz's
+              own adapter rather than from any CLI inspection, and Pi, whose surface was CLI-inspected but never
+              exercised; no worked configuration on either page may set <code>reasoning</code> until a child issue
+              measures levels.
+            </p>
+            <p>
+              <code>cloudPortable</code> is optional for the same reason. No candidate has a measured value, and a
+              required boolean could only claim <code>true</code> or <code>false</code> about a harness nobody has run
+              in the worker image. An absent value makes the validator refuse to schedule that binding onto a cloud node
+              rather than reading the absence as <code>false</code>.
             </p>
             <p>
               The summary block in
-              <a href="https://github.com/monad-developers/ultrafuzz/issues/658">issue #658</a> abbreviates some of
-              these — it writes <code>tools</code> as <code>fs</code> / <code>shell</code> and <code>isolation</code> as
-              <code>native</code> | <code>external</code>. Those abbreviations are shorthand in the issue text, not the
-              contract: the implementation follows the spellings above, and #658's body should be corrected to match
-              rather than the other way round.
+              <a href="https://github.com/monad-developers/ultrafuzz/issues/658">issue #658</a> abbreviated some of
+              these when this report was written — writing <code>tools</code> as <code>fs</code> /
+              <code>shell</code> and <code>isolation</code> as <code>native</code> | <code>external</code>. The durable
+              rule is a precedence rule: wherever the issue and this report disagree on a capability spelling, this
+              report is the contract and the issue text is shorthand, so the implementation follows the spellings above.
             </p>
           </div>
 
@@ -1706,8 +1719,10 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     provider's declared <code>preflight</code> mode then behaves as specified against the real endpoint,
                     including the 401 path: a missing or rejected credential fails before launch, not mid-run. This gate
                     was widened to cover preflight after <a href="#issue-b">#653-B (#659)</a> was filed, so that issue's
-                    enumerated G2 criterion names only the canary-credential half; it inherits this definition by its
-                    <code>G1–G8</code> reference, and its body should pick up the preflight/401 clause explicitly.
+                    enumerated G2 criterion named only the canary-credential half when this report was written. The gate
+                    definition here is the normative one and #659 inherits it through its <code>G1–G8</code> reference,
+                    so the preflight/401 path is in scope for that issue whether or not its own body restates the
+                    clause.
                   </td>
                   <td>
                     <span class="pill warn">canary passed locally; authenticated preflight unmeasured</span>
@@ -1813,8 +1828,9 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                       allowlist.
                     </li>
                     <li>
-                      Unsupported protocol, reasoning level, missing executable/version, or missing credential fails
-                      before launch with an actionable diagnostic naming the profile field.
+                      Unsupported protocol, reasoning level, missing executable/version, missing credential, or an event
+                      class below the node's requirement fails before launch with an actionable diagnostic naming the
+                      profile field.
                     </li>
                     <li>
                       Every existing profile — including <code>CodexAgent</code>, <code>ClaudeAgent</code>,
@@ -1907,6 +1923,9 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     </li>
                     <li>Docs and diagnostics never call this adapter "DeepSeek Harness" or "DeepSeek Code".</li>
                     <li>No change to reasoning-effort validation, pricing provenance, or usage translation.</li>
+                    <li>
+                      The compatibility pairing stays supported and stays non-default, with the migration documented.
+                    </li>
                   </ul>
                 </dd>
                 <dt>Depends on</dt>

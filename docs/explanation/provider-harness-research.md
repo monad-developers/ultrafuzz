@@ -27,9 +27,11 @@ other, so neither is a substitute for the other:
   maintenance posture).
 - **Only on this page:** the TOML configuration boundary, the TypeScript
   `ProviderBinding` / `HarnessCapabilities` / `QualifiedHarnessBinding`
-  interfaces, the legacy `agent = "…"` forward mapping, the five dsh-specific
-  gate items, and the full per-file source list with every DeepSeek Harness URL
-  pinned to a commit rather than a branch.
+  interfaces, the _complete_ legacy `agent = "…"` forward mapping including the
+  `CodexAgent` case (the plan carries only the `DeepSeekAgent` half, in its §2
+  obsolete-claims table and its §9-C scope), the five dsh-specific gate items,
+  and the full per-file source list with every DeepSeek Harness URL pinned to a
+  commit rather than a branch.
 - **On both pages:** the correction narrative, the candidate comparison and its
   evidence provenance, the pairing policy, the capability-contract vocabulary,
   the credential and state rules, and the numbered qualification gates G1–G10
@@ -135,19 +137,23 @@ criteria are extended. The only measured retry fact on this page is internal to
 dsh (`dsh-llm-retry`) and is not observable from outside the process.
 
 That last pointer is a gap in the issue tracker, not just in this page. #659 and
-#662 already scope the measurements for Pi and OpenCode, but #663's body scopes
-only the pinned Modal worker image and its capability checks: its acceptance
-criteria are the `dsh` sandbox runner, the Landlock per-arch package, pre-baked
-state roots and offline cold boot, `ultrafuzz doctor` cloud readiness, and
-local/Modal agreement. None of them requires reconciling the Codex and Claude
-Code version pins, and none requires producing a 401, 429, rejected-model-ID, or
-mid-stream-disconnect measurement — nor the Codex and Claude Code
-reasoning-level measurements this page also assigns to it below. **#663's body
-must be extended with acceptance criteria for all three**, and the spelling on
-this page governs — the same correction this page asks for on #658's
-abbreviations below. Until that edit lands, treat Codex's and Claude Code's
-error classification, preflight, and retry semantics as unowned rather than
-assigned.
+#662 already scope the measurements for Pi and OpenCode. #663's body, as read
+while this page was written, scopes only the pinned Modal worker image and its
+capability checks: its acceptance criteria are the `dsh` sandbox runner, the
+Landlock per-arch package, pre-baked state roots and offline cold boot,
+`ultrafuzz doctor` cloud readiness, and local/Modal agreement. None of them
+requires reconciling the Codex and Claude Code version pins, none requires
+producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement,
+and none covers the Codex and Claude Code reasoning-level measurements this page
+also nominates it for below.
+
+The rule rather than that snapshot is what governs, so this page stays correct
+whichever way the issue is edited: **#663 owns Codex's and Claude Code's version
+reconciliation, error classification, preflight, retry, and reasoning levels
+exactly when its acceptance criteria name them, and until they do those
+dimensions are unowned rather than assigned.** This page defines what the
+measurements are; the issue decides when it has taken them on. Read the issue,
+not this paragraph, for its current state.
 
 The detail behind each row follows. Each subsection covers the same five
 dimensions in the same order: provider and model binding, the reasoning surface,
@@ -375,10 +381,12 @@ _Evidence: design analysis only. Nothing was built or measured._
    **Recommended default** describes the advice this section gives a new
    project. Codex is the shipped OpenRouter default by grandfathering, because
    it is what already ships and nothing has replaced it, while rule 2 recommends
-   a gateway-neutral harness instead; the two converge at Phase 5. Claude Code
-   is likewise the shipped DeepSeek default by grandfathering, because it is the
-   only pairing that reaches DeepSeek today, while rule 1 recommends DeepSeek
-   Harness once it is qualified. Neither pairing acquires the recommended status
+   a gateway-neutral harness instead; the two converge at Phase 5 of the
+   sequencing — the default decision carried by
+   [#664](https://github.com/monad-developers/ultrafuzz/issues/664) in
+   [Next Work](#next-work). Claude Code is likewise the shipped DeepSeek default
+   by grandfathering, because it is the only pairing that reaches DeepSeek today,
+   while rule 1 recommends DeepSeek Harness once it is qualified. Neither pairing acquires the recommended status
    before its replacement clears the gates, and rule 4 lists both under the
    _shipped_ sense of the word.
 
@@ -502,7 +510,7 @@ interface HarnessCapabilities {
   usage: { tokens: boolean; cache: boolean; cost: boolean };
   reasoningLevels: readonly string[];
   isolation: "native-sandbox" | "external-sandbox-required";
-  cloudPortable: boolean;
+  cloudPortable?: boolean;
 }
 
 interface QualifiedHarnessBinding {
@@ -523,11 +531,12 @@ capability must use these strings, so an operator can match an error back to
 this page.
 
 The summary block in
-[#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviates
-some of these — it writes `tools` as `fs` / `shell` and `isolation` as
-`native` | `external`. Those abbreviations are shorthand in the issue text, not
-the contract; the implementation follows the spellings above, and #658's issue
-body should be corrected to match rather than the other way round.
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviated
+some of these when this page was written — writing `tools` as `fs` / `shell` and
+`isolation` as `native` | `external`. The durable rule is a precedence rule:
+wherever the issue and this page disagree on a capability spelling, this page is
+the contract and the issue text is shorthand, so the implementation follows the
+spellings above.
 
 `events: "final-text-only"` is new and exists because DeepSeek Harness needs
 it. A harness in that class can still run nodes whose contract is "produce an
@@ -553,30 +562,36 @@ what was measured, not that the harness has no reasoning surface, and **every
 candidate on this page is empty today** because no reasoning level anywhere in
 this research reached a real provider:
 
-| Harness     | Reasoning surface found                            | Why the list is empty today                   | Owner |
-| ----------- | -------------------------------------------------- | --------------------------------------------- | ----- |
-| Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server | #663  |
-| Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request      | #663  |
-| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659  |
-| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661  |
-| OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662  |
+| Harness     | Reasoning surface found                            | Why the list is empty today                   | Owner            |
+| ----------- | -------------------------------------------------- | --------------------------------------------- | ---------------- |
+| Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server | #663 (nominated) |
+| Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request      | #663 (nominated) |
+| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659             |
+| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661             |
+| OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662             |
 
 All five have a known surface and none has a measured level, which is what the
 declared value records: only a measured level may be declared. Each list becomes
 non-empty as soon as its child issue measures real levels. The two #663
 rows are nominated rather than tracked, on the same footing as the
 error-classification rows in the
-[Comparison Matrix](#comparison-matrix): that issue's body has to pick up the
-measurement before the pointer resolves.
+[Comparison Matrix](#comparison-matrix): #663 owns these two measurements once
+its acceptance criteria name them, and not before.
 
 `cloudPortable` sits in the same position: no candidate declares a value here
-either. What the subsections record is the _evidence_ for cloud portability
-rather than the declared boolean — Codex's existing adapter already runs in
-Modal workers, the Modal image installs Claude Code's pin, dsh's Modal evidence
-row is in §3.1 of the [architecture plan](provider-harness-plan.html), and Pi
-and OpenCode were never run in that image at all. Because the field is
-normative, [#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns
-the declared value for all five, and unlike the dimensions above that pointer
+either, which is why the field is optional rather than a required `boolean`. A
+required boolean could only say `true` or `false`, and neither is honest about a
+harness nobody has run in the worker image. An absent `cloudPortable` says what
+an empty `reasoningLevels` says: nothing was measured. The validator refuses to
+schedule such a binding onto a cloud node rather than reading the absence as
+`false` or assuming a default. What the subsections record is the _evidence_ for
+cloud portability rather than the declared boolean — Codex's existing adapter
+already runs in Modal workers, the Modal image installs Claude Code's pin, dsh's
+Modal evidence row is in §3.1 of the
+[architecture plan](provider-harness-plan.html), and Pi and OpenCode were never
+run in that image at all. Because the field is normative,
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns the
+declared value for all five, and unlike the dimensions above that pointer
 already resolves: per-harness `ultrafuzz doctor` cloud readiness and local/Modal
 agreement are enumerated acceptance criteria on that issue today.
 
@@ -638,10 +653,10 @@ measured here and the ones that image pins today.
   401 path: a missing or rejected credential must fail before the harness is
   launched, not partway through a run. G2 was widened to cover preflight after
   [#659](https://github.com/monad-developers/ultrafuzz/issues/659) was filed, so
-  that issue's enumerated G2 criterion names only the canary-credential half; it
-  inherits this definition by its `G1–G8` reference, and its body should pick up
-  the preflight/401 clause explicitly — the same correction this page asks for
-  on #658's abbreviations.
+  that issue's enumerated G2 criterion named only the canary-credential half
+  when this page was written. The gate definition here is the normative one and #659
+  inherits it through its `G1–G8` reference, so the preflight/401 path is in
+  scope for that issue whether or not its own body restates the clause.
 - **G3 · Tool execution.** Exercise read, write/edit, and shell tools in a
   disposable worktree.
 - **G4 · Artifact contract.** Produce an artifact, then pass the existing
@@ -841,18 +856,23 @@ Installed and executed in this environment:
 The work is filed as bounded child issues of
 [#653](https://github.com/monad-developers/ultrafuzz/issues/653):
 
-1. [#658](https://github.com/monad-developers/ultrafuzz/issues/658) — implement
-   the provider/harness/model schema and binding validator without changing the
-   existing default.
-2. [#659](https://github.com/monad-developers/ultrafuzz/issues/659) — qualify and
-   integrate Pi plus OpenRouter using Smithers' pinned `PiAgent`.
-3. [#660](https://github.com/monad-developers/ultrafuzz/issues/660) — rename the
-   legacy `DeepSeekAgent` binding to the Claude Code + DeepSeek pairing it
-   actually is, without breaking current profiles.
-4. [#661](https://github.com/monad-developers/ultrafuzz/issues/661) — add a
-   DeepSeek Harness adapter behind an explicit `harness = "dsh"` binding, scoped
-   to final-text nodes. The adapter must write an `llm-pi-ai:`/`llm-deepseek:`
-   settings document, not just environment variables: the pi-ai adapter ships
+The numbering below is this page's own; the parenthesised phase is the
+sequencing step that §6 of the [architecture plan](provider-harness-plan.html)
+gives the same issue.
+
+1. [#658](https://github.com/monad-developers/ultrafuzz/issues/658) (Phase 0) —
+   implement the provider/harness/model schema and binding validator without
+   changing the existing default.
+2. [#659](https://github.com/monad-developers/ultrafuzz/issues/659) (Phase 1) —
+   qualify and integrate Pi plus OpenRouter using Smithers' pinned `PiAgent`.
+3. [#660](https://github.com/monad-developers/ultrafuzz/issues/660) (Phase 2) —
+   rename the legacy `DeepSeekAgent` binding to the Claude Code + DeepSeek
+   pairing it actually is, without breaking current profiles.
+4. [#661](https://github.com/monad-developers/ultrafuzz/issues/661) (Phase 2) —
+   add a DeepSeek Harness adapter behind an explicit `harness = "dsh"` binding,
+   scoped to final-text nodes. The adapter must write an
+   `llm-pi-ai:`/`llm-deepseek:` settings document, not just environment
+   variables: the pi-ai adapter ships
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
@@ -862,20 +882,22 @@ The work is filed as bounded child issues of
    those through a real request and publish the levels the binding may declare.
    Parsing the undocumented `session.jsonl.zstd` format is explicitly out of
    scope.
-5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) — qualify
-   OpenCode plus OpenRouter separately, including fully isolated state
+5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) (Phase 3) —
+   qualify OpenCode plus OpenRouter separately, including fully isolated state
    directories and disabled sharing, plugins, update checks, and model fetching,
    plus the `--variant` reasoning-effort flag and the per-model reasoning config
    entries this research inspected but never exercised.
-6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) — gate the
-   Modal worker image on per-harness capability checks. It should also pick up
-   the version reconciliation for the two harnesses Ultrafuzz already ships, and
-   with it the error-classification, preflight, and retry measurements for Codex
-   and Claude Code at the pins the image installs — its body carries neither
-   today, so that issue needs the extension described under
-   [Comparison Matrix](#comparison-matrix) before this row is actionable.
-7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) — document
-   the pairing policy and migration paths. The default decision itself waits on
+6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) (Phase 4) —
+   gate the Modal worker image on per-harness capability checks. This page also
+   nominates it for the version reconciliation between the two harnesses
+   Ultrafuzz already ships, and with it the error-classification, preflight,
+   retry, and reasoning-level measurements for Codex and Claude Code at the pins
+   the image installs. That nomination becomes ownership only once the issue's
+   acceptance criteria name those measurements; see
+   [Comparison Matrix](#comparison-matrix).
+7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) (Phase 5) —
+   document the pairing policy and migration paths. This is the phase the
+   pairing-policy section above points at. The default decision itself waits on
    comparable real-provider results; until then Codex remains the shipped
    OpenRouter default, stated rather than implied.
 
