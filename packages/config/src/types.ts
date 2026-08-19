@@ -127,10 +127,19 @@ export interface ExecutionConfig {
 export interface ModelProfile {
   id: string;
   agent: string;
+  harness?: string;
+  provider?: string;
   model?: string;
   reasoning?: string;
   timeoutSeconds?: number;
 }
+
+export type WireProtocol = "openai-responses" | "openai-chat" | "anthropic-messages" | "provider-native";
+export type ProviderBinding = { id: string; kind: string; baseUrl: string; protocols: readonly WireProtocol[]; preflight: "openrouter-key" | "authenticated-models" | "first-request" } & ({ auth: "api-key"; credentialEnv: string } | { auth: "subscription" });
+export type HarnessState = { mode: "run-scoped"; configSeedDir: string } | { mode: "persistent"; stateRoot: string };
+export interface HarnessCapabilities { id: string; executable: string; version: string; state: HarnessState; protocols: readonly WireProtocol[]; unattended: true; tools: { filesystem: boolean; shell: boolean }; events: "jsonl" | "rpc" | "final-text-only"; sessions: "none" | "resume" | "tree"; usage: { tokens: boolean; cache: boolean; cost: boolean }; reasoningLevels?: readonly string[]; isolation: "native-sandbox" | "external-sandbox-required"; cloudPortable?: boolean }
+export interface QualifiedHarnessBinding { provider: ProviderBinding; harness: HarnessCapabilities; model: string; reasoning?: string; protocol: WireProtocol; childEnv: Record<string, string>; persistedCredentialExemption?: { stateRoot: string; reason: string } }
+export interface NodeRequirements { events?: HarnessCapabilities["events"]; cloudPortable?: true }
 
 export interface ModelsConfig {
   default: string;
@@ -198,6 +207,8 @@ export interface ResolvedConfig {
   execution: ExecutionConfig;
   models: ModelsConfig;
   agents: Record<string, AgentConfig>;
+  providers: Record<string, ProviderBinding>;
+  harnesses: Record<string, HarnessCapabilities>;
   permissions: PermissionConfig;
   invariants: InvariantConfig;
   triage: TriageConfig;
@@ -237,6 +248,8 @@ export interface ProjectConfigInput {
     profiles?: Record<string, Partial<ModelProfile> & { id?: string }>;
   };
   agents?: Record<string, Partial<AgentConfig>>;
+  providers?: Record<string, Partial<ProviderBinding>>;
+  harnesses?: Record<string, Partial<HarnessCapabilities> & { configSeedDir?: string; stateRoot?: string }>;
   permissions?: Partial<PermissionConfig>;
   invariants?: Partial<InvariantConfig>;
   triage?: Partial<TriageConfig>;

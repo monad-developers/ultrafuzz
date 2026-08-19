@@ -9,3 +9,5 @@ export * from "./redaction.js";
 export * from "./resolve.js";
 export * from "./triage.js";
 export * from "./types.js";
+
+export * from "./provider-bindings.js";
