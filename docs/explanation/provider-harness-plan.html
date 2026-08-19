@@ -741,8 +741,7 @@
                     <code>deepseek-ai/deepseek-harness</code> exists, is MIT-licensed TypeScript, ships the
                     <code>dsh</code> CLI as <code>@deepseek-ai/dsh</code>, and heads the <em>Agent Integrations</em>
                     sidebar in DeepSeek's own API docs — as an outbound link to the harness's own site, since the docs
-                    host no page for it. Both its own README and DeepSeek's API docs — in the Quick Start's
-                    <em>Integrate with Agent Tools</em> section — call it a developer preview.
+                    host no page for it. The DeepSeek Harness README itself calls the project a developer preview.
                   </td>
                 </tr>
                 <tr>
@@ -1240,9 +1239,9 @@
               measurement may make. <a href="#issue-b">#653-B (#659)</a> must publish Pi's levels,
               <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
-              accepts a <code>reasoning</code> value. Only the Pi row is <strong>tracked</strong> — #659's acceptance
-              criteria name that measurement in as many words. The other four rows are
-              <strong>nominated rather than tracked</strong>, on the same footing as the error-classification callout
+              accepts a <code>reasoning</code> value. Only #659 <strong>owns</strong> its row — its acceptance criteria
+              name that measurement in as many words. The other four rows are
+              <strong>nominated rather than owned</strong>, on the same footing as the error-classification callout
               below: the filed bodies of #661, #662, and #663 name no reasoning, variant, effort, or thinking
               measurement, so each owns its rows once its own acceptance criteria name them, and not before.
             </p>
@@ -1379,7 +1378,7 @@
                 <span class="box">executable + pinned version</span>
                 <span class="box">credential present</span>
                 <span class="box">cloud image capability</span>
-                <span class="box accent">event class ≥ node requirement</span>
+                <span class="box accent">event class satisfies node requirement</span>
               </div>
             </div>
             <div class="flow">↓</div>
@@ -1428,6 +1427,15 @@
               <code>"none" | "resume" | "tree"</code>, and <code>isolation</code> is
               <code>"native-sandbox" | "external-sandbox-required"</code>. Diagnostics that name a capability must use
               these strings so an operator can match the error to the documentation.
+            </p>
+            <p>
+              The comparison relation is a partial order, not a total one: <code>final-text-only</code> is below
+              <code>jsonl</code>, so a harness declaring <code>jsonl</code> satisfies a node requiring
+              <code>final-text-only</code> but never the reverse, while <code>rpc</code> is incomparable to both — a
+              node that requires <code>rpc</code> is satisfied only by a harness declaring exactly <code>rpc</code>, and
+              a harness declaring <code>rpc</code> satisfies only that requirement. Issue
+              <a href="https://github.com/monad-developers/ultrafuzz/issues/658">#658</a> must implement exactly this
+              relation.
             </p>
             <p>
               <code>reasoningLevels</code> lists only levels a real request exercised against a real provider, and it is

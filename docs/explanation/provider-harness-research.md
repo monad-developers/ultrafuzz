@@ -13,32 +13,6 @@ and this page is published by
 recommendations below are proposals awaiting real-provider qualification, not
 shipped defaults.
 
-The companion [architecture plan](provider-harness-plan.html) is a
-self-contained HTML report — GitHub serves `.html` as plain text, so download it
-and open it in a browser. The two pages overlap but are **not** copies of each
-other, so neither is a substitute for the other:
-
-- **Only in the HTML plan:** §1 the verdict; §7 the risk register of severities
-  and mitigations; §9 the drafted issue bodies that became
-  [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
-  the §2 table of obsolete draft claims paired with their replacements; the
-  Modal-portability evidence row of its §3.1 dsh table; and the row-by-row §3.1
-  detail behind findings this page states in condensed form (packaging, retry,
-  maintenance posture).
-- **Only on this page:** the TOML configuration boundary, the TypeScript
-  `ProviderBinding` / `HarnessCapabilities` / `QualifiedHarnessBinding`
-  interfaces, the _complete_ legacy `agent = "…"` forward mapping including the
-  `CodexAgent` case (the plan carries only the `DeepSeekAgent` half, in its §2
-  obsolete-claims table and its §9-C scope), the five dsh-specific gate items,
-  and the full per-file source list with every DeepSeek Harness URL pinned to a
-  commit rather than a branch.
-- **On both pages:** the correction narrative, the candidate comparison and its
-  evidence provenance, the pairing policy, the capability-contract vocabulary,
-  the credential and state rules, and the numbered qualification gates G1–G10
-  that the child issues cite by number.
-- **On both pages in different form:** the HTML plan's §6 sequencing is
-  condensed here into [Next Work](#next-work).
-
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
 validation and release cadences:
@@ -53,6 +27,12 @@ is not a decision that OpenRouter requires Codex or that Codex should remain the
 recommended pairing; see
 [Recommended Pairing Policy](#recommended-pairing-policy) for how those two
 statuses differ.
+
+The companion [architecture plan](provider-harness-plan.html) is a
+self-contained HTML report — GitHub serves `.html` as plain text, so download
+it and open it in a browser to read it as intended. The two pages overlap but
+neither contains the other; the [explanation index](index.md) maps which
+material lives only on which page.
 
 ## What "DeepSeek Code" Refers To
 
@@ -530,8 +510,17 @@ needs from a harness — a dashboard or telemetry node requires `events: "jsonl"
 while a node whose contract is "produce an artifact, exit zero" requires only
 `events: "final-text-only"` — and the validator matches that requirement against
 the binding's declared capability before launch, so a harness whose event class
-is below the node's requirement is rejected rather than scheduled and discovered
-mid-run. The HTML plan's §5.1 uses the same spelling.
+does not satisfy the node's requirement is rejected rather than scheduled and
+discovered mid-run. The HTML plan's §5.1 uses the same spelling.
+
+The comparison relation is a partial order, not a total one:
+`final-text-only` is below `jsonl`, so a harness declaring `jsonl` satisfies a
+node requiring `final-text-only` but never the reverse, while `rpc` is
+incomparable to both — a node that requires `rpc` is satisfied only by a
+harness declaring exactly `rpc`, and a harness declaring `rpc` satisfies only
+that requirement. Issue
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) must implement
+exactly this relation.
 
 The summary block in
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviated
@@ -558,7 +547,8 @@ this plan.
 
 The binding validator must reject an unsupported protocol, reasoning level,
 missing executable/version, unavailable cloud image, missing credential, or an
-event class below the node's requirement before workflow launch. A harness that
+event class that does not satisfy the node's requirement under the comparison
+relation above before workflow launch. A harness that
 records no reasoning levels accepts no `reasoning` value at all, so setting one
 on such a binding is a validation error rather than a silently ignored field.
 `reasoningLevels` is optional for the same reason `cloudPortable` is, and the
@@ -575,7 +565,7 @@ provider:
 | ----------- | -------------------------------------------------- | --------------------------------------------- | ---------------- |
 | Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server | #663 (nominated) |
 | Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request      | #663 (nominated) |
-| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659 (tracked)   |
+| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659 (owns)      |
 | dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661 (nominated) |
 | OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662 (nominated) |
 
@@ -587,9 +577,9 @@ of the [Comparison Matrix](#comparison-matrix), the direct provider-API harness,
 declares no capability values whatsoever, so it has no `reasoningLevels` either
 way — which is why this table has five rows and not six.
 
-Only the Pi row is **tracked**: #659's acceptance criteria name the measurement
+Only #659 **owns** its row: its acceptance criteria name the measurement
 in as many words ("Pi's reasoning levels, including `max`, are representable").
-The other four rows are **nominated rather than tracked**, on the same footing as
+The other four rows are **nominated rather than owned**, on the same footing as
 the error-classification rows in the [Comparison Matrix](#comparison-matrix),
 under the rule in [Measurement Ownership](#measurement-ownership).
 
