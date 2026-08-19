@@ -12,7 +12,7 @@ product model behind that contract.
 - [Aave v4 Invariant Case Study](aave-v4-invariant-case-study.md)
 - [Monad Bugfinder Context](bugfinder.md)
 
-## Reading the provider/harness pair
+## Reading The Provider/Harness Pair
 
 The two provider/harness pages are one piece of work in two formats, and they
 are read differently:

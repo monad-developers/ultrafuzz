@@ -89,11 +89,11 @@ gates and credential-isolation checks described below.
 The three kinds of evidence collected here are not interchangeable, so every
 row names its provenance:
 
-| Provenance         | What it means                                                                                                                                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **real run**       | The pinned CLI was installed and executed in this environment against a live endpoint. Where no paid credential existed that endpoint was a local deterministic server: routing evidence, never qualification. |
-| **CLI inspection** | The real installed binary answered `--version` and `--help`. The capability is advertised by the executable itself but was not exercised end to end.                                                           |
-| **upstream docs**  | Vendor documentation or source read at a pinned commit. A claim, not a measurement.                                                                                                                            |
+| Provenance         | What it means                                                                                                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **real run**       | The CLI was installed at an exact recorded version and executed in this environment against a live endpoint. Where no paid credential existed that endpoint was a local deterministic server: routing evidence, never qualification. |
+| **CLI inspection** | The real installed binary answered `--version` and `--help`. The capability is advertised by the executable itself but was not exercised end to end.                                                                                 |
+| **upstream docs**  | Vendor documentation or source read at a pinned commit. A claim, not a measurement.                                                                                                                                                  |
 
 The `Events`, `Sessions`, and `Isolation` columns are drawn from the
 capability-contract vocabulary defined in
@@ -132,9 +132,25 @@ and Claude Code re-measured at the versions the shipped Modal image pins. The
 only measured retry fact on this page is internal to dsh (`dsh-llm-retry`) and
 is not observable from outside the process.
 
-The detail behind each row follows. Each subsection covers the same four
-dimensions: provider and model binding, unattended tools and artifacts, events
-and telemetry, and isolation and portability.
+That last pointer is a gap in the issue tracker, not just in this page. #659 and
+#662 already scope the measurements for Pi and OpenCode, but #663's body scopes
+only the pinned Modal worker image and its capability checks: its acceptance
+criteria are the `dsh` sandbox runner, the Landlock per-arch package, pre-baked
+state roots and offline cold boot, `ultrafuzz doctor` cloud readiness, and
+local/Modal agreement. None of them requires reconciling the Codex and Claude
+Code version pins, and none requires producing a 401, 429, rejected-model-ID, or
+mid-stream-disconnect measurement — nor the Codex and Claude Code
+reasoning-level measurements this page also assigns to it below. **#663's body
+must be extended with acceptance criteria for all three**, and the spelling on
+this page governs — the same correction this page asks for on #658's
+abbreviations below. Until that edit lands, treat Codex's and Claude Code's
+error classification, preflight, and retry semantics as unowned rather than
+assigned.
+
+The detail behind each row follows. Each subsection covers the same five
+dimensions in the same order: provider and model binding, the reasoning surface,
+unattended tools and artifacts, events and telemetry, and isolation and
+portability.
 
 ### Codex CLI 0.147.0
 
@@ -144,8 +160,6 @@ _Evidence: real run (PR #654), upstream docs._
   the model is supplied separately. PR #654 (merged into `release/v0.1.0` on
   2026-08-18, before this re-analysis) validated an OpenRouter Responses route
   against a deterministic Responses-compatible server.
-- **Unattended.** `codex exec` is non-interactive, has filesystem and shell
-  tools, and supports a final-response JSON schema.
 - **Reasoning.** Codex takes a reasoning effort through the
   `model_reasoning_effort` config key, and Ultrafuzz already drives it: the
   existing adapter maps its `reasoningEffort` option onto exactly that key
@@ -155,6 +169,8 @@ _Evidence: real run (PR #654), upstream docs._
   real provider. A Codex binding therefore declares an empty `reasoningLevels`
   until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
   measures the levels at the version the shipped image pins.
+- **Unattended.** `codex exec` is non-interactive, has filesystem and shell
+  tools, and supports a final-response JSON schema.
 - **Events.** JSONL events, persisted or ephemeral sessions, `exec resume`, and
   provider-reported usage.
 - **Isolation.** Apache-2.0; Node wrapper plus native binaries, with a native
@@ -170,10 +186,10 @@ upstream docs. No provider request was made._
 
 - **Binding.** Built-in `openrouter` and `deepseek` providers; the CLI accepts
   `--provider` and an opaque `--model`. Custom OpenAI, Anthropic, Google, and
-  Responses-compatible providers are documented. **The reasoning surface was
-  inspected, not exercised**: `--help` on the real 0.84.2 binary advertises
-  levels through `max`, but no provider request set one, so a Pi binding
-  declares an empty `reasoningLevels` until
+  Responses-compatible providers are documented.
+- **Reasoning.** **Inspected, not exercised**: `--help` on the real 0.84.2
+  binary advertises levels through `max`, but no provider request set one, so a
+  Pi binding declares an empty `reasoningLevels` until
   [#659](https://github.com/monad-developers/ultrafuzz/issues/659) measures
   them.
 - **Unattended.** Non-interactive print mode has `read`, `write`, `edit`, and
@@ -183,7 +199,10 @@ upstream docs. No provider request was made._
   token/cache usage and cost.
 - **Isolation.** MIT and Node 22.19+. Pi has no sandbox, so the Ultrafuzz
   worktree and the local/container/Modal boundary must supply isolation.
-  Version checks and install telemetry can be disabled.
+  Version checks and install telemetry can be disabled. Portability was measured
+  locally only — the binary ran here through `npx`, and nothing in this research
+  ran Pi inside the pinned Modal image — so a Pi binding records no
+  `cloudPortable` value until #663 proves cloud readiness.
 - **Disposition.** First gateway-neutral candidate to qualify for OpenRouter.
   Smithers 0.32.0 already exports a `PiAgent`.
 
@@ -194,10 +213,11 @@ docs. No provider request was made._
 
 - **Binding.** Built-in OpenRouter support, `provider/model` selection, and
   explicit config entries for catalogue models; custom base URLs through AI SDK
-  providers. **No reasoning surface was measured**: `run --help` exposes no
-  reasoning flag, and any reasoning control would come from those per-model
-  config entries, which this research did not exercise. An OpenCode binding
-  declares no reasoning levels until
+  providers.
+- **Reasoning.** **No surface was measured, and none was found on the CLI**:
+  `run --help` exposes no reasoning flag, and any reasoning control would come
+  from those per-model config entries, which this research did not exercise. An
+  OpenCode binding declares no reasoning levels until
   [#662](https://github.com/monad-developers/ultrafuzz/issues/662) measures
   them.
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
@@ -206,7 +226,11 @@ docs. No provider request was made._
   session JSON, token usage, and cost-bearing step events.
 - **Isolation.** MIT. Permissions are an approval policy, not a sandbox.
   Config, data, cache, model refresh, plugins, updates, and sharing all need
-  isolated or disabled defaults.
+  isolated or disabled defaults. Portability was measured locally only — the
+  binary ran here through `npx` and never inside the pinned Modal image — so an
+  OpenCode binding records no `cloudPortable` value until #663 proves cloud
+  readiness, and the isolated state roots above are what that proof has to
+  cover.
 - **Disposition.** Second gateway-neutral candidate for OpenRouter. Smithers
   0.32.0 exports an `OpenCodeAgent`, but credentials and state roots still need
   an Ultrafuzz-owned wrapper.
@@ -217,8 +241,6 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
 
 - **Binding.** First-party for Anthropic, and the harness Ultrafuzz's existing
   `DeepSeekAgent` already points at `https://api.deepseek.com/anthropic`.
-- **Unattended.** Print mode with confirmed schema, tool, effort, session, and
-  permission surfaces.
 - **Reasoning.** An `--effort` flag, which Ultrafuzz's DeepSeek pairing already
   drives with `["low", "high", "max"]`
   (`packages/runtime/src/templates/smithers/agents/deepseek.tsx`). Provenance is
@@ -226,6 +248,8 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
   real provider, so a Claude Code binding declares an empty `reasoningLevels`
   until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
   measures them at the version the shipped image pins.
+- **Unattended.** Print mode with confirmed schema, tool, effort, session, and
+  permission surfaces.
 - **Events.** Streaming JSON with a response schema; sessions resume by ID.
 - **Isolation.** The one candidate here without an OSI licence: the package
   declares `"license": "SEE LICENSE IN README.md"`, and its `LICENSE.md` reads
@@ -255,8 +279,9 @@ commit
   bundle mounts it **dormant with zero routes**; a route registers only when an
   `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is
   the shipped default (`agent-default-model` = `deepseek-official` /
-  `deepseek-v4-flash`), not a hard coupling. **A reasoning surface exists in the
-  adapter config but was never exercised.** `dsh-llm-deepseek` declares
+  `deepseek-v4-flash`), not a hard coupling.
+- **Reasoning.** **A surface exists in the adapter config but was never
+  exercised.** `dsh-llm-deepseek` declares
   `thinking?: 'enabled' | 'disabled'` and
   `reasoningEffort?: 'off' | 'low' | 'high' | 'max'` on its plugin config at
   `99f6f02`; an omitted `reasoningEffort` resolves to `high`, and
@@ -306,6 +331,9 @@ _Evidence: design analysis only. Nothing was built or measured._
 
 - **Binding.** Full control over OpenRouter model pass-through and credential
   routing.
+- **Reasoning.** Whatever each provider's API exposes, passed through directly —
+  the one row where Ultrafuzz would own the mapping rather than read it off a
+  CLI. Nothing was measured, because nothing was built.
 - **Unattended.** Ultrafuzz would own the complete tool loop, cancellation,
   context management, and filesystem/shell policy.
 - **Events.** Ultrafuzz would own event normalization, sessions, retries,
@@ -528,7 +556,22 @@ this research reached a real provider:
 
 Four of the five have a known surface and one does not, but that difference does
 not change the declared value: only a measured level may be declared. Each list
-becomes non-empty as soon as its child issue measures real levels.
+becomes non-empty as soon as its child issue measures real levels. The two #663
+rows are nominated rather than tracked, on the same footing as the
+error-classification rows in the
+[Comparison Matrix](#comparison-matrix): that issue's body has to pick up the
+measurement before the pointer resolves.
+
+`cloudPortable` sits in the same position: no candidate declares a value here
+either. What the subsections record is the _evidence_ for cloud portability
+rather than the declared boolean — Codex's existing adapter already runs in
+Modal workers, the Modal image installs Claude Code's pin, dsh's Modal evidence
+row is in §3.1 of the [architecture plan](provider-harness-plan.html), and Pi
+and OpenCode were never run in that image at all. Because the field is
+normative, [#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns
+the declared value for all five, and unlike the dimensions above that pointer
+already resolves: per-harness `ultrafuzz doctor` cloud readiness and local/Modal
+agreement are enumerated acceptance criteria on that issue today.
 
 Generic topology, prompts, and artifact verification never branch on a CLI
 name.
@@ -586,7 +629,12 @@ measured here and the ones that image pins today.
   the selected endpoint receives the canary. Then prove the provider's declared
   `preflight` mode behaves as specified against the real endpoint, including the
   401 path: a missing or rejected credential must fail before the harness is
-  launched, not partway through a run.
+  launched, not partway through a run. G2 was widened to cover preflight after
+  [#659](https://github.com/monad-developers/ultrafuzz/issues/659) was filed, so
+  that issue's enumerated G2 criterion names only the canary-credential half; it
+  inherits this definition by its `G1–G8` reference, and its body should pick up
+  the preflight/401 clause explicitly — the same correction this page asks for
+  on #658's abbreviations.
 - **G3 · Tool execution.** Exercise read, write/edit, and shell tools in a
   disposable worktree.
 - **G4 · Artifact contract.** Produce an artifact, then pass the existing
@@ -657,8 +705,9 @@ whatever `codex` was on `PATH`, not against the pinned image build. The Codex an
 Claude Code rows are therefore evidence about newer builds than the image ships:
 G9 and G10 have to be re-run at the shipped pins — or the pins moved to the
 measured versions — before either pairing counts as qualified, and
-[#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns that
-reconciliation.
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663) is the issue
+that should own that reconciliation — once its body is extended to say so, as
+[Comparison Matrix](#comparison-matrix) records.
 
 Installed and executed in this environment:
 
@@ -746,10 +795,12 @@ Installed and executed in this environment:
   in the research environment, so no candidate has passed a real paid provider
   request, cost telemetry check, or rate-limit diagnostic. That is what leaves
   error classification, authenticated preflight behavior, and retry semantics
-  unmeasured for every CLI-inspection candidate: no 401, 429, rejected model ID,
+  unmeasured for every candidate, including the two _real run_ rows: no 401,
+  429, rejected model ID,
   or mid-stream disconnect was ever produced to classify. #659 owns Pi, #662
-  owns OpenCode, and #663 owns Codex and Claude Code at the versions the shipped
-  Modal image pins.
+  owns OpenCode, and #663 is nominated for Codex and Claude Code at the versions
+  the shipped Modal image pins, pending the acceptance-criteria extension noted
+  under [Comparison Matrix](#comparison-matrix).
 - **DeepSeek Harness has no supported machine-readable output.** The repository
   states the JSONL event driver is test infrastructure. `@deepseek-ai/dsh-acp`
   publishes an ACP JSON-RPC stdio server, but it is not a dependency of the
@@ -808,10 +859,12 @@ The work is filed as bounded child issues of
    directories and disabled sharing, plugins, update checks, and model fetching,
    plus the per-model reasoning config entries this research did not exercise.
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) — gate the
-   Modal worker image on per-harness capability checks. It also owns the version
-   reconciliation for the two harnesses Ultrafuzz already ships, and with it the
-   error-classification, preflight, and retry measurements for Codex and Claude
-   Code at the pins the image installs.
+   Modal worker image on per-harness capability checks. It should also pick up
+   the version reconciliation for the two harnesses Ultrafuzz already ships, and
+   with it the error-classification, preflight, and retry measurements for Codex
+   and Claude Code at the pins the image installs — its body carries neither
+   today, so that issue needs the extension described under
+   [Comparison Matrix](#comparison-matrix) before this row is actionable.
 7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) — document
    the pairing policy and migration paths. The default decision itself waits on
    comparable real-provider results; until then Codex remains the shipped

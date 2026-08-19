@@ -636,12 +636,12 @@
           <li><a href="#verdict">1 · Verdict</a></li>
           <li><a href="#correction">2 · What "DeepSeek Code" refers to</a></li>
           <li><a href="#evidence">3 · Evidence table</a></li>
-          <li><a href="#policy">4 · Pairing policy</a></li>
+          <li><a href="#policy">4 · Recommended pairing policy</a></li>
           <li><a href="#architecture">5 · Target architecture</a></li>
           <li><a href="#sequencing">6 · Sequencing</a></li>
           <li><a href="#risks">7 · Risks</a></li>
           <li><a href="#gates">8 · Qualification gates</a></li>
-          <li><a href="#issues">9 · Proposed issues</a></li>
+          <li><a href="#issues">9 · Proposed GitHub issues</a></li>
           <li><a href="#sources">10 · Sources</a></li>
         </ol>
       </nav>
@@ -1099,12 +1099,13 @@
           <h3>3.2 · Candidate comparison</h3>
           <p>
             The three kinds of evidence behind these rows are not interchangeable, so each row names its provenance.
-            <span class="pill ok">real run</span> means the pinned CLI was installed and executed here against a live
-            endpoint — where no paid credential existed, a local deterministic server, which is routing and isolation
-            evidence and never provider qualification. <span class="pill warn">CLI inspection</span> means the real
-            installed binary answered <code>--version</code> and <code>--help</code>, so the capability is advertised by
-            the executable but was not exercised end to end. <span class="pill info">upstream docs</span> means vendor
-            documentation or source read at a pinned commit — a claim, not a measurement.
+            <span class="pill ok">real run</span> means the CLI was installed at an exact recorded version and executed
+            here against a live endpoint — where no paid credential existed, a local deterministic server, which is
+            routing and isolation evidence and never provider qualification.
+            <span class="pill warn">CLI inspection</span> means the real installed binary answered
+            <code>--version</code> and <code>--help</code>, so the capability is advertised by the executable but was
+            not exercised end to end. <span class="pill info">upstream docs</span> means vendor documentation or source
+            read at a pinned commit — a claim, not a measurement.
           </p>
           <p>
             The <em>Events</em>, <em>Sessions</em>, and <em>Isolation</em> columns are drawn from the
@@ -1233,7 +1234,9 @@
               rather than claiming a harness has no surface. <a href="#issue-b">#653-B (#659)</a> must publish Pi's
               levels, <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
-              accepts a <code>reasoning</code> value.
+              accepts a <code>reasoning</code> value. The two #663 rows are nominated rather than tracked, on the same
+              footing as the error-classification callout below: that issue's body has to pick up the measurement before
+              the pointer resolves.
             </p>
           </div>
           <div class="callout warn">
@@ -1253,6 +1256,19 @@
               Claude Code re-measured at the versions the shipped Modal image pins. The only measured retry fact
               anywhere here is internal to dsh (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the
               process.
+            </p>
+            <p>
+              That last pointer is a gap in the issue tracker, not just in this report. #659 and #662 already scope the
+              Pi and OpenCode measurements, but #663's body scopes only the pinned Modal worker image and its capability
+              checks — its acceptance criteria are the <code>dsh</code> sandbox runner, the Landlock per-arch package,
+              pre-baked state roots and offline cold boot, <code>ultrafuzz doctor</code> cloud readiness, and
+              local/Modal agreement. None of them requires reconciling the Codex and Claude Code version pins, and none
+              requires producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement — nor the Codex and
+              Claude Code reasoning-level measurements §3.2 also assigns to it.
+              <strong>#663's body must be extended with acceptance criteria for all three</strong>, and this report's
+              spelling governs — the same correction §5 asks for on #658's abbreviations. Until that edit lands, treat
+              Codex's and Claude Code's error classification, preflight, and retry semantics as unowned rather than
+              assigned.
             </p>
           </div>
         </section>
@@ -1645,7 +1661,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
           <p>
             A pinned real CLI must clear every applicable gate against the real provider. Fake CLIs are for simple unit
             tests only; they never satisfy a gate or qualify a pairing. These ten are always called
-            <em>qualification gates</em>; "conformance suite" in §6 and §9 means only the test code that exercises them.
+            <em>qualification gates</em>; "conformance suite" in §7 and §9 means only the test code that exercises them.
           </p>
           <div class="callout warn">
             <strong class="tag">"Pinned" means the version the shipped image installs</strong>
@@ -1659,8 +1675,8 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               <code>2.1.233</code>. PR #654 left both pins untouched, so its real-CLI assertions ran against whatever
               <code>codex</code> was on <code>PATH</code>. Evidence gathered against any other build is provenance, not
               qualification: G9 and G10 must be re-run at the shipped pins — or the pins moved to the measured versions
-              — before either pairing counts as qualified, and <a href="#issue-f">#653-F (#663)</a> owns that
-              reconciliation.
+              — before either pairing counts as qualified. <a href="#issue-f">#653-F (#663)</a> is the issue that should
+              own that reconciliation, once its body is extended to say so (§3.2).
             </p>
           </div>
           <div class="scroller">
@@ -1683,7 +1699,10 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                   <td>
                     One canary credential plus ambient conflicting endpoints; only the selected endpoint sees it. The
                     provider's declared <code>preflight</code> mode then behaves as specified against the real endpoint,
-                    including the 401 path: a missing or rejected credential fails before launch, not mid-run.
+                    including the 401 path: a missing or rejected credential fails before launch, not mid-run. This gate
+                    was widened to cover preflight after <a href="#issue-b">#653-B (#659)</a> was filed, so that issue's
+                    enumerated G2 criterion names only the canary-credential half; it inherits this definition by its
+                    <code>G1–G8</code> reference, and its body should pick up the preflight/401 clause explicitly.
                   </td>
                   <td><span class="pill ok">passed locally</span></td>
                 </tr>
