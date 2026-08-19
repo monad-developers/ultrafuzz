@@ -660,9 +660,11 @@ interface NodeRequirements {
 }
 ```
 
-This is the normative spelling of the contract — normative for
-[#658](https://github.com/monad-developers/ultrafuzz/issues/658) and its child
-issues until [SPECS.md](../SPECS.md) absorbs it, which is the one carve-out from
+This is the normative spelling of the contract — normative for the seven child
+issues of [#653](https://github.com/monad-developers/ultrafuzz/issues/653),
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) through
+[#664](https://github.com/monad-developers/ultrafuzz/issues/664), until
+[SPECS.md](../SPECS.md) absorbs it, which is the one carve-out from
 the "these pages are not normative" preamble in
 [the explanation index](index.md). In this vocabulary, `tools` is
 `filesystem` / `shell`, `events` is
@@ -1170,11 +1172,17 @@ numbering below restates its phases with implementation detail.
 
 [#653](https://github.com/monad-developers/ultrafuzz/issues/653) and its seven
 child issues were filed while this plan was rendered as a standalone HTML page at
-`docs/explanation/provider-harness-plan.html`, so each of them cites a design
-source by that path and by section number — §2, §4, §5, §5.1, §6, §7, and §8
-between them. That rendering is retired in favour of this page, which uses named
-headings rather than numbers, so those eight citations need a target. Read the
-path as this file and the number as the row below:
+`docs/explanation/provider-harness-plan.html`. #653 cited that path with no
+section number; the child issues cited it by path and by section number, naming
+§2, §4, §5, §5.1, §6, §7, and §8 between them, several of those numbers more than
+once. That rendering is retired in favour of this page, which uses named headings
+rather than numbers.
+
+All eight bodies now cite this page and the named heading directly, so no open
+issue depends on the table below. It stays as the historical key for references
+made before that move — comments on those issues, the retired rendering's own
+cross-references, and any working note that still speaks in section numbers. Read
+the path as this file and the number as the row below:
 
 | Retired reference                            | Section on this page                                                                                                                  |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1196,10 +1204,10 @@ path as this file and the number as the row below:
 Two of those mappings are one-to-many because this page splits what the retired
 rendering kept together: its evidence section carried both the candidate
 comparison and the DeepSeek measurement, and its target architecture carried both
-the configuration boundary and the capability contract. Where a child issue cites
-§5 for a configuration key, the
+the configuration boundary and the capability contract. Where a retired citation
+names §5 for a configuration key, the
 [configuration boundary](#proposed-configuration-boundary) is the half it means;
-where it cites §5 for a capability name or the event-class relation, the
+where it names §5 for a capability name or the event-class relation, the
 [capability contract](#proposed-capability-contract) is.
 
 ## Sources
