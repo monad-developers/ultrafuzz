@@ -1371,6 +1371,7 @@
                 <span class="box">reasoning level supported</span>
                 <span class="box">executable + pinned version</span>
                 <span class="box">credential present</span>
+                <span class="box">subscription auth pairs only with a persistent state root</span>
                 <span class="box">cloud image capability</span>
                 <span class="box accent">event class satisfies node requirement</span>
               </div>
@@ -1497,12 +1498,21 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
             </li>
             <li>
               Every harness <em>taking an env-var credential</em> gets a run-scoped state root, so no such run reads or
-              writes an operator's real home. One carve-out: a harness whose credential lives inside its own persisted
-              state root — Codex <code>auth = "subscription"</code>, which reads <code>CODEX_HOME/auth.json</code> and
-              is Ultrafuzz's default Codex mode — keeps a stable, writable state root <em>outside</em> the run scope
-              rather than being rejected as unsupported, and declares that exemption. See invariant 7 of the
-              configuration boundary in <a href="provider-harness-research.md">provider-harness-research.md</a>, which
-              also gives the legacy <code>[agents.CodexAgent]</code> mapping.
+              writes an operator's real home. The carve-out is a <strong>class</strong> rather than one harness:
+              <strong>persisted-credential harnesses</strong>, whose credential lives inside their own persisted state
+              root instead of the child environment. Ultrafuzz ships two of them, both under
+              <code>auth = "subscription"</code> and both the default mode for their harness — Codex, which reads
+              <code>CODEX_HOME/auth.json</code>, and Claude Code, which uses <code>CLAUDE_CONFIG_DIR</code> and the
+              logged-in <code>claude -p</code> session it holds. Those harnesses keep one explicitly named, stable,
+              writable <code>state_root</code> <em>outside</em> the run scope rather than being rejected as unsupported,
+              and each binding declares the exemption — recorded by the validator, never inferred. Seeding the session
+              instead is not an option: embedding a persistent OAuth token in versioned config would violate the
+              environment-only rule above. See invariant 7 of the configuration boundary in
+              <a href="provider-harness-research.md">provider-harness-research.md</a>, which also carries the forward
+              mapping for all four legacy <code>agent = "…"</code> references and the <code>auth</code>/<code
+                >state_root</code
+              >
+              contract that makes the exemption representable.
             </li>
             <li>
               The invocation cwd must not carry harness-readable config. For dsh this means proving no <code>.env</code>
@@ -2190,7 +2200,11 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     <li>
                       Each supported pairing has a copy-pasteable configuration block and a stated credential variable.
                     </li>
-                    <li>The legacy-to-new migration for every existing agent reference is documented.</li>
+                    <li>
+                      The legacy-to-new migration for every existing agent reference —
+                      <code>CodexAgent</code>, <code>ClaudeAgent</code>, <code>DeepSeekAgent</code>, and
+                      <code>KimiAgent</code> — is documented.
+                    </li>
                     <li><code>pnpm docs:check</code> passes.</li>
                     <li>
                       The default-selection status is stated rather than implied — Codex remains the shipped OpenRouter

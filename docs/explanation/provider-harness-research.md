@@ -112,8 +112,12 @@ and [#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns
 OpenCode; the pointers for Codex, Claude Code, and dsh are nominations. Which
 cells are which, and the rule that decides it, are stated once under
 [Measurement Ownership](#measurement-ownership). The only measured retry fact on
-this page is internal to dsh (`dsh-llm-retry`) and is not observable from outside
-the process.
+this page is internal to dsh: its `dsh-llm-retry` module runs provider retry at
+durable agent-step boundaries with the vendored pi-ai SDK's own `maxRetries`
+forced to zero, so one stream is one request. That is a composition-dump reading
+— the Retry evidence row of §3.1 of the
+[architecture plan](provider-harness-plan.html) carries it — and none of it is
+observable from outside the process.
 
 The detail behind each row follows. Each subsection covers the same five
 dimensions in the same order: provider and model binding, the reasoning surface,
@@ -387,6 +391,23 @@ auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 preflight = "authenticated-models"
 
+# `auth` is a two-value discriminant, and `api_key_env` belongs to exactly one
+# of them. `auth = "api-key"` requires `api_key_env`; `auth = "subscription"`
+# forbids it, because the credential is a persisted session inside the paired
+# harness's own state root rather than a value in the child environment. These
+# are the two shipped subscription providers.
+[providers.openai-subscription]
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+auth = "subscription"
+preflight = "first-request"
+
+[providers.anthropic-subscription]
+kind = "anthropic"
+base_url = "https://api.anthropic.com"
+auth = "subscription"
+preflight = "first-request"
+
 [harnesses.pi]
 kind = "pi"
 version = "0.84.2"
@@ -399,6 +420,20 @@ version = "0.1.0-rc.7"
 # .ultrafuzz/runs/<run-id>/harness/dsh/ and exports that path, never this
 # literal, as DSH_HOME.
 config_seed_dir = ".ultrafuzz/harness/dsh"
+
+# Persisted-credential harnesses declare `state_root` instead of
+# `config_seed_dir`: one explicitly named, stable, writable directory outside the
+# run scope, exported verbatim, because that directory is where the harness's own
+# logged-in session already lives. The two keys are mutually exclusive.
+[harnesses.codex-subscription]
+kind = "codex"
+version = "0.147.0"
+state_root = "~/.codex" # exported verbatim as CODEX_HOME; holds auth.json
+
+[harnesses.claude-code-subscription]
+kind = "claude-code"
+version = "2.1.233"
+state_root = "~/.claude" # exported verbatim as CLAUDE_CONFIG_DIR
 
 [models.openrouter-sonnet]
 harness = "pi"
@@ -416,6 +451,19 @@ model = "deepseek-v4-pro"
 # No `reasoning` key yet: dsh exposes `thinking`/`reasoningEffort` in its
 # adapter settings, but no run has exercised them, so this binding omits
 # `reasoningLevels` until the levels are measured (#661 nominated).
+
+# The two shipped subscription bindings. Neither profile names a credential
+# environment variable anywhere, and the validator records the
+# persisted-credential exemption of invariant 7 for both.
+[models.codex-subscription]
+harness = "codex-subscription"
+provider = "openai-subscription"
+model = "gpt-5.5"
+
+[models.claude-subscription]
+harness = "claude-code-subscription"
+provider = "anthropic-subscription"
+model = "claude-opus-4-8"
 ```
 
 The exact field names remain subject to schema implementation review. The
@@ -442,39 +490,88 @@ important invariants are:
    `.ultrafuzz/runs/<run-id>/harness/**` for the state roots. The name is
    deliberately _not_ `config_dir`: `[agents.<id>].config_dir` is already a
    shipped key (`packages/config/src/loader.ts`) that Ultrafuzz exports
-   **verbatim** as the child's `CODEX_HOME`
-   (`packages/runtime/src/templates/smithers/agents/codex.tsx`, documented in
+   **verbatim** as whichever state-root variable the selected CLI reads —
+   `CODEX_HOME` for `CodexAgent`, `CLAUDE_CONFIG_DIR` for `ClaudeAgent` and
+   `DeepSeekAgent`, the Kimi Code home for `KimiAgent`
+   (`packages/runtime/src/templates/smithers/agents/`, documented in
    [docs/config.md](../config.md)). Seed-copy semantics are the opposite of that,
-   so reusing the spelling would silently change what `CODEX_HOME` means for
-   every existing Codex profile. Exemption 7 below is what keeps the shipped key
+   so reusing the spelling would silently change what those variables mean for
+   every existing profile. Exemption 7 below is what keeps the shipped key
    working.
-7. A harness whose credential lives _inside_ its own state root is exempt from
-   the per-run state root, and the exemption is declared rather than inferred.
-   Codex `auth = "subscription"` is the shipped case: it reads
-   `CODEX_HOME/auth.json`, so a run-scoped `CODEX_HOME` seeded from tracked
-   config would have no token in it and none could be seeded either, because
-   rule 2 of the [credential and state rules](#credential-and-state-rules)
-   forbids credential material in tracked config. Such a harness instead keeps a
-   **stable, writable state root outside the run scope** — the operator's real
-   `~/.codex`, or the explicit `state_root` they name — and the validator records
-   that the binding is exempt. The alternative, rejecting subscription auth as
-   unsupported, is not chosen: it is Ultrafuzz's current default. Only harnesses
-   taking an env-var credential (`auth = "api-key"` and every provider binding in
-   this page's tables) get the run-scoped root of invariant 6.
+7. **Persisted-credential harnesses** — those whose credential lives _inside_
+   their own state root rather than in the child environment — are a class, not
+   a special case, and they are exempt from the per-run state root. The class is
+   exactly the bindings whose provider declares `auth = "subscription"`. Two of
+   the harnesses this research covers ship in that mode today: Codex, which
+   reads `CODEX_HOME/auth.json`, and Claude Code, which uses
+   `CLAUDE_CONFIG_DIR` and the logged-in `claude -p` session it holds. (A third
+   shipped binding, `KimiAgent`'s Kimi Code, is in the same class and is mapped
+   forward below; it is not one of this page's researched candidates.) In each
+   case a run-scoped state root seeded from tracked config would contain no
+   session, and none could be seeded either: embedding a persistent OAuth token
+   in versioned config would violate the credential rules, which keep
+   credential values in the process environment only. Such harnesses instead
+   declare one **explicitly named, stable, writable `state_root` outside the run
+   scope** — the operator's real `~/.codex` or `~/.claude`, or whichever path
+   they name — and the validator records the exemption on the binding rather
+   than inferring it, so the isolation claim stays true of every binding that
+   does not declare one. The alternative, rejecting subscription auth as
+   unsupported, is not chosen: it is Ultrafuzz's shipped default for those
+   harnesses. Only bindings whose provider declares `auth = "api-key"` — every
+   provider binding in this page's tables — get the run-scoped root of
+   invariant 6.
 
-Existing profiles keep working during migration. A legacy `agent = "CodexAgent"`
-profile maps to the Codex harness and its existing provider binding. That
-includes the two keys the shipped schema already accepts under
-`[agents.CodexAgent]`: `auth = "subscription"` (the default when the key is
-absent, per `packages/runtime/src/templates/smithers/agents/codex.tsx`) maps to a
-Codex binding carrying the invariant-7 exemption, keeping today's `~/.codex`
-fallback and its `auth.json`; and a legacy `config_dir` maps to that binding's
-persistent `state_root`, **not** to `config_seed_dir`, so it keeps being exported
-verbatim as `CODEX_HOME` and an existing `.ultrafuzz/openrouter-codex` profile is
-unaffected.
-Legacy `agent = "DeepSeekAgent"` maps to `harness = "claude-code"` plus
-`provider = "deepseek"` — the compatibility pairing it already is — and is _not_
-silently re-pointed at DeepSeek Harness.
+Existing profiles keep working during migration. All four shipped
+`agent = "…"` references map forward to a harness and a provider:
+
+| Legacy reference | Harness       | Provider                                        |
+| ---------------- | ------------- | ----------------------------------------------- |
+| `CodexAgent`     | `codex`       | `openai`, or `openrouter` for the gateway route |
+| `ClaudeAgent`    | `claude-code` | `anthropic`                                     |
+| `DeepSeekAgent`  | `claude-code` | `deepseek`                                      |
+| `KimiAgent`      | `kimi-code`   | `kimi`                                          |
+
+The two keys the shipped schema already accepts under `[agents.<id>]` —
+`auth` and `config_dir` — map forward with them, and each adapter's real
+behavior is what the mapping has to preserve:
+
+- **`CodexAgent`** (`agents/codex.tsx`). `auth` defaults to `"subscription"`,
+  which reads `CODEX_HOME/auth.json`, so the binding carries the invariant-7
+  persisted-credential exemption; `auth = "api-key"` reads `api_key_env`
+  (default `OPENAI_API_KEY`). A legacy `config_dir` is exported verbatim as
+  `CODEX_HOME`, so it maps to the binding's persistent `state_root`, **not** to
+  `config_seed_dir`, and an existing `.ultrafuzz/openrouter-codex` profile is
+  unaffected.
+- **`ClaudeAgent`** (`agents/claude.tsx`). `auth` also defaults to
+  `"subscription"`, which clears `ANTHROPIC_API_KEY` so the logged-in
+  `claude -p` session is used — the second persisted-credential case, carrying
+  the same exemption; `auth = "api-key"` reads `api_key_env` (default
+  `ANTHROPIC_API_KEY`). A legacy `config_dir` becomes an isolated
+  `CLAUDE_CONFIG_DIR` for running subscriptions side by side, so it likewise
+  maps to `state_root`.
+- **`DeepSeekAgent`** (`agents/deepseek.tsx`). The one adapter that defaults to
+  `auth = "api-key"` and rejects every other value, so it never takes the
+  exemption and always gets a run-scoped root. It is Claude Code against
+  `https://api.deepseek.com/anthropic`, with `config_dir` defaulting to
+  `.ultrafuzz/deepseek-claude`, and it is _not_ silently re-pointed at DeepSeek
+  Harness —
+  [#660](https://github.com/monad-developers/ultrafuzz/issues/660) is what makes
+  the name say so.
+- **`KimiAgent`** (`agents/kimi.tsx`, executable `kimi` per
+  `packages/runtime/src/doctor.ts`). `auth` defaults to `"subscription"`, which
+  uses the logged-in Kimi Code layout from `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`,
+  or `~/.kimi-code` — the third instance of the persisted-credential class;
+  `auth = "api-key"` reads `KIMI_API_KEY` with `MOONSHOT_API_KEY` as its
+  automatic fallback, against `https://api.moonshot.ai/v1` unless
+  `KIMI_BASE_URL` selects another compatible endpoint. `config_dir` becomes the
+  Kimi Code home, so it maps to `state_root` too.
+
+`kimi-code` is a **forward mapping of an existing binding, not a researched
+candidate**: it appears in no comparison table and no gate row on this page, and
+rule 4 of the [pairing policy](#recommended-pairing-policy) already lists
+`KimiAgent` among the shipped defaults that carry qualification debt. Mapping it
+forward is what keeps the migration complete; it is not a claim that the pairing
+has been qualified.
 
 ## Proposed Capability Contract
 
@@ -484,19 +581,29 @@ or provider environment variables:
 ```ts
 type WireProtocol = "openai-responses" | "openai-chat" | "anthropic-messages" | "provider-native";
 
-interface ProviderBinding {
+// The `auth` discriminant of `[providers.<id>]`. `credentialEnv` exists only on
+// the API-key arm, so a subscription provider cannot name one and an API-key
+// provider cannot omit one.
+type ProviderAuth = { auth: "api-key"; credentialEnv: string } | { auth: "subscription" };
+
+type ProviderBinding = {
   id: string;
   kind: string;
   baseUrl: string;
-  credentialEnv: string;
   protocols: readonly WireProtocol[];
   preflight: "openrouter-key" | "authenticated-models" | "first-request";
-}
+} & ProviderAuth;
+
+// Invariant 6 versus invariant 7. `run-scoped` copies `configSeedDir` into a
+// fresh per-run root; `persistent` exports one explicitly named `stateRoot`
+// verbatim, and is the only shape a persisted-credential harness may declare.
+type HarnessState = { mode: "run-scoped"; configSeedDir: string } | { mode: "persistent"; stateRoot: string };
 
 interface HarnessCapabilities {
   id: string;
   executable: string;
   version: string;
+  state: HarnessState;
   protocols: readonly WireProtocol[];
   unattended: true;
   tools: { filesystem: boolean; shell: boolean };
@@ -514,6 +621,11 @@ interface QualifiedHarnessBinding {
   model: string;
   reasoning?: string;
   childEnv: Record<string, string>;
+  // Present only when the validator granted the invariant-7 exemption, which it
+  // records rather than infers. It is grantable only for a `subscription`
+  // provider paired with a `persistent` harness state, and `childEnv` then
+  // carries no provider credential at all.
+  persistedCredentialExemption?: { stateRoot: string; reason: string };
 }
 
 interface NodeRequirements {
@@ -532,6 +644,24 @@ in the HTML plan's §5: `tools` is `filesystem` / `shell`, `events` is
 `"native-sandbox" | "external-sandbox-required"`. Diagnostics that name a
 capability must use these strings, so an operator can match an error back to
 this page.
+
+The TOML keys and these fields are the same fields under the two spellings each
+language uses: `auth` is `auth`, `api_key_env` is `credentialEnv`,
+`config_seed_dir` is `configSeedDir`, and `state_root` is `stateRoot`. Three of
+them exist to make invariant 7 representable rather than commented:
+`ProviderAuth` is a discriminated union, so `credentialEnv` is present on the
+`api-key` arm and absent on the `subscription` arm and there is no shape in
+which a subscription provider names a credential variable; `HarnessState` is a
+second union, so a harness declares either a seed directory or one explicitly
+named persistent `stateRoot` and never both; and
+`persistedCredentialExemption` is where the validator _records_ the exemption it
+granted. The validator grants it only for a `subscription` provider paired with
+a `persistent` harness state, and rejects every other combination of the two
+before launch: a `subscription` provider on a `run-scoped` harness has no
+session to read, and an `api-key` provider on a `persistent` state root gets no
+exemption and stays subject to invariant 6. The Codex and Claude Code
+subscription profiles in the configuration boundary above are the two shipped
+bindings that take this path.
 
 Capabilities are only half of the matching. A workflow node declares what it
 needs from a harness — a dashboard or telemetry node requires `events: "jsonl"`,
@@ -640,14 +770,20 @@ the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
   `--api-key` path, which must be left unset in favour of an environment
   variable.
 - Every harness taking an env-var credential gets a run-scoped state root, so no
-  such run reads or writes an operator's real home. The one carve-out is a
-  harness whose credential lives inside its own persisted state root — Codex
-  `auth = "subscription"`, which reads `CODEX_HOME/auth.json` and is Ultrafuzz's
-  default Codex mode. That class keeps a stable, writable state root outside the
-  run scope (invariant 7 of the
+  such run reads or writes an operator's real home. The carve-out is a **class**
+  rather than one harness: **persisted-credential harnesses**, whose credential
+  lives inside their own persisted state root instead of the child environment.
+  Ultrafuzz ships two of them, both under `auth = "subscription"` and both the
+  default mode for their harness — Codex, which reads `CODEX_HOME/auth.json`,
+  and Claude Code, which uses `CLAUDE_CONFIG_DIR` and the logged-in `claude -p`
+  session it holds. Those harnesses keep one explicitly named, stable, writable
+  `state_root` outside the run scope (invariant 7 of the
   [configuration boundary](#proposed-configuration-boundary)) rather than being
-  rejected as unsupported, and the binding declares the exemption so the
-  isolation claim above stays true of everything that does not declare it.
+  rejected as unsupported, and each binding declares the exemption — recorded by
+  the validator, never inferred — so the isolation claim above stays true of
+  everything that does not declare it. Seeding the session instead is not an
+  option: embedding a persistent OAuth token in versioned config would violate
+  the environment-only rule above.
 - The invocation directory must not carry harness-readable configuration. For
   dsh that means proving no `.env` exists in the target worktree before launch,
   both because an unset name there would be adopted and because a
@@ -687,9 +823,9 @@ and assert it at preflight
 adding those three to the image is
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663)'s work, which
 is why the version-reconciliation row in
-[Measurement Ownership](#measurement-ownership) records "—" for them. Either way, evidence
-gathered against any build other than the asserted pin is provenance, not
-qualification — see [Evidence](#evidence) for the gap between the Codex and
+[Measurement Ownership](#measurement-ownership) records "—" for them. Either
+way, evidence gathered against any build other than the asserted pin is
+provenance, not qualification — see [Evidence](#evidence) for the gap between the Codex and
 Claude Code versions measured here and the ones that image pins today.
 
 - **G1 · Model pass-through.** Run a real provider request with an opaque
@@ -1008,4 +1144,5 @@ The architecture, sequencing, risks, gates, and bounded issue proposals are in
 - [OpenCode 1.18.18 package](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/opencode/package.json), [OpenRouter provider setup](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/providers.mdx), [CLI automation/session surface](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/cli.mdx), and [permissions](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/permissions.mdx).
 - DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek) (its [`src/index.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek/src/index.ts) is where the `thinking`/`reasoningEffort` config surface is declared), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/acp/acp).
 - DeepSeek API documentation: [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) (`deepseek-v4-flash`/`deepseek-v4-pro`, 1M context, 384K max output, OpenAI + Anthropic + Responses formats); the **Agent Integrations** sidebar, which heads its list with DeepSeek Harness as an outbound link to the [harness quickstart](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) — there is no `agent_integrations/deepseek_harness` page, and the [Integrate with AI Tools](https://api-docs.deepseek.com/guides/coding_agents) guide still covers only Claude Code, OpenCode, and OpenClaw; the [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) page; and the [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api) guide.
+- In-repo sources for the legacy forward mapping, all read at this branch's head: `packages/runtime/src/templates/smithers/agents/codex.tsx`, `claude.tsx`, `deepseek.tsx`, and `kimi.tsx` for each adapter's `auth`/`config_dir` handling and its state-root variable; `packages/runtime/src/doctor.ts` for the `agent = "…"` to executable map; `packages/config/src/loader.ts` for the shipped `[agents.<id>]` keys; and [docs/config.md](../config.md) for the operator-facing description of both keys.
 - [Smithers 0.32.0 Pi adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/PiAgent.js) and [OpenCode adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/OpenCodeAgent.js), matching the dependency pinned by Ultrafuzz.

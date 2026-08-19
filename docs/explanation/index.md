@@ -38,11 +38,12 @@ knowing before you pick one:
   **§3.1** detail behind findings the Markdown page states in condensed form
   (packaging, retry, maintenance posture).
 - **Only in the Markdown research page:** the TOML configuration boundary, the
-  TypeScript capability interfaces, the _complete_ legacy `agent = "…"` forward
-  mapping including the `CodexAgent` case (the plan carries only the
-  `DeepSeekAgent` half, in its **§2** obsolete-claims table and its **§9-C**
-  scope), the five dsh-specific gate items, and the full per-file source list
-  with every DeepSeek Harness URL pinned to a commit.
+  TypeScript capability interfaces, the legacy `agent = "…"` forward mapping for
+  **all four** shipped references — `CodexAgent`, `ClaudeAgent`, `DeepSeekAgent`,
+  and `KimiAgent` — with each one's `auth` and `config_dir` behavior (the plan
+  carries only the `DeepSeekAgent` row, in its **§2** obsolete-claims table and
+  its **§9-C** scope), the five dsh-specific gate items, and the full per-file
+  source list with every DeepSeek Harness URL pinned to a commit.
 - **On both:** the correction narrative, the candidate comparison and its
   evidence provenance, the pairing policy, the capability-contract vocabulary,
   the credential and state rules, and the numbered qualification gates G1–G10
