@@ -8,5 +8,6 @@ product model behind that contract.
 - [Topology, Prompts, and Artifacts](topology-prompts-artifacts.md)
 - [Agents, Workflow Boundary, and Safety](backends-safety.md)
 - [Provider-agnostic Coding Harness Research](provider-harness-research.md)
+- [Provider/Harness Architecture Plan (HTML report)](provider-harness-plan.html)
 - [Aave v4 Invariant Case Study](aave-v4-invariant-case-study.md)
 - [Monad Bugfinder Context](bugfinder.md)
