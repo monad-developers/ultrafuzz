@@ -11,6 +11,7 @@ on:
       - reopened
       - ready_for_review
       - converted_to_draft
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,6 +22,7 @@ concurrency:
 
 jobs:
   draft-and-build-gates:
+    name: "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -62,9 +64,14 @@ jobs:
       - name: Build
         run: pnpm -w build
 
+      - name: Run PR runtime smoke tests
+        if: github.event_name == 'pull_request'
+        run: pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt
+
   release-validation:
+    name: Full release validation (${{ matrix.description }})
     needs: draft-and-build-gates
-    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
@@ -73,30 +80,37 @@ jobs:
       matrix:
         include:
           - lane: package-gates
+            description: Package, dependency, and policy gates
             gates: dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal
             timeout_minutes: 30
             build_modal_dependencies: true
           - lane: runtime-supporting
+            description: Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts
             gates: runtime-supporting
             timeout_minutes: 75
             build_modal_dependencies: true
           - lane: runtime-1
+            description: Node.js 24 runtime integration tests, shard 1/4
             gates: runtime-1
             timeout_minutes: 75
             build_modal_dependencies: true
           - lane: runtime-2
+            description: Node.js 24 runtime integration tests, shard 2/4
             gates: runtime-2
             timeout_minutes: 75
             build_modal_dependencies: true
           - lane: runtime-3
+            description: Node.js 24 runtime integration tests, shard 3/4
             gates: runtime-3
             timeout_minutes: 75
             build_modal_dependencies: true
           - lane: runtime-4
+            description: Node.js 24 runtime integration tests, shard 4/4
             gates: runtime-4
             timeout_minutes: 75
             build_modal_dependencies: true
           - lane: cli-typecheck
+            description: CLI tests, benchmark history, and workspace typecheck
             gates: cli,benchmark-history,workspace-typecheck
             timeout_minutes: 30
     env:
@@ -162,32 +176,32 @@ jobs:
         run: exit 1
 
       - name: Check out repository
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up pnpm
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 11.1.1
 
       - name: Set up Node.js
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         run: pnpm install --frozen-lockfile
 
       - name: Build release reporter dependencies
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         run: pnpm --filter @ultrafuzz/artifacts... build
 
       - name: Download release validation lanes
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-validation-report-*
@@ -195,7 +209,7 @@ jobs:
           merge-multiple: true
 
       - name: Merge release validation report
-        if: github.event_name == 'push' || github.event.pull_request.draft == false
+        if: github.event_name != 'pull_request'
         run: >-
           node scripts/validate-release.mjs
           --merge-report-dir .ultrafuzz/release-validation
@@ -204,12 +218,12 @@ jobs:
       - name: Require release validation lanes
         if: >-
           always() &&
-          (github.event_name == 'push' || github.event.pull_request.draft == false) &&
+          github.event_name != 'pull_request' &&
           needs.release-validation.result != 'success'
         run: exit 1
 
       - name: Upload release validation report
-        if: always() && (github.event_name == 'push' || github.event.pull_request.draft == false)
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-validation-report
