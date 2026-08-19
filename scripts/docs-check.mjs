@@ -100,36 +100,46 @@ if (missingFlagMentions.length > 0) {
 }
 
 // The provider/harness pages build a version-gap argument on the harness
-// versions the Modal worker image installs. Pin both ends: if a pin moves in the
-// image source without the docs following, that narrative goes stale silently.
-// Each entry is [pin, ...filesThatMustContainIt]: every listed file must contain
-// the literal pin string. The Codex pin needs two entries because the Modal image
-// never spells the installable literally — `runner.ts` declares
-// `CODEX_CLI_VERSION = "0.146.0"` and interpolates that constant into the install
-// command, so the source file is matched on the constant while the docs are
-// matched on the `@openai/codex@0.146.0` string they actually print. Claude Code
-// needs only one entry because `runner.ts` spells `@anthropic-ai/claude-code@2.1.207`
-// inline, so source and docs share a single literal.
-const pinnedHarnessVersions = [
-  ['CODEX_CLI_VERSION = "0.146.0"', "packages/modal/src/runner.ts"],
-  [
-    "@openai/codex@0.146.0",
-    "docs/explanation/provider-harness-research.md",
-    "docs/explanation/provider-harness-plan.html"
-  ],
-  [
-    "@anthropic-ai/claude-code@2.1.207",
-    "packages/modal/src/runner.ts",
-    "docs/explanation/provider-harness-research.md",
-    "docs/explanation/provider-harness-plan.html"
-  ]
+// versions the Modal worker image installs. The image source is the single
+// source of truth: read the pins out of `runner.ts` and assert the docs print
+// the same literals, so a legitimate pin bump is a one-file edit and this check
+// cannot drift into a third copy of the numbers.
+const runnerSource = "packages/modal/src/runner.ts";
+if (!existsSync(runnerSource)) {
+  console.error(
+    `Cannot verify harness version pins: ${runnerSource} is missing. If the Modal image source moved, update this check.`
+  );
+  process.exit(1);
+}
+const runnerText = readFileSync(runnerSource, "utf8");
+// `runner.ts` never spells the Codex installable literally — it declares
+// `CODEX_CLI_VERSION` and interpolates it into the install command — so the
+// constant is what gets matched here and `@openai/codex@<v>` is what the docs
+// must print. Claude Code is spelled inline in the install command instead.
+const pinPatterns = [
+  ["@openai/codex", /CODEX_CLI_VERSION = "([^"]+)"/u],
+  ["@anthropic-ai/claude-code", /@anthropic-ai\/claude-code@([\d.]+)/u]
 ];
-const staleVersionPins = pinnedHarnessVersions.flatMap(([pin, ...files]) =>
-  files.filter((file) => !readFileSync(file, "utf8").includes(pin)).map((file) => `${pin} in ${file}`)
-);
+const harnessDocs = ["docs/explanation/provider-harness-research.md", "docs/explanation/provider-harness-plan.html"];
+const staleVersionPins = [];
+for (const [pkg, pattern] of pinPatterns) {
+  const match = pattern.exec(runnerText);
+  if (match === null) {
+    console.error(
+      `Cannot verify the ${pkg} pin: ${pattern} no longer matches ${runnerSource}. Update this check to follow the image source.`
+    );
+    process.exit(1);
+  }
+  const pin = `${pkg}@${match[1]}`;
+  for (const file of harnessDocs) {
+    if (!readFileSync(file, "utf8").includes(pin)) {
+      staleVersionPins.push(`${pin} in ${file}`);
+    }
+  }
+}
 if (staleVersionPins.length > 0) {
   console.error(
-    `Harness version pins out of sync between the Modal image and the provider/harness docs: ${staleVersionPins.join(", ")}`
+    `Harness version pins out of sync between ${runnerSource} and the provider/harness docs: ${staleVersionPins.join(", ")}`
   );
   process.exit(1);
 }

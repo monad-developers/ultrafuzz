@@ -626,7 +626,7 @@
             >
             filed
           </span>
-          <span>Published by <a href="https://github.com/monad-developers/ultrafuzz/pull/665">PR #665</a> (open)</span>
+          <span>Published by <a href="https://github.com/monad-developers/ultrafuzz/pull/665">PR #665</a></span>
         </div>
       </header>
 
@@ -866,10 +866,12 @@
                     <code>thinking: 'disabled'</code> restricts <code>reasoningEffort</code> to <code>off</code>. These
                     are settings-document fields, not CLI flags (headless <code>--help</code> exposes no reasoning
                     flag), and they are absent from <code>--dump-default-config</code> only because they carry no schema
-                    default. No request in this research set either field, so a dsh binding declares an empty
-                    <code>reasoningLevels</code> until
-                    <a href="https://github.com/monad-developers/ultrafuzz/issues/661">#661</a> measures the levels end
-                    to end. The field is unsupported because it is unmeasured, not because dsh lacks it.
+                    default. No request in this research set either field, so a dsh binding declares no
+                    <code>reasoningLevels</code> at all until the levels are measured end to end.
+                    <a href="https://github.com/monad-developers/ultrafuzz/issues/661">#661</a> is
+                    <strong>nominated</strong> for that measurement, not assigned it — its filed acceptance criteria
+                    name no reasoning surface — and owns it once they do. The field is unsupported because it is
+                    unmeasured, not because dsh lacks it.
                   </td>
                   <td>
                     <code>packages/llm/llm-deepseek/src/index.ts</code> read at the pin; real <code>--help</code> and
@@ -1231,14 +1233,17 @@
               flag, which no request set. <strong>OpenCode</strong> exposes <code>--variant</code> on
               <code>run --help</code>, documented there as "model variant (provider-specific reasoning effort, e.g.,
               high, max, minimal)" — CLI inspection confirmed the flag, but no request in this research set it, and its
-              per-model config entries were never exercised either. All five bindings therefore declare an empty
-              <code>reasoningLevels</code>, which records what was measured rather than claiming a harness has no
-              surface. <a href="#issue-b">#653-B (#659)</a> must publish Pi's levels,
+              per-model config entries were never exercised either. All five bindings therefore declare no
+              <code>reasoningLevels</code> at all: the field is optional, an absent value records that nothing was
+              measured, and an empty array would instead claim the harness accepts no level — a claim only a real
+              measurement may make. <a href="#issue-b">#653-B (#659)</a> must publish Pi's levels,
               <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
-              accepts a <code>reasoning</code> value. The two #663 rows are nominated rather than tracked, on the same
-              footing as the error-classification callout below: #663 owns these two measurements once its acceptance
-              criteria name them, and not before.
+              accepts a <code>reasoning</code> value. Only the Pi row is <strong>tracked</strong> — #659's acceptance
+              criteria name that measurement in as many words. The other four rows are
+              <strong>nominated rather than tracked</strong>, on the same footing as the error-classification callout
+              below: the filed bodies of #661, #662, and #663 name no reasoning, variant, effort, or thinking
+              measurement, so each owns its rows once its own acceptance criteria name them, and not before.
             </p>
           </div>
           <div class="callout warn">
@@ -1253,29 +1258,39 @@
               <code>Retry-After</code> are all unknown. That is a credential gap, not an oversight — the environment
               holds no <code>OPENROUTER_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>, or
               <code>ANTHROPIC_API_KEY</code>. G2 in §8 is where authenticated preflight behavior gets recorded and G5
-              and G6 are where the other two do. <strong>Ownership is explicit for two candidates only</strong>:
+              and G6 are where the other two do.
+              <strong>Ownership is explicit for two of the five harness candidates only</strong>:
               <a href="#issue-b">#653-B (#659)</a> owns Pi and <a href="#issue-e">#653-E (#662)</a> owns OpenCode,
               because both issues already enumerate the measurements. <a href="#issue-f">#653-F (#663)</a> is
               <strong>nominated, not assigned</strong>, for Codex and Claude Code re-measured at the versions the
-              shipped Modal image pins; that nomination becomes ownership only once #663's acceptance criteria are
-              extended. The only measured retry fact anywhere here is internal to dsh (<code>dsh-llm-retry</code>, §3.1)
-              and is not observable from outside the process.
+              shipped Modal image pins, and <a href="#issue-d">#653-D (#661)</a> is likewise only
+              <strong>nominated</strong> for dsh: its filed acceptance criteria require a real DeepSeek V4 request but
+              name no 401, 429, rejected-model-ID, or mid-stream-disconnect measurement, so dsh's error classification
+              and authenticated preflight are unowned today. Either nomination becomes ownership only once that issue's
+              own acceptance criteria are extended. The only measured retry fact anywhere here is internal to dsh
+              (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the process.
             </p>
             <p>
-              That last pointer is a gap in the issue tracker, not just in this report. #659 and #662 already scope the
-              Pi and OpenCode measurements, but #663's body scopes only the pinned Modal worker image and its capability
-              checks — its acceptance criteria are the <code>dsh</code> sandbox runner, the Landlock per-arch package,
-              pre-baked state roots and offline cold boot, <code>ultrafuzz doctor</code> cloud readiness, and
-              local/Modal agreement. None of them requires reconciling the Codex and Claude Code version pins, and none
-              requires producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement — nor the Codex and
-              Claude Code reasoning-level measurements §3.2 also nominates it for. The rule rather than that snapshot
-              governs, so this report stays correct whichever way the issue is edited:
+              Those nominations are gaps in the issue tracker, not just in this report. #659 and #662 already scope the
+              Pi and OpenCode error-classification measurements, but #663's body scopes only the pinned Modal worker
+              image and its capability checks — its acceptance criteria are the <code>dsh</code> sandbox runner, the
+              Landlock per-arch package, pre-baked state roots and offline cold boot,
+              <code>ultrafuzz doctor</code> cloud readiness, and local/Modal agreement. None of them requires
+              reconciling the Codex and Claude Code version pins, and none requires producing a 401, 429,
+              rejected-model-ID, or mid-stream-disconnect measurement — nor the Codex and Claude Code reasoning-level
+              measurements §3.2 also nominates it for. #661's body scopes the dsh adapter, its isolation, and the smoke
+              profile, and names neither an error-classification measurement nor a reasoning surface; #662's body scopes
+              the gates, the isolated state roots, and credential handling, and names no reasoning surface either. The
+              rule rather than those snapshots governs, so this report stays correct whichever way the issues are
+              edited:
               <strong
-                >#663 owns Codex's and Claude Code's version reconciliation, error classification, preflight, retry, and
-                reasoning levels exactly when its acceptance criteria name them, and until they do those dimensions are
-                unowned rather than assigned.</strong
+                >an issue owns a measurement this report nominates it for exactly when its own acceptance criteria name
+                it, and until they do that dimension is unowned rather than assigned.</strong
               >
-              This report defines what the measurements are; the issue decides when it has taken them on.
+              That covers #663's Codex and Claude Code version reconciliation, error classification, preflight, retry,
+              and reasoning levels; #661's dsh error classification, preflight, retry, and reasoning levels; and #662's
+              OpenCode reasoning levels. This report defines what the measurements are; each issue decides when it has
+              taken them on.
             </p>
           </div>
         </section>
@@ -1374,7 +1389,7 @@
                 <span class="box">events: jsonl | rpc | final-text-only</span>
                 <span class="box">sessions: none | resume | tree</span>
                 <span class="box">usage: tokens / cache / cost</span>
-                <span class="box">reasoningLevels: measured values only</span>
+                <span class="box">reasoningLevels: declared only when measured</span>
                 <span class="box">isolation: native-sandbox | external-sandbox-required</span>
                 <span class="box">cloudPortable: declared only when measured</span>
               </div>
@@ -1414,13 +1429,15 @@
               these strings so an operator can match the error to the documentation.
             </p>
             <p>
-              <code>reasoningLevels</code> lists only levels a real request exercised against a real provider. An empty
-              list makes the validator reject a <code>reasoning</code> value on that binding, but it records what was
-              measured — it is not a claim that the harness has no reasoning surface. Every candidate in §3 is empty
-              today for exactly that reason, including Codex, whose surface is known from upstream docs and Ultrafuzz's
-              own adapter rather than from any CLI inspection, and Pi, whose surface was CLI-inspected but never
-              exercised; no worked configuration on either page may set <code>reasoning</code> until a child issue
-              measures levels.
+              <code>reasoningLevels</code> lists only levels a real request exercised against a real provider, and it is
+              <strong>optional</strong> so that the two possible answers stay distinguishable: an <em>absent</em> value
+              records that nothing was measured, while an <em>empty</em> array records that the surface was measured and
+              the harness accepts no level at all. Both make the validator reject a <code>reasoning</code> value on that
+              binding, but only the empty array is a positive claim, so only a real measurement may write it. Every
+              candidate in §3 omits the field today — none declares an empty array either — including Codex, whose
+              surface is known from upstream docs and Ultrafuzz's own adapter rather than from any CLI inspection, and
+              Pi, whose surface was CLI-inspected but never exercised; no worked configuration on either page may set
+              <code>reasoning</code> until a child issue measures levels.
             </p>
             <p>
               <code>cloudPortable</code> is optional for the same reason. No candidate has a measured value, and a
@@ -1805,6 +1822,13 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               2026-08-18, before this re-analysis, and is cited here only as existing evidence. Labels marked
               <em>new</em> did not exist in the repository at the time of writing; the rest are existing labels.
             </p>
+            <p>
+              Two items below <strong>post-date the filing</strong> and are not yet reflected in the issue bodies: E's
+              OpenCode <code>--variant</code> scope sentence and its matching acceptance criterion, and D's &ldquo;also
+              measure the reasoning surface&rdquo; scope block for <code>dsh</code>. Read the §9 bodies as this report's
+              drafts rather than as the filed text, and see the reasoning callout in §3.2 — those two measurements are
+              nominated for #662 and #661, not owned by them, until the criteria are added.
+            </p>
           </div>
 
           <details class="issue" id="issue-a" open>
@@ -1955,7 +1979,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                   <code>dsh-llm-deepseek</code> declares <code>thinking</code> and <code>reasoningEffort</code>
                   (<code>off</code>/<code>low</code>/<code>high</code>/<code>max</code>) in settings, so drive them
                   through a real request and publish the levels the binding may declare instead of leaving
-                  <code>reasoningLevels</code> empty.
+                  <code>reasoningLevels</code> undeclared.
                 </dd>
                 <dt>Acceptance</dt>
                 <dd>
@@ -2040,7 +2064,7 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                   cache roots; disable sharing, plugins, update checks, and remote model fetching. Reuse the Pi
                   conformance suite. Exercise the <code>--variant</code> reasoning-effort flag and the per-model
                   reasoning config entries this research inspected but never ran, so the binding can declare real
-                  <code>reasoningLevels</code> rather than an empty list.
+                  <code>reasoningLevels</code> rather than leaving the field undeclared.
                 </dd>
                 <dt>Acceptance</dt>
                 <dd>
@@ -2048,7 +2072,9 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     <li>Gates G1–G8 pass against real OpenRouter.</li>
                     <li>
                       The <code>--variant</code> values OpenCode actually accepts on an OpenRouter route are measured
-                      and recorded, or the binding documents that it accepts none.
+                      and recorded — or, if it accepts none, the binding declares an <em>empty</em>
+                      <code>reasoningLevels</code> to record that measured outcome rather than leaving the field
+                      undeclared.
                     </li>
                     <li>
                       No OpenCode state is written outside the run-scoped roots, verified by a filesystem assertion.
@@ -2214,10 +2240,10 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
             >#664</a
           >
           are filed, and this report is published by
-          <a href="https://github.com/monad-developers/ultrafuzz/pull/665">PR #665</a>, which is open for review. The
-          recommendations remain proposals until real-provider qualification promotes them. PR #654 was not merged by
-          this work — it was already merged into <code>release/v0.1.0</code> by the maintainer on 2026-08-18, before
-          this re-analysis, and is cited only as existing evidence.
+          <a href="https://github.com/monad-developers/ultrafuzz/pull/665">PR #665</a>. The recommendations remain
+          proposals until real-provider qualification promotes them. PR #654 was not merged by this work — it was
+          already merged into <code>release/v0.1.0</code> by the maintainer on 2026-08-18, before this re-analysis, and
+          is cited only as existing evidence.
         </p>
       </footer>
     </div>

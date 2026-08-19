@@ -126,34 +126,45 @@ rather than an oversight — see
 [Constraints That Block Qualification Today](#constraints-that-block-qualification-today).
 [G2](#qualification-gates) is where authenticated preflight behavior gets
 recorded, and [G5](#qualification-gates) and [G6](#qualification-gates) are where
-the other two do. **Ownership is explicit for two candidates only**:
-[#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi and
-[#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns OpenCode,
-because both issues already enumerate the measurements.
+the other two do. **Ownership is explicit for two of the five harness candidates
+only**: [#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi
+and [#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns
+OpenCode, because both issues already enumerate the measurements.
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663) is **nominated,
 not assigned**, for Codex and Claude Code re-measured at the versions the shipped
-Modal image pins; that nomination becomes ownership only once #663's acceptance
-criteria are extended. The only measured retry fact on this page is internal to
-dsh (`dsh-llm-retry`) and is not observable from outside the process.
+Modal image pins, and
+[#661](https://github.com/monad-developers/ultrafuzz/issues/661) is likewise only
+**nominated** for dsh: its filed acceptance criteria require a real DeepSeek V4
+request but name no 401, 429, rejected-model-ID, or mid-stream-disconnect
+measurement, so dsh's error classification and authenticated preflight are
+unowned today. Either nomination becomes ownership only once that issue's own
+acceptance criteria are extended. The only measured retry fact on this page is
+internal to dsh (`dsh-llm-retry`) and is not observable from outside the process.
 
-That last pointer is a gap in the issue tracker, not just in this page. #659 and
-#662 already scope the measurements for Pi and OpenCode. #663's body, as read
-while this page was written, scopes only the pinned Modal worker image and its
-capability checks: its acceptance criteria are the `dsh` sandbox runner, the
-Landlock per-arch package, pre-baked state roots and offline cold boot,
-`ultrafuzz doctor` cloud readiness, and local/Modal agreement. None of them
-requires reconciling the Codex and Claude Code version pins, none requires
+Those nominations are gaps in the issue tracker, not just in this page. #659 and
+#662 already scope the error-classification measurements for Pi and OpenCode.
+#663's body, as read while this page was written, scopes only the pinned Modal
+worker image and its capability checks: its acceptance criteria are the `dsh`
+sandbox runner, the Landlock per-arch package, pre-baked state roots and offline
+cold boot, `ultrafuzz doctor` cloud readiness, and local/Modal agreement. None of
+them requires reconciling the Codex and Claude Code version pins, none requires
 producing a 401, 429, rejected-model-ID, or mid-stream-disconnect measurement,
 and none covers the Codex and Claude Code reasoning-level measurements this page
-also nominates it for below.
+also nominates it for below. #661's body, read the same way, scopes the dsh
+adapter, its isolation, and the smoke profile, and names neither an
+error-classification measurement nor a reasoning surface. #662's body scopes the gates,
+the isolated state roots, and credential handling, and names no reasoning surface
+either.
 
-The rule rather than that snapshot is what governs, so this page stays correct
-whichever way the issue is edited: **#663 owns Codex's and Claude Code's version
-reconciliation, error classification, preflight, retry, and reasoning levels
-exactly when its acceptance criteria name them, and until they do those
-dimensions are unowned rather than assigned.** This page defines what the
-measurements are; the issue decides when it has taken them on. Read the issue,
-not this paragraph, for its current state.
+The rule rather than those snapshots is what governs, so this page stays correct
+whichever way the issues are edited: **an issue owns a measurement this page
+nominates it for exactly when its own acceptance criteria name it, and until they
+do that dimension is unowned rather than assigned.** That covers #663's Codex and
+Claude Code version reconciliation, error classification, preflight, retry, and
+reasoning levels; #661's dsh error classification, preflight, retry, and
+reasoning levels; and #662's OpenCode reasoning levels. This page defines what
+the measurements are; each issue decides when it has taken them on. Read the
+issues, not this paragraph, for their current state.
 
 The detail behind each row follows. Each subsection covers the same five
 dimensions in the same order: provider and model binding, the reasoning surface,
@@ -174,7 +185,7 @@ _Evidence: real run (PR #654), upstream docs._
   (`packages/runtime/src/templates/smithers/agents/codex.tsx`). Provenance is
   upstream docs plus that in-repo adapter, not measurement — PR #654's requests
   went to a deterministic local server, so no level was ever exercised against a
-  real provider. A Codex binding therefore declares an empty `reasoningLevels`
+  real provider. A Codex binding therefore declares no `reasoningLevels`
   until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
   measures the levels at the version the shipped image pins.
 - **Unattended.** `codex exec` is non-interactive, has filesystem and shell
@@ -197,7 +208,7 @@ upstream docs. No provider request was made._
   Responses-compatible providers are documented.
 - **Reasoning.** **Inspected, not exercised**: `--help` on the real 0.84.2
   binary advertises levels through `max`, but no provider request set one, so a
-  Pi binding declares an empty `reasoningLevels` until
+  Pi binding declares no `reasoningLevels` until
   [#659](https://github.com/monad-developers/ultrafuzz/issues/659) measures
   them.
 - **Unattended.** Non-interactive print mode has `read`, `write`, `edit`, and
@@ -227,9 +238,12 @@ docs. No provider request was made._
   (provider-specific reasoning effort, e.g., high, max, minimal)"; the per-model
   config entries can carry the same control and were not exercised either. No
   request in this research set `--variant` or observed a level reaching a
-  provider, so an OpenCode binding declares an empty `reasoningLevels` until
-  [#662](https://github.com/monad-developers/ultrafuzz/issues/662) measures
-  which values each OpenRouter route actually accepts.
+  provider, so an OpenCode binding declares no `reasoningLevels` until the
+  values each OpenRouter route actually accepts are measured.
+  [#662](https://github.com/monad-developers/ultrafuzz/issues/662) is
+  **nominated** for that measurement, not assigned it: its filed acceptance
+  criteria cover the gates, the isolated state roots, and credential handling
+  but name no reasoning surface, so it owns the measurement once they do.
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
   Build agent exposes file, shell, search, and task tools.
 - **Events.** Raw JSON events, session IDs, continue/resume/fork, exported
@@ -255,7 +269,7 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
   drives with `["low", "high", "max"]`
   (`packages/runtime/src/templates/smithers/agents/deepseek.tsx`). Provenance is
   CLI inspection plus that in-repo adapter; no level was exercised against a
-  real provider, so a Claude Code binding declares an empty `reasoningLevels`
+  real provider, so a Claude Code binding declares no `reasoningLevels`
   until [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
   measures them at the version the shipped image pins.
 - **Unattended.** Print mode with confirmed schema, tool, effort, session, and
@@ -303,12 +317,15 @@ commit
   advertises exactly one argument and `-h` — and they are absent from
   `--dump-default-config` because they carry no schema default, not because they
   do not exist. No request in this research set either field and no level was
-  observed reaching the provider, so a dsh binding declares an empty
-  `reasoningLevels` **until
-  [#661](https://github.com/monad-developers/ultrafuzz/issues/661) measures the
-  surface end to end**. #661 must publish the measured levels before the
-  validator accepts a `reasoning` value for dsh; the field is unsupported
-  because it is unmeasured, not because DeepSeek Harness lacks it.
+  observed reaching the provider, so a dsh binding declares no
+  `reasoningLevels` **until the surface is measured end to end**.
+  [#661](https://github.com/monad-developers/ultrafuzz/issues/661) is
+  **nominated** for that measurement, not assigned it: its filed acceptance
+  criteria cover the adapter, its isolation, and the smoke profile but name no
+  reasoning surface, so it owns the measurement once they do. Whoever takes it
+  must publish the measured levels before the validator accepts a `reasoning`
+  value for dsh; the field is unsupported because it is unmeasured, not because
+  DeepSeek Harness lacks it.
 - **Unattended.** `dsh --profile headless "task"` runs one task unattended and
   prints the final assistant text. 25 model-facing tools, including `bash`,
   `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`,
@@ -444,7 +461,7 @@ harness = "pi"
 provider = "openrouter"
 model = "anthropic/claude-sonnet-4"
 # No `reasoning` key yet: Pi's `--help` advertises levels through `max`, but no
-# real request exercised them, so this binding declares an empty
+# real request exercised them, so this binding omits
 # `reasoningLevels` until #659 measures them. No binding in this example sets
 # `reasoning`, because no candidate has a measured level today.
 
@@ -453,8 +470,8 @@ harness = "dsh"
 provider = "deepseek"
 model = "deepseek-v4-pro"
 # No `reasoning` key yet: dsh exposes `thinking`/`reasoningEffort` in its
-# adapter settings, but no run has exercised them, so this binding declares an
-# empty `reasoningLevels` until #661 measures the levels.
+# adapter settings, but no run has exercised them, so this binding omits
+# `reasoningLevels` until the levels are measured (#661 nominated).
 ```
 
 The exact field names remain subject to schema implementation review. The
@@ -508,7 +525,7 @@ interface HarnessCapabilities {
   events: "jsonl" | "rpc" | "final-text-only";
   sessions: "none" | "resume" | "tree";
   usage: { tokens: boolean; cache: boolean; cost: boolean };
-  reasoningLevels: readonly string[];
+  reasoningLevels?: readonly string[];
   isolation: "native-sandbox" | "external-sandbox-required";
   cloudPortable?: boolean;
 }
@@ -557,32 +574,45 @@ The binding validator must reject an unsupported protocol, reasoning level,
 missing executable/version, unavailable cloud image, or missing credential
 before workflow launch. A harness that records no reasoning levels accepts no
 `reasoning` value at all, so setting one on such a binding is a validation
-error rather than a silently ignored field. An empty `reasoningLevels` states
-what was measured, not that the harness has no reasoning surface, and **every
-candidate on this page is empty today** because no reasoning level anywhere in
+error rather than a silently ignored field. `reasoningLevels` is optional for
+the same reason `cloudPortable` is, and the two spellings say different things:
+an **absent** `reasoningLevels` records that nothing was measured, while an
+**empty** `reasoningLevels` records that the surface _was_ measured and the
+harness accepts no level at all. Both make the validator reject a `reasoning`
+value, but only the empty array is a positive claim, so only a real measurement
+may write it. **Every harness candidate on this page omits the field today** —
+none declares an empty array either — because no reasoning level anywhere in
 this research reached a real provider:
 
-| Harness     | Reasoning surface found                            | Why the list is empty today                   | Owner            |
+| Harness     | Reasoning surface found                            | Why nothing is declared today                 | Owner            |
 | ----------- | -------------------------------------------------- | --------------------------------------------- | ---------------- |
 | Codex       | `model_reasoning_effort` config key                | Requests went to a deterministic local server | #663 (nominated) |
 | Claude Code | `--effort` (`low`/`high`/`max` in-repo)            | CLI inspection only; no provider request      | #663 (nominated) |
-| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659             |
-| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661             |
-| OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662             |
+| Pi          | `--help` advertises levels through `max`           | CLI inspection only; no provider request      | #659 (tracked)   |
+| dsh         | `thinking` / `reasoningEffort` in adapter settings | Settings fields never set by any run          | #661 (nominated) |
+| OpenCode    | `--variant` (provider-specific reasoning effort)   | CLI inspection only; no provider request      | #662 (nominated) |
 
-All five have a known surface and none has a measured level, which is what the
-declared value records: only a measured level may be declared. Each list becomes
-non-empty as soon as its child issue measures real levels. The two #663
-rows are nominated rather than tracked, on the same footing as the
-error-classification rows in the
-[Comparison Matrix](#comparison-matrix): #663 owns these two measurements once
-its acceptance criteria name them, and not before.
+All five harness candidates have a known surface and none has a measured level,
+which is why none declares the field at all: only a measured level may be
+declared, and writing `[]` instead would assert that the harness accepts none.
+Each list appears as soon as its child issue measures real levels. The sixth row
+of the [Comparison Matrix](#comparison-matrix), the direct provider-API harness,
+declares no capability values whatsoever, so it has no `reasoningLevels` either
+way — which is why this table has five rows and not six.
+
+Only the Pi row is **tracked**: #659's acceptance criteria name the measurement
+in as many words ("Pi's reasoning levels, including `max`, are representable").
+The other four rows are **nominated rather than tracked**, on the same footing as
+the error-classification rows in the
+[Comparison Matrix](#comparison-matrix): the filed bodies of #661, #662, and
+#663 name no reasoning, variant, effort, or thinking measurement at all, so each
+owns its rows here once its own acceptance criteria name them, and not before.
 
 `cloudPortable` sits in the same position: no candidate declares a value here
 either, which is why the field is optional rather than a required `boolean`. A
 required boolean could only say `true` or `false`, and neither is honest about a
 harness nobody has run in the worker image. An absent `cloudPortable` says what
-an empty `reasoningLevels` says: nothing was measured. The validator refuses to
+an absent `reasoningLevels` says: nothing was measured. The validator refuses to
 schedule such a binding onto a cloud node rather than reading the absence as
 `false` or assuming a default. What the subsections record is the _evidence_ for
 cloud portability rather than the declared boolean — Codex's existing adapter
@@ -821,9 +851,10 @@ Installed and executed in this environment:
   429, rejected model ID,
   or mid-stream disconnect was ever produced to classify. #659 owns Pi and #662
   owns OpenCode; #663 is only nominated for Codex and Claude Code at the versions
-  the shipped Modal image pins, and stays nominated rather than owning them until
-  the acceptance-criteria extension noted under
-  [Comparison Matrix](#comparison-matrix) lands.
+  the shipped Modal image pins, and #661 is only nominated for dsh, whose error
+  classification and authenticated preflight no filed issue owns today. Both stay
+  nominated rather than owning those dimensions until the acceptance-criteria
+  extension noted under [Comparison Matrix](#comparison-matrix) lands.
 - **DeepSeek Harness has no supported machine-readable output.** The repository
   states the JSONL event driver is test infrastructure. `@deepseek-ai/dsh-acp`
   publishes an ACP JSON-RPC stdio server, but it is not a dependency of the
@@ -876,17 +907,21 @@ gives the same issue.
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
-   final-text-only fallback that warns rather than failing the run. It also owns
-   the reasoning measurement: `dsh-llm-deepseek` declares `thinking` and
-   `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so #661 must drive
-   those through a real request and publish the levels the binding may declare.
-   Parsing the undocumented `session.jsonl.zstd` format is explicitly out of
-   scope.
+   final-text-only fallback that warns rather than failing the run. This page also
+   **nominates** it for the reasoning measurement and for dsh's error
+   classification, preflight, and retry semantics: `dsh-llm-deepseek` declares
+   `thinking` and `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so
+   those have to be driven through a real request before the binding may declare
+   levels. Those nominations become ownership only once the issue's acceptance
+   criteria name them; see [Comparison Matrix](#comparison-matrix). Parsing the
+   undocumented `session.jsonl.zstd` format is explicitly out of scope.
 5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) (Phase 3) —
    qualify OpenCode plus OpenRouter separately, including fully isolated state
-   directories and disabled sharing, plugins, update checks, and model fetching,
-   plus the `--variant` reasoning-effort flag and the per-model reasoning config
-   entries this research inspected but never exercised.
+   directories and disabled sharing, plugins, update checks, and model fetching.
+   This page also **nominates** it for the `--variant` reasoning-effort flag and
+   the per-model reasoning config entries this research inspected but never
+   exercised; that nomination becomes ownership only once the issue's acceptance
+   criteria name them.
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) (Phase 4) —
    gate the Modal worker image on per-harness capability checks. This page also
    nominates it for the version reconciliation between the two harnesses
