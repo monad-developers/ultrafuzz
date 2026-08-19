@@ -401,13 +401,14 @@ preflight = "authenticated-models"
 [harnesses.pi]
 kind = "pi"
 version = "0.84.2"
-config_dir = ".ultrafuzz/harness/pi"  # base path, expanded per run
+config_dir = ".ultrafuzz/harness/pi"  # seed dir, copied per run
 
 [harnesses.dsh]
 kind = "dsh"
 version = "0.1.0-rc.7"
-# Base path only. The launcher derives a per-run state root under
-# .ultrafuzz/runs/<run-id>/ and exports that, never this literal, as DSH_HOME.
+# Seed directory only. The launcher copies it into the per-run state root
+# .ultrafuzz/runs/<run-id>/harness/dsh/ and exports that path, never this
+# literal, as DSH_HOME.
 config_dir = ".ultrafuzz/harness/dsh"
 
 [models.openrouter-sonnet]
@@ -440,11 +441,16 @@ important invariants are:
    capabilities, and reasoning translation.
 5. A validated binding chooses a mutually supported wire protocol before any
    child is launched.
-6. `config_dir` is a base path, never exported verbatim. The launcher expands it
-   into a run-scoped state root under `.ultrafuzz/runs/<run-id>/` and exports
-   _that_ path as `DSH_HOME`, `CODEX_HOME`, and the like, so two runs never
-   share a harness state root. The `.ultrafuzz/harness/**` base surface extends
-   the campaign layout documented in [docs/index.md](../index.md).
+6. `config_dir` is a pre-run seed directory, never exported verbatim. The
+   composition is fixed: for every run the launcher creates the state root
+   `.ultrafuzz/runs/<run-id>/harness/<harness-id>/`, copies the declared
+   `config_dir` in as that root's initial contents, and exports _that_ path —
+   never the declared literal — as `DSH_HOME`, `CODEX_HOME`, and the like. So
+   two runs never share a harness state root, and no run mutates the seed. Both
+   surfaces extend the campaign layout documented in
+   [docs/index.md](../index.md), which lists `runs/` but no `harness/` entry
+   today: `.ultrafuzz/harness/**` for the seeds and
+   `.ultrafuzz/runs/<run-id>/harness/**` for the state roots.
 
 Existing profiles keep working during migration. A legacy `agent = "CodexAgent"`
 profile maps to the Codex harness and its existing provider binding. Legacy
@@ -643,10 +649,22 @@ one. They are called _qualification gates_ everywhere; "conformance suite" means
 only the test code the child issues add to exercise them, never the gates
 themselves.
 
-"Pinned" means the version the shipped Modal worker image installs. Evidence
-gathered against any other build is provenance, not qualification — see
-[Evidence](#evidence) for the gap between the Codex and Claude Code versions
-measured here and the ones that image pins today.
+"Pinned" means the exact version the binding declares and preflight asserts.
+For the two harnesses the shipped Modal worker image installs — Codex and
+Claude Code — that pin is the image's, and the versions measured for this report
+are not it. For Pi, OpenCode, and dsh the image installs nothing today, so the
+asserted pin is the only pin they have: the child issues fix an exact version
+and assert it at preflight
+([#659](https://github.com/monad-developers/ultrafuzz/issues/659) for Pi,
+[#662](https://github.com/monad-developers/ultrafuzz/issues/662) for OpenCode,
+[#661](https://github.com/monad-developers/ultrafuzz/issues/661) for dsh), and
+adding those three to the image is
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663)'s work, which
+is why the version-reconciliation row in
+[Measurement Ownership](#measurement-ownership) records "—" for them. Either way, evidence
+gathered against any build other than the asserted pin is provenance, not
+qualification — see [Evidence](#evidence) for the gap between the Codex and
+Claude Code versions measured here and the ones that image pins today.
 
 - **G1 · Model pass-through.** Run a real provider request with an opaque
   catalogue model ID and confirm the provider observed that exact ID.
