@@ -779,7 +779,7 @@ G9 and G10 have to be re-run at the shipped pins — or the pins moved to the
 measured versions — before either pairing counts as qualified, and
 [#663](https://github.com/monad-developers/ultrafuzz/issues/663) is the issue
 that should own that reconciliation — once its body is extended to say so, as
-[Comparison Matrix](#comparison-matrix) records.
+[Measurement Ownership](#measurement-ownership) records.
 
 Installed and executed in this environment:
 

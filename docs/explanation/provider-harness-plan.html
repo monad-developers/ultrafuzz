@@ -1903,7 +1903,12 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                       present.
                     </li>
                     <li>
-                      Tool execution, artifact contract, session resume by explicit ID, and token/cost parsing all pass.
+                      Tool execution in a disposable worktree and the post-agent artifact contract, including retry
+                      cleanup, pass.
+                    </li>
+                    <li>
+                      Token/cost/rate-limit event parsing and session resume by explicit ID pass, and retry provably
+                      cannot resume an unrelated session.
                     </li>
                     <li>
                       A run-scoped state root writes nothing to the operator's real home, and the enforced sandbox
@@ -2073,7 +2078,10 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                 <dt>Acceptance</dt>
                 <dd>
                   <ul>
-                    <li>Gates G1–G8 pass against real OpenRouter.</li>
+                    <li>
+                      Gates G1&ndash;G8 pass against real OpenRouter with a pinned OpenCode version asserted at
+                      preflight.
+                    </li>
                     <li>
                       The <code>--variant</code> values OpenCode actually accepts on an OpenRouter route are measured
                       and recorded — or, if it accepts none, the binding declares an <em>empty</em>
@@ -2168,6 +2176,10 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                     </li>
                     <li>The legacy-to-new migration for every existing agent reference is documented.</li>
                     <li><code>pnpm docs:check</code> passes.</li>
+                    <li>
+                      The default-selection status is stated rather than implied — Codex remains the shipped OpenRouter
+                      default until a comparable real-provider result replaces it.
+                    </li>
                   </ul>
                 </dd>
                 <dt>Depends on</dt>
