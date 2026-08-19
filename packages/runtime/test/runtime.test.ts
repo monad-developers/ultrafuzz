@@ -9010,6 +9010,104 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   );
 });
 
+test("a divergent published control file leaves status readable while execution stays closed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-control-status";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Diverge the PUBLISHED snapshot copy of the generated workflow, which is what the seal check
+  // compares once a snapshot exists. The project copy stays byte-identical to the seal, exactly as
+  // observed in issue #674.
+  const snapshotsRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots");
+  const generations = fs.readdirSync(snapshotsRoot);
+  assert.equal(generations.length, 1, JSON.stringify(generations));
+  const workflowsDir = path.join(snapshotsRoot, generations[0]!, ".smithers", "workflows");
+  const workflowFile = fs.readdirSync(workflowsDir).find((entry) => entry.endsWith(".tsx"));
+  assert.ok(workflowFile, "published snapshot has no generated workflow");
+  const snapshotWorkflowPath = path.join(workflowsDir, workflowFile!);
+  const pristine = fs.readFileSync(snapshotWorkflowPath, "utf8");
+  // Published snapshots are intentionally read-only, so reaching this state takes a deliberate
+  // override — which is exactly what an operator hot-patching a sealed run has to do.
+  const publishedMode = fs.statSync(snapshotWorkflowPath).mode;
+  fs.chmodSync(snapshotWorkflowPath, 0o644);
+  fs.writeFileSync(snapshotWorkflowPath, `${pristine}\n// diverged\n`, "utf8");
+  fs.chmodSync(snapshotWorkflowPath, publishedMode);
+
+  // Execution authority still fails closed, and still refuses to resume.
+  const strict = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(strict.ok, false);
+  if (!strict.ok) {
+    assert.equal(strict.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(strict.diagnostics[0]?.message ?? "", /sealed workflow control file changed: workflow/u);
+  }
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+
+  // An observer reads the same run, and is told exactly what diverged.
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
+  if (observed.ok) {
+    assert.equal(observed.verifiedControl.divergences.length, 1);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /sealed workflow control file changed: workflow/u);
+    // The message must name which copy was compared and both digests, so the divergence is
+    // diagnosable without reproducing the capture by hand.
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /published execution snapshot copy/u);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /sealed [0-9a-f]{64} \d+ bytes/u);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /observed [0-9a-f]{64} \d+ bytes/u);
+  }
+
+  // status reports the run instead of replacing it with an error, and carries the divergence as a warning.
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, runId);
+  assert.equal(health.value?.verdict, "running-healthy");
+  const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
+  assert.equal(diverged.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(diverged[0]?.severity, "warning");
+
+  // The divergence is never silently repaired.
+  assert.equal(fs.readFileSync(snapshotWorkflowPath, "utf8"), `${pristine}\n// diverged\n`);
+});
+
+test("an observer still refuses a run whose sealed execution files diverged", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-execution-file";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Execution files are what `status` itself runs: the snapshot env binds the runner executable and the
+  // sealed module URLs inside the snapshot. Tolerating divergence here would mean executing tampered
+  // code to report the tampering, so this must stay fatal even for a read-only caller.
+  const seal = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "control-integrity.json"), "utf8")
+  ) as { execution_files: { snapshot_path: string }[] };
+  const generations = fs.readdirSync(path.join(run.value!.run_root, "smithers", "execution-snapshots"));
+  const snapshotRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots", generations[0]!);
+  const target = path.join(snapshotRoot, ...seal.execution_files[0]!.snapshot_path.split("/"));
+  const originalMode = fs.statSync(target).mode;
+  fs.chmodSync(target, 0o644);
+  fs.appendFileSync(target, "\n// diverged\n", "utf8");
+  fs.chmodSync(target, originalMode);
+
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, false);
+  if (!observed.ok) {
+    assert.equal(observed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(observed.diagnostics[0]?.message ?? "", /sealed workflow execution file changed/u);
+  }
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, false);
+  assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+});
+
 test("getRunHealth accepts the terminal degraded verdict without converting it to done", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

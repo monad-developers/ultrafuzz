@@ -23,6 +23,7 @@ import {
 
 import type {
   QueryRunEventsValue,
+  RuntimeDiagnostic,
   RunHealthValue,
   RunHealthVerdict,
   RunListEntry,
@@ -170,14 +171,29 @@ export async function getRunHealth(input: {
     ]);
   }
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // `status` reports on a run; it never executes one. Reading it must not require the authority to
+  // resume it, or a single divergent control file makes an otherwise healthy run permanently
+  // unobservable (issue #674). Divergences are surfaced as warnings below rather than suppressed.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);
   }
+  const controlDiagnostics: RuntimeDiagnostic[] = evidence.verifiedControl.divergences.map((message) => ({
+    code: "WORKFLOW_CONTROL_EVIDENCE_DIVERGED",
+    message,
+    severity: "warning" as const,
+    source: "workflow",
+    path: evidence.verifiedControl.paths.integrityPath
+  }));
   const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
+  const syncDiagnostics = [
+    ...controlDiagnostics,
+    ...(sync.ok
+      ? sync.diagnostics
+      : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })))
+  ];
   const snapshot = await runSmithersInspectionCommand({
     args: [
       "status",

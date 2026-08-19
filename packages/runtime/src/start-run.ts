@@ -863,7 +863,8 @@ async function persistSmithersEvidence(
 
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
-  runId: string
+  runId: string,
+  options: { tolerateControlDivergence?: boolean } = {}
 ): Promise<LinkedWorkflowEvidence | { ok: false; diagnostics: RuntimeDiagnostic[] }> {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const runsRoot = await runsRootForProject(resolvedProjectRoot);
@@ -938,7 +939,12 @@ export async function readLinkedWorkflowEvidence(
       throw new Error("run metadata workflow IDs do not exactly match the active workflow run");
     }
 
-    const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout);
+    // Observers pass `tolerateControlDivergence` so a divergent control file downgrades to a reported
+    // warning instead of hiding a live run entirely (issue #674). Execution callers omit it and keep
+    // failing closed.
+    const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, {
+      tolerateDivergence: options.tolerateControlDivergence === true
+    });
     const sealedPlan = verifiedControl.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
     if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
     const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);

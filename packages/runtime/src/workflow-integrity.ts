@@ -110,6 +110,26 @@ export interface VerifiedWorkflowControlSnapshot {
   executionFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[];
   bindings: WorkflowControlBindings;
   integrityContents: Buffer;
+  /**
+   * Digest divergences found against the seal. Always empty unless the caller opted into
+   * `tolerateDivergence`, which only a read-only observer may do. Execution paths leave the
+   * option unset and therefore still fail closed on the first divergence.
+   */
+  divergences: readonly string[];
+}
+
+/**
+ * A read-only caller — `ultrafuzz status` and friends — needs the run's identity and snapshot
+ * environment, not permission to execute it. Gating observability on execution-grade authority made a
+ * single divergent control file hide an otherwise healthy run for the rest of its life (issue #674).
+ * `tolerateDivergence` collects CONTROL-FILE digest divergences instead of throwing so the caller can
+ * report them as warnings. It deliberately does NOT relax:
+ *   - anything structural (an unparseable seal, a mismatched run ID, an unreadable control file), or
+ *   - execution-file divergence, because the snapshot env binds the runner executable and the sealed
+ *     module URLs inside the snapshot, so an observer still executes those files.
+ */
+export interface VerifyWorkflowControlSnapshotOptions {
+  tolerateDivergence?: boolean;
 }
 
 export interface VerifiedSealedTaskManifestSnapshot {
@@ -332,7 +352,16 @@ export function workflowControlGeneration(projectRoot: string, layout: RunLayout
   return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
 }
 
-export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLayout): VerifiedWorkflowControlSnapshot {
+export function verifyWorkflowControlSnapshot(
+  projectRoot: string,
+  layout: RunLayout,
+  options: VerifyWorkflowControlSnapshotOptions = {}
+): VerifiedWorkflowControlSnapshot {
+  const divergences: string[] = [];
+  const reportDivergence = (message: string): void => {
+    if (options.tolerateDivergence !== true) throw new Error(message);
+    divergences.push(message);
+  };
   const paths = workflowControlPaths(projectRoot, layout);
   const sealContents = readBoundedRegularFile(layout.root, paths.integrityPath, "workflow control seal");
   const seal = parseWorkflowControlIntegritySeal(sealContents);
@@ -356,7 +385,9 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     const observed = digestBytes(contents[key]);
     const expected = seal.files[key];
     if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
-      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+      reportDivergence(
+        `sealed workflow control file changed: ${controlFileLabel(key)} (sealed ${expected.sha256} ${expected.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes${hasPublishedSnapshot && key === "workflow" ? ", compared against the published execution snapshot copy" : ""})`
+      );
     }
   }
   const executionFiles = seal.execution_files.map((entry) => {
@@ -368,7 +399,13 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     );
     const observed = digestBytes(bytes);
     if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
-      throw new Error(`sealed workflow execution file changed: ${entry.snapshot_path}`);
+      // Never tolerated, even for an observer. The snapshot env binds SMITHERS_BIN and the sealed
+      // artifacts/runtime module URLs to paths INSIDE this snapshot, so `ultrafuzz status` executes
+      // these files to obtain a status summary. Downgrading this to a warning would mean running
+      // tampered code in order to report that the code was tampered with.
+      throw new Error(
+        `sealed workflow execution file changed: ${entry.snapshot_path} (sealed ${entry.sha256} ${entry.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes)`
+      );
     }
     return { sourcePath: entry.source_path, snapshotPath: entry.snapshot_path, contents: bytes };
   });
@@ -379,7 +416,7 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents
   );
   if (JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
-    throw new Error("workflow control completeness binding changed");
+    reportDivergence("workflow control completeness binding changed");
   }
   return {
     paths,
@@ -387,7 +424,8 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     contents,
     executionFiles,
     bindings: seal.bindings,
-    integrityContents: sealContents
+    integrityContents: sealContents,
+    divergences
   };
 }
 
