@@ -9,12 +9,9 @@ Last substantively revised 2026-08-19 under review.
 The follow-up work is filed as
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664),
 and this page is published by
-[PR #665](https://github.com/monad-developers/ultrafuzz/pull/665). Those issues
-name their design source by an earlier path and by section number;
-[Where The Retired Section Numbers Land](#where-the-retired-section-numbers-land)
-maps every one of those citations onto the heading that now carries it. The
-recommendations below are proposals awaiting real-provider qualification, not
-shipped defaults.
+[PR #665](https://github.com/monad-developers/ultrafuzz/pull/665). All eight issue
+bodies cite this page and its named headings directly. The recommendations below
+are proposals awaiting real-provider qualification, not shipped defaults.
 
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
@@ -436,8 +433,8 @@ config_seed_dir = ".ultrafuzz/harness/pi"  # seed dir, copied per run
 kind = "dsh"
 version = "0.1.0-rc.7"
 # Seed directory only. The launcher copies it into the per-run state root
-# .ultrafuzz/runs/<run-id>/harness/dsh/ and exports that path, never this
-# literal, as DSH_HOME.
+# .ultrafuzz/runs/<run-id>/harness/dsh/<model-profile-id>/<node-id>/<attempt>/
+# and exports that path, never this literal, as DSH_HOME.
 config_seed_dir = ".ultrafuzz/harness/dsh"
 
 # Persisted-credential harnesses declare `state_root` instead of
@@ -657,6 +654,7 @@ interface QualifiedHarnessBinding {
 
 interface NodeRequirements {
   events?: HarnessCapabilities["events"];
+  cloudPortable?: true;
 }
 ```
 
@@ -693,8 +691,9 @@ legal but receives no exemption from the isolation claim. For `api-key` auth,
 `subscription` auth, `credentialEnv` is absent and the provider's declared
 preflight must validate a usable logged-in session before workflow launch. The
 configuration boundary shows two of the three shipped subscription bindings,
-Codex and Claude Code; the legacy mapping below identifies Kimi Code as the
-third.
+Codex and Claude Code; the legacy mapping in the
+[configuration boundary](#proposed-configuration-boundary) identifies Kimi Code
+as the third.
 
 Capabilities are only half of the matching. A workflow node declares what it
 needs from a harness — a dashboard or telemetry node requires `events: "jsonl"`,
@@ -773,10 +772,11 @@ Read the Owner column under the rule in
 either, which is why the field is optional rather than a required `boolean`. A
 required boolean could only say `true` or `false`, and neither is honest about a
 harness nobody has run in the worker image. An absent `cloudPortable` says what
-an absent `reasoningLevels` says: nothing was measured. The validator refuses to
-schedule such a binding onto a cloud node rather than reading the absence as
-`false` or assuming a default. What the subsections record is the _evidence_ for
-cloud portability rather than the declared boolean — Codex's existing adapter
+an absent `reasoningLevels` says: nothing was measured. A cloud node declares
+`cloudPortable: true` in `NodeRequirements`; the validator refuses to match a
+binding whose capability is absent rather than reading the absence as `false` or
+assuming a default. What the subsections record is the _evidence_ for cloud
+portability rather than the declared boolean — Codex's existing adapter
 already runs in Modal workers, the Modal image installs Claude Code's pin, and
 Pi and OpenCode were never run in that image at all. dsh has source-level
 portability evidence only: its Node requirement matches the image, its prebuilt
@@ -1169,48 +1169,6 @@ numbering below restates its phases with implementation detail.
    pairing-policy section above points at. The default decision itself waits on
    comparable real-provider results; until then Codex remains the shipped
    OpenRouter default, stated rather than implied.
-
-## Where The Retired Section Numbers Land
-
-[#653](https://github.com/monad-developers/ultrafuzz/issues/653) and its seven
-child issues were filed while this plan was rendered as a standalone HTML page at
-`docs/explanation/provider-harness-plan.html`. #653 cited that path with no
-section number; the child issues cited it by path and by section number, naming
-§2, §4, §5, §5.1, §6, §7, and §8 between them, several of those numbers more than
-once. That rendering is retired in favour of this page, which uses named headings
-rather than numbers.
-
-All eight bodies now cite this page and the named heading directly, so no open
-issue depends on the table below. It stays as the historical key for references
-made before that move — comments on those issues, the retired rendering's own
-cross-references, and any working note that still speaks in section numbers. Read
-the path as this file and the number as the row below:
-
-| Retired reference                            | Section on this page                                                                                                                  |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| §1 · Verdict                                 | [Recommended Plan And Action Items](#recommended-plan-and-action-items)                                                               |
-| §2 · What "DeepSeek Code" refers to          | [What "DeepSeek Code" Refers To](#what-deepseek-code-refers-to)                                                                       |
-| §3 · Evidence table                          | [Comparison Matrix](#comparison-matrix) and [Evidence](#evidence)                                                                     |
-| §3.1 · DeepSeek Harness 0.1.0-rc.7, measured | [DeepSeek Harness, Measured](#deepseek-harness-measured)                                                                              |
-| §3.2 · Candidate comparison                  | [Comparison Matrix](#comparison-matrix)                                                                                               |
-| §4 · Recommended pairing policy              | [Recommended Pairing Policy](#recommended-pairing-policy)                                                                             |
-| §5 · Target architecture                     | [Proposed Configuration Boundary](#proposed-configuration-boundary) and [Proposed Capability Contract](#proposed-capability-contract) |
-| §5.1 · The `final-text-only` event class     | [Proposed Capability Contract](#proposed-capability-contract)                                                                         |
-| §5.2 · Credential and state rules            | [Credential And State Rules](#credential-and-state-rules)                                                                             |
-| §6 · Sequencing                              | [Recommended Plan And Action Items](#recommended-plan-and-action-items) and [Next Work](#next-work)                                   |
-| §7 · Risks                                   | [Constraints That Block Qualification Today](#constraints-that-block-qualification-today)                                             |
-| §8 · Qualification gates                     | [Qualification Gates](#qualification-gates)                                                                                           |
-| §9 · Proposed GitHub issues                  | [Next Work](#next-work)                                                                                                               |
-| §10 · Sources                                | [Sources](#sources)                                                                                                                   |
-
-Two of those mappings are one-to-many because this page splits what the retired
-rendering kept together: its evidence section carried both the candidate
-comparison and the DeepSeek measurement, and its target architecture carried both
-the configuration boundary and the capability contract. Where a retired citation
-names §5 for a configuration key, the
-[configuration boundary](#proposed-configuration-boundary) is the half it means;
-where it names §5 for a capability name or the event-class relation, the
-[capability contract](#proposed-capability-contract) is.
 
 ## Sources
 
