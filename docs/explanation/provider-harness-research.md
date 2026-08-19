@@ -1,8 +1,21 @@
-# Provider-agnostic coding harness research
+# Provider-agnostic Coding Harness Research
 
-Status: working draft for [issue #653](https://github.com/monad-developers/ultrafuzz/issues/653),
-researched on 2026-08-18. Revised the same day after the issue's "DeepSeek Code"
-was corrected to mean [`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness).
+Status: reviewed research for
+[issue #653](https://github.com/monad-developers/ultrafuzz/issues/653),
+researched on 2026-08-18 and revised the same day after the issue's "DeepSeek
+Code" was corrected to mean
+[`deepseek-ai/deepseek-harness`](https://github.com/deepseek-ai/deepseek-harness).
+The follow-up work is filed as
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664),
+and this page is published by
+[PR #665](https://github.com/monad-developers/ultrafuzz/pull/665). The
+recommendations below are proposals awaiting real-provider qualification, not
+shipped defaults.
+
+The companion [architecture plan](provider-harness-plan.html) is a
+self-contained HTML report — GitHub serves `.html` as plain text, so download
+it and open it in a browser. Its §7 (risk register) and §9 (drafted issue
+bodies) have no counterpart here; everything else appears on both pages.
 
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
@@ -16,7 +29,7 @@ The current OpenRouter-through-Codex configuration is a supported compatibility
 path, not a decision that OpenRouter requires Codex or that Codex should remain
 the default.
 
-## Terminology correction
+## Terminology Correction
 
 The earlier revision of this page concluded that no first-party DeepSeek coding
 CLI existed and that "DeepSeek Code" should not be blessed. That conclusion is
@@ -39,21 +52,168 @@ Two things remain true and must not be conflated:
 - DeepSeek is a provider; DeepSeek Harness is a harness. They are separately
   selectable, and either can be used without the other.
 
-## Comparison matrix
+## Comparison Matrix
 
 This matrix distinguishes upstream claims from Ultrafuzz qualification. A
 candidate is not supported until a pinned real CLI passes the conformance and
 credential-isolation tests described below.
 
-| Candidate                           | Provider and model binding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Unattended tools and artifacts                                                                                                                                                                                                                                                                                                                                                                         | Events, sessions, and telemetry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Isolation and portability                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Disposition                                                                                                                                                         |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex CLI 0.147.0                   | Custom `model_provider`, `base_url`, `wire_api`, and `env_key`; the model is supplied separately. PR #654 (merged into `release/v0.1.0` on 2026-08-18, before this re-analysis) validated an OpenRouter Responses route.                                                                                                                                                                                                                                                                                                                                                                                                               | `codex exec` is non-interactive, has filesystem and shell tools, supports a final-response JSON schema, and has a native workspace-write sandbox.                                                                                                                                                                                                                                                      | JSONL events, persisted or ephemeral sessions, `exec resume`, and provider-reported usage are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Apache-2.0; Node wrapper and native binaries. The sandbox is useful locally and the existing adapter runs in Modal workers.                                                                                                                                                                                                                                                                                                                                                                                                                              | Keep. Natural first-party pairing with OpenAI/Codex; retained as an OpenRouter compatibility path but not the provider-neutral default.                             |
-| Pi 0.84.2                           | Built-in `openrouter` and `deepseek` providers; CLI accepts `--provider` and an opaque `--model`. Custom OpenAI, Anthropic, Google, and Responses-compatible providers are documented.                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Non-interactive print mode has `read`, `write`, `edit`, and `bash`; JSON and RPC modes are designed for process integration.                                                                                                                                                                                                                                                                           | JSON events include tool lifecycle and usage. Sessions are JSONL trees with explicit IDs, continue, resume, and fork. The UI reports token/cache usage and cost.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | MIT and Node 22.19+. Pi has no sandbox, so the Ultrafuzz worktree and the local/container/Modal boundary must supply isolation. Version checks and install telemetry can be disabled.                                                                                                                                                                                                                                                                                                                                                                    | First gateway-neutral candidate to qualify for OpenRouter. Smithers 0.32.0 already exports a `PiAgent`.                                                             |
-| OpenCode 1.18.18                    | Built-in OpenRouter support, `provider/model` selection, and explicit config entries for catalogue models; custom base URLs through AI SDK providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | `opencode run --format json --auto` is non-interactive; the Build agent exposes file, shell, search, and task tools.                                                                                                                                                                                                                                                                                   | Raw JSON events, session IDs, continue/resume/fork, exported session JSON, token usage, and cost-bearing step events.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | MIT. Permissions are an approval policy, not a sandbox. Config, data, cache, model refresh, plugins, updates, and sharing all need isolated or disabled defaults.                                                                                                                                                                                                                                                                                                                                                                                        | Second gateway-neutral candidate for OpenRouter. Smithers 0.32.0 exports an `OpenCodeAgent`, but credentials and state roots still need an Ultrafuzz-owned wrapper. |
-| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | Two LLM adapters. `dsh-llm-deepseek` owns the `deepseek-official` route (`https://api.deepseek.com`, `DEEPSEEK_API_KEY`, default catalogue `deepseek-v4-flash` / `deepseek-v4-pro`). `dsh-llm-pi-ai` wraps `@earendil-works/pi-ai` and can reach 38 catalogue providers including `openrouter`, plus hand-declared OpenAI-compatible gateways — but the base bundle mounts it **dormant with zero routes**; a route registers only when an `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is the shipped default (`agent-default-model` = `deepseek-official` / `deepseek-v4-flash`), not a hard coupling. | `dsh --profile headless "task"` runs one task unattended and prints the final assistant text. 25 model-facing tools, including `bash`, `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`, `subagent`, `workflow`, and `web_search`. Native OS sandbox (`bwrap`/Landlock, Seatbelt, Windows ACL) with `read-only` / `workspace-write` (default) / `danger-full-access` modes. | **No supported machine-readable CLI output.** Headless prints prose on stdout; the JSONL event driver is explicitly "test infrastructure, not a supported CLI output format". Live machine-readable access exists only through the unshipped ACP JSON-RPC plugin or the Python SDK. Sessions persist to `$DSH_HOME/sessions/**/session-<uuid>/session.jsonl.zstd`, but headless prints no session ID and exposes no resume flag. That log is **not opaque** — plain `zstd -dc` yields typed JSONL with `tool/call`, `tool/result`, usage-bearing `assistant/chunk`, and `turn/end` records — but the format is undocumented and self-declares `"version": 0` on a prerelease that promises breaking changes, so Ultrafuzz does not parse it and no planned work depends on it. Usage never reaches stdout; OTel telemetry defaults to `DISABLED`. | MIT; Node `^22.19.0 \|\| >=24`. `$DSH_HOME` relocates profiles, sessions, settings, credentials, and identity. Config carries `apiKeyEnv` references, never literals; tool subprocesses receive an environment scrubbed by `/KEY\|PASSWORD\|SECRET\|TOKEN/i`. Prebuilt Landlock launcher for linux-x64 and linux-arm64 (an _optional_ npm dependency). Sandbox fails closed with `SANDBOX_UNAVAILABLE` when no runner is usable — but `workspace-write` under the Landlock runner leaves all of `/tmp` writable, which `bwrap`'s private tmpfs does not. | Qualify as the first-party pairing for DeepSeek V4, gated on the missing structured-output surface. Do not adopt it as a generic OpenRouter harness.                |
-| Direct provider-API harness         | Full control over OpenRouter model pass-through and credential routing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Ultrafuzz would own the complete tool loop, cancellation, context management, and filesystem/shell policy.                                                                                                                                                                                                                                                                                             | Ultrafuzz would own event normalization, sessions, retries, usage, and error classification.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Potentially the smallest runtime boundary, but the largest new security and maintenance surface.                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Retain as a design fallback if qualified CLIs cannot meet the contract; do not implement first.                                                                     |
+The three kinds of evidence collected here are not interchangeable, so every
+row names its provenance:
 
-## Recommended pairing policy
+| Provenance         | What it means                                                                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **real run**       | The pinned CLI was installed and executed in this environment against a live endpoint. Where no paid credential existed that endpoint was a local deterministic server: routing evidence, never qualification. |
+| **CLI inspection** | The real installed binary answered `--version` and `--help`. The capability is advertised by the executable itself but was not exercised end to end.                                                           |
+| **upstream docs**  | Vendor documentation or source read at a pinned commit. A claim, not a measurement.                                                                                                                            |
+
+The `Events`, `Sessions`, and `Isolation` columns use the capability-contract
+spellings defined in [the contract below](#proposed-capability-contract), so a
+row reads directly as the capability a binding would declare.
+
+| Candidate                           | Events            | Sessions          | Isolation                   | Evidence                                       | Disposition                                               |
+| ----------------------------------- | ----------------- | ----------------- | --------------------------- | ---------------------------------------------- | --------------------------------------------------------- |
+| Codex CLI 0.147.0                   | `jsonl` + schema  | `resume`          | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path     |
+| Pi 0.84.2                           | `jsonl` + `rpc`   | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification        |
+| OpenCode 1.18.18                    | `jsonl`           | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                         |
+| Claude Code 2.1.233                 | `jsonl` + schema  | `resume`          | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek     |
+| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only` | `none`            | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, artifact-only nodes |
+| Direct provider-API harness         | Ultrafuzz owns it | Ultrafuzz owns it | Ultrafuzz owns it           | design only                                    | Fallback; do not implement first                          |
+
+The detail behind each row follows. Each subsection covers the same four
+dimensions: provider and model binding, unattended tools and artifacts, events
+and telemetry, and isolation and portability.
+
+### Codex CLI 0.147.0
+
+_Evidence: real run (PR #654), upstream docs._
+
+- **Binding.** Custom `model_provider`, `base_url`, `wire_api`, and `env_key`;
+  the model is supplied separately. PR #654 (merged into `release/v0.1.0` on
+  2026-08-18, before this re-analysis) validated an OpenRouter Responses route
+  against a deterministic Responses-compatible server.
+- **Unattended.** `codex exec` is non-interactive, has filesystem and shell
+  tools, and supports a final-response JSON schema.
+- **Events.** JSONL events, persisted or ephemeral sessions, `exec resume`, and
+  provider-reported usage.
+- **Isolation.** Apache-2.0; Node wrapper plus native binaries, with a native
+  workspace-write sandbox. The existing adapter already runs in Modal workers.
+- **Disposition.** Keep. The natural first-party pairing with OpenAI/Codex, and
+  retained as an OpenRouter compatibility path — but not the provider-neutral
+  default.
+
+### Pi 0.84.2
+
+_Evidence: CLI inspection (`--version`/`--help` on the real binary via `npx`),
+upstream docs. No provider request was made._
+
+- **Binding.** Built-in `openrouter` and `deepseek` providers; the CLI accepts
+  `--provider` and an opaque `--model`. Custom OpenAI, Anthropic, Google, and
+  Responses-compatible providers are documented.
+- **Unattended.** Non-interactive print mode has `read`, `write`, `edit`, and
+  `bash`; JSON and RPC modes are designed for process integration.
+- **Events.** JSON events include tool lifecycle and usage. Sessions are JSONL
+  trees with explicit IDs, continue, resume, and fork. The UI reports
+  token/cache usage and cost.
+- **Isolation.** MIT and Node 22.19+. Pi has no sandbox, so the Ultrafuzz
+  worktree and the local/container/Modal boundary must supply isolation.
+  Version checks and install telemetry can be disabled.
+- **Disposition.** First gateway-neutral candidate to qualify for OpenRouter.
+  Smithers 0.32.0 already exports a `PiAgent`.
+
+### OpenCode 1.18.18
+
+_Evidence: CLI inspection (`run --help` on the real binary via `npx`), upstream
+docs. No provider request was made._
+
+- **Binding.** Built-in OpenRouter support, `provider/model` selection, and
+  explicit config entries for catalogue models; custom base URLs through AI SDK
+  providers.
+- **Unattended.** `opencode run --format json --auto` is non-interactive; the
+  Build agent exposes file, shell, search, and task tools.
+- **Events.** Raw JSON events, session IDs, continue/resume/fork, exported
+  session JSON, token usage, and cost-bearing step events.
+- **Isolation.** MIT. Permissions are an approval policy, not a sandbox.
+  Config, data, cache, model refresh, plugins, updates, and sharing all need
+  isolated or disabled defaults.
+- **Disposition.** Second gateway-neutral candidate for OpenRouter. Smithers
+  0.32.0 exports an `OpenCodeAgent`, but credentials and state roots still need
+  an Ultrafuzz-owned wrapper.
+
+### Claude Code 2.1.233
+
+_Evidence: CLI inspection on the real installed binary, upstream docs._
+
+- **Binding.** First-party for Anthropic, and the harness Ultrafuzz's existing
+  `DeepSeekAgent` already points at `https://api.deepseek.com/anthropic`.
+- **Unattended.** Print mode with confirmed schema, tool, effort, session, and
+  permission surfaces.
+- **Events.** Streaming JSON with a response schema; sessions resume by ID.
+- **Isolation.** Permission modes rather than an OS sandbox, so the worktree
+  and container boundary carry the isolation.
+- **Disposition.** First-party default for Anthropic; the supported,
+  non-default compatibility pairing for DeepSeek.
+
+### DeepSeek Harness (`dsh`) 0.1.0-rc.7
+
+_Evidence: real run against a local deterministic endpoint, plus source read at
+commit
+[`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca)._
+
+- **Binding.** Two LLM adapters. `dsh-llm-deepseek` owns the
+  `deepseek-official` route (`https://api.deepseek.com`, `DEEPSEEK_API_KEY`,
+  default catalogue `deepseek-v4-flash` / `deepseek-v4-pro`). `dsh-llm-pi-ai`
+  wraps `@earendil-works/pi-ai` and can reach 38 catalogue providers including
+  `openrouter`, plus hand-declared OpenAI-compatible gateways — but the base
+  bundle mounts it **dormant with zero routes**; a route registers only when an
+  `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is
+  the shipped default (`agent-default-model` = `deepseek-official` /
+  `deepseek-v4-flash`), not a hard coupling.
+- **Unattended.** `dsh --profile headless "task"` runs one task unattended and
+  prints the final assistant text. 25 model-facing tools, including `bash`,
+  `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`,
+  `subagent`, `workflow`, and `web_search`.
+- **Events.** **No supported machine-readable CLI output.** Headless prints
+  prose on stdout; the JSONL event driver is explicitly "test infrastructure,
+  not a supported CLI output format". Live machine-readable access exists only
+  through the unshipped ACP JSON-RPC plugin or the Python SDK. Sessions persist
+  to `$DSH_HOME/sessions/**/session-<uuid>/session.jsonl.zstd`, but headless
+  prints no session ID and exposes no resume flag. That log is _not_ opaque —
+  plain `zstd -dc` yields typed JSONL with `tool/call`, `tool/result`,
+  usage-bearing `assistant/chunk`, and `turn/end` records — but the format is
+  undocumented and self-declares `"version": 0` on a prerelease that promises
+  breaking changes, so Ultrafuzz does not parse it and no planned work depends
+  on it. Usage never reaches stdout; OTel telemetry defaults to `DISABLED`.
+- **Isolation.** MIT; Node `^22.19.0 || >=24`. Native OS sandbox
+  (`bwrap`/Landlock, Seatbelt, Windows ACL) with `read-only` / `workspace-write`
+  (default) / `danger-full-access` modes. `$DSH_HOME` relocates profiles,
+  sessions, settings, credentials, and identity. Config carries `apiKeyEnv`
+  references, never literals; tool subprocesses receive an environment scrubbed
+  by `/KEY|PASSWORD|SECRET|TOKEN/i`. The prebuilt Landlock launcher ships for
+  linux-x64 and linux-arm64 as an _optional_ npm dependency. The sandbox fails
+  closed with `SANDBOX_UNAVAILABLE` when no runner is usable — but
+  `workspace-write` under the Landlock runner leaves all of `/tmp` writable,
+  which `bwrap`'s private tmpfs does not.
+- **Disposition.** Qualify as the first-party pairing for DeepSeek V4, gated on
+  the missing structured-output surface. Do not adopt it as a generic
+  OpenRouter harness.
+
+### Direct Provider-API Harness
+
+_Evidence: design analysis only. Nothing was built or measured._
+
+- **Binding.** Full control over OpenRouter model pass-through and credential
+  routing.
+- **Unattended.** Ultrafuzz would own the complete tool loop, cancellation,
+  context management, and filesystem/shell policy.
+- **Events.** Ultrafuzz would own event normalization, sessions, retries,
+  usage, and error classification.
+- **Isolation.** Potentially the smallest runtime boundary, but the largest new
+  security and maintenance surface.
+- **Disposition.** Retain as a design fallback if qualified CLIs cannot meet
+  the contract; do not implement first.
+
+## Recommended Pairing Policy
 
 1. **First-party by default.** When an operator selects a provider that ships its
    own harness, that harness is the default: OpenAI is reached through the Codex
@@ -64,7 +224,9 @@ credential-isolation tests described below.
    translation layer.
 2. **Gateways get a provider-neutral harness.** OpenRouter is a gateway, not a
    model vendor, so its default harness must be one built for arbitrary
-   provider routes: Pi first, OpenCode second.
+   provider routes: Pi first, OpenCode second. Both are _proposed_ defaults
+   pending real-provider qualification; until a pinned real CLI clears the
+   gates against real OpenRouter, Codex remains the shipped OpenRouter default.
 3. **Compatibility pairings stay allowed, never default.** Codex + OpenRouter
    and Claude Code + DeepSeek's Anthropic endpoint keep working and keep their
    documented migration path. Neither becomes the recommended shape for a new
@@ -79,7 +241,7 @@ it deliberately sends no OpenRouter app-attribution headers, and Pi — whose
 provider layer DeepSeek Harness vendors — offers the same routing with a
 supported JSON event stream.
 
-## Proposed configuration boundary
+## Proposed Configuration Boundary
 
 Provider, harness, and model should be explicit references. Credential values
 remain process environment only and never enter resolved config, snapshots, or
@@ -142,7 +304,7 @@ profile maps to the Codex harness and its existing provider binding. Legacy
 `provider = "deepseek"` — the compatibility pairing it already is — and is _not_
 silently re-pointed at DeepSeek Harness.
 
-## Proposed capability contract
+## Proposed Capability Contract
 
 The generic workflow should receive a validated binding, not CLI-specific flags
 or provider environment variables:
@@ -183,17 +345,29 @@ interface QualifiedHarnessBinding {
 }
 ```
 
-`events: "final-text-only"` is new and exists because DeepSeek Harness needs it.
-A harness in that class can still run nodes whose contract is "produce an
-artifact, exit zero", but it cannot drive live dashboards, per-tool evidence, or
-token accounting until it gains a structured stream. dsh's durable session log does carry typed tool and usage
-records, but Ultrafuzz does not read them: the format is undocumented,
-self-declares `"version": 0` on a prerelease, and upstream accepts neither issues
-nor pull requests. Observability for a `final-text-only` harness comes instead
-from a small smoke profile built on the real installed CLI — headless final text
-plus exit status, one filesystem/shell artifact check in a disposable worktree,
-and a version pin asserted at preflight. That profile is part of the dsh adapter
-work, not a separate parser workstream.
+This is the normative spelling of the contract. The same vocabulary appears in
+the HTML plan's §5, and
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) must implement
+it verbatim: `tools` is `filesystem` / `shell`, `events` is
+`"jsonl" | "rpc" | "final-text-only"`, `sessions` is
+`"none" | "resume" | "tree"`, and `isolation` is
+`"native-sandbox" | "external-sandbox-required"`. Abbreviations such as `fs` or
+a bare `native` are not part of the contract.
+
+`events: "final-text-only"` is new and exists because DeepSeek Harness needs
+it. A harness in that class can still run nodes whose contract is "produce an
+artifact, exit zero", but it cannot drive live dashboards, per-tool evidence,
+or token accounting until it gains a structured stream.
+
+dsh's durable session log does carry typed tool and usage records, but
+Ultrafuzz does not read them: the format is undocumented, self-declares
+`"version": 0` on a prerelease, and upstream accepts neither issues nor pull
+requests. Observability for a `final-text-only` harness comes instead from a
+small smoke profile built on the real installed CLI — headless final text plus
+exit status, one filesystem/shell artifact check in a disposable worktree, and
+a version pin asserted at preflight. That profile is part of the dsh adapter
+work, not a separate parser workstream. There is no session parser anywhere in
+this plan.
 
 The binding validator must reject an unsupported protocol, reasoning level,
 missing executable/version, unavailable cloud image, or missing credential
@@ -201,7 +375,7 @@ before workflow launch. `childEnv` is built from an empty or tightly allowlisted
 base and contains only the selected provider credential and harness controls.
 Generic topology, prompts, and artifact verification never branch on a CLI name.
 
-## Conformance gate
+## Conformance Gate
 
 Every approved provider/harness binding must use a pinned real CLI run against
 the real provider. Fake CLIs are for simple unit tests only — they may stand in
@@ -272,7 +446,7 @@ Installed and executed in this environment:
 - `@deepseek-ai/dsh 0.1.0-rc.7` — installed from npm (532 packages) into a
   throwaway prefix and executed against an isolated `DSH_HOME`.
 
-### DeepSeek Harness, measured
+### DeepSeek Harness, Measured
 
 - `dsh --version` reports `0.1.0-rc.7`. The repository's only tag and release is
   the prerelease `dsh-v0.1.0-rc.7` (2026-08-17); npm shows seven versions
@@ -329,7 +503,7 @@ Installed and executed in this environment:
   providers, including `openrouter`, `anthropic`, `openai`, `deepseek`,
   `openai-codex`, `google-vertex`, and `xai`.
 
-### Constraints that block qualification today
+### Constraints That Block Qualification Today
 
 - **No `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, or `ANTHROPIC_API_KEY`** exists
   in the research environment, so no candidate has passed a real paid provider
@@ -361,7 +535,7 @@ Installed and executed in this environment:
   parses JSON events and session flags but isolates neither the provider
   credential nor OpenCode's config, data, and cache roots.
 
-## Next work
+## Next Work
 
 The work is filed as bounded child issues of
 [#653](https://github.com/monad-developers/ultrafuzz/issues/653):
@@ -401,6 +575,6 @@ The architecture, sequencing, risks, gates, and bounded issue proposals are in
 - [Codex 0.147.0 package and source](https://github.com/openai/codex/tree/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a), including [non-interactive execution](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/exec.md) and [sandboxing](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/sandbox.md).
 - [Pi 0.84.2 coding-agent package](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/package.json), [CLI/provider surface](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/README.md), [JSON events](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/json.md), [sessions](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/sessions.md), and [security boundary](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/security.md).
 - [OpenCode 1.18.18 package](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/opencode/package.json), [OpenRouter provider setup](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/providers.mdx), [CLI automation/session surface](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/cli.mdx), and [permissions](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/permissions.mdx).
-- DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/master/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/master/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/llm/llm-deepseek), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/acp/acp).
+- DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/acp/acp).
 - DeepSeek API documentation: [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) (`deepseek-v4-flash`/`deepseek-v4-pro`, 1M context, 384K max output, OpenAI + Anthropic + Responses formats); the **Agent Integrations** sidebar, which heads its list with DeepSeek Harness as an outbound link to the [harness quickstart](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) — there is no `agent_integrations/deepseek_harness` page, and the [Integrate with AI Tools](https://api-docs.deepseek.com/guides/coding_agents) guide still covers only Claude Code, OpenCode, and OpenClaw; the [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) page; and the [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api) guide.
 - [Smithers 0.32.0 Pi adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/PiAgent.js) and [OpenCode adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/OpenCodeAgent.js), matching the dependency pinned by Ultrafuzz.
