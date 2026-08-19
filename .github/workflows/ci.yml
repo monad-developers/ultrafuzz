@@ -69,7 +69,7 @@ jobs:
         run: pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt
 
   release-validation:
-    name: Full release validation (${{ matrix.description }})
+    name: "${{ github.event_name == 'pull_request' && 'Full release validation (main/manual only)' || format('Full release validation ({0})', matrix.description) }}"
     needs: draft-and-build-gates
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
