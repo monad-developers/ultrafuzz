@@ -866,6 +866,160 @@ describe("prompt semantic anchors", () => {
     expect(template).toContain("including findings that are or may become non-production records");
   });
 
+  // #672/#677. Two prompt-side halves of the run-reliability fix, neither of which any other
+  // assertion covers.
+  //
+  // First: the goal sentence is a LABEL. `goal_prompt` is a ~161-character template whose namespaced
+  // placeholders are substituted from the dynamic item's `replacements` map, and this prompt tells the
+  // hunter that sentence is its authoritative focused goal. The planner prompt used to mandate whole
+  // records as those values, so in one 18-hour local default-profile run every goal node opened with
+  // a wall of nested JSON (per-goal replacement payload: min 3,751 / median 13,956 / max 42,483
+  // characters across 88 goals). `packages/artifacts` now caps the values, but a cap alone would just
+  // relocate the failure into a rejected plan unless both prompts agree that the records are read from
+  // files. So the anchors assert the CONTRACT (labels, plus the exact lookup order and paths), not
+  // just that some sentence mentions titles.
+  //
+  // Second: a duration is unactionable for a model with no clock, which is how 9 nodes reached exactly
+  // their 7200000ms timeout having written nothing at all, and only 3 of 77 class-goal nodes produced
+  // output. Both goal-search prompts must name the shell clock and must state that an empty result is
+  // a legitimate negative outcome — the runtime now tolerates a goal lane that finds nothing, and that
+  // tolerance is only safe if the prompt does not push the agent to invent a finding instead.
+  it("makes goal searches read their records from files and stop at a measurable deadline", () => {
+    const hunter = prompt("strategies/goal-hunter.mdx");
+    const roaming = prompt("strategies/roaming-goal.md");
+    const planner = prompt("setup/goal-plan.md");
+
+    // The label contract, on both sides of the handoff.
+    expect(planner).toContain("short human-readable label");
+    expect(planner).toMatch(/well under 200 characters/u);
+    expect(hunter).toMatch(/short human-readable\s+titles/u);
+    // ...and the specific mandates that produced the wall must not come back.
+    expect(planner).not.toMatch(/full contextual value/u);
+    expect(planner).not.toMatch(/contains the full selected threat/u);
+    expect(planner).not.toMatch(/focused hunter instructions and relevant examples/u);
+    expect(planner).not.toMatch(/[Nn]ever flatten a placeholder to a bare literal ID/u);
+
+    // The lookup order that replaces the inlined records. `{{item.node_id}}` is what makes it
+    // resolvable at all: it is how a generated child finds its own single entry in a plan that
+    // contains every goal. It binds because `flattenItemVariables` exposes every scalar item field and
+    // `node_id` is schema-required on both goal kinds.
+    expect(hunter).toContain("{{item.node_id}}");
+    expect(hunter).toContain("{{artifact_path:goal-plan}}/goal-plan.json");
+    expect(hunter).toContain("{{artifact_path:threat-model}}/threat-model.json");
+    expect(hunter).toContain("vulnerability-db/selected");
+    expect(hunter).toMatch(/`selected_record\.path`/u);
+
+    // `vulnerability-db-manifest.json` sits in the same artifact directory the hunter is handed, and
+    // it is a trap rather than an index: its own `path` fields are relative to the upstream
+    // vulnerability database, not to this artifact, and only the selected subset was ever copied here.
+    // A `toContain` on the file name passes either way, so the assertion is on the guidance -- naming
+    // the manifest as a do-not-follow, and saying why -- which is what a future edit reinstating it as
+    // the index would break.
+    expect(hunter).toContain("vulnerability-db-manifest.json");
+    expect(hunter).toMatch(/do not route them through/u);
+    expect(hunter).toMatch(/relative to the upstream vulnerability\s+database rather than to this artifact/u);
+
+    // Both goal kinds, because they are different shapes and only one of them had any coverage. A
+    // threat goal carries no `class_id` and no `selected_record`; it carries `class_ids`, plural, which
+    // resolve against the plan's own `selected_class_records`. Telling all 88 hunters to read
+    // `selected_record` sent the 11 threat hunters looking for a key their entry does not have.
+    expect(hunter).toMatch(/`class_ids`, plural/u);
+    expect(hunter).toContain("selected_class_records");
+    expect(hunter).toMatch(/It has no\s+`class_id`, no `selected_record`, and no `coverage_gap`\./u);
+
+    // A threat entry inlines four fields and references everything else by ID. Without the explicit
+    // dereference the hunter reads a threat as a bag of opaque ID strings.
+    expect(hunter).toMatch(/dereference `asset_ids`/u);
+    expect(hunter).toContain("`trust_boundaries`");
+
+    // A coverage-gap class goal has no threat entry, so the order must say so rather than send the
+    // hunter looking for a record the threat model does not contain -- and it must name the two places
+    // the missing context actually lives, one run-wide and one per-class.
+    expect(hunter).toMatch(/coverage-gap class goal has no threat entry/u);
+    expect(hunter).toContain("`coverage_gaps` section");
+    expect(hunter).toContain("applicability_decisions");
+
+    for (const [name, body] of [
+      ["strategies/goal-hunter.mdx", hunter],
+      ["strategies/roaming-goal.md", roaming]
+    ] as const) {
+      expect(body, name).toContain("absolute UTC deadline");
+      expect(body, name).toContain("`date -u`");
+      expect(body, name).toMatch(/negative result, not a\s+failure/u);
+      expect(body, name).toMatch(/strictly better\s+than being killed at the\s+timeout/u);
+    }
+  });
+
+  // #677. The prompt side of the goal-search census, which had no coverage at all.
+  //
+  // The runtime writes `goal-search-coverage.json` because the artifacts cannot answer the question:
+  // every goal lane's outputs are pre-seeded with a contract-valid empty findings array, so a lane
+  // stopped before it searched leaves byte-for-byte what a lane that searched and found nothing
+  // leaves. The census is the only surviving difference, and the two review prompts that turn goal
+  // output into a report are the two places a phantom lane can be laundered into prose: `final-report`
+  // by writing "no issues found" over a run that searched 3 of 77 classes, and `dedupe-findings` by
+  // treating a seeded `[]` as a zero-finding source. Both must name the census, both must name the
+  // statuses that are NOT coverage, and the report must state unknown rather than stay silent.
+  it("makes the review prompts read goal coverage from the census and never from seeded artifacts", () => {
+    const report = prompt("review/final-report.md");
+    const dedupe = prompt("review/dedupe-findings.md");
+
+    for (const [name, body] of [
+      ["review/final-report.md", report],
+      ["review/dedupe-findings.md", dedupe]
+    ] as const) {
+      // The file and the schema version are the join to the runtime. `prompt()` returns the unrendered
+      // Markdown, so the placeholder is asserted literally.
+      expect(body, name).toContain("`goal-search-coverage.json` next to `{{run_metadata_path}}`");
+      expect(body, name).toContain("ultrafuzz.goal-search-coverage.v1");
+      // Only the `completed` statuses are searched goals. A prompt that lists the statuses without
+      // saying which of them mean "measured nothing" leaves the inference to the model.
+      expect(body, name).toMatch(/`stopped-early`/u);
+      expect(body, name).toMatch(/`unverified`/u);
+      expect(body, name).toMatch(/only the (?:three )?`completed` statuses are/iu);
+    }
+
+    // Both prompts must forbid calling an unmeasured lane clean; they word it differently because one
+    // governs report prose and the other governs a dedupe ledger, so each is asserted against its own
+    // sentence rather than a lowest-common-denominator substring.
+    expect(report).toMatch(
+      /Do not call such a lane\s+covered, searched, clean, or verified anywhere in `report\.md` or `report\.json`/u
+    );
+    expect(dedupe).toMatch(/Do not describe a `stopped-early` or `unverified` lane as searched,\s+covered, or clean/u);
+
+    // The report's own structural contract: the section exists in every report, sits in one place, and
+    // is computed from the census rather than from the plan or from the handoffs the agent can see.
+    expect(report).toContain("Add `## Goal search coverage` after `## Property implementation coverage` and");
+    expect(report).toContain("and before `## Goal search coverage`");
+    expect(report).toContain("Add `## Property provenance` after the goal search coverage section.");
+    expect(report).toMatch(/in every report, including a report with no\s+issues/u);
+    expect(report).toMatch(/Never state or imply that no vulnerabilities were found without stating goal/u);
+    expect(report).toMatch(/write that goal search coverage is unknown/u);
+    expect(report).toMatch(/unknown coverage is not full coverage/u);
+    expect(report).toMatch(/Do not reconstruct coverage from the\s+goal plan/u);
+
+    // The bare sentence that reads as a result must carry the numbers when coverage is partial, and the
+    // example is the measured 3-of-77 run so the shape of the amended sentence is unambiguous.
+    expect(report).toContain("Never write that bare `No issues reported.` when the goal search coverage census");
+    expect(report).toMatch(/only 3 of 77 targeted goal searches completed, so this is not a result/u);
+
+    // The field is runtime-owned. The runtime stamps it after this node's writes and discards whatever
+    // the agent put there, so the prompt must forbid authoring it rather than require it.
+    expect(report).toContain("Do not author a `goal_search_coverage` value in `report.json`");
+    expect(report).toContain("- `report.json` contains no agent-authored `goal_search_coverage` value.");
+    // The report is sent on its own, so the census path must not leak into it.
+    expect(report).toMatch(/Do not write the census path, or any other local path, into `report\.md`/u);
+
+    // Dedupe's half: a lane that did not complete carries no coverage obligation and is not a
+    // zero-finding source. The pre-existing coverage-discipline sentence must survive, because the new
+    // paragraphs narrow what it covers rather than replacing it.
+    expect(dedupe).toContain("Coverage is checked against what the runtime read");
+    expect(dedupe).toContain("What the runtime read never includes a goal search lane whose result was not");
+    expect(dedupe).toContain("Never treat a goal lane that did not complete as a zero-finding source.");
+    expect(dedupe).toMatch(/no agent output row was stopped early and searched nothing/u);
+    expect(dedupe).toMatch(/the second is a negative result, and only the second is coverage\./u);
+  });
+
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {
     const projectDiscovery = prompt("setup/project-discovery.md");
     const setupFoundry = prompt("setup/prepare-foundry-harness.md");

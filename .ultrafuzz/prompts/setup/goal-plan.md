@@ -74,11 +74,27 @@ Class goal example (using invented IDs):
 Your /goal is to find a vulnerability of type \{{class:clockwork.deferred-settlement-gap}} using threat model \{{clockwork:late-tick}}.
 ```
 
-The replacement value for each threat key contains the full selected threat,
-assets, actors, surfaces, preconditions, invariants, assumptions, unknowns, and
-evidence. The class replacement contains the database record's focused hunter
-instructions and relevant examples. Never flatten a placeholder to a bare
-literal ID.
+Every replacement value is a short human-readable label, not a record. Use
+the referenced record's `title`, optionally followed by its ID in parentheses
+when two titles would otherwise read alike. Keep each value on one line of
+plain prose and well under 200 characters. A replacement value must never
+contain JSON, a nested object, or the record's `evidence`, `actors`,
+`assets`, `attack_surfaces`, preconditions, invariants, assumptions, or
+unknowns. The coverage-gap key `threat-model:coverage-gap` takes the same
+treatment: a short label naming the uncovered class, not a synthesized
+threat record.
+
+The hunter obtains full detail by reading files, never from the goal
+sentence. `strategies/goal-hunter.mdx` already gives it every path it needs:
+the canonical `threat-model.json` under the threat-model artifact directory,
+this plan's `goal-plan.json` under the goal-plan artifact directory, and the
+selected class records under that same directory's
+`vulnerability-db/selected`. Each label therefore only has to identify which
+record to open; the hunter prompt already says where to open it. Inlining a
+record into `replacements` duplicates those files into the goal statement
+that the hunter is told to treat as its authoritative focused goal, and a
+plan-sized wall of nested JSON there costs the hunter thousands of tokens of
+reasoning budget before it reads a single line of the target repository.
 
 ## Output
 
@@ -150,7 +166,7 @@ by `id`, and `class_replacement_key` is exactly `class:` followed by `id`.
 For a mapped class goal, `threat_replacement_keys` must contain exactly its
 `threat_ids`. For a coverage-gap class goal it must contain only
 `threat-model:coverage-gap`. Every listed key remains an MDX placeholder in
-`goal_prompt` and has a full contextual value in `replacements`: keep each
+`goal_prompt` and has a short label value in `replacements`: keep each
 key wrapped in its literal double braces inside `goal_prompt` — a
 coverage-gap goal keeps the exact `threat-model:coverage-gap` key in that
 brace-wrapped form — and never substitute a placeholder with its

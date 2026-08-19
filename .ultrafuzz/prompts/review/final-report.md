@@ -182,6 +182,37 @@ The Run summary contains exactly these public fields when available: `Run ID`,
 digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
 Render each concrete value as Markdown inline code.
 
+Goal search coverage census:
+`goal-search-coverage.json` next to `{{run_metadata_path}}`
+
+This run-root file is the runtime's own record of how much of the goal hunt
+actually ran. It is written from the run's durable output rows, not from any
+agent's account of itself, because a goal search may end without producing a
+result while the run still finishes, and every goal lane's outputs are
+pre-seeded with a contract-valid empty findings array. A lane that was stopped
+before it searched therefore leaves behind the same empty `findings.json` as a
+lane that searched and found nothing, and this census is the only surviving
+difference between those two cases. Treat it as the source of truth for every
+coverage claim in the report.
+
+The census is a JSON object with `schema_version`
+(`ultrafuzz.goal-search-coverage.v1`), `run_id`, a `totals` object with
+`planned`, `completed`, `completed_with_findings`, `completed_no_findings`,
+`stopped_early`, and `unverified`, and a `goals` array with one entry per goal
+lane carrying `node_id`, `logical_node_id`, `attempt_id`, `status`, and
+`finding_count` (`null` when the published count could not be read). Each
+`status` is exactly one of `stopped-early` (the lane's agent never returned),
+`unverified` (it returned but its artifacts did not pass verification),
+`completed-with-findings`, `completed-no-findings`, or `completed` (verified,
+with an unreadable finding count). Only the three `completed` statuses are
+searched goals; a `stopped-early` or `unverified` lane measured nothing.
+
+Recompute the counts you render from the `goals` array, and when the array
+disagrees with `totals`, use the array and treat the totals as unreliable.
+Treat a `logical_node_id` of `goal-roaming` as the untargeted roaming pass
+rather than as a targeted goal. Read this file as it stands: the runtime owns
+it, and neither its statuses nor its counts are yours to adjust.
+
 ## Finding Selection
 
 Read every issue surfaced by the upstream findings and severity classification
@@ -485,7 +516,7 @@ Preserve that same array in the `report.json` issue and keep compatibility
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. Read the implementation handoff's
+and before `## Goal search coverage`. Read the implementation handoff's
 `selection` object and property records. When
 the handoff is historical or lacks `selection`, render `unavailable` instead
 of guessing. In `report.json`, emit `property_implementation_coverage` with
@@ -562,7 +593,55 @@ so a summary naming `_beforeTokenTransfer` may appear either as
 `- property-2: _beforeTokenTransfer reverts` or as
 `- property-2: \_beforeTokenTransfer reverts`.
 
-Add `## Property provenance` after the implementation coverage section. For every
+Add `## Goal search coverage` after `## Property implementation coverage` and
+before `## Property provenance`, in every report, including a report with no
+issues. Compute it only from the goal search coverage census named in Required
+Inputs. This section is what makes an issue list readable at all: a reader who
+receives `report.md` on its own must be able to tell a run whose goal searches
+all completed and found nothing from a run whose goal searches mostly never
+ran, and nothing else in the report distinguishes those two.
+
+Write, in this order:
+
+- a lead sentence stating how many targeted goal searches completed out of how
+  many targeted goal lanes the census recorded, emphasized in bold when
+  coverage is partial;
+- one bullet per count, recomputed from the `goals` array: targeted goal search
+  lanes, completed with a verified result, completed and reported findings,
+  completed and reported no findings, stopped early without returning, and
+  returned without passing verification;
+- a separate bullet for the untargeted roaming pass when the census contains a
+  `goal-roaming` lane, counted on its own line so it can neither raise nor
+  lower targeted coverage; and
+- a closing sentence recording that these counts cover the goal lanes this run
+  expanded and executed, not the goals the plan requested.
+
+Never state or imply that no vulnerabilities were found without stating goal
+coverage in the same report. A goal that reported no findings is a searched
+goal only when its census status is `completed-no-findings`; a `stopped-early`
+or `unverified` lane is an absence of measurement, and its empty findings are
+an absence of evidence rather than evidence of absence. Do not call such a lane
+covered, searched, clean, or verified anywhere in `report.md` or `report.json`,
+and do not fold its lane count into a completed count.
+
+If the census is absent, unparsable, carries a different `schema_version`, or
+contains no goal lanes, write that goal search coverage is unknown, that
+unknown coverage is not full coverage, and that any goal-derived result in the
+report is therefore an unquantified sample. Do not reconstruct coverage from the
+goal plan, from the number of goal handoffs you can see, or from the seeded
+empty findings arrays: a planned goal is not a searched goal, and
+`goal-plan.json` linked from `## Audit context` records only what was planned.
+
+Do not write the census path, or any other local path, into `report.md`; this
+section renders counts only, so the report stays self-sufficient when it is
+sent by itself. Do not author a `goal_search_coverage` value in `report.json`
+either. The runtime stamps the authoritative census into that field after this
+node's writes, any value found there is discarded, and `ultrafuzz report`
+regenerates this whole section deterministically from the census. Your prose
+must therefore agree with the census exactly and must never be more optimistic
+than it is.
+
+Add `## Property provenance` after the goal search coverage section. For every
 property-derived production or non-production finding, render one concise table
 row containing:
 
@@ -600,10 +679,20 @@ appendix short and do not include exploit-style PoC sections for these outcomes.
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
 production issue entries with their Strategy sections, Property implementation
-coverage, Property provenance, optional prior finding disposition section, and
-non-production actionable outcomes appendix. If there are no production issues
-and no appendix outcomes, skip the issue index table and write `No issues
-reported.` before the Property implementation coverage section.
+coverage, Goal search coverage, Property provenance, optional prior finding
+disposition section, and non-production actionable outcomes appendix. If there
+are no production issues and no appendix outcomes, skip the issue index table
+and write `No issues reported.` before the Property implementation coverage
+section.
+
+Never write that bare `No issues reported.` when the goal search coverage census
+records a targeted goal search that did not complete, or records no targeted
+goal lane at all. An empty issue list is then not a result, and the sentence
+must say so and carry the numbers, for example `No issues were reported, but
+only 3 of 77 targeted goal searches completed, so this is not a result. See
+[Goal search coverage](#goal-search-coverage).` A census that is simply
+unreadable does not amend this sentence: a topology with no goal lanes reports
+unknown coverage as a matter of course, and its own section states that.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
@@ -722,6 +811,15 @@ Before finishing, verify that:
 - `report.md` contains `## Property implementation coverage` with counts that
   match the implementation handoff, or the literal `unavailable` for
   historical artifacts.
+- `report.md` contains `## Goal search coverage`, stating how many targeted goal
+  searches completed out of how many targeted goal lanes the census recorded, or
+  stating that coverage is unknown when there is no readable census.
+- Every goal coverage count in `report.md` equals the count recomputed from the
+  census `goals` array, and no `stopped-early` or `unverified` lane is described
+  as searched, covered, or clean.
+- No sentence in `report.md` reports an absence of findings as a result without
+  the goal coverage numbers beside it.
+- `report.json` contains no agent-authored `goal_search_coverage` value.
 - `report.json.property_implementation_coverage` is either the exact
   machine-readable coverage object or the string `unavailable`.
 - `report.json.run_metadata.tokens_used` and

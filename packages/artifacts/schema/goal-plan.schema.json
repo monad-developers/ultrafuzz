@@ -120,7 +120,8 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 200
                 },
                 {
                   "type": "number"
@@ -239,7 +240,8 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 200
                 },
                 {
                   "type": "number"

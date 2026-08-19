@@ -18,7 +18,7 @@ groups:
     defaults:
       loops: 3
       max_attempts: 2
-      timeout_seconds: 14400
+      timeout_seconds: 7200
       model_profiles:
         - default
   references:

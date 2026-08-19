@@ -7,10 +7,14 @@ display_name: Dynamic goal hunter
 
 {{item.goal_prompt}}
 
-The first sentence above is the authoritative focused goal. Its namespaced MDX
-placeholders were resolved from this dynamic item's bounded `replacements`
-map. Do not broaden the assigned bug class or threat into unrelated generic
-review.
+The first sentence above is the authoritative focused goal, but it is a label
+and not the specification. Its namespaced MDX placeholders resolve to the
+short human-readable titles carried in this dynamic item's `replacements`
+map — a vulnerability-class title, a threat-model title, or several of them,
+depending on which kind of goal this is. The full records are deliberately
+not inlined into that sentence — read them from the paths below before you
+start hunting. Do not broaden the assigned bug class or threat into unrelated
+generic review.
 
 Canonical threat model:
 {{artifact_path:threat-model}}/threat-model.json
@@ -22,11 +26,84 @@ Goal-plan artifact directory containing the selected records under
 `vulnerability-db/selected`:
 {{artifact_path:goal-plan}}
 
+Resolve the titles to their authoritative records in this order:
+
+1. In `{{artifact_path:goal-plan}}/goal-plan.json`, find this node's own
+   entry: the single element of `class_goals` or `threat_goals` whose
+   `node_id` is `{{item.node_id}}`. Which of those two arrays holds your
+   entry decides what you read next. The two shapes are not the same, so
+   read the keys your kind actually carries and do not go looking for the
+   other kind's — a missing key here means you are reading the wrong recipe,
+   not that the plan is incomplete.
+2. A class goal (an element of `class_goals`) carries one `class_id`, one
+   `selected_record`, a `threat_ids` list of zero or more threat IDs,
+   `attack_surface_ids`, `selection_rationale`, and a boolean `coverage_gap`.
+   Its scope is that one vulnerability class, narrowed to the threats it
+   lists.
+3. A threat goal (an element of `threat_goals`) carries `threat_ids` — the
+   one modeled threat that is its scope — together with `class_ids`, plural,
+   holding between one and a few dozen vulnerability-class IDs. It has no
+   `class_id`, no `selected_record`, and no `coverage_gap`. Resolve each ID
+   in `class_ids` against the plan's `selected_class_records` array, whose
+   elements carry the same `id` and `path` fields that a class goal's
+   `selected_record` does. Those records are the candidate lenses on your one
+   threat, not additional goals: when `class_ids` is long, read first the
+   records whose titles bear on that threat's own preconditions and
+   invariants, and spend the budget hunting rather than reading all of them.
+4. Read each selected class record — its focused hunter instructions and
+   relevant examples — from the exact bytes at the `path` you resolved above:
+   `selected_record.path` for a class goal, the matching
+   `selected_class_records[].path` for a threat goal. Those values are
+   already relative to `{{artifact_path:goal-plan}}` and resolve as written.
+   Do not rewrite them, and do not route them through
+   `{{artifact_path:goal-plan}}/vulnerability-db-manifest.json`: that
+   manifest's own `path` fields are relative to the upstream vulnerability
+   database rather than to this artifact, and most of the records it lists
+   were never copied here, so following it yields a missing file every time.
+   Only `vulnerability-db/selected` exists on disk.
+5. For each ID in your entry's `threat_ids`, read the matching element of
+   `threats` in `{{artifact_path:threat-model}}/threat-model.json`. That
+   element inlines its own `description`, `impact`, `preconditions`, and
+   `evidence`, but everything else it names is a reference rather than an
+   object: dereference `asset_ids`, `actor_ids`, `attack_surface_ids`,
+   `invariant_ids`, `assumption_ids`, `unknown_ids`, `capability_ids`, and
+   `trust_boundary_ids` by ID against that same file's top-level `assets`,
+   `actors`, `attack_surfaces`, `invariants`, `assumptions`, `unknowns`,
+   `capabilities`, and `trust_boundaries` arrays. The objects live there, not
+   inside the threat entry. Your own entry's `attack_surface_ids` dereference
+   the same way.
+6. A coverage-gap class goal has no threat entry to read — `coverage_gap` is
+   true and `threat_ids` is empty — because that class was selected for an
+   area the threat model records as untested rather than for a modeled
+   threat. For those goals, read the class record and `selection_rationale`
+   as usual, then add two things the rationale only summarizes: the
+   top-level `coverage_gaps` section of
+   `{{artifact_path:threat-model}}/threat-model.json`, whose entries name and
+   explain the untested areas, and your `class_id`'s element of the plan's
+   `applicability_decisions`, whose `checks` carry the per-capability
+   `requirement`, `observed_status`, and `evidence` that made this class
+   applicable to this target. That array covers every class goal, not only
+   coverage-gap ones.
+
 Inspect the assigned threat or class context, then trace concrete repository
 paths that could violate its invariants or preconditions. Confirm reachability,
 scope, and impact from repository evidence. Use focused native compilation or
 tests when they materially strengthen a candidate and can complete before the
-runtime finalization reserve.
+deadline below.
+
+The Topology Runtime Context states an absolute UTC deadline for this node.
+It is a wall-clock timestamp rather than a duration, so check the current time
+with `date -u` before each expensive step and compare the two. If the context
+supplies only relative seconds, resolve them into that timestamp once with
+`date -u` at startup and work against it thereafter.
+
+At the deadline, stop investigating in whatever state the hunt is, write
+`{{output_findings_path}}` and the generated-test manifest, and exit cleanly.
+Finding no supported vulnerability for this goal within the budget is an
+expected and valid outcome: one assigned goal is one hypothesis, and most
+hypotheses are negative. Writing `[]` and exiting cleanly is strictly better
+than inventing a finding, and strictly better than being killed at the timeout
+with no output at all. An empty result is a negative result, not a failure.
 
 Do not inspect sibling runs, historical reports, benchmark ground truth,
 host-global files, package internals, or network resources. Do not invent a

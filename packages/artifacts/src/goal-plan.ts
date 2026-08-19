@@ -35,8 +35,74 @@ const uniqueIds = z
 const replacementKey = z.string().refine(isNamespacedDynamicReplacementKey, {
   message: "Replacement keys must be namespaced as <namespace>:<name>"
 });
+/**
+ * A replacement value is substituted directly into the goal sentence, so its length is the length of
+ * the agent's authoritative goal statement. It must be a LABEL, not a payload.
+ *
+ * The number is set from measurement, not taste. In one 18-hour local default-profile run the
+ * planner inlined whole JSON records (a full vulnerability-class record plus the full threat-model
+ * entry, including `attack_surfaces`, `assets`, `actors` and every `evidence` array) into these
+ * values: across 88 goals the per-goal replacement payload was min 3,751 / median 13,956 / max
+ * 42,483 characters, against a `goal_prompt` template of only ~161 characters. `goal-hunter.mdx`
+ * then tells the agent "the first sentence above is the authoritative focused goal", so each goal
+ * began with a 3.5k-10.6k-token JSON wall. At max reasoning effort that is what exhausted the
+ * per-node timeout: 9 nodes were killed at exactly the 7200000ms limit and only 3 of 77 class-goal
+ * nodes produced any output (run reliability, #672/#677).
+ *
+ * 200 characters comfortably holds a human-readable title plus its namespaced ID -- the longest
+ * shapes in this contract are like "Fixed-term loan liquidated before it is overdue
+ * (lending.liquidation:fixed-term-before-overdue)" at well under half the budget -- while sitting
+ * ~19x below the SMALLEST inlined record observed. Even a coverage-gap class goal with several
+ * threat placeholders therefore adds a few hundred characters to the goal sentence rather than tens
+ * of thousands. The full records stay reachable: the hunter prompt already reads
+ * `{{artifact_path:threat-model}}/threat-model.json` and the selected class records under
+ * `{{artifact_path:goal-plan}}`'s `vulnerability-db/selected`, so inlining them here was redundant
+ * with the pattern the prompt already uses.
+ *
+ * The prompt asks the planner for titles; this cap is what makes a planner (or a model that ignores
+ * the prompt) unable to silently reintroduce the wall.
+ */
+const REPLACEMENT_VALUE_MAX_LENGTH = 200;
+
+/**
+ * Rejects a serialized JSON record without rejecting prose that merely contains punctuation.
+ *
+ * The check is deliberately narrow: a value fails only when it BOTH begins with `{` or `[` after
+ * trimming AND actually parses as a JSON object or array. Testing the prefix alone would reject
+ * legitimate titles that open with a symbol or a code fragment ("{withdraw} reentrancy before
+ * settlement"), and testing `JSON.parse` alone would reject bare numeric or boolean-looking titles.
+ * Requiring both means the only strings rejected are ones that really are a machine record, which
+ * is the exact failure mode measured above. Values that merely contain braces anywhere else, quotes,
+ * colons, commas, or parenthesised IDs are all accepted -- the cap above, not this check, is what
+ * bounds them.
+ */
+function isSerializedJsonRecord(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // Not machine-readable JSON, so it is prose that happens to open with a brace. Allowed.
+    return false;
+  }
+  return typeof parsed === "object" && parsed !== null;
+}
+
+const replacementValue = nonEmptyString
+  .max(REPLACEMENT_VALUE_MAX_LENGTH, {
+    message:
+      `Replacement values must be at most ${String(REPLACEMENT_VALUE_MAX_LENGTH)} characters: use a short ` +
+      "human-readable title and let the hunter read the full record from its artifact path"
+  })
+  .refine((value) => !isSerializedJsonRecord(value), {
+    message:
+      "Replacement values must be a human-readable title, not a serialized JSON record: keep the record in the " +
+      "artifact directory and reference it by path so the goal sentence stays one sentence"
+  });
+
 const replacementsSchema = z
-  .record(replacementKey, z.union([nonEmptyString, z.number().finite(), z.boolean()]))
+  .record(replacementKey, z.union([replacementValue, z.number().finite(), z.boolean()]))
   .refine((value) => Object.keys(value).length > 0, { message: "At least one item-scoped replacement is required" });
 
 const evidenceReferenceSchema = z

@@ -274,3 +274,146 @@ test("a campaign that never fuzzed is disclosed instead of reading as a clean re
   assert.doesNotMatch(partial.markdown, /did not run/u);
   assert.match(partial.markdown, /^No issues reported\.$/mu);
 });
+
+test("goal search coverage is rendered into the Markdown report instead of only the JSON", () => {
+  const empty = (): Record<string, unknown> => ({
+    schema_version: "1.0",
+    run_metadata: { run_id: "goal-coverage-test" },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: []
+  });
+  const lane = (index: number, status: string, logicalNodeId = "class-goals"): Record<string, unknown> => ({
+    node_id: `dynamic:class:${index}`,
+    logical_node_id: logicalNodeId,
+    attempt_id: `attempt-${String(index).padStart(3, "0")}`,
+    status,
+    finding_count: status === "completed-with-findings" ? 1 : status === "completed-no-findings" ? 0 : null
+  });
+  const census = (
+    goals: Array<Record<string, unknown>>,
+    totals?: Record<string, unknown>
+  ): Record<string, unknown> => ({
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: "goal-coverage-test",
+    totals: totals ?? { planned: goals.length },
+    goals
+  });
+
+  // Every targeted lane searched: an empty findings list is a searched negative.
+  const full = projectCanonicalFinalReport({
+    ...empty(),
+    goal_search_coverage: census([
+      lane(1, "completed-with-findings"),
+      lane(2, "completed-no-findings"),
+      lane(3, "completed-no-findings"),
+      lane(4, "completed-no-findings", "goal-roaming")
+    ])
+  });
+  assert.match(full.markdown, /^## Goal search coverage$/mu);
+  assert.match(full.markdown, /All 3 targeted goal searches completed and published a verified result/u);
+  assert.match(full.markdown, /- Targeted goal search lanes: `3`\n- Completed with a verified result: `3`/u);
+  assert.match(full.markdown, /- Completed and reported findings: `1`\n- Completed and reported no findings: `2`/u);
+  assert.match(full.markdown, /- Untargeted roaming passes, counted separately: `1` of `1` completed/u);
+  // The roaming pass must not be counted inside the targeted denominator.
+  assert.doesNotMatch(full.markdown, /- Targeted goal search lanes: `4`/u);
+  assert.match(full.markdown, /^No issues reported\.$/mu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(full.markdown, full.report), true);
+
+  // A partial hunt must be unmistakable, and must not leave "No issues reported." standing alone.
+  const partialGoals = [
+    lane(1, "completed-no-findings"),
+    lane(2, "completed-no-findings"),
+    lane(3, "completed-no-findings"),
+    ...Array.from({ length: 73 }, (_entry, index) => lane(index + 4, "stopped-early")),
+    lane(77, "unverified")
+  ];
+  const partial = projectCanonicalFinalReport({ ...empty(), goal_search_coverage: census(partialGoals) });
+  assert.match(
+    partial.markdown,
+    /\*\*Partial goal search coverage: only 3 of 77 targeted goal searches completed\.\*\*/u
+  );
+  assert.match(partial.markdown, /The other 74 published no verified result/u);
+  assert.match(partial.markdown, /absence of evidence, not evidence of absence/u);
+  assert.match(partial.markdown, /- Stopped early without returning: `73`/u);
+  assert.match(partial.markdown, /- Returned without passing verification: `1`/u);
+  assert.match(
+    partial.markdown,
+    /^No issues were reported, but only 3 of 77 targeted goal searches completed, so this is not a result\. See \[Goal search coverage\]\(#goal-search-coverage\)\.$/mu
+  );
+  assert.doesNotMatch(partial.markdown, /^No issues reported\.$/mu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(partial.markdown, partial.report), true);
+
+  // Both absences of measurement are named when both happened.
+  const partialAndBlocked = projectCanonicalFinalReport({
+    ...empty(),
+    campaign_outcome: { outcome: "blocked" },
+    goal_search_coverage: census(partialGoals)
+  });
+  assert.match(
+    partialAndBlocked.markdown,
+    /^No issues were reported, but the invariant campaign did not run and only 3 of 77 targeted goal searches completed, so this is not a result\./mu
+  );
+
+  // An unknown census must read as unknown, never as silence and never as full coverage.
+  for (const coverage of [
+    undefined,
+    "unavailable",
+    { schema_version: "ultrafuzz.goal-search-coverage.v0" },
+    {},
+    "",
+    7
+  ]) {
+    const unknown = projectCanonicalFinalReport(
+      coverage === undefined ? empty() : { ...empty(), goal_search_coverage: coverage }
+    );
+    assert.match(unknown.markdown, /^## Goal search coverage$/mu);
+    assert.match(unknown.markdown, /\*\*Goal search coverage is unknown\.\*\*/u);
+    assert.match(unknown.markdown, /Unknown coverage is not full coverage\./u);
+    assert.doesNotMatch(unknown.markdown, /- Targeted goal search lanes:/u);
+    // A topology that runs no goal lanes reports unknown coverage as a matter of course, so the
+    // unknown case must not turn its clean result into a warning.
+    assert.match(unknown.markdown, /^No issues reported\.$/mu);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(unknown.markdown, unknown.report), true);
+  }
+
+  // A census with zero recorded lanes is the dead-goal-plan shape, and reports unknown, not complete.
+  const noLanes = projectCanonicalFinalReport({ ...empty(), goal_search_coverage: census([], { planned: 0 }) });
+  assert.match(noLanes.markdown, /\*\*Goal search coverage is unknown\.\*\*/u);
+
+  // A lane count that disagrees with the census summary is disclosed, not silently trusted.
+  const inconsistent = projectCanonicalFinalReport({
+    ...empty(),
+    goal_search_coverage: census([lane(1, "completed-no-findings")], { planned: 9 })
+  });
+  assert.match(inconsistent.markdown, /- Targeted goal search lanes: `1`/u);
+  assert.match(inconsistent.markdown, /census summary disagrees with the per-lane record/u);
+
+  // An unrecognized status is a lane, but never a completion.
+  const unrecognized = projectCanonicalFinalReport({
+    ...empty(),
+    goal_search_coverage: census([lane(1, "completed-no-findings"), lane(2, "invented-status")])
+  });
+  assert.match(unrecognized.markdown, /\*\*Partial goal search coverage: only 1 of 2 targeted goal searches/u);
+  assert.match(unrecognized.markdown, /- Recorded with an unrecognized status: `1`/u);
+
+  // Dropping the section from a current-run projection is a conformance failure, not a style choice.
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      full.markdown.replace("## Goal search coverage", "## Goal coverage"),
+      full.report
+    ),
+    false
+  );
+
+  // Only roaming ran: the targeted denominator is empty and says so.
+  const roamingOnly = projectCanonicalFinalReport({
+    ...empty(),
+    goal_search_coverage: census([lane(1, "completed-no-findings", "goal-roaming")])
+  });
+  assert.match(
+    roamingOnly.markdown,
+    /\*\*No targeted goal search coverage: this run recorded no targeted goal search lanes\.\*\*/u
+  );
+  assert.match(roamingOnly.markdown, /^No issues were reported, but no targeted goal search lane ran, /mu);
+});

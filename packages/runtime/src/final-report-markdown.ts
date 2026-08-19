@@ -3,6 +3,18 @@ import { redactValue, validateArtifactContract } from "@ultrafuzz/artifacts";
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
 
+/**
+ * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
+ *
+ * Exported from the renderer because the renderer is the consumer of last resort: every producer of
+ * `report.goal_search_coverage` -- the generated workflow's reconstruction pass and the CLI report
+ * reconciler -- has to name the same file and the same schema version, and a census silently written
+ * under one name and read under another would render as "coverage unknown" on a run that measured its
+ * coverage perfectly well. One definition, one failure mode.
+ */
+export const GOAL_SEARCH_COVERAGE_FILE = "goal-search-coverage.json";
+export const GOAL_SEARCH_COVERAGE_SCHEMA_VERSION = "ultrafuzz.goal-search-coverage.v1";
+
 type JsonRecord = Record<string, unknown>;
 
 const reportSummaryFields = [
@@ -123,6 +135,12 @@ export function isDirectiveConformingFinalReportMarkdown(
     return false;
   }
   if (requireImplementationCoverage && !markdown.includes("\n## Property implementation coverage\n")) {
+    return false;
+  }
+  // A current-run projection always states its goal-search coverage, even when that statement is
+  // "coverage is unknown". Requiring the heading keeps a future edit from turning a partial hunt back
+  // into silence, which is indistinguishable from full coverage to a reader (issue #677).
+  if (requireImplementationCoverage && !markdown.includes("\n## Goal search coverage\n")) {
     return false;
   }
   if (!markdown.includes("\n## Property provenance\n")) {
@@ -429,23 +447,21 @@ function renderCanonicalReport(report: JsonRecord): string {
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
   appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
+  const goalCoverage = summarizeGoalSearchCoverage(report.goal_search_coverage);
 
   for (const issue of issues) {
     appendProductionIssue(lines, issue);
   }
 
   if (issues.length === 0 && outcomes.length === 0) {
-    // Saying "no issues" after a campaign that never fuzzed would report an
-    // absence of measurement as a clean result.
-    lines.push(
-      "",
-      campaignDidNotRun
-        ? "No issues were reported, but the invariant campaign did not run, so this is not a result."
-        : "No issues reported."
-    );
+    // Saying "no issues" after a campaign that never fuzzed, or after a goal
+    // hunt where most lanes never searched, would report an absence of
+    // measurement as a clean result.
+    lines.push("", noIssuesSentence(campaignDidNotRun, goalCoverage));
   }
 
   appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
+  appendGoalSearchCoverage(lines, goalCoverage);
   appendPropertyProvenance(lines, report.property_provenance, issues, outcomes);
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
@@ -716,6 +732,212 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
       lines.push(`- ${publicProse(summary)}`);
     }
   }
+}
+
+/**
+ * The topology logical node that runs the untargeted roaming goal pass.
+ *
+ * `goal-roaming` sits in the same `group: goals` as the targeted `class-goals` and `threat-goals`
+ * lanes, so the runtime census tallies it in the same lane list and `logical_node_id` is the only
+ * field that separates them. Rendering it inside the targeted denominator would let one untargeted
+ * sweep stand in for a targeted goal that never ran, which is the exact substitution this section
+ * exists to prevent, so it is tallied and rendered on its own line (issue #677).
+ */
+const ROAMING_GOAL_LOGICAL_NODE_ID = "goal-roaming";
+
+interface GoalLaneTally {
+  lanes: number;
+  completed: number;
+  withFindings: number;
+  noFindings: number;
+  unknownFindingCount: number;
+  stoppedEarly: number;
+  unverified: number;
+  unrecognized: number;
+}
+
+interface GoalSearchCoverageSummary {
+  targeted: GoalLaneTally;
+  roaming: GoalLaneTally;
+  /** Set when the census `totals.planned` disagrees with the lane list shipped alongside it. */
+  inconsistentTotals: boolean;
+}
+
+function emptyGoalLaneTally(): GoalLaneTally {
+  return {
+    lanes: 0,
+    completed: 0,
+    withFindings: 0,
+    noFindings: 0,
+    unknownFindingCount: 0,
+    stoppedEarly: 0,
+    unverified: 0,
+    unrecognized: 0
+  };
+}
+
+/**
+ * Tally the runtime-owned goal-search census, or answer `undefined` for "coverage is unknown".
+ *
+ * Recomputed from the per-lane `goals` list rather than trusted from `totals`, because the lane list
+ * is the only place the targeted/roaming split exists, and because a summary that disagrees with its
+ * own detail is exactly the kind of quiet arithmetic error a coverage claim must not inherit. A
+ * disagreement is recorded and disclosed rather than resolved silently.
+ *
+ * Every rejection path returns `undefined` so the render states that coverage is unknown: a missing
+ * field, the `"unavailable"` sentinel the producers stamp when no census was written, a census under
+ * an unrecognized schema version, and a census with no lanes at all. That last case is not
+ * hypothetical -- the recorder writes nothing when a run expanded zero goal lanes, which is precisely
+ * what a dead goal plan leaves behind, and reporting zero planned lanes as full coverage would invert
+ * the worst case into the best one.
+ */
+function summarizeGoalSearchCoverage(value: unknown): GoalSearchCoverageSummary | undefined {
+  if (!isRecord(value) || value.schema_version !== GOAL_SEARCH_COVERAGE_SCHEMA_VERSION) {
+    return undefined;
+  }
+  const goals = Array.isArray(value.goals) ? value.goals.filter(isRecord) : [];
+  if (goals.length === 0) {
+    return undefined;
+  }
+  const targeted = emptyGoalLaneTally();
+  const roaming = emptyGoalLaneTally();
+  for (const goal of goals) {
+    const tally = goal.logical_node_id === ROAMING_GOAL_LOGICAL_NODE_ID ? roaming : targeted;
+    tally.lanes += 1;
+    const status = typeof goal.status === "string" ? goal.status : "";
+    if (status.startsWith("completed")) {
+      tally.completed += 1;
+      if (status === "completed-with-findings") {
+        tally.withFindings += 1;
+      } else if (status === "completed-no-findings") {
+        tally.noFindings += 1;
+      } else {
+        tally.unknownFindingCount += 1;
+      }
+    } else if (status === "stopped-early") {
+      tally.stoppedEarly += 1;
+    } else if (status === "unverified") {
+      tally.unverified += 1;
+    } else {
+      // An unrecognized status is counted as a lane but never as a completion, so a status this
+      // renderer has not been taught can only ever lower the reported coverage.
+      tally.unrecognized += 1;
+    }
+  }
+  const planned = recordField(value, "totals")?.planned;
+  return {
+    targeted,
+    roaming,
+    inconsistentTotals: typeof planned === "number" && planned !== goals.length
+  };
+}
+
+/**
+ * Report how much of the goal hunt actually ran (issue #677).
+ *
+ * Goal lanes carry `continueOnFail` and are pre-seeded with a contract-valid empty findings array, so
+ * a lane that was killed before it searched leaves behind bytes indistinguishable from a lane that
+ * searched and found nothing. The census is the only surviving difference between those two, and this
+ * section is where a reader of `report.md` alone -- the document the prompt designs to be forwarded on
+ * its own -- gets told which one happened. Modelled on `appendPropertyImplementationCoverage`: same
+ * heading style, same counted bullets, same explicit handling of an absent or sentinel census.
+ *
+ * Two limits of the census are stated in the rendered text rather than smoothed over:
+ *
+ *   1. The denominator is lanes that were expanded and run, not goals the plan asked for. A goal that
+ *      never became a lane cannot appear as unsearched here, and a run that expanded no lanes at all
+ *      has no census and therefore reports unknown coverage.
+ *   2. The untargeted roaming pass shares the goal group with the targeted lanes, so it is split out
+ *      by `logical_node_id` and reported on its own line instead of diluting the targeted ratio.
+ */
+function appendGoalSearchCoverage(lines: string[], summary: GoalSearchCoverageSummary | undefined): void {
+  lines.push("", "## Goal search coverage", "");
+  if (summary === undefined) {
+    lines.push(
+      "**Goal search coverage is unknown.** This run published no authoritative goal-search census, so this report cannot state how many of its goal searches ran: either the run performed no goal searches at all, or it performed them without recording coverage. Unknown coverage is not full coverage. Treat any goal-derived result in this report as an unquantified sample, and do not read a goal that reported nothing as a goal that was searched."
+    );
+    return;
+  }
+  const { targeted, roaming } = summary;
+  const missing = targeted.lanes - targeted.completed;
+  if (targeted.lanes === 0) {
+    lines.push(
+      "**No targeted goal search coverage: this run recorded no targeted goal search lanes.** Nothing in this report is a statement about targeted goal coverage."
+    );
+  } else if (missing > 0) {
+    lines.push(
+      `**Partial goal search coverage: only ${targeted.completed} of ${targeted.lanes} targeted goal searches completed.** The other ${missing} published no verified result, so nothing was measured for those goals: their empty findings are an absence of evidence, not evidence of absence. This report does not cover them.`
+    );
+  } else {
+    lines.push(
+      `All ${targeted.lanes} targeted goal searches completed and published a verified result, so a goal that reported no findings here was searched and found nothing.`
+    );
+  }
+  lines.push("");
+  lines.push(`- Targeted goal search lanes: \`${targeted.lanes}\``);
+  lines.push(`- Completed with a verified result: \`${targeted.completed}\``);
+  lines.push(`- Completed and reported findings: \`${targeted.withFindings}\``);
+  lines.push(`- Completed and reported no findings: \`${targeted.noFindings}\``);
+  if (targeted.unknownFindingCount > 0) {
+    lines.push(`- Completed with an unreadable finding count: \`${targeted.unknownFindingCount}\``);
+  }
+  lines.push(`- Stopped early without returning: \`${targeted.stoppedEarly}\``);
+  lines.push(`- Returned without passing verification: \`${targeted.unverified}\``);
+  if (targeted.unrecognized > 0) {
+    lines.push(`- Recorded with an unrecognized status: \`${targeted.unrecognized}\``);
+  }
+  if (roaming.lanes > 0) {
+    lines.push(
+      `- Untargeted roaming passes, counted separately: \`${roaming.completed}\` of \`${roaming.lanes}\` completed`
+    );
+  }
+  lines.push(
+    "",
+    "These counts cover goal search lanes this run expanded and executed, not goals the plan requested: a planned goal that never became a lane is absent from them entirely, and a run whose goal planning or expansion produced no lanes publishes no census and reports its coverage as unknown rather than as zero."
+  );
+  if (roaming.lanes > 0) {
+    lines.push(
+      "",
+      "The untargeted roaming pass shares its execution group with the targeted goal lanes but is counted on its own line here, so it can neither raise nor lower targeted coverage."
+    );
+  }
+  if (summary.inconsistentTotals) {
+    lines.push(
+      "",
+      "The census summary disagrees with the per-lane record it ships with. The counts above come from the per-lane record; treat the totals as unreliable and this coverage statement as approximate."
+    );
+  }
+}
+
+/**
+ * State an empty issue list without letting it stand in for coverage.
+ *
+ * Two different absences of measurement can leave the issue list empty: an invariant campaign that
+ * never fuzzed, and a goal hunt whose lanes were killed before they searched. Either one makes "no
+ * issues reported" a false summary, so both are named here, and the goal case points at the section
+ * that carries the numbers. Unknown goal coverage deliberately does NOT amend this sentence: a
+ * topology with no goal lanes at all reports unknown coverage as a matter of course, and turning
+ * every such run's clean result into a warning would spend the warning where it means nothing. That
+ * run still gets an explicit "coverage is unknown" statement in its own section.
+ */
+function noIssuesSentence(campaignDidNotRun: boolean, coverage: GoalSearchCoverageSummary | undefined): string {
+  const targeted = coverage?.targeted;
+  const goalClause =
+    targeted === undefined || (targeted.lanes > 0 && targeted.completed >= targeted.lanes)
+      ? undefined
+      : targeted.lanes === 0
+        ? "no targeted goal search lane ran"
+        : `only ${targeted.completed} of ${targeted.lanes} targeted goal searches completed`;
+  const clauses = [campaignDidNotRun ? "the invariant campaign did not run" : undefined, goalClause].filter(
+    (clause): clause is string => clause !== undefined
+  );
+  if (clauses.length === 0) {
+    return "No issues reported.";
+  }
+  const sentence = `No issues were reported, but ${clauses.join(" and ")}, so this is not a result.`;
+  return goalClause === undefined
+    ? sentence
+    : `${sentence} See [Goal search coverage](#${markdownAnchor("Goal search coverage")}).`;
 }
 
 function appendPriorFindingDisposition(lines: string[], issues: RenderedIssue[], outcomes: JsonRecord[]): void {

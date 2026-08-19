@@ -4056,6 +4056,36 @@ function defaultModelProfile(config: ResolvedConfig): ResolvedConfig["models"]["
 
 export { topologyRuntimeBudgetForTimeout };
 
+/**
+ * Builds the "## Topology Runtime Context" block injected into every task prompt as
+ * `task.runtimeContext`.
+ *
+ * The relative-seconds lines are unactionable on their own: a language model has no clock, so
+ * "stop after 6900 seconds" cannot be checked. Long-running agentic nodes were consequently killed
+ * at their timeout with no artifacts written at all (run reliability, #672/#677). Agentic nodes run
+ * through a shell, so an ABSOLUTE UTC deadline is measurable where a duration is not.
+ *
+ * The deadline is expressed as an arithmetic RECIPE over a start time the agent observes itself,
+ * never as a wall-clock timestamp resolved here. That is a hard constraint, not a stylistic
+ * preference:
+ *
+ *   - This string is serialized into the generated workflow by `renderWorkflowSource`, and that
+ *     file is hashed into the control seal (`workflow-integrity.ts`). Sealed content must be a pure
+ *     function of the run inputs.
+ *   - `writePreparedWorkflowFile` re-renders the workflow source and throws
+ *     "existing generated Smithers workflow conflicts with the prepared workflow start" when the
+ *     bytes differ from the file already on disk. A `Date.now()` in this block would therefore make
+ *     every re-prepare of an existing run fail.
+ *   - Generation happens once; nodes start hours later. A generation-time timestamp would already be
+ *     wrong — often expired — by the time the node it governs begins.
+ *
+ * The same "agent resolves its own absolute deadlines from an observed start time" pattern is
+ * already established by the invariant campaign plan (`backend_started_at`, `fuzzing_deadline_utc`,
+ * `force_kill_deadline_utc`, `final_artifact_deadline_utc`).
+ *
+ * The three relative lines are kept verbatim: several strategy prompts instruct the agent to copy
+ * the exact `Timeout` and `Finalization reserve` values out of this block.
+ */
 export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   const { timeoutSeconds, finalizationReserveSeconds, workingBudgetSeconds } =
     topologyRuntimeBudgetForTimeout(timeoutMs);
@@ -4065,8 +4095,13 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
     `- Timeout: ${timeoutSeconds} seconds total.`,
     `- Finalization reserve: ${finalizationReserveSeconds} seconds.`,
     `- Working budget before finalization: ${workingBudgetSeconds} seconds.`,
+    "- You have shell access, so you have a clock: run `date -u +%s` once at the very start of this node and keep that value as your node start epoch.",
+    `- Absolute working-budget deadline (UTC) = node start epoch + ${workingBudgetSeconds}. Absolute hard deadline (UTC) = node start epoch + ${timeoutSeconds}. Resolve both once at startup and record them in your notes, for example with \`date -u -d "+${workingBudgetSeconds} seconds" +%Y-%m-%dT%H:%M:%SZ\` and \`date -u -d "+${timeoutSeconds} seconds" +%Y-%m-%dT%H:%M:%SZ\`.`,
+    "- These are absolute timestamps rather than durations on purpose. Re-read the current time with `date -u +%s` (or `date -u`) before each expensive step and compare it against those two values instead of estimating how long you have been running.",
+    "- The deadlines are computed by you at startup and not printed here because this block is part of the hash-sealed workflow and cannot contain a wall-clock value.",
     "- Stop starting new delegated or tool work when the finalization reserve begins.",
-    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs."
+    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
+    "- Crossing the hard deadline kills this node with no output at all, which is strictly worse than a complete, cleanly written negative result."
   ].join("\n");
 }
 

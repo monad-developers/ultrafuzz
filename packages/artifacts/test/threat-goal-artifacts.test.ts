@@ -1295,6 +1295,58 @@ test("goal-plan replacement keys are exactly the keys the dynamic fanout consume
   }
 });
 
+test("goal-plan replacements are bounded titles, not inlined JSON records", () => {
+  const plan = goalPlanFixture();
+  const threatId = "liquidation:overdue";
+  const withReplacement = (value: unknown): Record<string, unknown> => {
+    const next = structuredClone(plan);
+    (next.threat_goals as Array<Record<string, unknown>>)[0]!.replacements = { [threatId]: value };
+    return next;
+  };
+
+  // A replacement is substituted into the goal sentence, so the shape the planner is asked for is a
+  // title plus its namespaced ID. That must keep validating.
+  const titled = validateGoalPlan(withReplacement("Overdue liquidation bypass (liquidation:overdue)"));
+  assert.equal(titled.ok, true, JSON.stringify(titled.issues));
+  assert.equal(
+    titled.value?.threat_goals[0]?.replacements[threatId],
+    "Overdue liquidation bypass (liquidation:overdue)"
+  );
+
+  // The cap is a boundary, so both sides of it are asserted rather than only the rejection.
+  assert.equal(validateGoalPlan(withReplacement("T".repeat(200))).ok, true);
+  const oversized = validateGoalPlan(withReplacement("T".repeat(201)));
+  assert.equal(oversized.ok, false, "an over-long replacement must not reach the goal sentence");
+  assert.match(oversized.issues.map((issue) => issue.message).join("; "), /at most 200 characters/u);
+
+  // The measured regression: a whole record serialized into the value. Rejected even well under the
+  // cap, because the fix is a path reference, not a smaller wall.
+  for (const record of [
+    '{"id":"liquidation:overdue","assets":[],"evidence":[]}',
+    '[{"id":"liquidation:overdue"}]',
+    '  {"id":"liquidation:overdue"}  '
+  ]) {
+    const rejected = validateGoalPlan(withReplacement(record));
+    assert.equal(rejected.ok, false, record);
+    assert.match(rejected.issues.map((issue) => issue.message).join("; "), /not a serialized JSON record/u);
+  }
+
+  // Punctuation is not a record. A title that merely opens with a brace or contains brackets, quotes
+  // and colons is prose, and rejecting it would push the planner into worse titles.
+  for (const title of [
+    "{withdraw} liquidates a fixed-term loan before it is overdue",
+    'The "overdue" check reads state [see the ledger]: it is stale',
+    "liquidation:overdue -- fixed-term loans, 1e18 rounding"
+  ]) {
+    const accepted = validateGoalPlan(withReplacement(title));
+    assert.equal(accepted.ok, true, JSON.stringify(accepted.issues));
+  }
+
+  // Numeric and boolean replacements are still accepted: they cannot be a JSON wall.
+  assert.equal(validateGoalPlan(withReplacement(7)).ok, true);
+  assert.equal(validateGoalPlan(withReplacement(true)).ok, true);
+});
+
 test("escaped required goal placeholders are rejected instead of rendering as literals", () => {
   const plan = goalPlanFixture();
   const goal = (plan.threat_goals as Array<Record<string, unknown>>)[0]!;
