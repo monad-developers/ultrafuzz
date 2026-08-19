@@ -699,7 +699,6 @@ describe("public Modal benchmark configuration", () => {
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
       on: {
         push: { branches: string[] };
-        merge_group: { types: string[] };
         pull_request: { types: string[] };
         workflow_dispatch: null;
       };
@@ -724,7 +723,7 @@ describe("public Modal benchmark configuration", () => {
     };
 
     expect(workflow.on.push.branches).toEqual(["main"]);
-    expect(workflow.on.merge_group.types).toEqual(["checks_requested"]);
+    expect(workflow.on).not.toHaveProperty("merge_group");
     expect(workflow.on.workflow_dispatch).toBeNull();
     expect(workflow.on.pull_request.types).toEqual([
       "opened",
@@ -737,7 +736,11 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
 
-    const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
+    const draftAndBuild = workflow.jobs["draft-and-build-gates"];
+    expect(draftAndBuild?.name).toBe(
+      "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
+    );
+    const steps = draftAndBuild?.steps ?? [];
     const bunSetup = steps.find((step) => step.name === "Set up Bun");
     expect(bunSetup?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(bunSetup?.with?.["bun-version"]).toBe("1.3.14");
@@ -758,36 +761,7 @@ describe("public Modal benchmark configuration", () => {
     expect(runtimeSmoke?.if).toBe("github.event_name == 'pull_request'");
     expect(runtimeSmoke?.run).toBe("pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt");
 
-    const pullRequestValidation = workflow.jobs["pull-request-validation"];
-    expect(pullRequestValidation?.name).toBe("PR validation (${{ matrix.description }})");
-    expect(pullRequestValidation?.if).toBe(
-      "github.event_name == 'pull_request' && github.event.pull_request.draft == false"
-    );
-    expect(pullRequestValidation?.strategy).toEqual({
-      "fail-fast": false,
-      "max-parallel": 2,
-      matrix: {
-        include: [
-          {
-            lane: "package-gates",
-            description: "Package, dependency, and policy gates",
-            gates:
-              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
-            timeout_minutes: 30,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "cli-typecheck",
-            description: "CLI tests, benchmark history, and workspace typecheck",
-            gates: "cli,benchmark-history,workspace-typecheck",
-            timeout_minutes: 30
-          }
-        ]
-      }
-    });
-    expect(pullRequestValidation?.steps.find((step) => step.name === "Validate pull request lane")?.run).toContain(
-      "--gates"
-    );
+    expect(workflow.jobs).not.toHaveProperty("pull-request-validation");
 
     const releaseValidation = workflow.jobs["release-validation"];
     expect(releaseValidation?.name).toBe("Full release validation (${{ matrix.description }})");
@@ -863,10 +837,7 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseReporterBuild?.run).toBe("pnpm --filter @ultrafuzz/artifacts... build");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
-    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "pull-request-validation", "release-validation"]);
-    expect(releaseGates?.steps.find((step) => step.name === "Require pull request validation lanes")?.if).toContain(
-      "needs.pull-request-validation.result != 'success'"
-    );
+    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
     for (const name of [
       "Check out repository",
       "Set up pnpm",

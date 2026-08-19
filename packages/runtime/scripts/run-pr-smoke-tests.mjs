@@ -22,6 +22,9 @@ const namedTests = new Map([
     ["generated workflow input is an exact current-only envelope with bounded JSON operator data"]
   ]
 ]);
+const smokeEnvironment = { ...process.env };
+delete smokeEnvironment.ULTRAFUZZ_RUNTIME_TEST_SHARD;
+const selectedTestNames = [...namedTests.values()].flat();
 
 for (const [sourcePath, names] of namedTests) {
   const source = readFileSync(sourcePath, "utf8");
@@ -35,22 +38,44 @@ for (const [sourcePath, names] of namedTests) {
 runNodeTests(supportingTestFiles);
 runNodeTests(
   [...namedTests.keys()].map((sourcePath) => `dist-test/${sourcePath.replace(/\.ts$/u, ".js")}`),
-  [...namedTests.values()].flat()
+  selectedTestNames,
+  selectedTestNames.length
 );
 
-function runNodeTests(files, testNames) {
-  const args = ["--test"];
+function runNodeTests(files, testNames, expectedPasses) {
+  const args = ["--test", "--test-reporter=tap"];
   if (testNames !== undefined) {
     const pattern = `^(?:${testNames.map(escapeRegExp).join("|")})$`;
     args.push(`--test-name-pattern=${pattern}`);
   }
   args.push(...files);
 
-  const result = spawnSync(process.execPath, args, { stdio: "inherit" });
+  const result = spawnSync(process.execPath, args, {
+    encoding: "utf8",
+    env: smokeEnvironment,
+    stdio: ["inherit", "pipe", "pipe"]
+  });
+  process.stdout.write(result.stdout ?? "");
+  process.stderr.write(result.stderr ?? "");
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
+  if (expectedPasses !== undefined) assertTapSummary(result.stdout ?? "", expectedPasses);
 }
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function assertTapSummary(output, expectedPasses) {
+  const summary = new Map(
+    [...output.matchAll(/^# (tests|pass|fail|skipped) ([0-9]+)$/gmu)].map((match) => [match[1], Number(match[2])])
+  );
+  if (
+    summary.get("tests") !== expectedPasses ||
+    summary.get("pass") !== expectedPasses ||
+    summary.get("fail") !== 0 ||
+    summary.get("skipped") !== 0
+  ) {
+    throw new Error(`PR runtime smoke expected ${expectedPasses} selected tests to pass without skips`);
+  }
 }

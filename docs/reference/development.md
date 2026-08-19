@@ -39,16 +39,13 @@ built workspace and covers runtime sharding, workflow controls, source revision
 binding, generated workflow input, and representative initialization,
 validation, planning, and workflow-compilation behavior. Feature branches are
 validated only by the pull-request event, avoiding a duplicate push run.
-Ready-for-review pull requests also run package validation and the
-CLI/benchmark/typecheck lanes, but not the full runtime matrix.
 
-Pushes to `main`, merge-queue commits, and manual workflow dispatches add full
-release validation. It uses seven isolated CI lanes with a maximum of seven
-jobs in parallel: package and CLI/typecheck lanes, one runtime-supporting lane,
-and four deterministic runtime integration shards. It then records their
-results in stable gate order in the JSON report. The expensive full runtime
-matrix therefore runs once at the integration boundary instead of after every
-pull-request update.
+Pushes to `main` and manual workflow dispatches add full release validation. It
+uses seven isolated CI lanes with a maximum of seven jobs in parallel: package
+and CLI/typecheck lanes, one runtime-supporting lane, and four deterministic
+runtime integration shards. It then records their results in stable gate order
+in the JSON report. The expensive full runtime matrix therefore runs once after
+integration instead of after every pull-request update.
 
 ## Package Checks
 
