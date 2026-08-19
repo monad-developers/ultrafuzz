@@ -24,6 +24,8 @@ import {
   type ConfigDiagnostic,
   type ConfigResult,
   type PermissionConfig,
+  type ProviderBinding,
+  type HarnessCapabilities,
   type ProjectConfigInput,
   type PromptMetadataLayer,
   type ResolveConfigInput,
@@ -210,6 +212,7 @@ export function validateResolvedConfig(
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
   diagnostics.push(...validateExecutionConfig(config, env));
+  diagnostics.push(...validateProviderHarnessConfig(config));
   return diagnostics;
 }
 
@@ -283,6 +286,8 @@ export function serializeResolvedConfigToml(
   for (const [id, profile] of Object.entries(clone.models.profiles)) {
     pushTable(lines, tableName(["models", id]), {
       agent: profile.agent,
+      harness: profile.harness,
+      provider: profile.provider,
       model: profile.model,
       reasoning: profile.reasoning,
       timeout_seconds: profile.timeoutSeconds
@@ -556,6 +561,109 @@ function validateExecutionConfig(config: ResolvedConfig, env: Record<string, str
   return diagnostics;
 }
 
+function validateProviderHarnessConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+  const diagnostics: ConfigDiagnostic[] = [];
+  for (const [id, provider] of Object.entries(config.providers)) {
+    const path = ["providers", id];
+    if (!provider.kind?.trim())
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_PROVIDER_KIND_MISSING",
+          "providers." + id + ".kind is required",
+          [...path, "kind"],
+          "validation"
+        )
+      );
+    if (!provider.baseUrl?.trim())
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_PROVIDER_ENDPOINT_MISSING",
+          "providers." + id + ".base_url is required",
+          [...path, "base_url"],
+          "validation"
+        )
+      );
+    if (!provider.protocols?.length)
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_PROVIDER_PROTOCOLS_MISSING",
+          "providers." + id + ".protocols is required",
+          [...path, "protocols"],
+          "validation"
+        )
+      );
+    if (provider.auth === "api-key" && !provider.credentialEnv?.trim())
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_PROVIDER_CREDENTIAL_NAME_MISSING",
+          "providers." + id + ".api_key_env is required for api-key auth",
+          [...path, "api_key_env"],
+          "validation"
+        )
+      );
+    if (provider.auth === "subscription" && "credentialEnv" in provider)
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_PROVIDER_CREDENTIAL_FORBIDDEN",
+          "providers." + id + ".api_key_env is forbidden for subscription auth",
+          [...path, "api_key_env"],
+          "validation"
+        )
+      );
+  }
+  for (const [id, harness] of Object.entries(config.harnesses)) {
+    if (!harness.state)
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_HARNESS_STATE_MISSING",
+          "harnesses." + id + ".must declare config_seed_dir or state_root",
+          ["harnesses", id, "config_seed_dir"],
+          "validation"
+        )
+      );
+  }
+  for (const [id, profile] of Object.entries(config.models.profiles)) {
+    if (profile.harness === undefined && profile.provider === undefined) continue; // legacy adapter, forward mapped at runtime without behavior changes
+    if (!profile.harness)
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_HARNESS_REQUIRED",
+          "models." + id + ".harness is required when provider is set",
+          ["models", id, "harness"],
+          "validation"
+        )
+      );
+    if (!profile.provider)
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_PROVIDER_REQUIRED",
+          "models." + id + ".provider is required when harness is set",
+          ["models", id, "provider"],
+          "validation"
+        )
+      );
+    if (profile.harness && !config.harnesses[profile.harness])
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_HARNESS_UNKNOWN",
+          "models." + id + ".harness references unknown harness " + profile.harness,
+          ["models", id, "harness"],
+          "validation"
+        )
+      );
+    if (profile.provider && !config.providers[profile.provider])
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_PROVIDER_UNKNOWN",
+          "models." + id + ".provider references unknown provider " + profile.provider,
+          ["models", id, "provider"],
+          "validation"
+        )
+      );
+  }
+  return diagnostics;
+}
+
 function applyProjectConfigLayer(
   config: ResolvedConfig,
   layer: ProjectConfigInput,
@@ -611,11 +719,34 @@ function applyProjectConfigLayer(
         config.models.profiles[id] = {
           id,
           agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
+          harness: profile.harness ?? existing?.harness,
+          provider: profile.provider ?? existing?.provider,
           model: profile.model ?? existing?.model,
           reasoning: profile.reasoning ?? existing?.reasoning,
           timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
         };
       }
+    }
+  }
+  if (layer.providers) {
+    for (const [id, provider] of Object.entries(layer.providers))
+      config.providers[id] = { ...config.providers[id], ...definedOnly(provider), id } as ProviderBinding;
+  }
+  if (layer.harnesses) {
+    for (const [id, harness] of Object.entries(layer.harnesses)) {
+      const { configSeedDir, stateRoot, ...fields } = harness;
+      const state =
+        configSeedDir !== undefined
+          ? { mode: "run-scoped" as const, configSeedDir }
+          : stateRoot !== undefined
+            ? { mode: "persistent" as const, stateRoot }
+            : undefined;
+      config.harnesses[id] = {
+        ...config.harnesses[id],
+        ...definedOnly(fields),
+        ...(state ? { state } : {}),
+        id
+      } as HarnessCapabilities;
     }
   }
   if (layer.agents) {
@@ -955,6 +1086,8 @@ function sortConfig(config: ResolvedConfig): void {
   config.models.profiles = Object.fromEntries(
     Object.entries(config.models.profiles).sort(([left], [right]) => left.localeCompare(right))
   );
+  config.providers = Object.fromEntries(Object.entries(config.providers).sort(([a], [b]) => a.localeCompare(b)));
+  config.harnesses = Object.fromEntries(Object.entries(config.harnesses).sort(([a], [b]) => a.localeCompare(b)));
   config.eval.providers = Object.fromEntries(
     Object.entries(config.eval.providers).sort(([left], [right]) => left.localeCompare(right))
   );

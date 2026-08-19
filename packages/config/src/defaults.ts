@@ -248,6 +248,8 @@ function normalizeModelProfile(id: string, profile: Partial<ModelProfile>, fileP
   return {
     id,
     agent: required(profile.agent, `models.${id}.agent`, filePath),
+    ...(profile.harness !== undefined ? { harness: profile.harness } : {}),
+    ...(profile.provider !== undefined ? { provider: profile.provider } : {}),
     ...(profile.model !== undefined ? { model: profile.model } : {}),
     ...(profile.reasoning !== undefined ? { reasoning: profile.reasoning } : {}),
     ...(profile.timeoutSeconds !== undefined ? { timeoutSeconds: profile.timeoutSeconds } : {})
@@ -341,6 +343,8 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
       assertString(agent.configDir, `agents.${id}.configDir`, filePath);
     }
   }
+  assertRecord(value.providers, "providers", filePath);
+  assertRecord(value.harnesses, "harnesses", filePath);
   assertRecord(value.permissions, "permissions", filePath);
   assertString(value.permissions.trustModel, "permissions.trustModel", filePath);
   if (value.permissions.trustModel !== "skip-permissions") {
