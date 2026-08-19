@@ -14,8 +14,11 @@ shipped defaults.
 
 The companion [architecture plan](provider-harness-plan.html) is a
 self-contained HTML report — GitHub serves `.html` as plain text, so download
-it and open it in a browser. Its §7 (risk register) and §9 (drafted issue
-bodies) have no counterpart here; everything else appears on both pages.
+it and open it in a browser. Its §1 (verdict), §7 (risk register), and §9
+(drafted issue bodies) have no counterpart here, and its §6 (sequencing) is
+condensed here into [Next Work](#next-work). Everything else appears on both
+pages, including the numbered qualification gates G1–G10 that the child issues
+cite by number.
 
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
@@ -71,14 +74,14 @@ The `Events`, `Sessions`, and `Isolation` columns use the capability-contract
 spellings defined in [the contract below](#proposed-capability-contract), so a
 row reads directly as the capability a binding would declare.
 
-| Candidate                           | Events            | Sessions          | Isolation                   | Evidence                                       | Disposition                                               |
-| ----------------------------------- | ----------------- | ----------------- | --------------------------- | ---------------------------------------------- | --------------------------------------------------------- |
-| Codex CLI 0.147.0                   | `jsonl` + schema  | `resume`          | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path     |
-| Pi 0.84.2                           | `jsonl` + `rpc`   | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification        |
-| OpenCode 1.18.18                    | `jsonl`           | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                         |
-| Claude Code 2.1.233                 | `jsonl` + schema  | `resume`          | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek     |
-| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only` | `none`            | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, artifact-only nodes |
-| Direct provider-API harness         | Ultrafuzz owns it | Ultrafuzz owns it | Ultrafuzz owns it           | design only                                    | Fallback; do not implement first                          |
+| Candidate                           | Events            | Sessions          | Isolation                   | Evidence                                       | Disposition                                            |
+| ----------------------------------- | ----------------- | ----------------- | --------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| Codex CLI 0.147.0                   | `jsonl` + schema  | `resume`          | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path  |
+| Pi 0.84.2                           | `jsonl` + `rpc`   | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification     |
+| OpenCode 1.18.18                    | `jsonl`           | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                      |
+| Claude Code 2.1.233                 | `jsonl` + schema  | `resume`          | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek  |
+| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only` | `none`            | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, final-text nodes |
+| Direct provider-API harness         | Ultrafuzz owns it | Ultrafuzz owns it | Ultrafuzz owns it           | design only                                    | Fallback; do not implement first                       |
 
 The detail behind each row follows. Each subsection covers the same four
 dimensions: provider and model binding, unattended tools and artifacts, events
@@ -128,7 +131,12 @@ docs. No provider request was made._
 
 - **Binding.** Built-in OpenRouter support, `provider/model` selection, and
   explicit config entries for catalogue models; custom base URLs through AI SDK
-  providers.
+  providers. **No reasoning surface was measured**: `run --help` exposes no
+  reasoning flag, and any reasoning control would come from those per-model
+  config entries, which this research did not exercise. An OpenCode binding
+  declares no reasoning levels until
+  [#662](https://github.com/monad-developers/ultrafuzz/issues/662) measures
+  them.
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
   Build agent exposes file, shell, search, and task tools.
 - **Events.** Raw JSON events, session IDs, continue/resume/fork, exported
@@ -168,7 +176,12 @@ commit
   bundle mounts it **dormant with zero routes**; a route registers only when an
   `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is
   the shipped default (`agent-default-model` = `deepseek-official` /
-  `deepseek-v4-flash`), not a hard coupling.
+  `deepseek-v4-flash`), not a hard coupling. **No reasoning surface was
+  measured**: `dsh --profile headless --help` advertises exactly one argument
+  and `-h`, and this research identified no reasoning or thinking-budget row in
+  `--dump-default-config`. A dsh binding therefore declares an empty
+  `reasoningLevels` until one is measured, and the validator rejects any
+  `reasoning` value set on it.
 - **Unattended.** `dsh --profile headless "task"` runs one task unattended and
   prints the final assistant text. 25 model-facing tools, including `bash`,
   `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`,
@@ -267,7 +280,7 @@ kind = "pi"
 version = "0.84.2"
 config_dir = ".ultrafuzz/pi"
 
-[harnesses.deepseek-harness]
+[harnesses.dsh]
 kind = "dsh"
 version = "0.1.0-rc.7"
 config_dir = ".ultrafuzz/dsh"   # exported as DSH_HOME
@@ -279,10 +292,11 @@ model = "anthropic/claude-sonnet-4"
 reasoning = "high"
 
 [models.deepseek-v4-pro]
-harness = "deepseek-harness"
+harness = "dsh"
 provider = "deepseek"
 model = "deepseek-v4-pro"
-reasoning = "high"
+# No `reasoning` key: dsh's reasoning surface is unmeasured, so a dsh binding
+# declares no reasoning levels and the validator rejects the field.
 ```
 
 The exact field names remain subject to schema implementation review. The
@@ -345,14 +359,20 @@ interface QualifiedHarnessBinding {
 }
 ```
 
-This is the normative spelling of the contract. The same vocabulary appears in
-the HTML plan's §5, and
-[#658](https://github.com/monad-developers/ultrafuzz/issues/658) must implement
-it verbatim: `tools` is `filesystem` / `shell`, `events` is
+This is the normative spelling of the contract, and the same vocabulary appears
+in the HTML plan's §5: `tools` is `filesystem` / `shell`, `events` is
 `"jsonl" | "rpc" | "final-text-only"`, `sessions` is
 `"none" | "resume" | "tree"`, and `isolation` is
-`"native-sandbox" | "external-sandbox-required"`. Abbreviations such as `fs` or
-a bare `native` are not part of the contract.
+`"native-sandbox" | "external-sandbox-required"`. Diagnostics that name a
+capability must use these strings, so an operator can match an error back to
+this page.
+
+The summary block in
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviates
+some of these — it writes `tools` as `fs` / `shell` and `isolation` as
+`native` | `external`. Those abbreviations are shorthand in the issue text, not
+the contract; the implementation follows the spellings above, and #658's issue
+body should be corrected to match rather than the other way round.
 
 `events: "final-text-only"` is new and exists because DeepSeek Harness needs
 it. A harness in that class can still run nodes whose contract is "produce an
@@ -371,9 +391,38 @@ this plan.
 
 The binding validator must reject an unsupported protocol, reasoning level,
 missing executable/version, unavailable cloud image, or missing credential
-before workflow launch. `childEnv` is built from an empty or tightly allowlisted
-base and contains only the selected provider credential and harness controls.
-Generic topology, prompts, and artifact verification never branch on a CLI name.
+before workflow launch. A harness that records no reasoning levels accepts no
+`reasoning` value at all, so setting one on such a binding is a validation
+error rather than a silently ignored field. Generic topology, prompts, and
+artifact verification never branch on a CLI name.
+
+### Credential and State Rules
+
+These rules hold for every harness, not just the ones measured here. They are
+the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
+
+- `childEnv` is built from an empty or tightly allowlisted base, never
+  inherited wholesale.
+- Exactly one provider credential is present, and it matches the endpoint the
+  harness will actually call.
+- Credentials never appear in `argv`. This rules out Smithers' `PiAgent`
+  `--api-key` path, which must be left unset in favour of an environment
+  variable.
+- Every harness gets a run-scoped state root, so no run reads or writes an
+  operator's real home.
+- The invocation directory must not carry harness-readable configuration. For
+  dsh that means proving no `.env` exists in the target worktree before launch,
+  both because an unset name there would be adopted and because a
+  bootstrap-only name there aborts the harness.
+- The state root does not live inside a region the harness's own sandbox leaves
+  writable. dsh's `workspace-write` policy grants all of `/tmp` under the
+  Landlock runner, so a `DSH_HOME` under `/tmp` is reachable by the agent's own
+  shell — put it beside the worktree instead.
+- Assume the child shell sees harness-injected environment. dsh strips ambient
+  `DSH_*` and then supplies `DSH_HOME`, `DSH_SHELL`, `DSH_SESSION_ID`, and
+  `DSH_SESSION_JSONL`; the credential scrub
+  (`/KEY|PASSWORD|SECRET|TOKEN/i`) is what keeps the provider key out, not the
+  `DSH_*` handling.
 
 ## Conformance Gate
 
@@ -382,21 +431,37 @@ the real provider. Fake CLIs are for simple unit tests only — they may stand i
 for process output in a unit test, but they never satisfy a gate and never
 qualify a pairing.
 
-- Run a real provider request with an opaque catalogue model ID and confirm the
-  provider observed that exact ID.
-- Give the child one canary provider credential and ambient conflicting
-  endpoints/credentials; prove only the selected endpoint receives the canary.
-- Exercise read, write/edit, and shell tools in a disposable worktree.
-- Produce an artifact, then pass the existing post-agent artifact contract and
-  retry cleanup paths.
-- Parse streaming text, tool events, terminal success/failure, tokens, cache
-  fields, cost when available, and rate-limit diagnostics.
-- Persist a session, resume it by explicit ID, and verify retry semantics do not
-  accidentally resume an unrelated session.
-- Repeat locally and in the pinned Modal image with update checks, sharing,
-  third-party plugins/extensions, and unrelated user configuration disabled.
-- Record the CLI version, package integrity, provider request evidence, and any
-  capability that remains unknown.
+The gates are numbered, and those numbers are the ones the child issues cite.
+They match §8 of the [architecture plan](provider-harness-plan.html) one for
+one.
+
+- **G1 · Model pass-through.** Run a real provider request with an opaque
+  catalogue model ID and confirm the provider observed that exact ID.
+- **G2 · Credential isolation.** Give the child one canary provider credential
+  and ambient conflicting endpoints/credentials; prove only the selected
+  endpoint receives the canary.
+- **G3 · Tool execution.** Exercise read, write/edit, and shell tools in a
+  disposable worktree.
+- **G4 · Artifact contract.** Produce an artifact, then pass the existing
+  post-agent artifact contract and retry cleanup paths.
+- **G5 · Event parsing.** Parse streaming text, tool events, terminal
+  success/failure, tokens, cache fields, cost when available, and rate-limit
+  diagnostics.
+- **G6 · Session resume.** Persist a session, resume it by explicit ID, and
+  verify retry semantics do not accidentally resume an unrelated session.
+- **G7 · State isolation.** Give the harness a run-scoped state root, prove
+  nothing is written to the operator's real home, and prove no ambient
+  configuration is adopted from the invocation directory.
+- **G8 · Sandbox boundary.** Name the sandbox runner actually selected, then
+  prove the boundary it enforces: a write inside the workspace succeeds, a write
+  to the operator's home is denied, and every path the policy leaves writable
+  outside the workspace is enumerated and accepted up front, not discovered
+  later.
+- **G9 · Cloud parity.** Repeat locally and in the pinned Modal image with
+  update checks, sharing, third-party plugins/extensions, and unrelated user
+  configuration disabled.
+- **G10 · Provenance.** Record the CLI version, package integrity, provider
+  request evidence, and any capability that remains unknown.
 
 DeepSeek Harness adds five gate items of its own:
 
@@ -435,7 +500,10 @@ labelled as routing and isolation evidence, never as provider qualification.
 Installed and executed in this environment:
 
 - `codex-cli 0.147.0` — PR #654 executes it against a deterministic
-  Responses-compatible server for both ordinary and alternate valid TOML;
+  Responses-compatible server for both ordinary and alternate valid TOML. Those
+  real-CLI assertions are guarded by a `codex --version` probe and are skipped
+  when no `codex` binary is on `PATH`; CI installs no `codex`, so the run is
+  reproducible locally but is not exercised by CI today;
 - Claude Code `2.1.233` — confirmed non-interactive JSON/streaming, schema,
   tool, effort, session, and permission surfaces;
 - `@earendil-works/pi-coding-agent 0.84.2` via `npx` — real `--version`/`--help`

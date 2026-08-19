@@ -1157,7 +1157,7 @@
                     <span class="pill ok">real run</span> against a local deterministic endpoint;
                     <span class="pill info">source read at <code>99f6f02</code></span>
                   </td>
-                  <td>Proposed first-party for DeepSeek V4, artifact-only nodes</td>
+                  <td>Proposed first-party for DeepSeek V4, final-text nodes</td>
                 </tr>
                 <tr>
                   <td><strong>Direct provider API</strong></td>
@@ -1289,11 +1289,16 @@
               <code>filesystem</code> / <code>shell</code>, <code>events</code> is
               <code>"jsonl" | "rpc" | "final-text-only"</code>, <code>sessions</code> is
               <code>"none" | "resume" | "tree"</code>, and <code>isolation</code> is
-              <code>"native-sandbox" | "external-sandbox-required"</code>.
-              <a href="https://github.com/monad-developers/ultrafuzz/issues/658">Issue #658</a> must implement that
-              spelling verbatim — abbreviations such as <code>fs</code> or a bare <code>native</code> are not part of
-              the contract, and diagnostics that name a capability must use these strings so an operator can match the
-              error to the documentation.
+              <code>"native-sandbox" | "external-sandbox-required"</code>. Diagnostics that name a capability must use
+              these strings so an operator can match the error to the documentation.
+            </p>
+            <p>
+              The summary block in
+              <a href="https://github.com/monad-developers/ultrafuzz/issues/658">issue #658</a> abbreviates some of
+              these — it writes <code>tools</code> as <code>fs</code> / <code>shell</code> and <code>isolation</code> as
+              <code>native</code> | <code>external</code>. Those abbreviations are shorthand in the issue text, not the
+              contract: the implementation follows the spellings above, and #658's body should be corrected to match
+              rather than the other way round.
             </p>
           </div>
 
@@ -1308,7 +1313,7 @@
 
 // Node declares what it needs; the validator does the matching.
 node.requires = { events: "jsonl" }   // dashboard/telemetry node → dsh rejected
-node.requires = { events: "final-text-only" } // artifact node → dsh allowed</code></pre>
+node.requires = { events: "final-text-only" } // final-text node → dsh allowed</code></pre>
           <p>
             <strong>The ceiling is lower than it looks, and that is deliberate.</strong> dsh's session log is readable
             typed JSONL once decompressed, but Ultrafuzz does not read it: the format is undocumented and

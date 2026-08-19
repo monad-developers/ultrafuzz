@@ -8,7 +8,7 @@ product model behind that contract.
 - [Topology, Prompts, and Artifacts](topology-prompts-artifacts.md)
 - [Agents, Workflow Boundary, and Safety](backends-safety.md)
 - [Provider-agnostic Coding Harness Research](provider-harness-research.md)
-- [Provider/Harness Architecture Plan (HTML report)](provider-harness-plan.html)
+- [Separating Provider, Harness, and Model (HTML report)](provider-harness-plan.html)
 - [Aave v4 Invariant Case Study](aave-v4-invariant-case-study.md)
 - [Monad Bugfinder Context](bugfinder.md)
 
@@ -21,14 +21,17 @@ are read differently:
   is the GitHub-readable companion. It renders inline in the GitHub file
   browser and carries the evidence, the capability contract, the conformance
   gate, and the full source list.
-- **[Provider/Harness Architecture Plan](provider-harness-plan.html)** is a
+- **[Separating Provider, Harness, and Model](provider-harness-plan.html)** is a
   self-contained HTML report. GitHub serves `.html` files as plain text rather
   than rendering them, so **download the file and open it in a browser** (or
   view it from a local checkout) to read it as intended.
 
-Most sections appear in both. Two are unique to the HTML plan: **§7 Risks**,
-the severity-ranked risk register with its mitigations, and **§9 Proposed
-GitHub issues**, the drafted issue bodies that became
+Most sections appear in both, including the numbered qualification gates
+G1–G10 that the child issues cite by number. Three are unique to the HTML plan:
+**§1 Verdict**, **§7 Risks** — the severity-ranked risk register with its
+mitigations — and **§9 Proposed GitHub issues**, the drafted issue bodies that
+became
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664).
-Read the Markdown page for the evidence; open the HTML plan for the risks and
-the issue breakdown.
+The HTML plan's **§6 Sequencing** is condensed on the Markdown page into its
+"Next Work" list. Read the Markdown page for the evidence; open the HTML plan
+for the risks and the issue breakdown.
