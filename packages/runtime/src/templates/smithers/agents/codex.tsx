@@ -58,8 +58,19 @@ function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
   if (auth === "api-key") {
-    const apiKey = requiredEnv(config.api_key_env ?? "OPENAI_API_KEY");
-    return { apiKey, env: { CODEX_API_KEY: apiKey } };
+    const credentialEnv = config.api_key_env ?? "OPENAI_API_KEY";
+    const apiKey = requiredEnv(credentialEnv);
+    const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);
+    const baseUrl = codexProviderBaseUrl(configDir);
+    return {
+      apiKey,
+      ...(configDir === undefined ? {} : { configDir }),
+      env: {
+        CODEX_API_KEY: apiKey,
+        [credentialEnv]: apiKey,
+        ...(baseUrl === undefined ? {} : { OPENAI_BASE_URL: baseUrl })
+      }
+    };
   }
   if (auth === "subscription") {
     const configDir = config.config_dir === undefined ? undefined : resolveConfigDir(config.config_dir);

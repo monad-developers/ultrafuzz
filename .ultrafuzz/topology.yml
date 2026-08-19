@@ -5,15 +5,20 @@ groups:
   setup:
     label: Setup
     color: "#2563eb"
+    defaults:
+      max_attempts: 2
   properties:
     label: Properties
     color: "#a16207"
+    defaults:
+      max_attempts: 2
   goals:
     label: Threat goals
     color: "#be123c"
     defaults:
       loops: 1
-      timeout_seconds: 7200
+      max_attempts: 2
+      timeout_seconds: 14400
       model_profiles:
         - default
   strategies:
@@ -21,7 +26,8 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 3
-      timeout_seconds: 7200
+      max_attempts: 2
+      timeout_seconds: 14400
       model_profiles:
         - default
   references:
@@ -30,6 +36,8 @@ groups:
   review:
     label: Review
     color: "#0f766e"
+    defaults:
+      max_attempts: 2
 nodes:
   - id: __start__
     kind: meta
