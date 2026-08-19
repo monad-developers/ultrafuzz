@@ -607,7 +607,7 @@
     <div class="wrap">
       <header class="masthead">
         <p class="eyebrow">Ultrafuzz · architecture &amp; plan report</p>
-        <h1>Separating provider, harness, and model</h1>
+        <h1>Separating Provider, Harness, and Model</h1>
         <p class="lede">
           A re-analysis of issue #653 after "DeepSeek Code" was corrected to mean
           <a href="https://github.com/deepseek-ai/deepseek-harness">deepseek-ai/deepseek-harness</a>. DeepSeek Harness
@@ -634,7 +634,7 @@
         <p>Contents</p>
         <ol>
           <li><a href="#verdict">1 · Verdict</a></li>
-          <li><a href="#correction">2 · The correction</a></li>
+          <li><a href="#correction">2 · What "DeepSeek Code" refers to</a></li>
           <li><a href="#evidence">3 · Evidence table</a></li>
           <li><a href="#policy">4 · Pairing policy</a></li>
           <li><a href="#architecture">5 · Target architecture</a></li>
@@ -698,17 +698,30 @@
         </section>
 
         <section id="correction">
-          <h2>2 · The correction and what it invalidates</h2>
+          <h2>2 · What "DeepSeek Code" refers to</h2>
           <p>
-            The previous draft concluded that no first-party DeepSeek coding CLI existed in the
-            <code>deepseek-ai</code> organization and that no CLI should be blessed under the name "DeepSeek Code". That
-            conclusion is withdrawn. Three claims in that draft were wrong or incomplete, and all three are now
-            corrected in <a href="provider-harness-research.md">provider-harness-research.md</a>.
+            The "DeepSeek Code" named in issue #653 is <code>deepseek-ai/deepseek-harness</code>: a real first-party,
+            MIT-licensed harness whose CLI is <code>dsh</code>. It is <em>not</em> the existing
+            <code>DeepSeekAgent</code>, which is Claude Code pointed at DeepSeek's Anthropic-compatible endpoint. Those
+            are two different things, and the risk this report guards against is treating the harness and the provider
+            as one selection.
+          </p>
+          <p>
+            An earlier unpublished draft of this report — this branch's first commit,
+            <a
+              href="https://github.com/monad-developers/ultrafuzz/pull/665/commits/bb831d6139069665b7aab072712553c67cef21d4"
+              ><code>bb831d61</code></a
+            >
+            — concluded the opposite. Three of its claims were wrong or incomplete; all three are corrected here and in
+            <a href="provider-harness-research.md">provider-harness-research.md</a>. The table is kept for provenance,
+            not because a reader needs the draft to follow the argument.
           </p>
           <div class="scroller">
             <table>
               <caption>
-                Obsolete claims and their replacements
+                Obsolete claims from draft
+                <code>bb831d61</code>
+                and their replacements
               </caption>
               <thead>
                 <tr>
@@ -731,8 +744,8 @@
                 <tr>
                   <td>"Do not invent or bless an unrelated community CLI under the name 'DeepSeek Code'."</td>
                   <td>
-                    The name in issue #653 refers to a genuine first-party harness. The caution now applies in reverse:
-                    the risk is treating the harness and the provider as one selection.
+                    The name in issue #653 refers to a genuine first-party harness, so the caution applies in reverse —
+                    as stated above.
                   </td>
                 </tr>
                 <tr>
@@ -838,6 +851,27 @@
                     Responses formats.
                   </td>
                   <td><code>dsh --profile headless --dump-default-config</code>; DeepSeek pricing docs</td>
+                </tr>
+                <tr>
+                  <td>Reasoning controls</td>
+                  <td><span class="pill warn">exists, unmeasured</span></td>
+                  <td>
+                    <strong>The surface exists; nothing here exercised it.</strong>
+                    <code>dsh-llm-deepseek</code> declares <code>thinking?: 'enabled' | 'disabled'</code> and
+                    <code>reasoningEffort?: 'off' | 'low' | 'high' | 'max'</code> on its plugin config — an omitted
+                    <code>reasoningEffort</code> resolves to <code>high</code>, and
+                    <code>thinking: 'disabled'</code> restricts <code>reasoningEffort</code> to <code>off</code>. These
+                    are settings-document fields, not CLI flags (headless <code>--help</code> exposes no reasoning
+                    flag), and they are absent from <code>--dump-default-config</code> only because they carry no schema
+                    default. No request in this research set either field, so a dsh binding declares an empty
+                    <code>reasoningLevels</code> until
+                    <a href="https://github.com/monad-developers/ultrafuzz/issues/661">#661</a> measures the levels end
+                    to end. The field is unsupported because it is unmeasured, not because dsh lacks it.
+                  </td>
+                  <td>
+                    <code>packages/llm/llm-deepseek/src/index.ts</code> read at the pin; real <code>--help</code> and
+                    <code>--dump-default-config</code>
+                  </td>
                 </tr>
                 <tr>
                   <td>Unattended operation</td>
@@ -1070,8 +1104,11 @@
             documentation or source read at a pinned commit — a claim, not a measurement.
           </p>
           <p>
-            The <em>Events</em>, <em>Sessions</em>, and <em>Isolation</em> columns use the capability-contract spellings
-            from §5, so a row reads directly as the capability a binding would declare.
+            The <em>Events</em>, <em>Sessions</em>, and <em>Isolation</em> columns are drawn from the
+            capability-contract vocabulary in §5. A cell naming a single value is exactly the capability a binding would
+            declare; a composite cell such as <code>jsonl</code> + schema or <code>jsonl</code> + <code>rpc</code> names
+            the declared contract value first and then an advertised extra that is <em>not</em> itself a contract value.
+            The direct provider-API row declares nothing at all, because it is not a harness binding.
           </p>
           <div class="scroller">
             <table>
@@ -1151,7 +1188,7 @@
                   </td>
                   <td><code>--profile headless</code></td>
                   <td><span class="pill stop">final-text-only</span></td>
-                  <td><span class="pill stop">none</span> on the CLI</td>
+                  <td><span class="pill stop">none</span></td>
                   <td><span class="pill ok">native-sandbox</span></td>
                   <td>
                     <span class="pill ok">real run</span> against a local deterministic endpoint;
@@ -1163,14 +1200,30 @@
                   <td><strong>Direct provider API</strong></td>
                   <td>Total control</td>
                   <td>n/a — we build it</td>
-                  <td>we own it</td>
-                  <td>we own it</td>
-                  <td>we own it</td>
+                  <td>n/a — not a harness binding</td>
+                  <td>n/a — not a harness binding</td>
+                  <td>n/a — not a harness binding</td>
                   <td><span class="pill info">design only</span> — nothing built or measured</td>
                   <td>Fallback only</td>
                 </tr>
               </tbody>
             </table>
+          </div>
+          <div class="callout warn">
+            <strong class="tag">Reasoning is unmeasured for two candidates</strong>
+            <p>
+              The table has no <em>Reasoning</em> column because two rows could not honestly fill one.
+              <strong>DeepSeek Harness</strong> does expose a reasoning surface — <code>dsh-llm-deepseek</code> declares
+              <code>thinking</code> (<code>enabled</code>/<code>disabled</code>) and
+              <code>reasoningEffort</code> (<code>off</code>/<code>low</code>/<code>high</code>/<code>max</code>) in
+              settings, with an omitted effort resolving to <code>high</code> — but it is a settings-document field with
+              no CLI flag, and no request in this research set it. <strong>OpenCode</strong> exposes no reasoning flag
+              on <code>run --help</code>; any control would come from per-model config entries that were likewise never
+              exercised. Both bindings therefore declare an empty <code>reasoningLevels</code>, which records what was
+              measured rather than claiming the harness has no surface. <a href="#issue-d">#653-D (#661)</a> must
+              publish dsh's levels and <a href="#issue-e">#653-E (#662)</a> OpenCode's before either binding accepts a
+              <code>reasoning</code> value.
+            </p>
           </div>
         </section>
 
@@ -1205,8 +1258,11 @@
             <div class="card">
               <h3>Evidence promotes, claims do not</h3>
               <p>
-                A pairing becomes default only after a pinned real CLI clears every gate in §8 against the real
-                provider. Kimi already ships; any further first-party pairing earns its place the same way.
+                A <em>new or changed</em> default requires a pinned real CLI clearing every gate in §8 against the real
+                provider. The pairings shipping today — Codex + OpenAI, Claude Code + Anthropic, Claude Code + DeepSeek,
+                and Kimi — stay default without having cleared G1–G10; that qualification debt is stated here rather
+                than implied, and <a href="#issue-g">#653-G (#664)</a> records the status explicitly. Any further
+                first-party pairing earns its place the same way.
               </p>
             </div>
           </div>
@@ -1256,6 +1312,7 @@
                 <span class="box">events: jsonl | rpc | final-text-only</span>
                 <span class="box">sessions: none | resume | tree</span>
                 <span class="box">usage: tokens / cache / cost</span>
+                <span class="box">reasoningLevels: measured values only</span>
                 <span class="box">isolation: native-sandbox | external-sandbox-required</span>
               </div>
             </div>
@@ -1291,6 +1348,12 @@
               <code>"none" | "resume" | "tree"</code>, and <code>isolation</code> is
               <code>"native-sandbox" | "external-sandbox-required"</code>. Diagnostics that name a capability must use
               these strings so an operator can match the error to the documentation.
+            </p>
+            <p>
+              <code>reasoningLevels</code> lists only levels a real request exercised. An empty list makes the validator
+              reject a <code>reasoning</code> value on that binding, but it records what was measured — it is not a
+              claim that the harness has no reasoning surface. dsh and OpenCode are both empty today for exactly that
+              reason.
             </p>
             <p>
               The summary block in
@@ -1541,8 +1604,23 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
           <h2>8 · Qualification gates</h2>
           <p>
             A pinned real CLI must clear every applicable gate against the real provider. Fake CLIs are for simple unit
-            tests only; they never satisfy a gate or qualify a pairing.
+            tests only; they never satisfy a gate or qualify a pairing. These ten are always called
+            <em>qualification gates</em>; "conformance suite" in §6 and §9 means only the test code that exercises them.
           </p>
+          <div class="callout warn">
+            <strong class="tag">"Pinned" means the version the shipped image installs</strong>
+            <p>
+              The Modal worker image pins
+              <code>@openai/codex@0.146.0</code> (<code>packages/modal/src/runner.ts:161</code>) and
+              <code>@anthropic-ai/claude-code@2.1.207</code>
+              (<code>packages/modal/src/runner.ts:2809</code>), while the versions measured for this report are
+              <code>codex-cli 0.147.0</code> and Claude Code <code>2.1.233</code>. PR #654 left both pins untouched, so
+              its real-CLI assertions ran against whatever <code>codex</code> was on <code>PATH</code>. Evidence
+              gathered against any other build is provenance, not qualification: G9 and G10 must be re-run at the
+              shipped pins — or the pins moved to the measured versions — before either pairing counts as qualified, and
+              <a href="#issue-f">#653-F (#663)</a> owns that reconciliation.
+            </p>
+          </div>
           <div class="scroller">
             <table>
               <thead>
@@ -1782,7 +1860,11 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                   <code>.env</code>, and an <code>llm-pi-ai:</code> or <code>llm-deepseek:</code> settings document that
                   selects the provider route — environment variables alone are not enough, because the pi-ai adapter
                   ships dormant with zero routes. Declare <code>events: "final-text-only"</code>,
-                  <code>sessions: "none"</code>.
+                  <code>sessions: "none"</code>. Also measure the reasoning surface:
+                  <code>dsh-llm-deepseek</code> declares <code>thinking</code> and <code>reasoningEffort</code>
+                  (<code>off</code>/<code>low</code>/<code>high</code>/<code>max</code>) in settings, so drive them
+                  through a real request and publish the levels the binding may declare instead of leaving
+                  <code>reasoningLevels</code> empty.
                 </dd>
                 <dt>Acceptance</dt>
                 <dd>
@@ -1865,12 +1947,17 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                 <dd>
                   Wrap Smithers' <code>OpenCodeAgent</code> with credential isolation and isolated config, data, and
                   cache roots; disable sharing, plugins, update checks, and remote model fetching. Reuse the Pi
-                  conformance suite.
+                  conformance suite. Exercise the per-model reasoning config entries this research did not, so the
+                  binding can declare real <code>reasoningLevels</code> rather than an empty list.
                 </dd>
                 <dt>Acceptance</dt>
                 <dd>
                   <ul>
                     <li>Gates G1–G8 pass against real OpenRouter.</li>
+                    <li>
+                      The reasoning levels OpenCode actually accepts are measured and recorded, or the binding documents
+                      that it accepts none.
+                    </li>
                     <li>
                       No OpenCode state is written outside the run-scoped roots, verified by a filesystem assertion.
                     </li>
@@ -2001,6 +2088,15 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               Real executions in this environment: <code>@deepseek-ai/dsh@0.1.0-rc.7</code>,
               <code>codex-cli 0.147.0</code>, <code>Claude Code 2.1.233</code>, and the installed
               <code>@earendil-works/pi-ai@0.82.1</code> provider catalogue.
+              <strong>Note the version gap:</strong> Ultrafuzz pins
+              <code>@openai/codex@0.146.0</code> (<code>packages/modal/src/runner.ts:161</code>) and
+              <code>@anthropic-ai/claude-code@2.1.207</code> (<code>packages/modal/src/runner.ts:2809</code>) in the
+              Modal worker image, so the Codex and Claude Code rows are evidence about newer builds than the image ships
+              — see §8.
+            </li>
+            <li>
+              <code>packages/llm/llm-deepseek/src/index.ts</code> at commit <code>99f6f02</code>, read for the
+              <code>thinking</code>/<code>reasoningEffort</code> config surface recorded in §3.1.
             </li>
             <li>
               <code>smithers-orchestrator@0.32.0</code> as pinned by <code>packages/runtime</code>, read for its agent

@@ -19,8 +19,8 @@ are read differently:
 
 - **[Provider-agnostic Coding Harness Research](provider-harness-research.md)**
   is the GitHub-readable companion. It renders inline in the GitHub file
-  browser and carries the evidence, the capability contract, the conformance
-  gate, and the full source list.
+  browser and carries the evidence, the capability contract, the numbered
+  qualification gates, and the full source list.
 - **[Separating Provider, Harness, and Model](provider-harness-plan.html)** is a
   self-contained HTML report. GitHub serves `.html` files as plain text rather
   than rendering them, so **download the file and open it in a browser** (or

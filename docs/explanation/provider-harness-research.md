@@ -32,18 +32,23 @@ The current OpenRouter-through-Codex configuration is a supported compatibility
 path, not a decision that OpenRouter requires Codex or that Codex should remain
 the default.
 
-## Terminology Correction
+## What "DeepSeek Code" Refers To
 
-The earlier revision of this page concluded that no first-party DeepSeek coding
-CLI existed and that "DeepSeek Code" should not be blessed. That conclusion is
-withdrawn. DeepSeek Harness (`dsh`) is a real first-party harness: MIT-licensed,
-published from `deepseek-ai/deepseek-harness`, distributed as `@deepseek-ai/dsh`
-on npm, and listed first under **Agent Integrations** in DeepSeek's own API
-documentation — as an outbound link to the harness's own site, since those docs
-host no page for it and the "Integrate with AI Tools" guide still covers only
-Claude Code, OpenCode, and OpenClaw. Every DeepSeek claim below is re-derived
-from that repository, the published package, and a real local execution of the
-installed CLI.
+The "DeepSeek Code" named in issue #653 is DeepSeek Harness (`dsh`), a real
+first-party harness: MIT-licensed, published from `deepseek-ai/deepseek-harness`,
+distributed as `@deepseek-ai/dsh` on npm, and listed first under **Agent
+Integrations** in DeepSeek's own API documentation — as an outbound link to the
+harness's own site, since those docs host no page for it and the "Integrate with
+AI Tools" guide still covers only Claude Code, OpenCode, and OpenClaw. Every
+DeepSeek claim below is derived from that repository, the published package, and
+a real local execution of the installed CLI.
+
+An earlier unpublished draft of this page — this branch's first commit,
+[`bb831d61`](https://github.com/monad-developers/ultrafuzz/pull/665/commits/bb831d6139069665b7aab072712553c67cef21d4) —
+concluded that no first-party DeepSeek coding CLI existed and that "DeepSeek
+Code" should not be blessed. That conclusion is withdrawn. The caution now
+applies in reverse: the risk is treating the harness and the provider as one
+selection.
 
 Two things remain true and must not be conflated:
 
@@ -58,8 +63,8 @@ Two things remain true and must not be conflated:
 ## Comparison Matrix
 
 This matrix distinguishes upstream claims from Ultrafuzz qualification. A
-candidate is not supported until a pinned real CLI passes the conformance and
-credential-isolation tests described below.
+candidate is not supported until a pinned real CLI clears the qualification
+gates and credential-isolation checks described below.
 
 The three kinds of evidence collected here are not interchangeable, so every
 row names its provenance:
@@ -70,18 +75,22 @@ row names its provenance:
 | **CLI inspection** | The real installed binary answered `--version` and `--help`. The capability is advertised by the executable itself but was not exercised end to end.                                                           |
 | **upstream docs**  | Vendor documentation or source read at a pinned commit. A claim, not a measurement.                                                                                                                            |
 
-The `Events`, `Sessions`, and `Isolation` columns use the capability-contract
-spellings defined in [the contract below](#proposed-capability-contract), so a
-row reads directly as the capability a binding would declare.
+The `Events`, `Sessions`, and `Isolation` columns are drawn from the
+capability-contract vocabulary defined in
+[the contract below](#proposed-capability-contract). A cell naming a single
+value is exactly the capability a binding would declare; a composite cell such
+as `jsonl` + schema or `jsonl` + `rpc` names the declared contract value first
+and then an advertised extra that is _not_ itself a contract value. The direct
+provider-API row declares nothing at all, because it is not a harness binding.
 
-| Candidate                           | Events            | Sessions          | Isolation                   | Evidence                                       | Disposition                                            |
-| ----------------------------------- | ----------------- | ----------------- | --------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
-| Codex CLI 0.147.0                   | `jsonl` + schema  | `resume`          | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path  |
-| Pi 0.84.2                           | `jsonl` + `rpc`   | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification     |
-| OpenCode 1.18.18                    | `jsonl`           | `tree`            | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                      |
-| Claude Code 2.1.233                 | `jsonl` + schema  | `resume`          | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek  |
-| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only` | `none`            | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, final-text nodes |
-| Direct provider-API harness         | Ultrafuzz owns it | Ultrafuzz owns it | Ultrafuzz owns it           | design only                                    | Fallback; do not implement first                       |
+| Candidate                           | Events                      | Sessions                    | Isolation                   | Evidence                                       | Disposition                                            |
+| ----------------------------------- | --------------------------- | --------------------------- | --------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| Codex CLI 0.147.0                   | `jsonl` + schema            | `resume`                    | `native-sandbox`            | real run (PR #654), upstream docs              | First-party for OpenAI; OpenRouter compatibility path  |
+| Pi 0.84.2                           | `jsonl` + `rpc`             | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed OpenRouter default, pending qualification     |
+| OpenCode 1.18.18                    | `jsonl`                     | `tree`                      | `external-sandbox-required` | CLI inspection, upstream docs                  | Proposed second OpenRouter option                      |
+| Claude Code 2.1.233                 | `jsonl` + schema            | `resume`                    | `external-sandbox-required` | CLI inspection, upstream docs                  | First-party for Anthropic; compatibility for DeepSeek  |
+| DeepSeek Harness (`dsh`) 0.1.0-rc.7 | `final-text-only`           | `none`                      | `native-sandbox`            | real run (local endpoint), source at `99f6f02` | Proposed first-party for DeepSeek V4, final-text nodes |
+| Direct provider-API harness         | n/a — not a harness binding | n/a — not a harness binding | n/a — not a harness binding | design only                                    | Fallback; do not implement first                       |
 
 The detail behind each row follows. Each subsection covers the same four
 dimensions: provider and model binding, unattended tools and artifacts, events
@@ -176,12 +185,22 @@ commit
   bundle mounts it **dormant with zero routes**; a route registers only when an
   `llm-pi-ai:` section in `$DSH_HOME/settings.yaml` declares it. DeepSeek V4 is
   the shipped default (`agent-default-model` = `deepseek-official` /
-  `deepseek-v4-flash`), not a hard coupling. **No reasoning surface was
-  measured**: `dsh --profile headless --help` advertises exactly one argument
-  and `-h`, and this research identified no reasoning or thinking-budget row in
-  `--dump-default-config`. A dsh binding therefore declares an empty
-  `reasoningLevels` until one is measured, and the validator rejects any
-  `reasoning` value set on it.
+  `deepseek-v4-flash`), not a hard coupling. **A reasoning surface exists in the
+  adapter config but was never exercised.** `dsh-llm-deepseek` declares
+  `thinking?: 'enabled' | 'disabled'` and
+  `reasoningEffort?: 'off' | 'low' | 'high' | 'max'` on its plugin config at
+  `99f6f02`; an omitted `reasoningEffort` resolves to `high`, and
+  `thinking: 'disabled'` restricts `reasoningEffort` to `off`. Those are
+  settings-document fields, not CLI flags — `dsh --profile headless --help`
+  advertises exactly one argument and `-h` — and they are absent from
+  `--dump-default-config` because they carry no schema default, not because they
+  do not exist. No request in this research set either field and no level was
+  observed reaching the provider, so a dsh binding declares an empty
+  `reasoningLevels` **until
+  [#661](https://github.com/monad-developers/ultrafuzz/issues/661) measures the
+  surface end to end**. #661 must publish the measured levels before the
+  validator accepts a `reasoning` value for dsh; the field is unsupported
+  because it is unmeasured, not because DeepSeek Harness lacks it.
 - **Unattended.** `dsh --profile headless "task"` runs one task unattended and
   prints the final assistant text. 25 model-facing tools, including `bash`,
   `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `todo_write`,
@@ -244,9 +263,14 @@ _Evidence: design analysis only. Nothing was built or measured._
    and Claude Code + DeepSeek's Anthropic endpoint keep working and keep their
    documented migration path. Neither becomes the recommended shape for a new
    project.
-4. **Only evidence promotes a pairing.** Kimi already ships as `KimiAgent`; any
-   further first-party pairing needs the same conformance evidence as the ones
-   above, not a vendor claim.
+4. **Only evidence promotes a pairing.** This rule governs new and changed
+   defaults, not the ones already shipping. Codex + OpenAI, Claude Code +
+   Anthropic, Claude Code + DeepSeek, and Kimi as `KimiAgent` remain default
+   today without having cleared G1–G10, and that qualification debt is stated
+   here rather than implied — no gate run exists for any of them, and
+   [#664](https://github.com/monad-developers/ultrafuzz/issues/664) records the
+   status explicitly. Any new or promoted first-party pairing needs the
+   qualification evidence described below, not a vendor claim.
 
 The one pairing this research explicitly declines is DeepSeek Harness as a
 general OpenRouter harness. It can reach OpenRouter through its pi-ai route, but
@@ -278,12 +302,14 @@ preflight = "authenticated-models"
 [harnesses.pi]
 kind = "pi"
 version = "0.84.2"
-config_dir = ".ultrafuzz/pi"
+config_dir = ".ultrafuzz/harness/pi"  # base path, expanded per run
 
 [harnesses.dsh]
 kind = "dsh"
 version = "0.1.0-rc.7"
-config_dir = ".ultrafuzz/dsh"   # exported as DSH_HOME
+# Base path only. The launcher derives a per-run state root under
+# .ultrafuzz/runs/<run-id>/ and exports that, never this literal, as DSH_HOME.
+config_dir = ".ultrafuzz/harness/dsh"
 
 [models.openrouter-sonnet]
 harness = "pi"
@@ -295,8 +321,9 @@ reasoning = "high"
 harness = "dsh"
 provider = "deepseek"
 model = "deepseek-v4-pro"
-# No `reasoning` key: dsh's reasoning surface is unmeasured, so a dsh binding
-# declares no reasoning levels and the validator rejects the field.
+# No `reasoning` key yet: dsh exposes `thinking`/`reasoningEffort` in its
+# adapter settings, but no run has exercised them, so this binding declares an
+# empty `reasoningLevels` until #661 measures the levels.
 ```
 
 The exact field names remain subject to schema implementation review. The
@@ -311,6 +338,11 @@ important invariants are:
    capabilities, and reasoning translation.
 5. A validated binding chooses a mutually supported wire protocol before any
    child is launched.
+6. `config_dir` is a base path, never exported verbatim. The launcher expands it
+   into a run-scoped state root under `.ultrafuzz/runs/<run-id>/` and exports
+   _that_ path as `DSH_HOME`, `CODEX_HOME`, and the like, so two runs never
+   share a harness state root. The `.ultrafuzz/harness/**` base surface extends
+   the campaign layout documented in [docs/index.md](../index.md).
 
 Existing profiles keep working during migration. A legacy `agent = "CodexAgent"`
 profile maps to the Codex harness and its existing provider binding. Legacy
@@ -393,7 +425,12 @@ The binding validator must reject an unsupported protocol, reasoning level,
 missing executable/version, unavailable cloud image, or missing credential
 before workflow launch. A harness that records no reasoning levels accepts no
 `reasoning` value at all, so setting one on such a binding is a validation
-error rather than a silently ignored field. Generic topology, prompts, and
+error rather than a silently ignored field. An empty `reasoningLevels` states
+what was measured, not that the harness has no reasoning surface — dsh's list is
+empty because nothing exercised the `thinking`/`reasoningEffort` fields its
+`dsh-llm-deepseek` adapter already declares, and OpenCode's is empty because its
+per-model config entries were never exercised. Each list becomes non-empty as
+soon as its child issue measures real levels. Generic topology, prompts, and
 artifact verification never branch on a CLI name.
 
 ### Credential and State Rules
@@ -424,7 +461,7 @@ the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
   (`/KEY|PASSWORD|SECRET|TOKEN/i`) is what keeps the provider key out, not the
   `DSH_*` handling.
 
-## Conformance Gate
+## Qualification Gates
 
 Every approved provider/harness binding must use a pinned real CLI run against
 the real provider. Fake CLIs are for simple unit tests only — they may stand in
@@ -433,7 +470,14 @@ qualify a pairing.
 
 The gates are numbered, and those numbers are the ones the child issues cite.
 They match §8 of the [architecture plan](provider-harness-plan.html) one for
-one.
+one. They are called _qualification gates_ everywhere; "conformance suite" means
+only the test code the child issues add to exercise them, never the gates
+themselves.
+
+"Pinned" means the version the shipped Modal worker image installs. Evidence
+gathered against any other build is provenance, not qualification — see
+[Evidence](#evidence) for the gap between the Codex and Claude Code versions
+measured here and the ones that image pins today.
 
 - **G1 · Model pass-through.** Run a real provider request with an opaque
   catalogue model ID and confirm the provider observed that exact ID.
@@ -497,6 +541,19 @@ Real CLIs were used. Where no paid credential exists, requests were driven
 against a local deterministic OpenAI-compatible endpoint; those results are
 labelled as routing and isolation evidence, never as provider qualification.
 
+**The two harnesses Ultrafuzz already ships were measured at versions the
+shipped image does not install.** The Modal worker image pins
+`@openai/codex@0.146.0` (`packages/modal/src/runner.ts:161`) and
+`@anthropic-ai/claude-code@2.1.207` (`packages/modal/src/runner.ts:2809`), while
+the versions measured below are `codex-cli 0.147.0` and Claude Code `2.1.233`.
+PR #654 also left both pins untouched, so its real-CLI assertions ran against
+whatever `codex` was on `PATH`, not against the pinned image build. The Codex and
+Claude Code rows are therefore evidence about newer builds than the image ships:
+G9 and G10 have to be re-run at the shipped pins — or the pins moved to the
+measured versions — before either pairing counts as qualified, and
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663) owns that
+reconciliation.
+
 Installed and executed in this environment:
 
 - `codex-cli 0.147.0` — PR #654 executes it against a deterministic
@@ -526,7 +583,13 @@ Installed and executed in this environment:
   including `agent-default-model` = `deepseek-official` / `deepseek-v4-flash`,
   both LLM adapters, JSONL session persistence under `dshHomePath('sessions')`,
   a `session-telemetry-otel` row whose `mode` defaults to `DISABLED`, and a
-  `sandbox-policy` row defaulting to `workspace-write`.
+  `sandbox-policy` row defaulting to `workspace-write`. It shows no reasoning
+  row, but that is a schema artefact rather than an absent surface: the
+  `dsh-llm-deepseek` plugin config at `99f6f02` declares
+  `thinking?: 'enabled' | 'disabled'` and
+  `reasoningEffort?: 'off' | 'low' | 'high' | 'max'`, neither of which carries a
+  schema default, so neither appears in a default dump. Nothing here exercised
+  either field, so no reasoning level is measured.
 - A real headless run against a local OpenAI-compatible endpoint printed the
   assistant text on stdout, wrote nothing to stderr, and exited 0. The endpoint
   received `Authorization: Bearer <canary>` and
@@ -623,11 +686,16 @@ The work is filed as bounded child issues of
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
-   final-text-only fallback that warns rather than failing the run. Parsing the
-   undocumented `session.jsonl.zstd` format is explicitly out of scope.
+   final-text-only fallback that warns rather than failing the run. It also owns
+   the reasoning measurement: `dsh-llm-deepseek` declares `thinking` and
+   `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so #661 must drive
+   those through a real request and publish the levels the binding may declare.
+   Parsing the undocumented `session.jsonl.zstd` format is explicitly out of
+   scope.
 5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) — qualify
    OpenCode plus OpenRouter separately, including fully isolated state
-   directories and disabled sharing, plugins, update checks, and model fetching.
+   directories and disabled sharing, plugins, update checks, and model fetching,
+   plus the per-model reasoning config entries this research did not exercise.
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) — gate the
    Modal worker image on per-harness capability checks.
 7. [#664](https://github.com/monad-developers/ultrafuzz/issues/664) — document
@@ -643,6 +711,6 @@ The architecture, sequencing, risks, gates, and bounded issue proposals are in
 - [Codex 0.147.0 package and source](https://github.com/openai/codex/tree/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a), including [non-interactive execution](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/exec.md) and [sandboxing](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/sandbox.md).
 - [Pi 0.84.2 coding-agent package](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/package.json), [CLI/provider surface](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/README.md), [JSON events](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/json.md), [sessions](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/sessions.md), and [security boundary](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/security.md).
 - [OpenCode 1.18.18 package](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/opencode/package.json), [OpenRouter provider setup](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/providers.mdx), [CLI automation/session surface](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/cli.mdx), and [permissions](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/permissions.mdx).
-- DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/acp/acp).
+- DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek) (its [`src/index.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek/src/index.ts) is where the `thinking`/`reasoningEffort` config surface is declared), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/acp/acp).
 - DeepSeek API documentation: [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) (`deepseek-v4-flash`/`deepseek-v4-pro`, 1M context, 384K max output, OpenAI + Anthropic + Responses formats); the **Agent Integrations** sidebar, which heads its list with DeepSeek Harness as an outbound link to the [harness quickstart](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) — there is no `agent_integrations/deepseek_harness` page, and the [Integrate with AI Tools](https://api-docs.deepseek.com/guides/coding_agents) guide still covers only Claude Code, OpenCode, and OpenClaw; the [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) page; and the [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api) guide.
 - [Smithers 0.32.0 Pi adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/PiAgent.js) and [OpenCode adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/OpenCodeAgent.js), matching the dependency pinned by Ultrafuzz.
