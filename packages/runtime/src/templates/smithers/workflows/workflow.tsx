@@ -1425,6 +1425,10 @@ function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
   return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
   return path.join(task.workspacePath, "artifacts", task.attemptId);
 }
