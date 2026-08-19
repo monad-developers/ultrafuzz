@@ -98,3 +98,31 @@ if (missingFlagMentions.length > 0) {
   );
   process.exit(1);
 }
+
+// The provider/harness pages build a version-gap argument on the harness
+// versions the Modal worker image installs. Pin both ends: if a pin moves in the
+// image source without the docs following, that narrative goes stale silently.
+// Each entry is [pin, sourceFile, ...docsThatMustRestateIt].
+const pinnedHarnessVersions = [
+  ['CODEX_CLI_VERSION = "0.146.0"', "packages/modal/src/runner.ts"],
+  [
+    "@openai/codex@0.146.0",
+    "docs/explanation/provider-harness-research.md",
+    "docs/explanation/provider-harness-plan.html"
+  ],
+  [
+    "@anthropic-ai/claude-code@2.1.207",
+    "packages/modal/src/runner.ts",
+    "docs/explanation/provider-harness-research.md",
+    "docs/explanation/provider-harness-plan.html"
+  ]
+];
+const staleVersionPins = pinnedHarnessVersions.flatMap(([pin, ...files]) =>
+  files.filter((file) => !readFileSync(file, "utf8").includes(pin)).map((file) => `${pin} in ${file}`)
+);
+if (staleVersionPins.length > 0) {
+  console.error(
+    `Harness version pins out of sync between the Modal image and the provider/harness docs: ${staleVersionPins.join(", ")}`
+  );
+  process.exit(1);
+}

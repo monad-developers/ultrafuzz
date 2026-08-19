@@ -1213,37 +1213,46 @@
             </table>
           </div>
           <div class="callout warn">
-            <strong class="tag">Reasoning is unmeasured for two candidates</strong>
+            <strong class="tag">Reasoning is unmeasured for every candidate</strong>
             <p>
-              The table has no <em>Reasoning</em> column because two rows could not honestly fill one.
-              <strong>DeepSeek Harness</strong> does expose a reasoning surface — <code>dsh-llm-deepseek</code> declares
+              The table has no <em>Reasoning</em> column because <em>no</em> row could honestly fill one: not one
+              reasoning level in this research reached a real provider. Four candidates do have a known surface.
+              <strong>Codex</strong> takes <code>model_reasoning_effort</code>, which Ultrafuzz's existing adapter
+              already drives (<code>packages/runtime/src/templates/smithers/agents/codex.tsx</code>), but PR #654's
+              requests went to a deterministic local server. <strong>Claude Code</strong> takes <code>--effort</code>,
+              driven with <code>low</code>/<code>high</code>/<code>max</code> by the DeepSeek pairing
+              (<code>packages/runtime/src/templates/smithers/agents/deepseek.tsx</code>), on CLI inspection alone.
+              <strong>Pi</strong>'s <code>--help</code> on the real 0.84.2 binary advertises levels through
+              <code>max</code>, again never exercised. <strong>DeepSeek Harness</strong> declares
               <code>thinking</code> (<code>enabled</code>/<code>disabled</code>) and
               <code>reasoningEffort</code> (<code>off</code>/<code>low</code>/<code>high</code>/<code>max</code>) in
-              settings, with an omitted effort resolving to <code>high</code> — but it is a settings-document field with
-              no CLI flag, and no request in this research set it. <strong>OpenCode</strong> exposes no reasoning flag
-              on <code>run --help</code>; any control would come from per-model config entries that were likewise never
-              exercised. Both bindings therefore declare an empty <code>reasoningLevels</code>, which records what was
-              measured rather than claiming the harness has no surface. <a href="#issue-d">#653-D (#661)</a> must
-              publish dsh's levels and <a href="#issue-e">#653-E (#662)</a> OpenCode's before either binding accepts a
-              <code>reasoning</code> value.
+              settings, with an omitted effort resolving to <code>high</code> — a settings-document field with no CLI
+              flag, which no request set. Only <strong>OpenCode</strong> exposes no surface at all:
+              <code>run --help</code> has no reasoning flag and its per-model config entries were never exercised. All
+              five bindings therefore declare an empty <code>reasoningLevels</code>, which records what was measured
+              rather than claiming a harness has no surface. <a href="#issue-b">#653-B (#659)</a> must publish Pi's
+              levels, <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
+              <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
+              accepts a <code>reasoning</code> value.
             </p>
           </div>
           <div class="callout warn">
-            <strong class="tag"
-              >Error classification, preflight, and retry are unmeasured for the inspected CLIs</strong
-            >
+            <strong class="tag">Error classification, preflight, and retry are unmeasured for every candidate</strong>
             <p>
               Issue #653 asks for error classification, preflight behavior, and retry/rate-limit semantics per
-              candidate. For every <span class="pill warn">CLI inspection</span> row this report does
-              <em>not</em> answer that: no request in this research provoked a 401, a 429, a malformed-model rejection,
-              or a mid-stream disconnect from a real provider, so how each harness classifies those failures, what it
-              retries, and whether it surfaces <code>Retry-After</code> are all unknown. That is a credential gap, not
-              an oversight — the environment holds no <code>OPENROUTER_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>, or
-              <code>ANTHROPIC_API_KEY</code>. G5 and G6 in §8 are where the answers get recorded, and ownership is
-              explicit: <a href="#issue-b">#653-B (#659)</a> for Pi, <a href="#issue-e">#653-E (#662)</a> for OpenCode,
-              and <a href="#issue-f">#653-F (#663)</a> for Codex and Claude Code re-measured at the versions the shipped
-              Modal image pins. The only measured retry fact anywhere here is internal to dsh
-              (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the process.
+              candidate. This report does <em>not</em> answer that for any row, because none was exercised against a
+              real paid provider — the two <span class="pill ok">real run</span> rows drove local deterministic
+              endpoints, which return no 401, no 429, and no rate-limit headers to classify. No request in this research
+              provoked a 401, a 429, a malformed-model rejection, or a mid-stream disconnect from a real provider, so
+              how each harness classifies those failures, what it retries, and whether it surfaces
+              <code>Retry-After</code> are all unknown. That is a credential gap, not an oversight — the environment
+              holds no <code>OPENROUTER_API_KEY</code>, <code>DEEPSEEK_API_KEY</code>, or
+              <code>ANTHROPIC_API_KEY</code>. G2 in §8 is where authenticated preflight behavior gets recorded and G5
+              and G6 are where the other two do; ownership is explicit: <a href="#issue-b">#653-B (#659)</a> for Pi,
+              <a href="#issue-e">#653-E (#662)</a> for OpenCode, and <a href="#issue-f">#653-F (#663)</a> for Codex and
+              Claude Code re-measured at the versions the shipped Modal image pins. The only measured retry fact
+              anywhere here is internal to dsh (<code>dsh-llm-retry</code>, §3.1) and is not observable from outside the
+              process.
             </p>
           </div>
         </section>
@@ -1273,12 +1282,15 @@
               <h3>Compatibility stays legal</h3>
               <p>
                 Codex + OpenRouter and Claude Code + DeepSeek keep working with a documented migration path. They are
-                supported combinations, never the <em>recommended</em> shape for a new project. Codex + OpenRouter holds
-                two statuses at once, and the difference is deliberate: <strong>shipped default</strong> describes what
-                the current release launches when an operator selects OpenRouter and names no harness, while
-                <strong>recommended default</strong> describes the advice this section gives a new project, which is the
-                gateway-neutral harness above. It keeps the first status by grandfathering, only because no replacement
-                has cleared the §8 gates; it never acquires the second. Phase 5 is where the two converge.
+                supported combinations, never the <em>recommended</em> shape for a new project. Both hold two statuses
+                at once, and the difference is deliberate: <strong>shipped default</strong> describes what the current
+                release launches when an operator selects that provider and names no harness, while
+                <strong>recommended default</strong> describes the advice this section gives a new project. Codex is the
+                shipped OpenRouter default by grandfathering while the gateway-neutral harness above is the recommended
+                one; Claude Code is likewise the shipped DeepSeek default by grandfathering, because it is the only
+                pairing that reaches DeepSeek today, while DeepSeek Harness is the recommended one once qualified.
+                Neither acquires the recommended status before its replacement clears the §8 gates. Phase 5 is where the
+                OpenRouter pair converges.
               </p>
             </div>
             <div class="card">
@@ -1286,9 +1298,10 @@
               <p>
                 A <em>new or changed</em> default requires a pinned real CLI clearing every gate in §8 against the real
                 provider. The pairings shipping today — Codex + OpenAI, <strong>Codex + OpenRouter</strong>, Claude Code
-                + Anthropic, Claude Code + DeepSeek, and Kimi — stay default without having cleared G1–G10; that
-                qualification debt is stated here rather than implied, and <a href="#issue-g">#653-G (#664)</a> records
-                the status explicitly. Any further first-party pairing earns its place the same way.
+                + Anthropic, Claude Code + DeepSeek, and Kimi — stay <em>shipped</em> defaults without having cleared
+                G1–G10; that qualification debt is stated here rather than implied, and
+                <a href="#issue-g">#653-G (#664)</a> records the status explicitly. Any further first-party pairing
+                earns its place the same way.
               </p>
             </div>
           </div>
@@ -1376,10 +1389,11 @@
               these strings so an operator can match the error to the documentation.
             </p>
             <p>
-              <code>reasoningLevels</code> lists only levels a real request exercised. An empty list makes the validator
-              reject a <code>reasoning</code> value on that binding, but it records what was measured — it is not a
-              claim that the harness has no reasoning surface. dsh and OpenCode are both empty today for exactly that
-              reason.
+              <code>reasoningLevels</code> lists only levels a real request exercised against a real provider. An empty
+              list makes the validator reject a <code>reasoning</code> value on that binding, but it records what was
+              measured — it is not a claim that the harness has no reasoning surface. Every candidate in §3 is empty
+              today for exactly that reason, including Codex and Pi, whose surfaces are known but were only inspected;
+              no worked configuration on either page may set <code>reasoning</code> until a child issue measures levels.
             </p>
             <p>
               The summary block in
@@ -1637,14 +1651,16 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
             <strong class="tag">"Pinned" means the version the shipped image installs</strong>
             <p>
               The Modal worker image pins
-              <code>@openai/codex@0.146.0</code> (<code>packages/modal/src/runner.ts:161</code>) and
+              <code>@openai/codex@0.146.0</code> (the <code>CODEX_CLI_VERSION</code> constant in
+              <code>packages/modal/src/runner.ts</code>) and
               <code>@anthropic-ai/claude-code@2.1.207</code>
-              (<code>packages/modal/src/runner.ts:2809</code>), while the versions measured for this report are
-              <code>codex-cli 0.147.0</code> and Claude Code <code>2.1.233</code>. PR #654 left both pins untouched, so
-              its real-CLI assertions ran against whatever <code>codex</code> was on <code>PATH</code>. Evidence
-              gathered against any other build is provenance, not qualification: G9 and G10 must be re-run at the
-              shipped pins — or the pins moved to the measured versions — before either pairing counts as qualified, and
-              <a href="#issue-f">#653-F (#663)</a> owns that reconciliation.
+              (the <code>npm install -g</code> line in that file's <code>modalSecurityToolchainCommands()</code>), while
+              the versions measured for this report are <code>codex-cli 0.147.0</code> and Claude Code
+              <code>2.1.233</code>. PR #654 left both pins untouched, so its real-CLI assertions ran against whatever
+              <code>codex</code> was on <code>PATH</code>. Evidence gathered against any other build is provenance, not
+              qualification: G9 and G10 must be re-run at the shipped pins — or the pins moved to the measured versions
+              — before either pairing counts as qualified, and <a href="#issue-f">#653-F (#663)</a> owns that
+              reconciliation.
             </p>
           </div>
           <div class="scroller">
@@ -1663,8 +1679,12 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
                   <td><span class="pill warn">local only</span></td>
                 </tr>
                 <tr>
-                  <td>G2 · Credential isolation</td>
-                  <td>One canary credential plus ambient conflicting endpoints; only the selected endpoint sees it.</td>
+                  <td>G2 · Credential isolation and preflight</td>
+                  <td>
+                    One canary credential plus ambient conflicting endpoints; only the selected endpoint sees it. The
+                    provider's declared <code>preflight</code> mode then behaves as specified against the real endpoint,
+                    including the 401 path: a missing or rejected credential fails before launch, not mid-run.
+                  </td>
                   <td><span class="pill ok">passed locally</span></td>
                 </tr>
                 <tr>
@@ -2114,11 +2134,12 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               Real executions in this environment: <code>@deepseek-ai/dsh@0.1.0-rc.7</code>,
               <code>codex-cli 0.147.0</code>, <code>Claude Code 2.1.233</code>, and the installed
               <code>@earendil-works/pi-ai@0.82.1</code> provider catalogue.
-              <strong>Note the version gap:</strong> Ultrafuzz pins
-              <code>@openai/codex@0.146.0</code> (<code>packages/modal/src/runner.ts:161</code>) and
-              <code>@anthropic-ai/claude-code@2.1.207</code> (<code>packages/modal/src/runner.ts:2809</code>) in the
-              Modal worker image, so the Codex and Claude Code rows are evidence about newer builds than the image ships
-              — see §8.
+              <strong>Note the version gap:</strong> Ultrafuzz pins <code>@openai/codex@0.146.0</code> (the
+              <code>CODEX_CLI_VERSION</code> constant in <code>packages/modal/src/runner.ts</code>) and
+              <code>@anthropic-ai/claude-code@2.1.207</code> (the <code>npm install -g</code> line in that file's
+              <code>modalSecurityToolchainCommands()</code>) in the Modal worker image, so the Codex and Claude Code
+              rows are evidence about newer builds than the image ships — see §8. Both pins are asserted against these
+              pages by <code>pnpm docs:check</code>.
             </li>
             <li>
               <code>packages/llm/llm-deepseek/src/index.ts</code> at commit <code>99f6f02</code>, read for the

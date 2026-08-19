@@ -33,9 +33,10 @@ knowing before you pick one:
   register with its mitigations; **§9 Proposed GitHub issues**, the drafted
   bodies that became
   [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664);
-  the **§2** table of obsolete draft claims and their replacements; and the
-  packaging, retry, Modal-portability, and maintenance-posture evidence rows in
-  **§3.1**.
+  the **§2** table of obsolete draft claims and their replacements; the
+  Modal-portability evidence row of its **§3.1** dsh table; and the row-by-row
+  **§3.1** detail behind findings the Markdown page states in condensed form
+  (packaging, retry, maintenance posture).
 - **Only in the Markdown research page:** the TOML configuration boundary, the
   TypeScript capability interfaces, the legacy `agent = "…"` forward mapping, the
   five dsh-specific gate items, and the full per-file source list with every
