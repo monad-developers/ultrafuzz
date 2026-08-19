@@ -9069,6 +9069,17 @@ test("a divergent published control file leaves status readable while execution 
   const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
   assert.equal(diverged.length, 1, JSON.stringify(health.diagnostics));
   assert.equal(diverged[0]?.severity, "warning");
+  // The divergence is reported exactly once. Synchronization re-reads the same evidence strictly, so
+  // running it here would report the identical mismatch a second time as INVALID and leave a healthy
+  // response contradicting itself.
+  assert.equal(
+    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID").length,
+    0,
+    JSON.stringify(health.diagnostics)
+  );
+  const skipped = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED");
+  assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(skipped[0]?.severity, "warning");
 
   // The divergence is never silently repaired.
   assert.equal(fs.readFileSync(snapshotWorkflowPath, "utf8"), `${pristine}\n// diverged\n`);

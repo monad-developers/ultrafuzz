@@ -187,13 +187,28 @@ export async function getRunHealth(input: {
     source: "workflow",
     path: evidence.verifiedControl.paths.integrityPath
   }));
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = [
-    ...controlDiagnostics,
-    ...(sync.ok
-      ? sync.diagnostics
-      : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })))
-  ];
+  // Synchronization reads the same evidence strictly, so it cannot succeed while a divergence stands.
+  // Calling it anyway would re-report the one divergence a second time under
+  // WORKFLOW_CONTROL_EVIDENCE_INVALID, so a healthy response would describe the same mismatch as both
+  // diverged and invalid. Skip it and say so instead.
+  const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
+  if (controlDiagnostics.length === 0) {
+    const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+    syncDiagnostics.push(
+      ...(sync.ok
+        ? sync.diagnostics
+        : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })))
+    );
+  } else {
+    syncDiagnostics.push({
+      code: "WORKFLOW_STATE_SYNC_SKIPPED",
+      message:
+        "run state synchronization was skipped because sealed control evidence diverged; reported counts come from the workflow runner and local run state may be stale",
+      severity: "warning",
+      source: "runtime",
+      path: evidence.verifiedControl.paths.integrityPath
+    });
+  }
   const snapshot = await runSmithersInspectionCommand({
     args: [
       "status",
