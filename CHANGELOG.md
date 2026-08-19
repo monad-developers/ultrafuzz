@@ -5,6 +5,7 @@
 ### Breaking changes
 
 - **[config] [docs]** Renames the unmodified built-in audit profile from `balanced` to `default` and removes the separate default pointer. Configurations that select `balanced` now fail with the standard unknown-profile diagnostic and must select `default` or omit `audit_profile`. Historical run metadata retains its exact recorded id; eval-history and benchmark reporting do not key cohorts by audit-profile id, so otherwise matching runs remain in the same reporting cohort across the migration boundary (#534).
+- **[config] [docs]** Consolidates maximum-effort audits under `exhaustive` by removing the overlapping `thorough` profile, and removes the transitional `fuzz-only` profile and topology used for v0.x/v0.1 comparisons. Configurations that select either removed profile now fail with the standard unknown-profile diagnostic; select `exhaustive` for maximum built-in breadth and depth, while focused stateful-invariant campaigns continue to use `invariant-only` (#648).
 
 ### Other changes
 

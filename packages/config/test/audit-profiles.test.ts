@@ -18,15 +18,7 @@ describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
     const catalog = loadAuditProfileCatalog();
     expect(catalog.defaultProfile).toBe("default");
-    expect(Object.keys(catalog.profiles)).toEqual([
-      "default",
-      "exhaustive",
-      "fuzz-only",
-      "invariant-only",
-      "low-cost",
-      "smoke",
-      "thorough"
-    ]);
+    expect(Object.keys(catalog.profiles)).toEqual(["default", "exhaustive", "invariant-only", "low-cost", "smoke"]);
     expect(catalog.digest).toMatch(/^[0-9a-f]{64}$/u);
 
     const smoke = auditProfile("smoke", catalog);
@@ -37,13 +29,6 @@ describe("audit profile catalog", () => {
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
     expect(packagedTopologyDigest(smoke, catalog)).toMatch(/^[0-9a-f]{64}$/u);
-
-    const fuzzOnly = auditProfile("fuzz-only", catalog);
-    expect(fuzzOnly.topologyPath).toBe("topologies/fuzz-only.yml");
-    expect(fuzzOnly.settings).toEqual({});
-    expect(fs.readFileSync(packagedTopologyPath(fuzzOnly, catalog)!, "utf8")).toContain(
-      "id: stateful-invariant-campaign"
-    );
 
     const invariantOnly = auditProfile("invariant-only", catalog);
     expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
@@ -163,11 +148,12 @@ profiles:
     expect(serializeResolvedConfigToml(resolved.value)).toContain('dynamic_strategies_enumerator = "unlimited"');
   });
 
-  it("fails unknown names with the available profile vocabulary", () => {
-    expect(() => auditProfile("balanced")).toThrow(
-      /available profiles: default, exhaustive, fuzz-only, invariant-only/u
-    );
-  });
+  it.each(["balanced", "fuzz-only", "thorough"])(
+    "rejects removed profile %s with the available profile vocabulary",
+    (profile) => {
+      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, invariant-only/u);
+    }
+  );
 
   it("ships every declared topology beside the built catalog", () => {
     const catalog = loadAuditProfileCatalog();

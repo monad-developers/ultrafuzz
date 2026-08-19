@@ -61,7 +61,7 @@ test("profile list and detail expose the catalog and effective project policy", 
   assert.match(listData.catalog_digest, /^[0-9a-f]{64}$/u);
   assert.deepEqual(
     listData.profiles.map((profile) => profile.id),
-    ["default", "exhaustive", "fuzz-only", "invariant-only", "low-cost", "smoke", "thorough"]
+    ["default", "exhaustive", "invariant-only", "low-cost", "smoke"]
   );
 
   const detailed = await cli(project, ["config", "audit-profile", "smoke", "--json"]);
@@ -89,7 +89,7 @@ test("topology list, show, and copy use the packaged assets safely", async () =>
   };
   assert.deepEqual(
     listData.topologies.map((topology) => topology.id),
-    ["full", "fuzz-only", "smoke", "invariant-only"]
+    ["full", "smoke", "invariant-only"]
   );
   assert.equal(
     listData.topologies.every((topology) => topology.logical_nodes > 2),
