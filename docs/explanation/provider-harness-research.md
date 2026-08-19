@@ -9,7 +9,10 @@ Last substantively revised 2026-08-19 under review.
 The follow-up work is filed as
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658)–[#664](https://github.com/monad-developers/ultrafuzz/issues/664),
 and this page is published by
-[PR #665](https://github.com/monad-developers/ultrafuzz/pull/665). The
+[PR #665](https://github.com/monad-developers/ultrafuzz/pull/665). Those issues
+name their design source by an earlier path and by section number;
+[Where The Retired Section Numbers Land](#where-the-retired-section-numbers-land)
+maps every one of those citations onto the heading that now carries it. The
 recommendations below are proposals awaiting real-provider qualification, not
 shipped defaults.
 
@@ -57,12 +60,10 @@ AI Tools" guide still covers only Claude Code, OpenCode, and OpenClaw. Every
 DeepSeek claim below is derived from that repository, the published package, and
 a real local execution of the installed CLI.
 
-An earlier unpublished draft of this page — this branch's first commit,
-[`bb831d61`](https://github.com/monad-developers/ultrafuzz/pull/665/commits/bb831d6139069665b7aab072712553c67cef21d4) —
-concluded that no first-party DeepSeek coding CLI existed and that "DeepSeek
-Code" should not be blessed. That conclusion is withdrawn. The caution now
-applies in reverse: the risk is treating the harness and the provider as one
-selection.
+So the name in #653 does resolve to a real first-party harness, and the caution
+it raises applies in the opposite direction from the obvious one: the risk is
+not that "DeepSeek Code" names nothing, but that the harness and the provider
+get treated as a single selection.
 
 Two things remain true and must not be conflated:
 
@@ -92,10 +93,16 @@ row names its provenance:
 The `Events`, `Sessions`, and `Isolation` columns are drawn from the
 capability-contract vocabulary defined in
 [the contract below](#proposed-capability-contract). A cell naming a single
-value is exactly the capability a binding would declare; a composite cell such
-as `jsonl` + schema or `jsonl` + `rpc` names the declared contract value first
-and then an advertised extra that is _not_ itself a contract value. The direct
-provider-API row declares nothing at all, because it is not a harness binding.
+value is exactly the capability a binding would declare. A composite cell such
+as `jsonl` + schema names the declared contract value first and then an
+advertised extra that is _not_ itself a contract value. Pi's `jsonl` + `rpc`
+cell is not that shape: `rpc` _is_ a contract value, and Pi advertises both
+modes, so a Pi binding must declare exactly one of them. A Pi binding declaring
+`jsonl` therefore does **not** satisfy a node requiring `rpc` — the two event
+classes are incomparable under the relation in
+[the capability contract](#proposed-capability-contract), so covering both would
+take two bindings. The direct provider-API row declares nothing at all, because
+it is not a harness binding.
 
 | Candidate                           | Events                      | Sessions                    | Isolation                   | Evidence                                       | Disposition                                            |
 | ----------------------------------- | --------------------------- | --------------------------- | --------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
@@ -546,9 +553,12 @@ Existing profiles keep working during migration. All four shipped
 | `DeepSeekAgent`  | `claude-code` | `deepseek`                                      |
 | `KimiAgent`      | `kimi-code`   | `kimi`                                          |
 
-The two keys the shipped schema already accepts under `[agents.<id>]` —
-`auth` and `config_dir` — map forward with them, and each adapter's real
-behavior is what the mapping has to preserve:
+The three keys the shipped schema already accepts under `[agents.<id>]` —
+`auth`, `api_key_env`, and `config_dir` (`AGENT_KEYS` in
+`packages/config/src/loader.ts`) — map forward with them. `api_key_env` maps to
+`credentialEnv` on the API-key arm of `ProviderAuth`, so it is present exactly
+when `auth = "api-key"` and absent from every persisted-credential binding. Each
+adapter's real behavior is what the mapping has to preserve:
 
 - **`CodexAgent`** (`agents/codex.tsx`). `auth` defaults to `"subscription"`,
   which reads `CODEX_HOME/auth.json`, so the binding carries the invariant-7
@@ -701,13 +711,11 @@ that requirement. Issue
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) must implement
 exactly this relation.
 
-The summary block in
-[#658](https://github.com/monad-developers/ultrafuzz/issues/658) abbreviated
-some of these when this page was written — writing `tools` as `fs` / `shell` and
-`isolation` as `native` | `external`. The durable rule is a precedence rule:
-wherever the issue and this page disagree on a capability spelling, this page is
-the contract and the issue text is shorthand, so the implementation follows the
-spellings above.
+Wherever [#658](https://github.com/monad-developers/ultrafuzz/issues/658) and
+this page disagree on a capability spelling — the issue's summary block
+abbreviates `tools` as `fs` / `shell` and `isolation` as `native` | `external` —
+this page is the contract and the issue text is shorthand, so the implementation
+follows the spellings above.
 
 `events: "final-text-only"` is new and exists because DeepSeek Harness needs
 it. A harness in that class can still run nodes whose contract is "produce an
@@ -861,12 +869,10 @@ Claude Code versions measured here and the ones that image pins today.
   the selected endpoint receives the canary. Then prove the provider's declared
   `preflight` mode behaves as specified against the real endpoint, including the
   401 path: a missing or rejected credential must fail before the harness is
-  launched, not partway through a run. G2 was widened to cover preflight after
-  [#659](https://github.com/monad-developers/ultrafuzz/issues/659) was filed, so
-  that issue's enumerated G2 criterion named only the canary-credential half
-  when this page was written. The gate definition here is the normative one and
-  #659 inherits it through its `G1–G8` reference, so the preflight/401 path is
-  in scope for that issue whether or not its own body restates the clause.
+  launched, not partway through a run. This definition is the normative one, and
+  [#659](https://github.com/monad-developers/ultrafuzz/issues/659) inherits it
+  through its `G1–G8` reference, so the preflight/401 path is in scope for that
+  issue whether or not its own body restates the clause.
 - **G3 · Tool execution.** Exercise read, write/edit, and shell tools in a
   disposable worktree.
 - **G4 · Artifact contract.** Produce an artifact, then pass the existing
@@ -1160,6 +1166,42 @@ numbering below restates its phases with implementation detail.
    comparable real-provider results; until then Codex remains the shipped
    OpenRouter default, stated rather than implied.
 
+## Where The Retired Section Numbers Land
+
+[#653](https://github.com/monad-developers/ultrafuzz/issues/653) and its seven
+child issues were filed while this plan was rendered as a standalone HTML page at
+`docs/explanation/provider-harness-plan.html`, so each of them cites a design
+source by that path and by section number — §2, §4, §5, §5.1, §6, §7, and §8
+between them. That rendering is retired in favour of this page, which uses named
+headings rather than numbers, so those eight citations need a target. Read the
+path as this file and the number as the row below:
+
+| Retired reference                            | Section on this page                                                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| §1 · Verdict                                 | [Recommended Plan And Action Items](#recommended-plan-and-action-items)                                                               |
+| §2 · What "DeepSeek Code" refers to          | [What "DeepSeek Code" Refers To](#what-deepseek-code-refers-to)                                                                       |
+| §3 · Evidence table                          | [Comparison Matrix](#comparison-matrix) and [Evidence](#evidence)                                                                     |
+| §3.1 · DeepSeek Harness 0.1.0-rc.7, measured | [DeepSeek Harness, Measured](#deepseek-harness-measured)                                                                              |
+| §3.2 · Candidate comparison                  | [Comparison Matrix](#comparison-matrix)                                                                                               |
+| §4 · Recommended pairing policy              | [Recommended Pairing Policy](#recommended-pairing-policy)                                                                             |
+| §5 · Target architecture                     | [Proposed Configuration Boundary](#proposed-configuration-boundary) and [Proposed Capability Contract](#proposed-capability-contract) |
+| §5.1 · The `final-text-only` event class     | [Proposed Capability Contract](#proposed-capability-contract)                                                                         |
+| §5.2 · Credential and state rules            | [Credential And State Rules](#credential-and-state-rules)                                                                             |
+| §6 · Sequencing                              | [Recommended Plan And Action Items](#recommended-plan-and-action-items) and [Next Work](#next-work)                                   |
+| §7 · Risks                                   | [Constraints That Block Qualification Today](#constraints-that-block-qualification-today)                                             |
+| §8 · Qualification gates                     | [Qualification Gates](#qualification-gates)                                                                                           |
+| §9 · Proposed GitHub issues                  | [Next Work](#next-work)                                                                                                               |
+| §10 · Sources                                | [Sources](#sources)                                                                                                                   |
+
+Two of those mappings are one-to-many because this page splits what the retired
+rendering kept together: its evidence section carried both the candidate
+comparison and the DeepSeek measurement, and its target architecture carried both
+the configuration boundary and the capability contract. Where a child issue cites
+§5 for a configuration key, the
+[configuration boundary](#proposed-configuration-boundary) is the half it means;
+where it cites §5 for a capability name or the event-class relation, the
+[capability contract](#proposed-capability-contract) is.
+
 ## Sources
 
 - [Codex 0.147.0 package and source](https://github.com/openai/codex/tree/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a), including [non-interactive execution](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/exec.md) and [sandboxing](https://github.com/openai/codex/blob/4a3e829c56415f8c1e69b18fbe74f4d81eaa926a/docs/sandbox.md).
@@ -1167,5 +1209,5 @@ numbering below restates its phases with implementation detail.
 - [OpenCode 1.18.18 package](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/opencode/package.json), [OpenRouter provider setup](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/providers.mdx), [CLI automation/session surface](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/cli.mdx), and [permissions](https://github.com/anomalyco/opencode/blob/0033bb35599a359def31b53d73e885eb4c44d815/packages/web/src/content/docs/permissions.mdx).
 - DeepSeek Harness at [`99f6f02`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca) (release [`dsh-v0.1.0-rc.7`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.7)): [README](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/README.md), [CONTRIBUTING](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/CONTRIBUTING.md), [CLI app](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/apps/cli), [headless bundle](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless), [`dsh-llm-pi-ai`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-pi-ai), [`dsh-llm-deepseek`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek) (its [`src/index.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek/src/index.ts) is where the `thinking`/`reasoningEffort` config surface is declared), [`dsh-credentials-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/credentials/credentials-local), [`dsh-launch-environment`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/util/launch-environment), [`dsh-sandbox-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/sandbox/sandbox-local), [`dsh-subprocess-local`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subprocess/subprocess-local), [`dsh-session-telemetry-otel`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-telemetry-otel), [`dsh-anonymous-user-id`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/identity/anonymous-user-id), and [`dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/acp/acp).
 - DeepSeek API documentation: [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) (`deepseek-v4-flash`/`deepseek-v4-pro`, 1M context, 384K max output, OpenAI + Anthropic + Responses formats); the **Agent Integrations** sidebar, which heads its list with DeepSeek Harness as an outbound link to the [harness quickstart](https://deepseek-harness.github.io/deepseek-harness/en/guide/quickstart) — there is no `agent_integrations/deepseek_harness` page, and the [Integrate with AI Tools](https://api-docs.deepseek.com/guides/coding_agents) guide still covers only Claude Code, OpenCode, and OpenClaw; the [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code) page; and the [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api) guide.
-- In-repo sources for the legacy forward mapping, all read at this branch's head: `packages/runtime/src/templates/smithers/agents/codex.tsx`, `claude.tsx`, `deepseek.tsx`, and `kimi.tsx` for each adapter's `auth`/`config_dir` handling and its state-root variable; `packages/runtime/src/doctor.ts` for the `agent = "…"` to executable map; `packages/config/src/loader.ts` for the shipped `[agents.<id>]` keys; and [docs/config.md](../config.md) for the operator-facing description of both keys.
+- In-repo sources for the legacy forward mapping, all read at this branch's head: `packages/runtime/src/templates/smithers/agents/codex.tsx`, `claude.tsx`, `deepseek.tsx`, and `kimi.tsx` for each adapter's `auth`/`api_key_env`/`config_dir` handling and its state-root variable; `packages/runtime/src/doctor.ts` for the `agent = "…"` to executable map; `packages/config/src/loader.ts` for the shipped `[agents.<id>]` keys; and [docs/config.md](../config.md) for the operator-facing description of all three.
 - [Smithers 0.32.0 Pi adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/PiAgent.js) and [OpenCode adapter](https://github.com/smithersai/smithers/blob/a76fff191e733ed504f9be0b4b71a396af47eaf0/packages/agents/src/OpenCodeAgent.js), matching the dependency pinned by Ultrafuzz.

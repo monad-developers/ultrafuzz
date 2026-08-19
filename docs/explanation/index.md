@@ -18,14 +18,11 @@ The
 page is the complete GitHub-readable plan. It carries the recommendation and
 action summary, evidence matrix, configuration and capability contracts,
 qualification gates, child-issue mapping, constraints, and pinned source list.
-The former standalone HTML rendering was removed in response to maintainer
-review so the plan has one reviewable source of truth in Git.
 
-One exception to the preamble above: the provider/harness **capability contract**
-— the capability names and their exact spellings, the event-class comparison
-relation, and the configuration invariants — _is_ normative for
+One exception to the preamble above: the
+[capability contract](provider-harness-research.md#proposed-capability-contract)
+on that page is normative for
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) and its child
-issues, and the Markdown research page is where it is stated. Until
-[SPECS.md](../SPECS.md) absorbs that contract, where the issue text and the
-research page disagree on a capability spelling, the research page wins. Nothing
+issues until [SPECS.md](../SPECS.md) absorbs it. The rule and its scope are
+stated there rather than restated here, so the two cannot drift apart. Nothing
 else on the page is normative.
