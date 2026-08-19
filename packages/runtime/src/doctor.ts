@@ -151,9 +151,10 @@ export async function diagnoseProject(input: DoctorInput) {
     project_root: projectRoot,
     ok: checks.every((check) => check.status !== "error"),
     checks,
-    validation: {
-      status: validationStatus,
-      policy_posture: policyPostureSummary(validation.value)
+      validation: {
+        status: validationStatus,
+        policy_posture: policyPostureSummary(validation.value),
+        bindings: validation.value?.resolved_config?.bindings ?? []
     },
     toolchain,
     workflow_engine: {

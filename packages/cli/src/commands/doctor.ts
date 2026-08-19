@@ -30,6 +30,13 @@ function renderDoctor(value: DoctorValue): string {
             : "missing from execution environment"
         }`
     ),
+    "Resolved bindings:",
+    ...(value.validation.bindings.length === 0
+      ? ["- none configured"]
+      : value.validation.bindings.map(
+          (binding) =>
+            `- ${binding.profile}: harness=${binding.harness}, provider=${binding.provider}, model=${binding.model}${binding.protocol === undefined ? "" : `, protocol=${binding.protocol}`}`
+        )),
     "Workflow engine:",
     `- bundled: ${engine.bundled_version}`,
     `- required by generated project: ${engine.required_version}`,

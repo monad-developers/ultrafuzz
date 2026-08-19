@@ -93,6 +93,53 @@ test("init copies the exact packaged full topology", () => {
   );
 });
 
+test("explicit provider harness bindings fail validation before launch", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  fs.appendFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    `
+[providers.invalid-launch]
+kind = "gateway"
+base_url = "https://example.test"
+auth = "api-key"
+api_key_env = "UNSET_BINDING_KEY"
+protocols = ["openai-chat"]
+preflight = "first-request"
+
+[harnesses.invalid-launch]
+kind = "runner"
+executable = "definitely-not-installed"
+version = "1"
+config_seed_dir = ".ultrafuzz/harness/runner"
+protocols = ["openai-chat"]
+events = "jsonl"
+sessions = "none"
+isolation = "external-sandbox-required"
+unattended = true
+
+[harnesses.invalid-launch.tools]
+filesystem = true
+shell = true
+
+[harnesses.invalid-launch.usage]
+tokens = true
+cache = false
+cost = false
+
+[models.invalid-launch]
+harness = "invalid-launch"
+provider = "invalid-launch"
+model = "opaque-id"
+`,
+    "utf8"
+  );
+  const validation = await validateProject({ projectRoot: project, env: { PATH: process.env.PATH } });
+  assert.equal(validation.ok, false);
+  assert.equal(validation.diagnostics.some((entry) => entry.path === "harnesses.invalid-launch.executable"), true);
+  assert.equal(validation.diagnostics.some((entry) => entry.path === "providers.invalid-launch.api_key_env"), true);
+});
+
 function firstSymlinkUnder(root: string): string | undefined {
   const pending = [root];
   while (pending.length > 0) {

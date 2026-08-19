@@ -299,6 +299,62 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
+test("validate and doctor report configured provider harness bindings without credential values", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  fs.appendFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    `
+[providers.test-gateway]
+kind = "gateway"
+base_url = "https://example.test/v1"
+auth = "api-key"
+api_key_env = "TEST_GATEWAY_KEY"
+protocols = ["openai-chat"]
+preflight = "first-request"
+
+[harnesses.test-runner]
+kind = "runner"
+executable = "node"
+version = "1.0.0"
+config_seed_dir = ".ultrafuzz/harness/runner"
+protocols = ["openai-chat"]
+events = "jsonl"
+sessions = "none"
+isolation = "external-sandbox-required"
+unattended = true
+
+[harnesses.test-runner.tools]
+filesystem = true
+shell = true
+
+[harnesses.test-runner.usage]
+tokens = true
+cache = false
+cost = false
+
+[models.binding-report]
+agent = "CodexAgent"
+harness = "test-runner"
+provider = "test-gateway"
+model = "opaque/provider-model"
+`,
+    "utf8"
+  );
+  const validation = await cli(project, ["validate", "--json"]);
+  const value = parseJson(validation).data as { resolved_config: { bindings: Array<Record<string, string>> } };
+  assert.deepEqual(value.resolved_config.bindings, [
+    { profile: "binding-report", harness: "test-runner", provider: "test-gateway", model: "opaque/provider-model", protocol: "openai-chat" }
+  ]);
+  assert.doesNotMatch(validation.stdout, /TEST_GATEWAY_KEY=|secret/u);
+  const plain = await cli(project, ["validate"]);
+  assert.match(plain.stdout, /Resolved bindings:[\s\S]*binding-report: harness=test-runner, provider=test-gateway/u);
+  const doctor = await cli(project, ["doctor", "--json"], { TEST_GATEWAY_KEY: "not-a-secret-for-output" });
+  const doctorValue = parseJson(doctor).data as { validation: { bindings: Array<Record<string, string>> } };
+  assert.equal(doctorValue.validation.bindings[0]?.profile, "binding-report");
+  assert.doesNotMatch(doctor.stdout, /not-a-secret-for-output/u);
+});
+
 test("plain init surfaces a customized stale agent adapter diagnostic", async () => {
   const project = tempProject();
   const initial = await cli(project, ["init", "--force"]);

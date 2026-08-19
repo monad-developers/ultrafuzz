@@ -102,6 +102,14 @@ export interface ValidateProjectResult {
     triage_panel_size: number;
     execution_mode: "local" | "cloud";
     execution_provider?: "modal";
+    /** Binding metadata only: environment variable names and credential values are excluded. */
+    bindings: Array<{
+      profile: string;
+      harness: string;
+      provider: string;
+      model: string;
+      protocol?: string;
+    }>;
   };
   topology?: {
     path: string;
@@ -764,6 +772,7 @@ export interface DoctorValue {
   validation: {
     status: DoctorCheckStatus;
     policy_posture: Record<string, { status: string; summary: string }>;
+    bindings: NonNullable<ValidateProjectResult["resolved_config"]>["bindings"];
   };
   toolchain: Array<{
     name: string;

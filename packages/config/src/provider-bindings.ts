@@ -1,5 +1,5 @@
 import { accessSync, constants } from "node:fs";
-import { delimiter, resolve } from "node:path";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import {
   diagnostic,
   type ConfigDiagnostic,
@@ -79,7 +79,7 @@ export function qualifyHarnessBinding(input: {
         ["providers", provider.id, "api_key_env"]
       );
     else childEnv[provider.credentialEnv] = credential;
-    if (input.argv?.some((arg) => arg === credential))
+    if (credential !== undefined && input.argv?.some((arg) => arg.includes(credential)))
       issue("CONFIG_BINDING_ARGV_CREDENTIAL", `models.${profileId} credential must not appear in argv`, [
         "models",
         profileId,
@@ -92,6 +92,18 @@ export function qualifyHarnessBinding(input: {
       ["harnesses", harness.id, "state_root"]
     );
   else exemption = { stateRoot: harness.state.stateRoot, reason: "subscription credential persisted in harness state" };
+  if (harness.state.mode === "run-scoped" && (isAbsolute(harness.state.configSeedDir) || harness.state.configSeedDir.split(/[\\/]/u).includes("..")))
+    issue(
+      "CONFIG_BINDING_STATE_ROOT_UNSAFE",
+      `harnesses.${harness.id}.config_seed_dir must be a project-relative seed; the launched state root is run-scoped`,
+      ["harnesses", harness.id, "config_seed_dir"]
+    );
+  if (harness.state.mode === "persistent" && !isAbsolute(harness.state.stateRoot))
+    issue(
+      "CONFIG_BINDING_STATE_ROOT_UNSAFE",
+      `harnesses.${harness.id}.state_root must be an absolute operator-controlled path outside the harness sandbox`,
+      ["harnesses", harness.id, "state_root"]
+    );
   if (diagnostics.length || !protocol) return { diagnostics };
   return {
     binding: {
@@ -105,6 +117,32 @@ export function qualifyHarnessBinding(input: {
     },
     diagnostics
   };
+}
+
+/**
+ * Qualify an explicitly configured profile at the last safe point before a
+ * workflow is materialized. Legacy `agent` profiles deliberately remain on
+ * their existing adapter path until their forward bindings are configured.
+ */
+export function qualifyModelProfile(
+  config: { models: { profiles: Record<string, { harness?: string; provider?: string; model?: string; reasoning?: string }> }; providers: Record<string, ProviderBinding>; harnesses: Record<string, HarnessCapabilities> },
+  profileId: string,
+  options: Pick<Parameters<typeof qualifyHarnessBinding>[0], "env" | "argv" | "requirements"> = {}
+): { binding?: QualifiedHarnessBinding; diagnostics: ConfigDiagnostic[] } {
+  const profile = config.models.profiles[profileId];
+  if (profile === undefined || (profile.harness === undefined && profile.provider === undefined)) return { diagnostics: [] };
+  if (profile.harness === undefined || profile.provider === undefined) return { diagnostics: [] };
+  const harness = config.harnesses[profile.harness];
+  const provider = config.providers[profile.provider];
+  if (harness === undefined || provider === undefined || profile.model === undefined) return { diagnostics: [] };
+  return qualifyHarnessBinding({
+    profileId,
+    model: profile.model,
+    reasoning: profile.reasoning,
+    harness,
+    provider,
+    ...options
+  });
 }
 function executableExists(name: string, path = ""): boolean {
   return path.split(delimiter).some((dir) => {

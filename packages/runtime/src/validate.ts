@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   applyDefaultProfileOverrides,
   loadProjectConfig,
+  qualifyModelProfile,
   redactDiagnostics,
   resolveConfig,
   validateExecutionNodeOverrides,
@@ -44,7 +45,8 @@ export async function validateProject(input: ValidateProjectInput) {
     projectRoot,
     resolved.config,
     input.topologyPath,
-    input.topologyTransform
+    input.topologyTransform,
+    input.env ?? process.env
   );
   posture.topology = topologyCheck.posture;
   if (topologyCheck.summary) {
@@ -158,7 +160,22 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
     triage_quorum: config.triage.quorum,
     triage_panel_size: config.triage.panelSize,
     execution_mode: config.execution.mode,
-    ...(config.execution.provider === undefined ? {} : { execution_provider: config.execution.provider })
+    ...(config.execution.provider === undefined ? {} : { execution_provider: config.execution.provider }),
+    bindings: Object.entries(config.models.profiles)
+      .filter(([, profile]) => profile.harness !== undefined && profile.provider !== undefined && profile.model !== undefined)
+      .map(([profile, binding]) => {
+        const provider = config.providers[binding.provider!];
+        const harness = config.harnesses[binding.harness!];
+        const protocol = provider?.protocols.find((candidate) => harness?.protocols.includes(candidate));
+        return {
+          profile,
+          harness: binding.harness!,
+          provider: binding.provider!,
+          model: binding.model!,
+          ...(protocol === undefined ? {} : { protocol })
+        };
+      })
+      .sort((left, right) => left.profile.localeCompare(right.profile))
   };
 }
 
@@ -202,7 +219,8 @@ function validateTopologySurface(
   projectRoot: string,
   config: ResolvedConfig | undefined,
   topologyPath?: string,
-  topologyTransform?: ValidateProjectInput["topologyTransform"]
+  topologyTransform?: ValidateProjectInput["topologyTransform"],
+  env: Record<string, string | undefined> = process.env
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
@@ -250,6 +268,14 @@ function validateTopologySurface(
       defaultModelProfileId: config?.models.default
     });
     const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
+    if (config !== undefined) {
+      // Bindings are an executable configuration contract, so qualify every
+      // explicit profile before launch rather than leaving an unused profile
+      // to fail only when a later topology selects it.
+      for (const profileId of Object.keys(config.models.profiles).sort()) {
+        executionDiagnostics.push(...configDiagnostics(qualifyModelProfile(config, profileId, { env }).diagnostics));
+      }
+    }
     if (config?.execution.mode === "cloud") {
       for (const agentId of [...selectedAgents].sort()) {
         if (config.agents[agentId]?.auth === "subscription") {
