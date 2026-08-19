@@ -39,10 +39,10 @@ runNodeTests(supportingTestFiles);
 runNodeTests(
   [...namedTests.keys()].map((sourcePath) => `dist-test/${sourcePath.replace(/\.ts$/u, ".js")}`),
   selectedTestNames,
-  selectedTestNames.length
+  selectedTestNames
 );
 
-function runNodeTests(files, testNames, expectedPasses) {
+function runNodeTests(files, testNames, expectedTestNames) {
   const args = ["--test", "--test-reporter=tap"];
   if (testNames !== undefined) {
     const pattern = `^(?:${testNames.map(escapeRegExp).join("|")})$`;
@@ -59,23 +59,20 @@ function runNodeTests(files, testNames, expectedPasses) {
   process.stderr.write(result.stderr ?? "");
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
-  if (expectedPasses !== undefined) assertTapSummary(result.stdout ?? "", expectedPasses);
+  if (expectedTestNames !== undefined) assertNamedTestsPassed(result.stdout ?? "", expectedTestNames);
 }
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
-function assertTapSummary(output, expectedPasses) {
-  const summary = new Map(
-    [...output.matchAll(/^# (tests|pass|fail|skipped) ([0-9]+)$/gmu)].map((match) => [match[1], Number(match[2])])
-  );
-  if (
-    summary.get("tests") !== expectedPasses ||
-    summary.get("pass") !== expectedPasses ||
-    summary.get("fail") !== 0 ||
-    summary.get("skipped") !== 0
-  ) {
-    throw new Error(`PR runtime smoke expected ${expectedPasses} selected tests to pass without skips`);
+function assertNamedTestsPassed(output, expectedTestNames) {
+  const passedTestNames = [...output.matchAll(/^ok [0-9]+ - (.+)$/gmu)]
+    .map((match) => match[1])
+    .filter((name) => !name.includes(" # SKIP") && !name.includes(" # TODO"))
+    .sort();
+  const expected = [...expectedTestNames].sort();
+  if (passedTestNames.length !== expected.length || passedTestNames.some((name, index) => name !== expected[index])) {
+    throw new Error(`PR runtime smoke passed unexpected tests: ${JSON.stringify(passedTestNames)}`);
   }
 }
