@@ -551,7 +551,8 @@ Existing profiles keep working during migration. All four shipped
 | `KimiAgent`      | `kimi-code`   | `kimi`                                          |
 
 Provider cells in this compatibility table name provider _kinds_, not concrete
-operator-chosen `[providers.<id>]` entries. The example above deliberately uses
+operator-chosen `[providers.<id>]` entries. The
+[TOML configuration example](#proposed-configuration-boundary) deliberately uses
 more specific IDs such as `openai-subscription` and `anthropic-subscription`.
 
 The three keys the shipped schema already accepts under `[agents.<id>]` —
@@ -666,7 +667,7 @@ This is the normative spelling of the contract — normative for the seven child
 issues of [#653](https://github.com/monad-developers/ultrafuzz/issues/653),
 [#658](https://github.com/monad-developers/ultrafuzz/issues/658) through
 [#664](https://github.com/monad-developers/ultrafuzz/issues/664), until
-[SPECS.md](../SPECS.md) absorbs it, which is the one carve-out from
+[SPECS.md](../SPECS.md) absorbs it, which is one of the two carve-outs from
 the "these pages are not normative" preamble in
 [the explanation index](index.md). In this vocabulary, `tools` is
 `filesystem` / `shell`, `events` is
@@ -820,9 +821,9 @@ These rules hold for every harness, not just the ones measured here.
   whose credential lives inside their own persisted state root instead of the
   child environment. Ultrafuzz ships three under `auth = "subscription"`, the
   default mode for each of those three legacy adapters: Codex reads
-  `CODEX_HOME/auth.json`; Claude Code uses `CLAUDE_CONFIG_DIR` and its logged-in
-  `claude -p` session; and Kimi Code
-  uses its logged-in Kimi home. Those harnesses keep one explicitly named,
+  `CODEX_HOME/auth.json`; Claude Code uses `CLAUDE_CONFIG_DIR` and its
+  logged-in `claude -p` session; and Kimi Code uses its logged-in Kimi home.
+  Those harnesses keep one explicitly named,
   stable, writable `state_root` outside the run scope (invariant 7 of the
   [configuration boundary](#proposed-configuration-boundary)) rather than being
   rejected as unsupported, and each binding declares the exemption — recorded
@@ -906,12 +907,22 @@ Claude Code versions measured here and the ones that image pins today.
 - **G10 · Provenance.** Record the CLI version, package integrity, provider
   request evidence, and any capability that remains unknown.
 
-G9 is owned by [#663](https://github.com/monad-developers/ultrafuzz/issues/663).
-G10 is owned by the Pi, dsh, and OpenCode qualification issues —
+These gate definitions are normative for the seven child issues of
+[#653](https://github.com/monad-developers/ultrafuzz/issues/653),
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) through
+[#664](https://github.com/monad-developers/ultrafuzz/issues/664), until
+[SPECS.md](../SPECS.md) absorbs them.
+
+For Pi, dsh, and OpenCode, G9 is owned by
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663), and G10 is owned
+by their qualification issues —
 [#659](https://github.com/monad-developers/ultrafuzz/issues/659),
 [#661](https://github.com/monad-developers/ultrafuzz/issues/661), and
 [#662](https://github.com/monad-developers/ultrafuzz/issues/662) — whose acceptance
 criteria require the provenance record before promotion.
+The Codex and Claude Code G9/G10 re-runs at the shipped pins remain nominated to
+[#663](https://github.com/monad-developers/ultrafuzz/issues/663) until that issue's
+acceptance criteria name them, as [Evidence](#evidence) records.
 
 DeepSeek Harness adds five gate items of its own:
 
