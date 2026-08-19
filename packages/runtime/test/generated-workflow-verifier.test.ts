@@ -360,15 +360,22 @@ function loadRetryFailureAwareArgs(): (
   previousFailure: string | undefined
 ) => { prompt?: unknown } | undefined {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function retryFailureAwareArgs");
+  const helperStart = source.indexOf("function renderEmbeddedPromptTemplate");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  return new Function("untrustedContentBoundary", `${helper}; return retryFailureAwareArgs;`)(
-    "UNTRUSTED CONTENT BOUNDARY"
+  const retryFailureTemplate = fs
+    .readFileSync(
+      path.join(repositoryRoot, ".ultrafuzz", "prompts", "_templates", "agent-preamble", "retry-failure.mdx"),
+      "utf8"
+    )
+    .trimEnd();
+  return new Function("untrustedContentBoundary", "retryFailureTemplate", `${helper}; return retryFailureAwareArgs;`)(
+    "UNTRUSTED CONTENT BOUNDARY",
+    retryFailureTemplate
   ) as ReturnType<typeof loadRetryFailureAwareArgs>;
 }
 
@@ -1100,7 +1107,7 @@ test("generated Smithers input avoids runner-reserved persistence fields", () =>
   assert.ok(schemaEnd > schemaStart, source);
   assert.doesNotMatch(source.slice(schemaStart, schemaEnd), /\brun_id\s*:/u);
   assert.match(source, /Smithers reserves `run_id`/u);
-  assert.match(source, /Smithers 0\.31 persists absent top-level workflow inputs as null/u);
+  assert.match(source, /Smithers persistence represents absent top-level workflow inputs as null/u);
   assert.match(source.slice(schemaStart, schemaEnd), /\.nullish\(\)[\s\S]*?value \?\? undefined/u);
 });
 
