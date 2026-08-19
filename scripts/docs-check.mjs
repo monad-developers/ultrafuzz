@@ -32,6 +32,7 @@ const requiredDocs = [
   "docs/explanation/backends-safety.md",
   "docs/explanation/bugfinder.md",
   "docs/explanation/campaigns.md",
+  "docs/explanation/provider-harness-research.md",
   "docs/explanation/topology-prompts-artifacts.md",
   "docs/cli.md",
   "docs/config.md",
@@ -93,6 +94,87 @@ const missingFlagMentions = requiredFlagMentions.filter(
 if (missingFlagMentions.length > 0) {
   console.error(
     `Missing documented CLI surfaces: ${missingFlagMentions.map(([file, needle]) => `${needle} in ${file}`).join(", ")}`
+  );
+  process.exit(1);
+}
+
+// The provider/harness page builds a version-gap argument on the harness
+// versions the Modal worker image installs. The image source is the single
+// source of truth: read the pins out of `runner.ts` and assert the docs print
+// the same literals. This check keeps no copy of the version itself, so a pin
+// bump means editing `runner.ts` and every version literal the page
+// prints — and nothing here.
+const runnerSource = "packages/modal/src/runner.ts";
+if (!existsSync(runnerSource)) {
+  console.error(
+    `Cannot verify harness version pins: ${runnerSource} is missing. If the Modal image source moved, update this check.`
+  );
+  process.exit(1);
+}
+const runnerText = readFileSync(runnerSource, "utf8");
+// `runner.ts` never spells the Codex installable literally — it declares
+// `CODEX_CLI_VERSION` and interpolates it into the install command — so the
+// constant is what gets matched here and `@openai/codex@<v>` is what the docs
+// must print. Claude Code is spelled inline in the install command instead.
+// The version character classes admit prerelease spellings (`2.2.0-rc.1`,
+// `0.1.0+build`) as well as release ones, while requiring an alphanumeric final
+// character so adjacent sentence punctuation is not captured as part of a pin.
+// A narrower `[\d.]+` would silently truncate a prerelease on both sides of the
+// comparison, so a stale doc could still pass; `VERSION_CHARS` is shared with
+// `literalPattern` below so the two halves cannot disagree about what a version
+// looks like.
+const VERSION_CHARS = "[\\w.+-]*\\w";
+const pinPatterns = [
+  ["@openai/codex", /CODEX_CLI_VERSION = "([^"]+)"/u],
+  ["@anthropic-ai/claude-code", new RegExp(`@anthropic-ai\\/claude-code@(${VERSION_CHARS})`, "u")]
+];
+const harnessDocs = ["docs/explanation/provider-harness-research.md"];
+const staleVersionPins = [];
+for (const [pkg, pattern] of pinPatterns) {
+  const match = pattern.exec(runnerText);
+  if (match === null) {
+    console.error(
+      `Cannot verify the ${pkg} pin: ${pattern} no longer matches ${runnerSource}. Update this check to follow the image source.`
+    );
+    process.exit(1);
+  }
+  const pin = `${pkg}@${match[1]}`;
+  // Existence is not enough: a pin may be printed at more than one site, and an
+  // `includes` test would pass while another site kept the old version. Every
+  // printed literal has to be the current pin, and a stale one is reported with
+  // its line so the half-applied bump is named rather than just the file. A `.`
+  // is the only regex metacharacter an npm package name can contain, so escaping
+  // it is enough to build the literal pattern.
+  const literalPattern = new RegExp(`${pkg.replaceAll(".", "\\.")}@${VERSION_CHARS}`, "gu");
+  // The two halves must agree on the version grammar, or the comparison below
+  // would pit a full pin against a truncated literal and report a stale doc
+  // that is current (or, worse, accept a stale one). Asserting the pin itself
+  // is expressible in `literalPattern` is what keeps them in step.
+  if (pin.match(new RegExp(`^${literalPattern.source}$`, "u")) === null) {
+    console.error(
+      `Cannot verify the ${pkg} pin: ${runnerSource} declares ${match[1]}, which this check's version pattern (${VERSION_CHARS}) cannot express. Widen it.`
+    );
+    process.exit(1);
+  }
+  for (const file of harnessDocs) {
+    const lines = readFileSync(file, "utf8").split("\n");
+    let printed = 0;
+    for (const [index, line] of lines.entries()) {
+      for (const literal of line.match(literalPattern) ?? []) {
+        printed += 1;
+        if (literal !== pin) {
+          staleVersionPins.push(`${file}:${index + 1} prints ${literal}, expected ${pin}`);
+        }
+      }
+    }
+    if (printed === 0) {
+      staleVersionPins.push(`${file} never prints ${pin}`);
+    }
+  }
+}
+if (staleVersionPins.length > 0) {
+  console.error(
+    `Harness version pins out of sync between ${runnerSource} and the provider/harness document: ${staleVersionPins.join(", ")}`
   );
   process.exit(1);
 }
