@@ -987,9 +987,11 @@ versions the shipped image does not install.** The Modal worker image pins
 `packages/modal/src/runner.ts`) and `@anthropic-ai/claude-code@2.1.207` (the
 `npm install -g` line in that file's `modalSecurityToolchainCommands()`), while
 the versions measured below are `codex-cli 0.147.0` and Claude Code `2.1.233`.
-`pnpm docs:check` asserts both pins against every place this page prints them,
-so moving a pin without updating each narrative fails the check rather than
-leaving one of them stale.
+`pnpm docs:check` asserts both pins against every place this page prints them in
+`@package@version` form, which is the spelling the check matches. Cite a pin in
+that form rather than as a bare version so the guard keeps seeing it; moving a
+pin without updating each narrative then fails the check rather than leaving
+one of them stale.
 PR #654 also left both pins untouched, so its real-CLI assertions ran against
 whatever `codex` was on `PATH`, not against the pinned image build. The Codex and
 Claude Code rows are therefore evidence about newer builds than the image ships:

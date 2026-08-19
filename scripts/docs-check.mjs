@@ -137,13 +137,12 @@ for (const [pkg, pattern] of pinPatterns) {
     process.exit(1);
   }
   const pin = `${pkg}@${match[1]}`;
-  // Existence is not enough: each pin appears in more than one narrative, so a
-  // bump applied to one site only would still satisfy an `includes` test while
-  // another site kept asserting the old version. Every printed literal has to
-  // be the current pin, and a stale one is reported with its line so the
-  // half-applied bump is named rather than just the file. A `.` is the only
-  // regex metacharacter an npm package name can contain, so escaping it is
-  // enough to build the literal pattern.
+  // Existence is not enough: a pin may be printed at more than one site, and an
+  // `includes` test would pass while another site kept the old version. Every
+  // printed literal has to be the current pin, and a stale one is reported with
+  // its line so the half-applied bump is named rather than just the file. A `.`
+  // is the only regex metacharacter an npm package name can contain, so escaping
+  // it is enough to build the literal pattern.
   const literalPattern = new RegExp(`${pkg.replaceAll(".", "\\.")}@${VERSION_CHARS}`, "gu");
   // The two halves must agree on the version grammar, or the comparison below
   // would pit a full pin against a truncated literal and report a stale doc
