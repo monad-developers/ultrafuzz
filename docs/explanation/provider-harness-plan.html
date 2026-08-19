@@ -867,11 +867,8 @@
                     are settings-document fields, not CLI flags (headless <code>--help</code> exposes no reasoning
                     flag), and they are absent from <code>--dump-default-config</code> only because they carry no schema
                     default. No request in this research set either field, so a dsh binding declares no
-                    <code>reasoningLevels</code> at all until the levels are measured end to end.
-                    <a href="https://github.com/monad-developers/ultrafuzz/issues/661">#661</a> is
-                    <strong>nominated</strong> for that measurement, not assigned it — its filed acceptance criteria
-                    name no reasoning surface — and owns it once they do. The field is unsupported because it is
-                    unmeasured, not because dsh lacks it.
+                    <code>reasoningLevels</code> at all until the levels are measured end to end. Owner: see the
+                    ownership rule in §3.2. The field is unsupported because it is unmeasured, not because dsh lacks it.
                   </td>
                   <td>
                     <code>packages/llm/llm-deepseek/src/index.ts</code> read at the pin; real <code>--help</code> and
@@ -1239,11 +1236,8 @@
               measurement may make. <a href="#issue-b">#653-B (#659)</a> must publish Pi's levels,
               <a href="#issue-d">#653-D (#661)</a> dsh's, <a href="#issue-e">#653-E (#662)</a> OpenCode's, and
               <a href="#issue-f">#653-F (#663)</a> Codex's and Claude Code's at the pinned versions, before any binding
-              accepts a <code>reasoning</code> value. Only #659 <strong>owns</strong> its row — its acceptance criteria
-              name that measurement in as many words. The other four rows are
-              <strong>nominated rather than owned</strong>, on the same footing as the error-classification callout
-              below: the filed bodies of #661, #662, and #663 name no reasoning, variant, effort, or thinking
-              measurement, so each owns its rows once its own acceptance criteria name them, and not before.
+              accepts a <code>reasoning</code> value. Only #659 <strong>owns</strong> its row; the other four are
+              nominations, read under the ownership rule in the error-classification callout below.
             </p>
           </div>
           <div class="callout warn">
@@ -1399,7 +1393,10 @@
               <p class="layer-title">4 · Harness launcher — one credential, one endpoint, one state root</p>
               <div class="boxes">
                 <span class="box accent">childEnv built from empty base</span>
-                <span class="box">run-scoped state dir (<code>DSH_HOME</code>, <code>CODEX_HOME</code>, …)</span>
+                <span class="box"
+                  >run-scoped state dir (<code>DSH_HOME</code>, …); persisted-credential harnesses declare an
+                  exemption</span
+                >
                 <span class="box">no credential in argv</span>
                 <span class="box">update/share/plugin surfaces disabled</span>
               </div>
@@ -1498,7 +1495,15 @@ node.requires = { events: "final-text-only" } // final-text node → dsh allowed
               Credentials never appear in argv — this rules out Smithers' <code>PiAgent</code>
               <code>--api-key</code> path.
             </li>
-            <li>Every harness gets a run-scoped state root, so no run reads or writes an operator's real home.</li>
+            <li>
+              Every harness <em>taking an env-var credential</em> gets a run-scoped state root, so no such run reads or
+              writes an operator's real home. One carve-out: a harness whose credential lives inside its own persisted
+              state root — Codex <code>auth = "subscription"</code>, which reads <code>CODEX_HOME/auth.json</code> and
+              is Ultrafuzz's default Codex mode — keeps a stable, writable state root <em>outside</em> the run scope
+              rather than being rejected as unsupported, and declares that exemption. See invariant 7 of the
+              configuration boundary in <a href="provider-harness-research.md">provider-harness-research.md</a>, which
+              also gives the legacy <code>[agents.CodexAgent]</code> mapping.
+            </li>
             <li>
               The invocation cwd must not carry harness-readable config. For dsh this means proving no <code>.env</code>
               exists in the target worktree before launch — both because an unset name there would be adopted, and

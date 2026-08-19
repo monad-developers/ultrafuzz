@@ -52,3 +52,12 @@ knowing before you pick one:
 
 Read the Markdown page for the evidence and the contract; open the HTML plan for
 the verdict, the risks, and the issue breakdown.
+
+One exception to the preamble above: the provider/harness **capability contract**
+— the capability names and their exact spellings, the event-class comparison
+relation, and the configuration invariants — _is_ normative for
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) and its child
+issues, and the Markdown research page is where it is stated. Until
+[SPECS.md](../SPECS.md) absorbs that contract, where the issue text and the
+research page disagree on a capability spelling, the research page wins. Nothing
+else on these two pages is normative.

@@ -109,12 +109,8 @@ recorded, and [G5](#qualification-gates) and [G6](#qualification-gates) are wher
 the other two do. **Ownership is explicit for two of the five harness candidates
 only**: [#659](https://github.com/monad-developers/ultrafuzz/issues/659) owns Pi
 and [#662](https://github.com/monad-developers/ultrafuzz/issues/662) owns
-OpenCode, while [#663](https://github.com/monad-developers/ultrafuzz/issues/663)
-is **nominated, not assigned**, for Codex and Claude Code at the versions the
-shipped Modal image pins, and
-[#661](https://github.com/monad-developers/ultrafuzz/issues/661) is likewise only
-**nominated** for dsh. The rule behind that distinction, and the per-issue
-snapshot behind each cell, are stated once under
+OpenCode; the pointers for Codex, Claude Code, and dsh are nominations. Which
+cells are which, and the rule that decides it, are stated once under
 [Measurement Ownership](#measurement-ownership). The only measured retry fact on
 this page is internal to dsh (`dsh-llm-retry`) and is not observable from outside
 the process.
@@ -139,10 +135,8 @@ _Evidence: real run (PR #654), upstream docs._
   upstream docs plus that in-repo adapter, not measurement — PR #654's requests
   went to a deterministic local server, so no level was ever exercised against a
   real provider. A Codex binding therefore declares no `reasoningLevels` until
-  the levels are measured at the version the shipped image pins.
-  [#663](https://github.com/monad-developers/ultrafuzz/issues/663) is
-  **nominated** for that measurement, not assigned it — see
-  [Measurement Ownership](#measurement-ownership).
+  the levels are measured at the version the shipped image pins. Owner:
+  see [Measurement Ownership](#measurement-ownership).
 - **Unattended.** `codex exec` is non-interactive, has filesystem and shell
   tools, and supports a final-response JSON schema.
 - **Events.** JSONL events, persisted or ephemeral sessions, `exec resume`, and
@@ -194,9 +188,7 @@ docs. No provider request was made._
   config entries can carry the same control and were not exercised either. No
   request in this research set `--variant` or observed a level reaching a
   provider, so an OpenCode binding declares no `reasoningLevels` until the
-  values each OpenRouter route actually accepts are measured.
-  [#662](https://github.com/monad-developers/ultrafuzz/issues/662) is
-  **nominated** for that measurement, not assigned it — see
+  values each OpenRouter route actually accepts are measured. Owner: see
   [Measurement Ownership](#measurement-ownership).
 - **Unattended.** `opencode run --format json --auto` is non-interactive; the
   Build agent exposes file, shell, search, and task tools.
@@ -224,9 +216,8 @@ _Evidence: CLI inspection on the real installed binary, upstream docs._
   (`packages/runtime/src/templates/smithers/agents/deepseek.tsx`). Provenance is
   CLI inspection plus that in-repo adapter; no level was exercised against a
   real provider, so a Claude Code binding declares no `reasoningLevels` until
-  the levels are measured at the version the shipped image pins. #663 is
-  **nominated** for that measurement on the same terms as for Codex above, not
-  assigned it — see [Measurement Ownership](#measurement-ownership).
+  the levels are measured at the version the shipped image pins. Owner: see
+  [Measurement Ownership](#measurement-ownership).
 - **Unattended.** Print mode with confirmed schema, tool, effort, session, and
   permission surfaces.
 - **Events.** Streaming JSON with a response schema; sessions resume by ID.
@@ -273,9 +264,7 @@ commit
   `--dump-default-config` because they carry no schema default, not because they
   do not exist. No request in this research set either field and no level was
   observed reaching the provider, so a dsh binding declares no
-  `reasoningLevels` **until the surface is measured end to end**.
-  [#661](https://github.com/monad-developers/ultrafuzz/issues/661) is
-  **nominated** for that measurement, not assigned it — see
+  `reasoningLevels` **until the surface is measured end to end**. Owner: see
   [Measurement Ownership](#measurement-ownership). Whoever takes it must publish
   the measured levels before the validator accepts a `reasoning` value for dsh;
   the field is unsupported because it is unmeasured, not because DeepSeek
@@ -401,7 +390,7 @@ preflight = "authenticated-models"
 [harnesses.pi]
 kind = "pi"
 version = "0.84.2"
-config_dir = ".ultrafuzz/harness/pi"  # seed dir, copied per run
+config_seed_dir = ".ultrafuzz/harness/pi"  # seed dir, copied per run
 
 [harnesses.dsh]
 kind = "dsh"
@@ -409,7 +398,7 @@ version = "0.1.0-rc.7"
 # Seed directory only. The launcher copies it into the per-run state root
 # .ultrafuzz/runs/<run-id>/harness/dsh/ and exports that path, never this
 # literal, as DSH_HOME.
-config_dir = ".ultrafuzz/harness/dsh"
+config_seed_dir = ".ultrafuzz/harness/dsh"
 
 [models.openrouter-sonnet]
 harness = "pi"
@@ -441,20 +430,49 @@ important invariants are:
    capabilities, and reasoning translation.
 5. A validated binding chooses a mutually supported wire protocol before any
    child is launched.
-6. `config_dir` is a pre-run seed directory, never exported verbatim. The
+6. `config_seed_dir` is a pre-run seed directory, never exported verbatim. The
    composition is fixed: for every run the launcher creates the state root
    `.ultrafuzz/runs/<run-id>/harness/<harness-id>/`, copies the declared
-   `config_dir` in as that root's initial contents, and exports _that_ path —
-   never the declared literal — as `DSH_HOME`, `CODEX_HOME`, and the like. So
+   `config_seed_dir` in as that root's initial contents, and exports _that_ path
+   — never the declared literal — as `DSH_HOME`, `CODEX_HOME`, and the like. So
    two runs never share a harness state root, and no run mutates the seed. Both
    surfaces extend the campaign layout documented in
    [docs/index.md](../index.md), which lists `runs/` but no `harness/` entry
    today: `.ultrafuzz/harness/**` for the seeds and
-   `.ultrafuzz/runs/<run-id>/harness/**` for the state roots.
+   `.ultrafuzz/runs/<run-id>/harness/**` for the state roots. The name is
+   deliberately _not_ `config_dir`: `[agents.<id>].config_dir` is already a
+   shipped key (`packages/config/src/loader.ts`) that Ultrafuzz exports
+   **verbatim** as the child's `CODEX_HOME`
+   (`packages/runtime/src/templates/smithers/agents/codex.tsx`, documented in
+   [docs/config.md](../config.md)). Seed-copy semantics are the opposite of that,
+   so reusing the spelling would silently change what `CODEX_HOME` means for
+   every existing Codex profile. Exemption 7 below is what keeps the shipped key
+   working.
+7. A harness whose credential lives _inside_ its own state root is exempt from
+   the per-run state root, and the exemption is declared rather than inferred.
+   Codex `auth = "subscription"` is the shipped case: it reads
+   `CODEX_HOME/auth.json`, so a run-scoped `CODEX_HOME` seeded from tracked
+   config would have no token in it and none could be seeded either, because
+   rule 2 of the [credential and state rules](#credential-and-state-rules)
+   forbids credential material in tracked config. Such a harness instead keeps a
+   **stable, writable state root outside the run scope** — the operator's real
+   `~/.codex`, or the explicit `state_root` they name — and the validator records
+   that the binding is exempt. The alternative, rejecting subscription auth as
+   unsupported, is not chosen: it is Ultrafuzz's current default. Only harnesses
+   taking an env-var credential (`auth = "api-key"` and every provider binding in
+   this page's tables) get the run-scoped root of invariant 6.
 
 Existing profiles keep working during migration. A legacy `agent = "CodexAgent"`
-profile maps to the Codex harness and its existing provider binding. Legacy
-`agent = "DeepSeekAgent"` maps to `harness = "claude-code"` plus
+profile maps to the Codex harness and its existing provider binding. That
+includes the two keys the shipped schema already accepts under
+`[agents.CodexAgent]`: `auth = "subscription"` (the default when the key is
+absent, per `packages/runtime/src/templates/smithers/agents/codex.tsx`) maps to a
+Codex binding carrying the invariant-7 exemption, keeping today's `~/.codex`
+fallback and its `auth.json`; and a legacy `config_dir` maps to that binding's
+persistent `state_root`, **not** to `config_seed_dir`, so it keeps being exported
+verbatim as `CODEX_HOME` and an existing `.ultrafuzz/openrouter-codex` profile is
+unaffected.
+Legacy `agent = "DeepSeekAgent"` maps to `harness = "claude-code"` plus
 `provider = "deepseek"` — the compatibility pairing it already is — and is _not_
 silently re-pointed at DeepSeek Harness.
 
@@ -503,7 +521,11 @@ interface NodeRequirements {
 }
 ```
 
-This is the normative spelling of the contract, and the same vocabulary appears
+This is the normative spelling of the contract — normative for
+[#658](https://github.com/monad-developers/ultrafuzz/issues/658) and its child
+issues until [SPECS.md](../SPECS.md) absorbs it, which is the one carve-out from
+the "these pages are not normative" preamble in
+[the explanation index](index.md). The same vocabulary appears
 in the HTML plan's §5: `tools` is `filesystem` / `shell`, `events` is
 `"jsonl" | "rpc" | "final-text-only"`, `sessions` is
 `"none" | "resume" | "tree"`, and `isolation` is
@@ -583,11 +605,8 @@ of the [Comparison Matrix](#comparison-matrix), the direct provider-API harness,
 declares no capability values whatsoever, so it has no `reasoningLevels` either
 way — which is why this table has five rows and not six.
 
-Only #659 **owns** its row: its acceptance criteria name the measurement
-in as many words ("Pi's reasoning levels, including `max`, are representable").
-The other four rows are **nominated rather than owned**, on the same footing as
-the error-classification rows in the [Comparison Matrix](#comparison-matrix),
-under the rule in [Measurement Ownership](#measurement-ownership).
+Read the Owner column under the rule in
+[Measurement Ownership](#measurement-ownership).
 
 `cloudPortable` sits in the same position: no candidate declares a value here
 either, which is why the field is optional rather than a required `boolean`. A
@@ -620,8 +639,15 @@ the same list as §5.2 of the [architecture plan](provider-harness-plan.html).
 - Credentials never appear in `argv`. This rules out Smithers' `PiAgent`
   `--api-key` path, which must be left unset in favour of an environment
   variable.
-- Every harness gets a run-scoped state root, so no run reads or writes an
-  operator's real home.
+- Every harness taking an env-var credential gets a run-scoped state root, so no
+  such run reads or writes an operator's real home. The one carve-out is a
+  harness whose credential lives inside its own persisted state root — Codex
+  `auth = "subscription"`, which reads `CODEX_HOME/auth.json` and is Ultrafuzz's
+  default Codex mode. That class keeps a stable, writable state root outside the
+  run scope (invariant 7 of the
+  [configuration boundary](#proposed-configuration-boundary)) rather than being
+  rejected as unsupported, and the binding declares the exemption so the
+  isolation claim above stays true of everything that does not declare it.
 - The invocation directory must not carry harness-readable configuration. For
   dsh that means proving no `.env` exists in the target worktree before launch,
   both because an unset name there would be adopted and because a
@@ -947,19 +973,18 @@ gives the same issue.
    with zero routes. Its evidence comes from a small real-`dsh` smoke profile —
    headless final text and exit status, one filesystem/shell artifact check in a
    disposable worktree, a version pin asserted at preflight, and an explicit
-   final-text-only fallback that warns rather than failing the run. This page
-   also **nominates** it for the reasoning measurement and for dsh's error
-   classification, preflight, and retry semantics — `dsh-llm-deepseek` declares
-   `thinking` and `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so
-   those have to be driven through a real request before the binding may declare
-   levels — under the rule in
+   final-text-only fallback that warns rather than failing the run. This page also
+   nominates it for the reasoning measurement and for dsh's error classification,
+   preflight, and retry semantics — `dsh-llm-deepseek` declares `thinking` and
+   `reasoningEffort` (`off`/`low`/`high`/`max`) in settings, so those have to be
+   driven through a real request before the binding may declare levels; see
    [Measurement Ownership](#measurement-ownership). Parsing the undocumented
    `session.jsonl.zstd` format is explicitly out of scope.
 5. [#662](https://github.com/monad-developers/ultrafuzz/issues/662) (Phase 3) —
    qualify OpenCode plus OpenRouter separately, including fully isolated state
    directories and disabled sharing, plugins, update checks, and model fetching.
-   This page also **nominates** it for the `--variant` reasoning-effort flag and
-   the per-model reasoning config entries this research inspected but never
+   This page also nominates it for the `--variant` reasoning-effort flag and the
+   per-model reasoning config entries this research inspected but never
    exercised; see [Measurement Ownership](#measurement-ownership).
 6. [#663](https://github.com/monad-developers/ultrafuzz/issues/663) (Phase 4) —
    gate the Modal worker image on per-harness capability checks. This page also
