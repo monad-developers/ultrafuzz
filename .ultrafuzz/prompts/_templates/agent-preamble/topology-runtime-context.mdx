@@ -3,10 +3,8 @@
 - Timeout: {{timeout_seconds}} seconds total.
 - Finalization reserve: {{finalization_reserve_seconds}} seconds.
 - Working budget before finalization: {{working_budget_seconds}} seconds.
-- You have shell access, so you have a clock: run `date -u +%s` once at the very start of this node and keep that value as your node start epoch.
-- Absolute working-budget deadline (UTC) = node start epoch + {{working_budget_seconds}}. Absolute hard deadline (UTC) = node start epoch + {{timeout_seconds}}. Resolve both once at startup and record them in your notes, for example with `date -u -d "+{{working_budget_seconds}} seconds" +%Y-%m-%dT%H:%M:%SZ` and `date -u -d "+{{timeout_seconds}} seconds" +%Y-%m-%dT%H:%M:%SZ`.
-- These are absolute timestamps rather than durations on purpose. Re-read the current time with `date -u +%s` (or `date -u`) before each expensive step and compare it against those two values instead of estimating how long you have been running.
-- The deadlines are computed by you at startup and not printed here because this block is part of the hash-sealed workflow and cannot contain a wall-clock value.
+- Clock: `date -u +%s` once at start = START; working deadline START+{{working_budget_seconds}}, hard deadline START+{{timeout_seconds}}.
+- Re-run `date -u +%s` before each expensive step; compare, never estimate.
 - Stop starting new delegated or tool work when the finalization reserve begins.
 - During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.
-- Crossing the hard deadline kills this node with no output at all, which is strictly worse than a complete, cleanly written negative result.
+- Crossing the hard deadline kills this node with no output at all.

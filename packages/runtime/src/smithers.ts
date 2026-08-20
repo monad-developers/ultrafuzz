@@ -4086,6 +4086,12 @@ export { topologyRuntimeBudgetForTimeout };
  *
  * The three relative lines are kept verbatim: several strategy prompts instruct the agent to copy
  * the exact `Timeout` and `Finalization reserve` values out of this block.
+ *
+ * Every byte here is paid once per task in the run, because this block is part of the mandatory
+ * prefix prepended to every prompt (`packages/prompts/test/agent-preamble.test.ts` pins its exact
+ * length). The template text is therefore deliberately telegraphic; the reasoning lives in this
+ * comment, which costs no prompt tokens. Keep new rationale here rather than in the MDX at
+ * `.ultrafuzz/prompts/_templates/agent-preamble/topology-runtime-context.mdx`.
  */
 export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   const { timeoutSeconds, finalizationReserveSeconds, workingBudgetSeconds } =

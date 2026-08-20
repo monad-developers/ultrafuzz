@@ -944,7 +944,9 @@ describe("prompt semantic anchors", () => {
       ["strategies/roaming-goal.md", roaming]
     ] as const) {
       expect(body, name).toContain("absolute UTC deadline");
-      expect(body, name).toContain("`date -u`");
+      // `date -u +%s` rather than `date -u`: the runtime context states relative seconds and a start
+      // epoch, so the only comparison the agent can actually make is numeric.
+      expect(body, name).toContain("`date -u +%s`");
       expect(body, name).toMatch(/negative result, not a\s+failure/u);
       expect(body, name).toMatch(/strictly better\s+than being killed at the\s+timeout/u);
     }

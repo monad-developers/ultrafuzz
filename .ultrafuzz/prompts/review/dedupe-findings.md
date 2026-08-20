@@ -206,30 +206,20 @@ unsupported. Coverage is checked against what the runtime read, not against the
 lanes you chose to inspect, so a missing or doubly-claimed source fails the node.
 
 What the runtime read never includes a goal search lane whose result was not
-published and verified. Such a lane carries no coverage obligation: it
-contributes no finding to account for, and whatever bytes an interrupted goal
-worktree happens to hold were never published or contract-verified, so they are
-not provenance. Do not invent a ledger record for it, and do not attach it to an
-unrelated root to make a lane count come out even.
+published and verified, so do not invent a ledger record for one.
 
-Never treat a goal lane that did not complete as a zero-finding source. A goal
-search may end without returning while the run continues, and every goal lane's
-outputs are pre-seeded with a contract-valid empty findings array, so an empty
-`findings.json` is not by itself evidence that a goal was searched. A lane with
-no agent output row was stopped early and searched nothing, which is a different
-fact from a lane that ran, published a verified result, and reported `[]`. Only
-the second is a negative result, and only the second is coverage.
+Never treat a goal lane that did not complete as a zero-finding source. Goal
+findings arrays are pre-seeded empty, so a lane with
+no agent output row was stopped early and searched nothing, unlike a lane that
+ran and reported `[]`.
+Only the second is a negative result, and only the second is coverage.
 
-The runtime records which is which in its own goal search coverage census,
-`goal-search-coverage.json` next to `{{run_metadata_path}}`, under schema
-`ultrafuzz.goal-search-coverage.v1`. Each of its `goals` entries carries a
-`status` of `stopped-early`, `unverified`, `completed-with-findings`,
-`completed-no-findings`, or `completed`, and only the `completed` statuses are
-searched goals. Read it when you need to know whether a quiet goal lane was
-searched, and prefer it to any inference from the handoff directories you can
-see. Do not describe a `stopped-early` or `unverified` lane as searched,
-covered, or clean in any artifact you write, and do not let its seeded empty
-array widen the apparent breadth of the dedupe result.
+The runtime records which is which in
+`goal-search-coverage.json` next to `{{run_metadata_path}}`, schema
+`ultrafuzz.goal-search-coverage.v1`, where only the `completed` statuses are
+searched goals.
+Do not describe a `stopped-early` or `unverified` lane as searched,
+covered, or clean in any artifact you write.
 
 Write `node_id` by copying the producing node out of the finding itself, from
 its own `source_nodes` entry or `producer_node_id`. Never write the group

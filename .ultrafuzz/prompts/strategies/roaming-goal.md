@@ -25,17 +25,13 @@ behavior and impact before reporting it. Do not inspect sibling runs,
 historical reports, benchmark ground truth, host-global files, or network
 resources.
 
-The Topology Runtime Context states an absolute UTC deadline for this node. It
-is a wall-clock timestamp rather than a duration, so check the current time
-with `date -u` before each expensive step and compare the two. If the context
-supplies only relative seconds, resolve them into that timestamp once with
-`date -u` at startup and work against it thereafter. At the deadline, stop
-roaming in whatever state the search is, write the findings and generated-test
-artifacts, and exit cleanly. A roaming pass that surfaces nothing within the
-budget is an expected and valid outcome: `[]` written cleanly is strictly
-better than inventing a finding, and strictly better than being killed at the
-timeout with no output at all. An empty result is a negative result, not a
-failure.
+Derive this node's absolute UTC deadline from the Topology Runtime Context:
+run `date -u +%s` once at startup and add the working budget it states.
+Re-run `date -u +%s` before each expensive step and compare epochs. At the
+deadline, stop roaming, write the findings and generated-test artifacts, and
+exit cleanly. An empty result is a negative result, not a failure: writing
+`[]` cleanly is strictly better than being killed at the timeout with no
+output, and better than inventing a finding.
 
 Write normalized findings to `{{output_findings_path}}` and use `[]` when no
 supported vulnerability is found. If you create focused tests, put them below

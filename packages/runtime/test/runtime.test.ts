@@ -5145,22 +5145,22 @@ nodes:
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
-  // absolute-deadline lines are the only thing that makes the budget checkable by an agent that has
-  // no clock but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted
-  // deadline visible here instead of only in a run that dies at its timeout with no artifacts.
+  // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
+  // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline
+  // visible here instead of only in a run that dies at its timeout with no artifacts. Every byte is
+  // also paid once per task, so the wording is deliberately terse; the reasoning lives in the JSDoc
+  // on `topologyRuntimeContextForTimeout`.
   const expectedRuntimeContext = [
     "## Topology Runtime Context",
     "",
     "- Timeout: 1200 seconds total.",
     "- Finalization reserve: 200 seconds.",
     "- Working budget before finalization: 1000 seconds.",
-    "- You have shell access, so you have a clock: run `date -u +%s` once at the very start of this node and keep that value as your node start epoch.",
-    '- Absolute working-budget deadline (UTC) = node start epoch + 1000. Absolute hard deadline (UTC) = node start epoch + 1200. Resolve both once at startup and record them in your notes, for example with `date -u -d "+1000 seconds" +%Y-%m-%dT%H:%M:%SZ` and `date -u -d "+1200 seconds" +%Y-%m-%dT%H:%M:%SZ`.',
-    "- These are absolute timestamps rather than durations on purpose. Re-read the current time with `date -u +%s` (or `date -u`) before each expensive step and compare it against those two values instead of estimating how long you have been running.",
-    "- The deadlines are computed by you at startup and not printed here because this block is part of the hash-sealed workflow and cannot contain a wall-clock value.",
+    "- Clock: `date -u +%s` once at start = START; working deadline START+1000, hard deadline START+1200.",
+    "- Re-run `date -u +%s` before each expensive step; compare, never estimate.",
     "- Stop starting new delegated or tool work when the finalization reserve begins.",
     "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
-    "- Crossing the hard deadline kills this node with no output at all, which is strictly worse than a complete, cleanly written negative result."
+    "- Crossing the hard deadline kills this node with no output at all."
   ].join("\n");
   assert.equal(
     workflowSource.includes(`"runtimeContext": ${JSON.stringify(expectedRuntimeContext)}`),
@@ -5194,8 +5194,8 @@ test("topology runtime context keeps a bounded finalization reserve", async () =
     assert.match(
       context,
       new RegExp(
-        `- Absolute working-budget deadline \\(UTC\\) = node start epoch \\+ ${entry.workingSeconds}\\. ` +
-          `Absolute hard deadline \\(UTC\\) = node start epoch \\+ ${entry.timeoutSeconds}\\.`,
+        "- Clock: `date -u \\+%s` once at start = START; " +
+          `working deadline START\\+${entry.workingSeconds}, hard deadline START\\+${entry.timeoutSeconds}\\.`,
         "u"
       )
     );
