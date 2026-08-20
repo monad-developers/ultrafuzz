@@ -34,43 +34,8 @@ describe("packaged topology collection", () => {
     expect(nodes.get("class-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.class_goals" });
   });
 
-  it("keeps fuzz-only aligned with full except for the threat-model and goal fanout", () => {
-    const excluded = new Set([
-      "reference-vulnerability-database",
-      "threat-model",
-      "goal-plan",
-      "goal-roaming",
-      "threat-goals",
-      "class-goals"
-    ]);
-    const full = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, "full.yml"),
-      requirePromptFiles: true
-    });
-    const fuzzOnly = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, "fuzz-only.yml"),
-      requirePromptFiles: true
-    });
-
-    expect(fuzzOnly.nodes.map((node) => node.id)).toEqual(
-      full.nodes.filter((node) => !excluded.has(node.id)).map((node) => node.id)
-    );
-    const fullById = new Map(full.nodes.map((node) => [node.id, node]));
-    for (const node of fuzzOnly.nodes) {
-      const expected = structuredClone(fullById.get(node.id));
-      expect(expected, node.id).toBeDefined();
-      if (expected === undefined) continue;
-      expected.depends_on = expected.depends_on.filter((dependency) => !excluded.has(dependency));
-      expect(node, node.id).toEqual(expected);
-    }
-
-    const expectedGroups = structuredClone(full.groups ?? {});
-    delete expectedGroups.goals;
-    expect(fuzzOnly.groups).toEqual(expectedGroups);
-  });
-
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
-    for (const name of ["full", "fuzz-only", "smoke", "invariant-only"]) {
+    for (const name of ["full", "smoke", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -119,7 +84,7 @@ describe("packaged topology collection", () => {
   });
 
   it("declares the invariant backend commands in every topology that runs them", () => {
-    for (const name of ["full", "fuzz-only", "invariant-only"]) {
+    for (const name of ["full", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -141,7 +106,7 @@ describe("packaged topology collection", () => {
   // tasks at `retries: 0`, where one stochastic provider failure was terminal for the node
   // and everything downstream of it.
   it("gives every agentic node in every shipped topology a retry budget", () => {
-    for (const name of ["full", "fuzz-only", "invariant-only", "smoke"]) {
+    for (const name of ["full", "invariant-only", "smoke"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -164,7 +129,7 @@ describe("packaged topology collection", () => {
   // configured for a longer window.
   it("keeps group timeout pins at or above the long-running agentic window", () => {
     const MINIMUM_AGENTIC_TIMEOUT_SECONDS = 14_400;
-    for (const name of ["full", "fuzz-only", "invariant-only", "smoke"]) {
+    for (const name of ["full", "invariant-only", "smoke"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true

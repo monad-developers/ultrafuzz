@@ -42,6 +42,43 @@ Set `auth = "api-key"` to bill through an OpenAI API key read from
 from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
 at a specific Codex config directory.
 
+### OpenRouter through Codex
+
+The v0.1.0 Codex workflow can use an OpenRouter catalogue model through an
+isolated Codex provider configuration. Select the catalogue ID and name the
+same credential variable in Ultrafuzz that the provider configuration reads:
+
+```toml
+[models.default]
+agent = "CodexAgent"
+model = "anthropic/claude-sonnet-4"
+reasoning = "high"
+
+[agents.CodexAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+config_dir = ".ultrafuzz/openrouter-codex"
+```
+
+Create `.ultrafuzz/openrouter-codex/config.toml` with the corresponding Codex
+route (the generated `.ultrafuzz` state is already ignored by Git):
+
+```toml
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+env_key = "OPENROUTER_API_KEY"
+```
+
+Then export `OPENROUTER_API_KEY` before `ultrafuzz run`. The generated adapter
+uses that value for both Smithers credential preflight and the spawned Codex
+provider, and preflight probes the configured OpenRouter route rather than the
+first-party OpenAI endpoint. Keep the provider config local and do not commit
+credentials.
+
 ## Claude agent
 
 `ultrafuzz init` also generates a `ClaudeAgent`, backed by the Claude Code CLI

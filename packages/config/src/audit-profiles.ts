@@ -50,7 +50,6 @@ export interface PackagedTopologyDefinition {
 
 const PACKAGED_TOPOLOGY_DESCRIPTIONS = {
   full: "The complete production audit graph copied to projects by ultrafuzz init.",
-  "fuzz-only": "The pre-v0.1.0 fuzzing graph without threat-model or goal-fanout strategies.",
   smoke: "The bounded CI graph with context, four parallel strategies, dedupe, and reporting.",
   "invariant-only": "The focused property discovery, stateful-invariant campaign, review, and reporting graph."
 } as const;
