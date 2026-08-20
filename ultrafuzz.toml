@@ -51,8 +51,9 @@ agent = "KimiAgent"
 model = "kimi-k3"
 reasoning = "max"
 
-# Opt-in DeepSeek V4 profile. DeepSeek's official coding-agent integration
-# runs Claude Code against its Anthropic-compatible API endpoint.
+# Opt-in DeepSeek V4 profile. This runs the Claude Code harness against
+# DeepSeek's Anthropic-compatible API endpoint: a compatibility pairing, not
+# DeepSeek's first-party coding agent.
 [models.deepseek]
 agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
@@ -90,7 +91,7 @@ auth = "subscription"
 
 [agents.DeepSeekAgent]
 # DeepSeek V4 is API-key only. The generated adapter reads DEEPSEEK_API_KEY and
-# routes Claude Code to DeepSeek's official Anthropic-compatible endpoint.
+# routes the Claude Code harness to DeepSeek's Anthropic-compatible endpoint.
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 

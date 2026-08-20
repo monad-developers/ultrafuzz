@@ -3,5 +3,8 @@
 - Timeout: {{timeout_seconds}} seconds total.
 - Finalization reserve: {{finalization_reserve_seconds}} seconds.
 - Working budget before finalization: {{working_budget_seconds}} seconds.
+- Clock: `date -u +%s` once at start = START; working deadline START+{{working_budget_seconds}}, hard deadline START+{{timeout_seconds}}.
+- Re-run `date -u +%s` before each expensive step; compare, never estimate.
 - Stop starting new delegated or tool work when the finalization reserve begins.
 - During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.
+- Crossing the hard deadline kills this node with no output at all.

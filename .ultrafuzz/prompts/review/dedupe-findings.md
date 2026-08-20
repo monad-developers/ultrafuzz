@@ -205,6 +205,22 @@ recorded only as a duplicate or family variant and the ones you judged
 unsupported. Coverage is checked against what the runtime read, not against the
 lanes you chose to inspect, so a missing or doubly-claimed source fails the node.
 
+What the runtime read never includes a goal search lane whose result was not
+published and verified, so do not invent a ledger record for one.
+
+Never treat a goal lane that did not complete as a zero-finding source. Goal
+findings arrays are pre-seeded empty, so a lane with
+no agent output row was stopped early and searched nothing, unlike a lane that
+ran and reported `[]`.
+Only the second is a negative result, and only the second is coverage.
+
+The runtime records which is which in
+`goal-search-coverage.json` next to `{{run_metadata_path}}`, schema
+`ultrafuzz.goal-search-coverage.v1`, where only the `completed` statuses are
+searched goals.
+Do not describe a `stopped-early` or `unverified` lane as searched,
+covered, or clean in any artifact you write.
+
 Write `node_id` by copying the producing node out of the finding itself, from
 its own `source_nodes` entry or `producer_node_id`. Never write the group
 template ID, and never write a directory name taken from the artifact path; for

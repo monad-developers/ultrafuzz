@@ -53,7 +53,10 @@ const AGENT_TEMPLATES = [
     file: "deepseek.ts",
     template: "smithers/agents/deepseek.tsx",
     ref: "DeepSeekAgent",
-    stockSha256: new Set(["c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35"])
+    stockSha256: new Set([
+      "c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35",
+      "65bf43f333cbced8ff0157e942d3c78267d8245d6c0041e053c8577a463e7407"
+    ])
   },
   {
     file: "kimi.ts",

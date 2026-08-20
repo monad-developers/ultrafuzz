@@ -182,6 +182,17 @@ The Run summary contains exactly these public fields when available: `Run ID`,
 digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
 Render each concrete value as Markdown inline code.
 
+Goal search coverage census:
+`goal-search-coverage.json` next to `{{run_metadata_path}}`
+
+Schema `ultrafuzz.goal-search-coverage.v1`, written by the runtime and the only
+source of truth for coverage. `totals` carries `planned`, `completed`,
+`completed_with_findings`, `completed_no_findings`, `stopped_early`, and
+`unverified`; recompute each from the per-lane `goals` array. A `stopped-early`
+or `unverified` lane measured nothing; only the three `completed` statuses are
+searched goals. A lane whose `logical_node_id` is `goal-roaming` is the
+untargeted roaming pass, not a targeted goal.
+
 ## Finding Selection
 
 Read every issue surfaced by the upstream findings and severity classification
@@ -485,7 +496,7 @@ Preserve that same array in the `report.json` issue and keep compatibility
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. Read the implementation handoff's
+and before `## Goal search coverage`. Read the implementation handoff's
 `selection` object and property records. When
 the handoff is historical or lacks `selection`, render `unavailable` instead
 of guessing. In `report.json`, emit `property_implementation_coverage` with
@@ -562,7 +573,31 @@ so a summary naming `_beforeTokenTransfer` may appear either as
 `- property-2: _beforeTokenTransfer reverts` or as
 `- property-2: \_beforeTokenTransfer reverts`.
 
-Add `## Property provenance` after the implementation coverage section. For every
+Add `## Goal search coverage` after `## Property implementation coverage` and
+before `## Property provenance`, in every report, including a report with no
+issues, computed from the census alone: how many targeted goal searches
+completed out of how many targeted lanes the census recorded, then the
+per-status counts as bullets, roaming counted separately.
+
+Never state or imply that no vulnerabilities were found without stating goal
+coverage in the same report. A no-findings goal counts as searched only when its
+census status is `completed-no-findings`; a `stopped-early` or `unverified` lane
+measured nothing. Do not call such a lane
+covered, searched, clean, or verified anywhere in `report.md` or `report.json`,
+and do not fold its lane count into a completed count.
+
+If the census is absent, unparsable, differently versioned, or empty of goal
+lanes, write that goal search coverage is unknown, that
+unknown coverage is not full coverage, and that any goal-derived result is an
+unquantified sample. Do not reconstruct coverage from the goal plan or from the
+seeded empty findings arrays: a planned goal is not a searched goal.
+
+Do not write the census path, or any other local path, into `report.md`.
+Do not author a `goal_search_coverage` value in `report.json` either; the
+runtime stamps the census there and discards yours. Never be more optimistic
+than the census.
+
+Add `## Property provenance` after the goal search coverage section. For every
 property-derived production or non-production finding, render one concise table
 row containing:
 
@@ -600,10 +635,18 @@ appendix short and do not include exploit-style PoC sections for these outcomes.
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
 production issue entries with their Strategy sections, Property implementation
-coverage, Property provenance, optional prior finding disposition section, and
-non-production actionable outcomes appendix. If there are no production issues
-and no appendix outcomes, skip the issue index table and write `No issues
-reported.` before the Property implementation coverage section.
+coverage, Goal search coverage, Property provenance, optional prior finding
+disposition section, and non-production actionable outcomes appendix. If there
+are no production issues and no appendix outcomes, skip the issue index table
+and write `No issues reported.` before the Property implementation coverage
+section.
+
+Never write that bare `No issues reported.` when the goal search coverage census
+records a targeted goal search that did not complete, or records no targeted
+goal lane at all. Carry the numbers, for example `No issues were reported, but
+only 3 of 77 targeted goal searches completed, so this is not a result. See
+[Goal search coverage](#goal-search-coverage).` An unreadable census does not
+amend this sentence.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
@@ -722,6 +765,10 @@ Before finishing, verify that:
 - `report.md` contains `## Property implementation coverage` with counts that
   match the implementation handoff, or the literal `unavailable` for
   historical artifacts.
+- `report.md` contains `## Goal search coverage` with counts recomputed from the
+  census, or unknown coverage when none is readable, and states no absence of
+  findings without them.
+- `report.json` contains no agent-authored `goal_search_coverage` value.
 - `report.json.property_implementation_coverage` is either the exact
   machine-readable coverage object or the string `unavailable`.
 - `report.json.run_metadata.tokens_used` and

@@ -25,6 +25,14 @@ behavior and impact before reporting it. Do not inspect sibling runs,
 historical reports, benchmark ground truth, host-global files, or network
 resources.
 
+Derive this node's absolute UTC deadline from the Topology Runtime Context:
+run `date -u +%s` once at startup and add the working budget it states.
+Re-run `date -u +%s` before each expensive step and compare epochs. At the
+deadline, stop roaming, write the findings and generated-test artifacts, and
+exit cleanly. An empty result is a negative result, not a failure: writing
+`[]` cleanly is strictly better than being killed at the timeout with no
+output, and better than inventing a finding.
+
 Write normalized findings to `{{output_findings_path}}` and use `[]` when no
 supported vulnerability is found. If you create focused tests, put them below
 `{{strategy_attempt_test_dir}}` and write the ordinary generated-test manifest

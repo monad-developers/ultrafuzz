@@ -45,8 +45,15 @@ at a specific Codex config directory.
 ### OpenRouter through Codex
 
 The v0.1.0 Codex workflow can use an OpenRouter catalogue model through an
-isolated Codex provider configuration. Select the catalogue ID and name the
-same credential variable in Ultrafuzz that the provider configuration reads:
+isolated Codex provider configuration. This is a compatibility pairing: the
+Codex CLI harness pointed at a gateway rather than at OpenAI. Two separate
+things are true of it. The pairing is not selected by default — the shipped root
+config points `[models.default]` at `CodexAgent` against OpenAI, and reaching
+OpenRouter means editing `[models.default]` and `[agents.CodexAgent]` as shown
+below; there is no OpenRouter profile or agent ref to select and no `--agent`
+value that reaches it. Separately, once OpenRouter is the provider, Codex CLI is
+the harness this release ships for it. Select the catalogue ID and name the same
+credential variable in Ultrafuzz that the provider configuration reads:
 
 ```toml
 [models.default]
@@ -204,6 +211,18 @@ reasoning = "max"
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
+
+This is a compatibility pairing: it runs the Claude Code harness against
+DeepSeek's Anthropic-compatible endpoint, not DeepSeek's first-party coding
+agent. The profile is opt-in and non-default: `[models.default]` stays on
+`CodexAgent`, and this profile is selected per node or group in
+`.ultrafuzz/topology.yml` (`model_profiles = ["deepseek"]`). `--agent` and
+`--model` override fields of the default profile rather than selecting a profile
+by id, so `ultrafuzz run --agent DeepSeekAgent` swaps only the default profile's
+agent and carries neither this profile's `deepseek-v4-pro` nor its
+`reasoning = "max"`. Add `--model deepseek-v4-pro` to pin the model on such a
+run; an `--agent` override clears reasoning, so no `--effort` is passed and the
+Claude Code CLI default applies.
 
 DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,

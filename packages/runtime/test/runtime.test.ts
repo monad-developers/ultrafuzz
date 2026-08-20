@@ -4849,6 +4849,67 @@ test("a clean scaffold publishes the canonical artifact schema files the prompts
   }
 });
 
+test("a clean scaffold caps goal replacement values instead of only asking the planner to keep them short", () => {
+  // Regression guard for the measured #672/#677 cause. The goal-plan `goal_prompt` template is a
+  // ~161-character sentence whose namespaced MDX placeholders are substituted from `replacements`,
+  // and `goal-hunter.mdx` tells the hunter that sentence is its authoritative focused goal. In one
+  // 18-hour local default-profile run the planner inlined whole records there -- a full
+  // vulnerability-class record plus a full threat-model entry with its `attack_surfaces`, `assets`,
+  // `actors`, and every `evidence` array -- giving a per-goal replacement payload of min 3,751 /
+  // median 13,956 / max 42,483 characters across 88 goals. Every goal node therefore opened with a
+  // multi-thousand-token JSON wall, 9 nodes were killed at exactly their 7200000ms timeout, and only
+  // 3 of 77 class-goal nodes produced any output.
+  //
+  // The prompt that mandated the inlining has been rewritten, but a prompt is advice. This test
+  // asserts the MECHANICAL half of the fix, in the two artifacts the planner agent is actually
+  // handed by a clean scaffold: the canonical schema it is told to validate against, and the prompt
+  // it is told to follow. Prompt-only enforcement of a token-budget invariant is exactly what
+  // regressed here, so the cap has to be in the published contract bytes.
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  const schemaPath = path.join(projectArtifactSchemaDir(project), "goal-plan.schema.json");
+  const published = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as {
+    properties: Record<
+      string,
+      { items: { properties: { replacements: { additionalProperties: { anyOf: unknown[] } } } } }
+    >;
+  };
+  for (const goalKind of ["threat_goals", "class_goals"] as const) {
+    const branches = published.properties[goalKind]?.items.properties.replacements.additionalProperties.anyOf as
+      Array<{ type?: string; minLength?: number; maxLength?: number }> | undefined;
+    assert.ok(branches, `${goalKind} must publish a replacements value contract`);
+    const stringBranch = branches.find((branch) => branch.type === "string");
+    assert.ok(stringBranch, `${goalKind} replacements must accept a string label`);
+    // A short label, and bounded. The bound is the load-bearing part: without it the contract admits
+    // a record of any size, and the only thing standing between the planner and a JSON wall is prose.
+    assert.equal(stringBranch.minLength, 1, `${goalKind} replacements must reject an empty label`);
+    assert.equal(
+      typeof stringBranch.maxLength,
+      "number",
+      `${goalKind} replacements must cap the label length; an uncapped value is how a whole record reached the goal sentence`
+    );
+    assert.ok(
+      stringBranch.maxLength! <= 200,
+      `${goalKind} replacements cap is ${String(stringBranch.maxLength)}, which is wide enough to inline a record`
+    );
+    // The smallest replacement payload measured in the failing run was 3,751 characters, so the cap
+    // has to sit far below that rather than merely below the median.
+    assert.ok(
+      stringBranch.maxLength! < 3_751,
+      `${goalKind} replacements cap is ${String(stringBranch.maxLength)}, which still admits the smallest inlined record measured`
+    );
+  }
+
+  // And the prompt must no longer ask for the thing the contract now rejects, or every plan attempt
+  // burns a retry producing a document the gate refuses.
+  const planner = fs.readFileSync(path.join(project, ".ultrafuzz", "prompts", "setup", "goal-plan.md"), "utf8");
+  assert.match(planner, /short human-readable label/u);
+  assert.doesNotMatch(planner, /full contextual value/u);
+  assert.doesNotMatch(planner, /contains the full selected threat/u);
+  assert.doesNotMatch(planner, /focused hunter instructions and relevant examples/u);
+});
+
 function listFilesRecursively(root: string): string[] {
   return fs
     .readdirSync(root, { withFileTypes: true })
@@ -5456,7 +5517,7 @@ nodes:
 
   const plan = await planRun({ projectRoot: project, runId: "group-timeout", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const { compileSmithersWorkflow, topologyRuntimeContextForTimeout } = await import("../src/smithers.js");
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
@@ -5487,7 +5548,24 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  const expectedRuntimeContext = topologyRuntimeContextForTimeout(1_200_000);
+  // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
+  // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
+  // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline
+  // visible here instead of only in a run that dies at its timeout with no artifacts. Every byte is
+  // also paid once per task, so the wording is deliberately terse; the reasoning lives in the JSDoc
+  // on `topologyRuntimeContextForTimeout`.
+  const expectedRuntimeContext = [
+    "## Topology Runtime Context",
+    "",
+    "- Timeout: 1200 seconds total.",
+    "- Finalization reserve: 200 seconds.",
+    "- Working budget before finalization: 1000 seconds.",
+    "- Clock: `date -u +%s` once at start = START; working deadline START+1000, hard deadline START+1200.",
+    "- Re-run `date -u +%s` before each expensive step; compare, never estimate.",
+    "- Stop starting new delegated or tool work when the finalization reserve begins.",
+    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
+    "- Crossing the hard deadline kills this node with no output at all."
+  ].join("\n");
   assert.equal(
     workflowSource.includes(`"runtimeContext": ${JSON.stringify(expectedRuntimeContext)}`),
     true,
@@ -5514,6 +5592,26 @@ test("topology runtime context keeps a bounded finalization reserve", async () =
     if (entry.timeoutSeconds > 1) {
       assert.ok(entry.workingSeconds > 0);
     }
+    // #672/#677: a relative budget is unactionable for a model with no clock, which is how nodes
+    // reached their timeout having written nothing. Both deadlines must be derivable arithmetic over
+    // a start epoch the agent observes itself, and the shell command that observes it must be named.
+    assert.match(
+      context,
+      new RegExp(
+        "- Clock: `date -u \\+%s` once at start = START; " +
+          `working deadline START\\+${entry.workingSeconds}, hard deadline START\\+${entry.timeoutSeconds}\\.`,
+        "u"
+      )
+    );
+    assert.match(context, /`date -u \+%s`/u);
+    // A resolved wall-clock timestamp here would be a hard break, not a style problem: this string is
+    // serialized into the generated workflow, the workflow file is hashed into the control seal, and
+    // `writePreparedWorkflowFile` throws when a re-render disagrees with the bytes already on disk.
+    // It would also be semantically wrong, because generation happens once and nodes start hours
+    // later. Hence a recipe, and hence this guard against anything date-shaped.
+    assert.doesNotMatch(context, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/u);
+    // The byte stability that seal and re-prepare both depend on.
+    assert.equal(topologyRuntimeContextForTimeout(entry.timeoutMs), context);
   }
 });
 
@@ -5865,7 +5963,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /report\.issues\.map/);
   assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
   assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
-  assert.match(workflowSource, /verifyArtifacts\(task\);/);
+  assert.match(workflowSource, /verifyArtifacts\(task, \{ agentReturned: true \}\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
