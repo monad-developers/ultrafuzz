@@ -2878,9 +2878,11 @@ test(
       const thinkingIndex = thinkingCommand.args.indexOf("--thinking");
       assert.notEqual(thinkingIndex, -1);
       assert.equal(thinkingCommand.args[thinkingIndex + 1], "high");
+      // The throw must name the file and the key, not just the range: this is the
+      // error an operator hits copying `reasoning = "max"` off another profile.
       assert.throws(
         () => createPiAgent({ reasoningEffort: "ludicrous" }),
-        /PiAgent reasoning must be one of off, minimal, low, medium, high, xhigh: ludicrous/u
+        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh/u
       );
 
       // api_key_env names only where ultrafuzz reads the operator's value from;
