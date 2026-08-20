@@ -236,6 +236,45 @@ quorum = 3
 panel_size = 4
 ```
 
+## Pi agent
+
+`ultrafuzz init` also generates a `PiAgent`, backed by the `pi` CLI
+(`@earendil-works/pi-coding-agent`). The default root config includes an opt-in
+profile:
+
+```toml
+[models.pi]
+agent = "PiAgent"
+model = "openai/gpt-mini-latest"
+
+[agents.PiAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The adapter routes pi through OpenRouter and nothing else: the provider is the
+adapter's identity, fixed as `--provider openrouter`, not a configuration field.
+`model` is an opaque OpenRouter catalogue id that pi resolves itself, so no base
+URL is configured or needed. `auth` must be `api-key`; anything else is
+rejected before execution.
+
+The credential never reaches a command line. Smithers' `apiKey` option is the
+only path that emits `--api-key`, so the adapter never sets it; the value is
+read from `api_key_env` (default `OPENROUTER_API_KEY`) on the operator side and
+handed to the child process as `OPENROUTER_API_KEY`, which is the variable pi
+itself looks up. Naming a different `api_key_env` changes only where ultrafuzz
+reads the value from.
+
+State stays off the operator's home. `PI_CODING_AGENT_DIR` points pi at an
+isolated directory (default `.ultrafuzz/pi-coding-agent`, selectable with
+`config_dir` under `[agents.PiAgent]`) instead of `~/.pi/agent`, sessions are
+written to a `sessions` directory beneath it via `--session-dir`, and
+`PI_TELEMETRY=0` suppresses install telemetry.
+
+When a Pi profile sets `reasoning`, the adapter passes it to pi as
+`--thinking <level>`. The accepted levels are `off`, `minimal`, `low`,
+`medium`, `high`, and `xhigh`; any other value is rejected before execution.
+
 ## Forge process guard
 
 Worker environments put a run-scoped Forge wrapper ahead of the installed
