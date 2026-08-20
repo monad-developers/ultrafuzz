@@ -237,7 +237,7 @@ The default root config includes an opt-in OpenCode profile:
 ```toml
 [models.opencode]
 agent = "OpenCodeAgent"
-model = "openrouter/anthropic/claude-opus-4-8"
+model = "openrouter/anthropic/claude-opus-4.8"
 
 [agents.OpenCodeAgent]
 auth = "api-key"
@@ -253,24 +253,46 @@ through as OpenCode's provider-defined variant rather than a fixed effort
 ladder. `api-key` auth places the named variable in the child environment only
 — OpenCode reads provider credentials from the environment and emits no
 credential flag, so the key never appears in a command line, a process listing,
-or a log. `subscription` auth places no credential and uses whatever OpenCode
-already holds under its state root.
+or a log. `auth = "subscription"` is **rejected**: OpenCode reads `auth.json`
+from `$XDG_DATA_HOME/opencode`, and the adapter always relocates
+`XDG_DATA_HOME` into the run, so a subscription login held in the operator's
+home is unreachable by construction. Building an agent from it would produce a
+silently unauthenticated run, so the adapter throws instead, naming
+`agents.OpenCodeAgent.auth`.
 
 **Run-scoped state.** OpenCode otherwise writes its config directory, database
 and write-ahead log, snapshots, tool output, cached model catalogue, and
-downloaded binaries into the operator's real home. The adapter names every one
-of those roots explicitly — `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-`XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and
-`OPENCODE_CONFIG_DIR` — under a directory belonging to the run, and disables
-autoupdate, session sharing, model-catalogue fetch, default plugins, project
-config, and LSP downloads. A child process is not implicitly sandboxed: a root
-left unnamed is inherited, which is why the list is explicit rather than
-derived. Set `config_dir` under `[agents.OpenCodeAgent]` to anchor that state
-somewhere else — for example at an OpenCode configuration directory that
-already holds subscription credentials.
+downloaded binaries into the operator's real home. A child process is not
+implicitly sandboxed, so the adapter names each of those locations under a
+directory belonging to the run rather than deriving them:
 
-`ultrafuzz doctor` requires the `opencode` executable whenever a selected
-profile uses `OpenCodeAgent`.
+- `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, and
+  `XDG_RUNTIME_DIR` — the base directories OpenCode resolves state from.
+- `OPENCODE_CONFIG_DIR` — OpenCode's own configuration directory.
+- `OPENCODE_DB` — the database, its write-ahead log, and its shared-memory
+  file. OpenCode resolves this ahead of `XDG_DATA_HOME` and honours an absolute
+  value outright, so redirecting the XDG roots alone still leaves an inherited
+  value pointing outside the run.
+- `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_MODELS_PATH`,
+  `OPENCODE_TUI_CONFIG`, and `OPENCODE_PLUGIN_META_FILE` — set empty, because
+  each names a single file that would otherwise be read from, or written
+  outside, the run.
+- `npm_config_cache` and `BUN_INSTALL_CACHE_DIR` — OpenCode shells out to npm
+  and bun, whose caches are separate roots.
+
+It also disables autoupdate, session sharing, model-catalogue fetch, default
+plugins, project config, and LSP downloads. This list is what the adapter
+actually sets; it is not a claim that OpenCode has no other state root.
+
+Set `config_dir` under `[agents.OpenCodeAgent]` to anchor that state somewhere
+else. `config_dir` is the XDG parent, not OpenCode's own directory:
+`XDG_DATA_HOME` becomes `<config_dir>/data`, so pointing it at
+`~/.config/opencode` or `~/.local/share/opencode` picks nothing up.
+
+`ultrafuzz doctor` requires the `opencode` executable whenever any configured
+profile uses `OpenCodeAgent` — every profile in `[models.*]` is checked, not
+only the one a run selects, so keeping the shipped `[models.opencode]` profile
+means every contributor needs the CLI installed.
 
 Default triage requires quorum `3` from a panel size of `4`:
 

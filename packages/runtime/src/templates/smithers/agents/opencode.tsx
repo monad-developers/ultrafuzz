@@ -54,6 +54,16 @@ function openCodeChildEnvironment(addDir: readonly string[] | undefined): Record
     XDG_STATE_HOME: path.join(root, "state"),
     XDG_RUNTIME_DIR: path.join(root, "runtime"),
     OPENCODE_CONFIG_DIR: path.join(root, "config", "opencode"),
+    // OPENCODE_DB overrides XDG_DATA_HOME, so an inherited absolute value puts
+    // the database and its write-ahead log outside the run root even with every
+    // XDG root named. The single-file overrides below are blanked for the same
+    // reason: each names a file OpenCode would otherwise read from outside.
+    OPENCODE_DB: path.join(root, "data", "opencode", "opencode.db"),
+    OPENCODE_CONFIG: "",
+    OPENCODE_CONFIG_CONTENT: "",
+    OPENCODE_MODELS_PATH: "",
+    OPENCODE_TUI_CONFIG: "",
+    OPENCODE_PLUGIN_META_FILE: "",
     // Nothing may update itself, publish a session, refetch the catalogue,
     // load a default plugin, or read a project config the run does not own.
     OPENCODE_DISABLE_AUTOUPDATE: "1",
@@ -62,16 +72,23 @@ function openCodeChildEnvironment(addDir: readonly string[] | undefined): Record
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
+    // OpenCode shells out to npm and bun; their caches are separate roots that
+    // stay in the operator's home unless they are named here too.
+    npm_config_cache: path.join(root, "cache", "npm"),
+    BUN_INSTALL_CACHE_DIR: path.join(root, "cache", "bun"),
     ...openCodeCredential(config)
   };
 }
 
 function openCodeCredential(config: OpenCodeAuthConfig): Record<string, string> {
-  const auth = config.auth ?? "subscription";
-  // "subscription" uses whatever OpenCode already holds under the state root
-  // above; no credential is placed in the child environment.
-  if (auth === "subscription") return {};
-  if (auth !== "api-key") throw new Error(`unsupported OpenCodeAgent auth mode in ultrafuzz.toml: ${auth}`);
+  const auth = config.auth ?? "api-key";
+  // OpenCode reads auth.json under XDG_DATA_HOME, which this adapter always
+  // relocates into the run, so a subscription credential the operator holds is
+  // unreachable by construction; a silently unauthenticated agent is worse than
+  // an error naming the setting that has to change.
+  if (auth !== "api-key") {
+    throw new Error(`agents.OpenCodeAgent.auth must be api-key in ultrafuzz.toml, not ${auth}`);
+  }
   const name = config.api_key_env ?? "OPENROUTER_API_KEY";
   const value = process.env[name];
   if (value === undefined || value.trim() === "") {

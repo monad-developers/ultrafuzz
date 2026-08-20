@@ -64,7 +64,7 @@ reasoning = "max"
 # own catalogue; `reasoning` is passed through as the provider-defined variant.
 [models.opencode]
 agent = "OpenCodeAgent"
-model = "openrouter/anthropic/claude-opus-4-8"
+model = "openrouter/anthropic/claude-opus-4.8"
 
 [agents.CodexAgent]
 auth = "api-key"
@@ -95,14 +95,17 @@ auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 
 [agents.OpenCodeAgent]
-# The generated adapter runs the OpenCode CLI with `--pure` and points every
-# OpenCode state root -- config, database, cache, snapshots, downloaded assets --
-# at a run-scoped directory, so no run writes harness state into your home.
+# The generated adapter runs the OpenCode CLI with `--pure` and points the
+# OpenCode state roots it names -- the XDG base directories, OPENCODE_CONFIG_DIR
+# and OPENCODE_DB, plus the npm and bun caches -- at a run-scoped directory, so
+# no run writes harness state into your home. See docs/config.md for the list.
 # "api-key" reads OPENROUTER_API_KEY unless api_key_env names another variable,
 # and places it in the child environment only, never on the command line.
-# Switch to "subscription" to use credentials OpenCode already holds, and set
-# config_dir to the directory holding them; config_dir also relocates the state
-# root away from the run-scoped default.
+# "subscription" is rejected: OpenCode reads auth.json from $XDG_DATA_HOME, which
+# the adapter always relocates into the run, so a login held in your home is
+# unreachable and the agent would run unauthenticated. config_dir relocates the
+# state root; it is the XDG parent, so pointing it at ~/.config/opencode or
+# ~/.local/share/opencode picks nothing up.
 auth = "api-key"
 api_key_env = "OPENROUTER_API_KEY"
 

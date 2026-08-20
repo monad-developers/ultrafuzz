@@ -1400,6 +1400,12 @@ test("init preserves existing project-owned files and validate exposes launch po
     "XDG_STATE_HOME",
     "XDG_RUNTIME_DIR",
     "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DB",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_MODELS_PATH",
+    "OPENCODE_TUI_CONFIG",
+    "OPENCODE_PLUGIN_META_FILE",
     "OPENCODE_DISABLE_AUTOUPDATE",
     "OPENCODE_DISABLE_SHARE",
     "OPENCODE_DISABLE_MODELS_FETCH",
@@ -2844,7 +2850,7 @@ test(
     try {
       const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
       const agent = createOpenCodeAgent({
-        model: "openrouter/anthropic/claude-opus-4-8",
+        model: "openrouter/anthropic/claude-opus-4.8",
         reasoningEffort: "high",
         addDir: [artifactDir]
       });
@@ -2858,6 +2864,23 @@ test(
       assert.equal(agent.opts.env.XDG_STATE_HOME, path.join(stateRoot, "state"));
       assert.equal(agent.opts.env.XDG_RUNTIME_DIR, path.join(stateRoot, "runtime"));
       assert.equal(agent.opts.env.OPENCODE_CONFIG_DIR, path.join(stateRoot, "config", "opencode"));
+      // OpenCode shells out to npm and bun; those caches are separate roots.
+      assert.equal(agent.opts.env.npm_config_cache, path.join(stateRoot, "cache", "npm"));
+      assert.equal(agent.opts.env.BUN_INSTALL_CACHE_DIR, path.join(stateRoot, "cache", "bun"));
+      // OPENCODE_DB is resolved ahead of XDG_DATA_HOME and wins, so naming the
+      // XDG roots alone leaves the database inheritable.
+      assert.equal(agent.opts.env.OPENCODE_DB, path.join(stateRoot, "data", "opencode", "opencode.db"));
+      // Every remaining single-file override names a file outside the run when
+      // inherited, so each is blanked rather than left to the parent.
+      for (const name of [
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_MODELS_PATH",
+        "OPENCODE_TUI_CONFIG",
+        "OPENCODE_PLUGIN_META_FILE"
+      ]) {
+        assert.equal(agent.opts.env[name], "", `${name} was left inheritable`);
+      }
       for (const name of [
         "OPENCODE_DISABLE_AUTOUPDATE",
         "OPENCODE_DISABLE_SHARE",
@@ -2875,7 +2898,10 @@ test(
         "XDG_CACHE_HOME",
         "XDG_STATE_HOME",
         "XDG_RUNTIME_DIR",
-        "OPENCODE_CONFIG_DIR"
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_DB",
+        "npm_config_cache",
+        "BUN_INSTALL_CACHE_DIR"
       ]) {
         const value = agent.opts.env[name] ?? "";
         assert.equal(value.startsWith(runRoot), true, `${name} escaped the run root: ${value}`);
@@ -2898,7 +2924,7 @@ test(
       // The subclass override is the only one: everything else -- argv, prompt
       // assembly, output interpretation, usage, sessions -- stays with Smithers.
       assert.equal(command.args.includes("-m"), true);
-      assert.equal(command.args.includes("openrouter/anthropic/claude-opus-4-8"), true);
+      assert.equal(command.args.includes("openrouter/anthropic/claude-opus-4.8"), true);
       // Controller-only capabilities are withheld, proving the command env went
       // through workflowControlChildEnvironment.
       for (const name of [
@@ -2912,13 +2938,50 @@ test(
       }
 
       // Without an artifact directory the state root still stays project-local.
-      const bare = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4-8" });
+      const bare = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4.8" });
       assert.equal(bare.opts.env.XDG_CONFIG_HOME, path.join(process.cwd(), ".ultrafuzz", "opencode", "config"));
 
       delete process.env.OPENROUTER_API_KEY;
       assert.throws(
         () => createOpenCodeAgent({ addDir: [artifactDir] }),
         /agents\.OpenCodeAgent auth is api-key, but OPENROUTER_API_KEY is not set/u
+      );
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.key;
+    }
+  }
+);
+
+/**
+ * `auth = "subscription"` cannot work here and must not be accepted quietly.
+ * OpenCode reads auth.json from `$XDG_DATA_HOME/opencode`, and this adapter
+ * always relocates XDG_DATA_HOME into the run, so a subscription login the
+ * operator holds is unreachable by construction; accepting the value would hand
+ * the workflow an agent that is silently unauthenticated.
+ */
+test(
+  "generated OpenCode adapter rejects subscription auth instead of running unauthenticated",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const subscriptionConfig = path.join(project, "opencode-subscription.toml");
+    fs.writeFileSync(subscriptionConfig, '[agents.OpenCodeAgent]\nauth = "subscription"\n', "utf8");
+    const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENROUTER_API_KEY };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "opencode-test-key";
+    try {
+      const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+      // The shipped api-key config still builds an agent.
+      assert.equal(typeof createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4.8" }), "object");
+      process.env.ULTRAFUZZ_CONFIG_PATH = subscriptionConfig;
+      assert.throws(
+        () => createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4.8" }),
+        /agents\.OpenCodeAgent\.auth must be api-key in ultrafuzz\.toml, not subscription/u
       );
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
@@ -2946,7 +3009,7 @@ test(
     process.env.OPENROUTER_API_KEY = "opencode-test-key";
     try {
       const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
-      const agent = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4-8" });
+      const agent = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4.8" });
       const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
       assert.equal(command.env?.OPENCODE_PERMISSION, '{"*":"allow"}');
     } finally {
@@ -2959,21 +3022,33 @@ test(
 );
 
 /**
- * The filesystem proof: run the real OpenCode CLI with HOME pointed at a
- * throwaway root and assert it created nothing under any of OpenCode's default
- * per-user locations. Skipped where the CLI is not installed; the env contract
- * above is asserted unconditionally.
+ * The filesystem proof, run as a matched pair against the real OpenCode CLI.
+ *
+ * The positive arm runs the adapter's environment and asserts nothing lands in
+ * OpenCode's per-user locations, and that an inherited absolute `OPENCODE_DB` --
+ * which OpenCode resolves ahead of XDG_DATA_HOME and honours outright -- does
+ * not survive. The negative control runs the SAME argv with that environment
+ * removed and asserts the leak does happen, so a green positive arm cannot be
+ * an artefact of the CLI writing nothing at all.
+ *
+ * Where the CLI is absent the case is declared skipped, not returned from: a
+ * body that returns early reports as a pass and would let a machine without
+ * OpenCode installed claim a proof it never ran. The selector below is what
+ * declares it -- Bun's `node:test` shim, which is what runs this file, ignores
+ * the `skip` option but does honour `test.skip`.
  */
-test(
+const openCodeCliInstalled = runningUnderBun && spawnSync("opencode", ["--version"], { encoding: "utf8" }).status === 0;
+const openCodeFilesystemProof = openCodeCliInstalled ? test : test.skip;
+openCodeFilesystemProof(
   "generated OpenCode adapter writes no harness state under a redirected home",
-  { skip: !runningUnderBun },
+  { timeout: 180_000 },
   async () => {
-    const openCodeVersion = spawnSync("opencode", ["--version"], { encoding: "utf8" });
-    if (openCodeVersion.status !== 0) return;
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-home-"));
+    const leakHome = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-leak-"));
+    const inheritedDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-db-")), "inherited.db");
     const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-home");
     const artifactDir = path.join(runRoot, "artifacts", "recon");
     const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENROUTER_API_KEY };
@@ -2982,7 +3057,7 @@ test(
     try {
       const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
       const agent = createOpenCodeAgent({
-        model: "openrouter/anthropic/claude-opus-4-8",
+        model: "openrouter/anthropic/claude-opus-4.8",
         addDir: [artifactDir]
       });
       const command = await agent.buildCommand({
@@ -2990,33 +3065,71 @@ test(
         cwd: project,
         options: {}
       });
-      const childEnv: Record<string, string> = {};
+      // Both arms start from an operator environment that already points
+      // OPENCODE_DB somewhere the run does not own.
+      const inherited: Record<string, string> = {};
       for (const [name, value] of Object.entries(process.env)) {
-        if (value !== undefined) childEnv[name] = value;
+        if (value !== undefined) inherited[name] = value;
       }
+      inherited.OPENCODE_DB = inheritedDb;
+
       spawnSync(command.command, command.args, {
         cwd: project,
         encoding: "utf8",
-        env: { ...childEnv, HOME: home, ...agent.opts.env, ...command.env },
+        env: { ...inherited, HOME: home, ...agent.opts.env, ...command.env },
         timeout: 60_000
       });
-      // Every default per-user location OpenCode would otherwise populate.
+      // Every default per-user location OpenCode would otherwise populate,
+      // including the npm cache its own subprocesses write.
       for (const relative of [
         [".config", "opencode"],
         [".local", "share", "opencode"],
         [".local", "state", "opencode"],
-        [".cache", "opencode"]
+        [".cache", "opencode"],
+        [".npm"]
       ]) {
         const leaked = path.join(home, ...relative);
         assert.equal(fs.existsSync(leaked), false, `OpenCode wrote harness state to ${leaked}`);
       }
+      assert.equal(fs.existsSync(inheritedDb), false, `an inherited OPENCODE_DB survived into ${inheritedDb}`);
       assert.equal(fs.existsSync(path.join(runRoot, "opencode")), true, "no run-scoped OpenCode state root was used");
+      assert.equal(
+        fs.existsSync(path.join(runRoot, "opencode", "data", "opencode", "opencode.db")),
+        true,
+        "the OpenCode database was not created inside the run-scoped state root"
+      );
+
+      // Negative control: the same argv with the adapter's environment removed.
+      const leaking: Record<string, string> = { ...inherited, HOME: leakHome };
+      for (const name of Object.keys(agent.opts.env)) {
+        if (name !== "OPENROUTER_API_KEY") delete leaking[name];
+      }
+      leaking.OPENCODE_DB = inheritedDb;
+      leaking.OPENCODE_PERMISSION = '{"*":"allow"}';
+      spawnSync(command.command, command.args, {
+        cwd: project,
+        encoding: "utf8",
+        env: leaking,
+        timeout: 60_000
+      });
+      assert.equal(
+        fs.existsSync(inheritedDb),
+        true,
+        "negative control did not reproduce the inherited-OPENCODE_DB leak, so the positive arm proves nothing"
+      );
+      assert.equal(
+        fs.existsSync(path.join(leakHome, ".config", "opencode")),
+        true,
+        "negative control did not reproduce the per-user config leak, so the positive arm proves nothing"
+      );
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
       else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = previous.key;
       fs.rmSync(home, { force: true, recursive: true });
+      fs.rmSync(leakHome, { force: true, recursive: true });
+      fs.rmSync(path.dirname(inheritedDb), { force: true, recursive: true });
     }
   }
 );
