@@ -28,37 +28,6 @@ profiles are intentionally not checked so a preserved registry from an older
 project remains usable; selecting one of those profiles still fails before
 launch if its agent is not registered.
 
-### Providers and harnesses are separate choices
-
-An agent ref names a **harness** — the CLI that actually runs the task — while
-the **provider** is chosen by the credential and endpoint that harness is
-pointed at. The two are not welded together, and this release ships more than
-one pairing:
-
-| Provider             | Harness     | Agent ref                                  | Status                       |
-| -------------------- | ----------- | ------------------------------------------ | ---------------------------- |
-| OpenAI               | Codex CLI   | `CodexAgent`                               | shipped default              |
-| Anthropic            | Claude Code | `ClaudeAgent`                              | opt-in profile               |
-| Moonshot / Kimi      | Kimi Code   | `KimiAgent`                                | opt-in profile               |
-| OpenRouter (gateway) | Codex CLI   | `CodexAgent` with an isolated `config_dir` | opt-in compatibility pairing |
-| DeepSeek             | Claude Code | `DeepSeekAgent`                            | opt-in compatibility pairing |
-
-`[models] default` is the only pairing selected without asking: the shipped root
-config points it at `CodexAgent` against OpenAI. Every other row is opt-in and
-has to be selected per node or group in `.ultrafuzz/topology.yml`
-(`model_profiles = [...]`) or for a single run with `--agent <Ref>`. None of the
-rows above is the only possible architecture; the sections below document each
-one as a worked example.
-
-A **compatibility pairing** is one vendor's harness pointed at another vendor's
-API-compatible endpoint. It is supported but not recommended for a new project,
-and it is not the provider's own first-party coding agent. Both compatibility
-rows above are what this release happens to ship for their provider — Codex CLI
-is the only harness that reaches OpenRouter today and Claude Code is the only
-one that reaches DeepSeek — which is a grandfathered status, not an endorsement.
-See [Provider/Harness Research](explanation/provider-harness-research.md) for the
-pairing policy and the qualification status behind each row.
-
 Codex agent authentication is configured in TOML instead of in generated
 workflow adapter code:
 
@@ -76,10 +45,15 @@ at a specific Codex config directory.
 ### OpenRouter through Codex
 
 The v0.1.0 Codex workflow can use an OpenRouter catalogue model through an
-isolated Codex provider configuration. This is a compatibility pairing — the
-Codex CLI harness pointed at a gateway rather than at OpenAI — and it is opt-in,
-not the default selection. Select the catalogue ID and name the same credential
-variable in Ultrafuzz that the provider configuration reads:
+isolated Codex provider configuration. This is a compatibility pairing: the
+Codex CLI harness pointed at a gateway rather than at OpenAI. Two separate
+things are true of it. The pairing is not selected by default — the shipped root
+config points `[models.default]` at `CodexAgent` against OpenAI, and reaching
+OpenRouter means editing `[models.default]` and `[agents.CodexAgent]` as shown
+below; there is no OpenRouter profile or agent ref to select and no `--agent`
+value that reaches it. Separately, once OpenRouter is the provider, Codex CLI is
+the harness this release ships for it. Select the catalogue ID and name the same
+credential variable in Ultrafuzz that the provider configuration reads:
 
 ```toml
 [models.default]
@@ -240,8 +214,15 @@ api_key_env = "DEEPSEEK_API_KEY"
 
 This is a compatibility pairing: it runs the Claude Code harness against
 DeepSeek's Anthropic-compatible endpoint, not DeepSeek's first-party coding
-agent. The profile is opt-in and non-default — `[models] default` stays on
-`CodexAgent` unless a topology entry or `--agent DeepSeekAgent` selects this one.
+agent. The profile is opt-in and non-default: `[models.default]` stays on
+`CodexAgent`, and this profile is selected per node or group in
+`.ultrafuzz/topology.yml` (`model_profiles = ["deepseek"]`). `--agent` and
+`--model` override fields of the default profile rather than selecting a profile
+by id, so `ultrafuzz run --agent DeepSeekAgent` swaps only the default profile's
+agent and carries neither this profile's `deepseek-v4-pro` nor its
+`reasoning = "max"`. Add `--model deepseek-v4-pro` to pin the model on such a
+run; an `--agent` override clears reasoning, so no `--effort` is passed and the
+Claude Code CLI default applies.
 
 DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,
