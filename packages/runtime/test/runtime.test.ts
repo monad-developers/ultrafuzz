@@ -5113,7 +5113,7 @@ nodes:
 
   const plan = await planRun({ projectRoot: project, runId: "group-timeout", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const { compileSmithersWorkflow, topologyRuntimeContextForTimeout } = await import("../src/smithers.js");
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
