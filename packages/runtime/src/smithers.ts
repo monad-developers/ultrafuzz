@@ -4057,6 +4057,42 @@ function defaultModelProfile(config: ResolvedConfig): ResolvedConfig["models"]["
 
 export { topologyRuntimeBudgetForTimeout };
 
+/**
+ * Builds the "## Topology Runtime Context" block injected into every task prompt as
+ * `task.runtimeContext`.
+ *
+ * The relative-seconds lines are unactionable on their own: a language model has no clock, so
+ * "stop after 6900 seconds" cannot be checked. Long-running agentic nodes were consequently killed
+ * at their timeout with no artifacts written at all (run reliability, #672/#677). Agentic nodes run
+ * through a shell, so an ABSOLUTE UTC deadline is measurable where a duration is not.
+ *
+ * The deadline is expressed as an arithmetic RECIPE over a start time the agent observes itself,
+ * never as a wall-clock timestamp resolved here. That is a hard constraint, not a stylistic
+ * preference:
+ *
+ *   - This string is serialized into the generated workflow by `renderWorkflowSource`, and that
+ *     file is hashed into the control seal (`workflow-integrity.ts`). Sealed content must be a pure
+ *     function of the run inputs.
+ *   - `writePreparedWorkflowFile` re-renders the workflow source and throws
+ *     "existing generated Smithers workflow conflicts with the prepared workflow start" when the
+ *     bytes differ from the file already on disk. A `Date.now()` in this block would therefore make
+ *     every re-prepare of an existing run fail.
+ *   - Generation happens once; nodes start hours later. A generation-time timestamp would already be
+ *     wrong — often expired — by the time the node it governs begins.
+ *
+ * The same "agent resolves its own absolute deadlines from an observed start time" pattern is
+ * already established by the invariant campaign plan (`backend_started_at`, `fuzzing_deadline_utc`,
+ * `force_kill_deadline_utc`, `final_artifact_deadline_utc`).
+ *
+ * The three relative lines are kept verbatim: several strategy prompts instruct the agent to copy
+ * the exact `Timeout` and `Finalization reserve` values out of this block.
+ *
+ * Every byte here is paid once per task in the run, because this block is part of the mandatory
+ * prefix prepended to every prompt (`packages/prompts/test/agent-preamble.test.ts` pins its exact
+ * length). The template text is therefore deliberately telegraphic; the reasoning lives in this
+ * comment, which costs no prompt tokens. Keep new rationale here rather than in the MDX at
+ * `.ultrafuzz/prompts/_templates/agent-preamble/topology-runtime-context.mdx`.
+ */
 export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   const { timeoutSeconds, finalizationReserveSeconds, workingBudgetSeconds } =
     topologyRuntimeBudgetForTimeout(timeoutMs);

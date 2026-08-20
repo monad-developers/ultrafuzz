@@ -1057,6 +1057,42 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     ]),
     "utf8"
   );
+  // The runtime writes this census at the run root; the report renderer must state its coverage.
+  writeJsonRecord(path.join(runData.run_root, "goal-search-coverage.json"), {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: runData.run_id,
+    totals: {
+      planned: 3,
+      completed: 3,
+      completed_with_findings: 1,
+      completed_no_findings: 2,
+      stopped_early: 0,
+      unverified: 0
+    },
+    goals: [
+      {
+        node_id: "dynamic:class:accounting",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-001",
+        status: "completed-with-findings",
+        finding_count: 1
+      },
+      {
+        node_id: "dynamic:threat:authorization",
+        logical_node_id: "threat-goals",
+        attempt_id: "attempt-002",
+        status: "completed-no-findings",
+        finding_count: 0
+      },
+      {
+        node_id: "goal-roaming",
+        logical_node_id: "goal-roaming",
+        attempt_id: "attempt-003",
+        status: "completed-no-findings",
+        finding_count: 0
+      }
+    ]
+  });
   fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
 
   const repaired = await cli(project, ["report", runData.run_id, "--json"]);
@@ -1128,6 +1164,12 @@ test("report regenerates canonical Markdown from structured issues and non-produ
   );
   assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
   assert.match(markdown, /- Reference expectation properties: `1`/u);
+  assert.match(
+    markdown,
+    /## Goal search coverage\n\nAll 2 targeted goal searches completed and published a verified result/u
+  );
+  assert.match(markdown, /- Targeted goal search lanes: `2`\n- Completed with a verified result: `2`/u);
+  assert.match(markdown, /- Untargeted roaming passes, counted separately: `1` of `1` completed/u);
   assert.match(
     markdown,
     /## Non-production actionable outcomes\n\n\| Classification \| Title \| Status \| Evidence \| Strategy provenance \| Recommended next action \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| harness-defect \| Review-only outcome \| non-production \| Focused harness evidence\. \| stateful-invariant \(1\/8\) \| Repair the focused harness\. \|/u
@@ -1392,6 +1434,95 @@ test("report reconciliation links dedicated audit context and preserves dynamic 
   };
   assert.equal(report.issues[0]?.source_node_id, sourceNodes[0]);
   assert.deepEqual(report.issues[0]?.source_nodes, sourceNodes);
+});
+
+test("report reconciliation renders authoritative goal search coverage and refuses the agent's claim", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-goal-coverage");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.json");
+  const markdownPath = path.join(reportDir, "report.md");
+  const censusPath = path.join(runData.run_root, "goal-search-coverage.json");
+  const lane = (index: number, status: string): Record<string, unknown> => ({
+    node_id: `dynamic:class:${index}`,
+    logical_node_id: "class-goals",
+    attempt_id: `attempt-${String(index).padStart(3, "0")}`,
+    status,
+    finding_count: status === "completed-no-findings" ? 0 : null
+  });
+
+  // The agent's own coverage claim is a full-coverage census it has no standing to make.
+  writeJsonRecord(reportPath, {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: [],
+    goal_search_coverage: {
+      schema_version: "ultrafuzz.goal-search-coverage.v1",
+      run_id: runData.run_id,
+      totals: { planned: 77, completed: 77, stopped_early: 0, unverified: 0 },
+      goals: Array.from({ length: 77 }, (_entry, index) => lane(index + 1, "completed-no-findings"))
+    }
+  });
+  writeJsonRecord(censusPath, {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: runData.run_id,
+    totals: {
+      planned: 77,
+      completed: 3,
+      completed_with_findings: 0,
+      completed_no_findings: 3,
+      stopped_early: 74,
+      unverified: 0
+    },
+    goals: [
+      ...Array.from({ length: 3 }, (_entry, index) => lane(index + 1, "completed-no-findings")),
+      ...Array.from({ length: 74 }, (_entry, index) => lane(index + 4, "stopped-early"))
+    ]
+  });
+
+  const partial = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(partial.code, 0, `${partial.stderr}${partial.stdout}`);
+  let markdown = fs.readFileSync(markdownPath, "utf8");
+  assert.match(markdown, /\*\*Partial goal search coverage: only 3 of 77 targeted goal searches completed\.\*\*/u);
+  assert.match(markdown, /- Stopped early without returning: `74`/u);
+  assert.match(
+    markdown,
+    /^No issues were reported, but only 3 of 77 targeted goal searches completed, so this is not a result\./mu
+  );
+  assert.doesNotMatch(markdown, /^No issues reported\.$/mu);
+  const readCoverage = (): unknown =>
+    (JSON.parse(fs.readFileSync(reportPath, "utf8")) as { goal_search_coverage?: unknown }).goal_search_coverage;
+  assert.equal((readCoverage() as { totals?: { completed?: number } }).totals?.completed, 3);
+
+  // Without a census the report must say coverage is unknown, and the previously stamped census in
+  // report.json must not be recycled into a coverage claim it can no longer stand behind.
+  fs.rmSync(censusPath);
+  const unknown = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(unknown.code, 0, `${unknown.stderr}${unknown.stdout}`);
+  markdown = fs.readFileSync(markdownPath, "utf8");
+  assert.match(markdown, /\*\*Goal search coverage is unknown\.\*\*/u);
+  assert.match(markdown, /Unknown coverage is not full coverage\./u);
+  assert.doesNotMatch(markdown, /- Targeted goal search lanes:/u);
+  assert.equal(readCoverage(), "unavailable");
+
+  // A census under an unrecognized schema version is not coverage either.
+  writeJsonRecord(censusPath, {
+    schema_version: "ultrafuzz.goal-search-coverage.v0",
+    goals: [lane(1, "completed-no-findings")]
+  });
+  const mismatched = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(mismatched.code, 0, `${mismatched.stderr}${mismatched.stdout}`);
+  assert.match(fs.readFileSync(markdownPath, "utf8"), /\*\*Goal search coverage is unknown\.\*\*/u);
+  assert.equal(readCoverage(), "unavailable");
+
+  // Unparsable census bytes are the unknown answer, not a failed report.
+  fs.writeFileSync(censusPath, "{ not json", "utf8");
+  const unparsable = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(unparsable.code, 0, `${unparsable.stderr}${unparsable.stdout}`);
+  assert.match(fs.readFileSync(markdownPath, "utf8"), /\*\*Goal search coverage is unknown\.\*\*/u);
 });
 
 test("report reconciliation rejects contradictory, unknown, and unmatched finding provenance", async () => {

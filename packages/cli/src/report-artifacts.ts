@@ -23,6 +23,8 @@ import {
   type PropertyCampaignArtifact
 } from "@ultrafuzz/artifacts";
 import {
+  GOAL_SEARCH_COVERAGE_FILE,
+  GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   isDirectiveConformingFinalReportMarkdown,
   MAX_FINAL_REPORT_JSON_BYTES,
   MAX_FINAL_REPORT_MARKDOWN_BYTES,
@@ -90,6 +92,7 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   report = reconcileFindingSourceProvenance(root, report);
   report = reconcileCampaignOutcome(root, report);
   report = reconcilePropertyImplementationCoverage(root, report);
+  report = reconcileGoalSearchCoverage(root, report);
   report = reconcilePropertyProvenance(root, report);
   const projection = projectCanonicalFinalReport(report);
   report = projection.report;
@@ -388,6 +391,36 @@ function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonReco
       ...(typeof reason === "string" && reason.trim() !== "" ? { reason: reason.trim() } : {})
     }
   };
+}
+
+/**
+ * Carry the runtime-owned goal-search census into the report the reader receives (issue #677).
+ *
+ * The generated workflow already stamps this census into `report.json` after the final-review agent
+ * returns, but the CLI re-renders `report.md` from `report.json` on demand, so without the same read
+ * here a `ultrafuzz report` invocation would drop the coverage statement it is supposed to publish, or
+ * republish whatever the agent claimed. Both failures are silent, which is why the agent's value is
+ * discarded unconditionally before the authoritative one is read: coverage honesty is exactly the
+ * claim a model that ran out of budget must not be the source of.
+ *
+ * A missing, unreadable, or schema-mismatched census stamps the `"unavailable"` sentinel that
+ * `reconcilePropertyImplementationCoverage` already uses, which the renderer states as "coverage is
+ * unknown". Read failures are deliberately not fatal, unlike the property coverage handoff: the census
+ * is diagnostic evidence written by the controller render, a relocated cloud worker legitimately never
+ * has it, and refusing to render any report over its absence would trade a missing sentence for a
+ * missing document.
+ */
+function reconcileGoalSearchCoverage(runRoot: string, report: JsonRecord): JsonRecord {
+  const { goal_search_coverage: _untrustedGoalSearchCoverage, ...rest } = report;
+  let census: JsonRecord | undefined;
+  try {
+    census = readRecord(runRoot, path.join(runRoot, GOAL_SEARCH_COVERAGE_FILE));
+  } catch {
+    census = undefined;
+  }
+  return census?.schema_version === GOAL_SEARCH_COVERAGE_SCHEMA_VERSION
+    ? { ...rest, goal_search_coverage: census }
+    : { ...rest, goal_search_coverage: "unavailable" };
 }
 
 function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRecord): JsonRecord {

@@ -152,6 +152,24 @@ const verificationOutput = z.object({
 
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+/**
+ * The topology group whose nodes are GOAL SEARCHES, plus the run-root census that records what each
+ * of those searches actually managed to do (issues #672, #677).
+ *
+ * Every other node in this topology owes its dependents a specific artifact: a threat model, a
+ * property catalog, an invariant suite. A goal search owes them an ANSWER, and "no supported
+ * vulnerability of this class exists here" is one of the two legitimate answers -- `goal-hunter`
+ * already contracts it as `[]`. That asymmetry is why `goals` is the only group whose nodes are
+ * allowed to fail without failing the run, and it is also why the census below is mandatory rather
+ * than nice to have: once a goal lane may end with nothing, "no vulnerabilities found" stops being
+ * a statement about the code unless something states how many of the planned searches actually ran
+ * to completion. In the 18-hour local default-profile run 9 goal nodes were killed at exactly their
+ * 7200000ms node timeout and only 3 of 77 class-goal nodes produced any output at all, so a report
+ * built on that evidence describes roughly 4% of its plan, not the target.
+ */
+const GOAL_SEARCH_TOPOLOGY_GROUP = "goals";
+const GOAL_SEARCH_COVERAGE_FILE = "goal-search-coverage.json";
+const GOAL_SEARCH_COVERAGE_SCHEMA_VERSION = "ultrafuzz.goal-search-coverage.v1";
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
 
@@ -1251,6 +1269,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         normalizeLegacyFindingFields(task);
         normalizeFindingProvenance(task);
         reconstructAuthoritativeReportImplementationCoverage(task);
+        reconstructAuthoritativeGoalSearchCoverage(task);
         normalizeLegacyReportProvenance(task);
         materializeMissingFinalReportArtifacts(task);
         normalizeLegacyGeneratedTestManifests(task);
@@ -1263,7 +1282,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         // Compatibility handling only adapts known legacy field representations;
         // generated-test companions are mirrored from their mandated workspace
         // path, and the strict verifier still validates every resulting artifact.
-        verifyArtifacts(task);
+        //
+        // `agentReturned` is unconditionally true here and the assertion is this line's position:
+        // execution only reaches it because `agent.generate` above resolved, which is the very fact
+        // Smithers is about to record as this task's output row (#677). The verifier NODE cannot make
+        // that claim from the filesystem, so it reads the row instead.
+        verifyArtifacts(task, { agentReturned: true });
         return result;
       } catch (error) {
         previousFailure = normalizeNodeAttemptFailureMessage(retryFailureText(error)) ?? "previous attempt failed";
@@ -2498,6 +2522,22 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
     assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
   }
   for (const dependency of task.dependencyArtifactDirs) {
+    const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === path.basename(dependency));
+    // #677: `dynamic-strategy-generator` and `dedupe-findings` depend on EVERY goal node, so before
+    // this a single killed goal search took both fan-ins down with it and produced 97 downstream
+    // `artifact dependency has not passed verification` events -- the largest single failure class in
+    // the 18-hour run. That cascade is the artifact-contract system working as designed for every
+    // other dependency class, and it stays exactly as it was for them; a goal search is the one
+    // dependency semantically allowed to arrive with nothing, so an unverified goal lane is treated
+    // here as MISSING rather than as a contract breach. Read it that way and nothing else: the lane
+    // is skipped, not defaulted, so no unverified model bytes reach a consumer (the same exclusion is
+    // repeated in `dependencyFindingSources` and `materializeMissingDedupeArtifact`, which read
+    // dependency findings directly), and the run-root goal-search census records which lanes were
+    // skipped so an empty report can never read as full coverage.
+    const unverifiedGoalSearch = dependencyTask !== undefined && goalSearchDependencyIsUnverified(task, dependencyTask);
+    if (unverifiedGoalSearch && !existsSync(dependency)) {
+      continue;
+    }
     let stat;
     try {
       stat = lstatSync(dependency);
@@ -2521,9 +2561,64 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
     // Pinned/reference nodes are materialized without an agent verifier and
     // therefore have no success marker; only agentic task dependencies need
     // this explicit verifier boundary.
-    if (taskSpecs.some((candidate) => candidate.attemptId === path.basename(dependency))) {
+    if (dependencyTask !== undefined) {
+      if (unverifiedGoalSearch) {
+        continue;
+      }
       assertVerifiedDependency(task, dependency);
     }
+  }
+}
+
+/**
+ * Is this task a goal SEARCH, i.e. a node of the `goals` topology group?
+ *
+ * The discriminator is `metadata.node.group`, which `buildSmithersTask` already copies from the
+ * topology node (`...(input.node.group ? { group: input.node.group } : {})`) and which the
+ * controller-to-worker handoff DTO forwards verbatim, so both `threat-goals`/`class-goals` dynamic
+ * expansions -- which inherit their template node's metadata -- and the static `goal-roaming` node
+ * carry it without any new plumbing. Matching on the group rather than on the three logical IDs is
+ * deliberate: a fourth goal lane added to the topology inherits this behavior, and a node moved out
+ * of the group loses it, which is the direction an operator would expect a group to work.
+ */
+function isGoalSearchTask(task: (typeof taskSpecs)[number]): boolean {
+  return task.metadata.node.group === GOAL_SEARCH_TOPOLOGY_GROUP;
+}
+
+/**
+ * Did this goal search fail to publish a verified handoff?
+ *
+ * True means "there is no runtime-owned success marker for this goal lane", which is exactly the
+ * state a killed, timed-out, or contract-failing goal node leaves behind now that goal lanes carry
+ * `continueOnFail`. It is deliberately narrow in three ways:
+ *
+ *   1. It answers only for goal-group tasks. Every other dependency returns false and therefore
+ *      still goes through the unchanged `assertVerifiedDependency`, which fails closed.
+ *   2. It reads only the marker's PRESENCE. Whether a present marker is internally consistent, still
+ *      matches its published digests, and still validates against its contract remains
+ *      `assertVerifiedDependency`'s decision, unchanged and unbypassed for goal lanes too.
+ *   3. An unsafe marker root still throws, because `artifactVerificationMarkerLocation` owns that
+ *      check and a hostile symlink over the verification directory must never be reinterpreted as a
+ *      goal that simply found nothing.
+ */
+function goalSearchDependencyIsUnverified(
+  task: (typeof taskSpecs)[number],
+  dependencyTask: (typeof taskSpecs)[number]
+): boolean {
+  if (!isGoalSearchTask(dependencyTask)) {
+    return false;
+  }
+  const location = artifactVerificationMarkerLocation(task.runRoot, dependencyTask.attemptId, false);
+  if (location === undefined) {
+    return true;
+  }
+  try {
+    return !lstatSync(location.path).isFile();
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return true;
+    }
+    throw error;
   }
 }
 
@@ -3121,6 +3216,13 @@ function dependencyFindingSources(
   for (const attemptId of task.metadata.dependencies.attemptIds) {
     const dependency = taskSpecs.find((candidate) => candidate.attemptId === attemptId);
     if (dependency === undefined) continue;
+    // #677: a goal lane without a verification marker is tolerated by `assertTaskInputs` so one
+    // killed search cannot fail the fan-ins, and this is the other half of that bargain. Tolerating a
+    // MISSING dependency must never turn into consuming an UNVERIFIED one: whatever findings bytes an
+    // interrupted goal worktree happens to have left behind were never published, digest-checked, or
+    // contract-verified, so they are not provenance and are excluded here. The census records the
+    // lane as skipped instead.
+    if (goalSearchDependencyIsUnverified(task, dependency)) continue;
     const nodeId = dependency.metadata.node.producerNodeId ?? dependency.metadata.node.concreteNodeId ?? attemptId;
     const roots = [path.resolve(artifactsParent, attemptId)];
     let collected = false;
@@ -3246,6 +3348,12 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
   for (const dependencyAttemptId of task.metadata.dependencies.attemptIds) {
     const dependency = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
     if (dependency === undefined) {
+      continue;
+    }
+    // #677: this recovery path reads the dependency's own worktree mirror as a fallback, which for a
+    // goal lane that never passed verification is exactly the unpublished, unchecked byte stream the
+    // artifact contract exists to keep out of a report. Retain only verified goal lanes.
+    if (goalSearchDependencyIsUnverified(task, dependency)) {
       continue;
     }
     for (const candidateRootPath of [dependency.metadata.artifacts.dir, mirroredArtifactDir(dependency)]) {
@@ -5953,12 +6061,61 @@ function resolveNonEmptyRegularArtifactFile(
   return resolvedPath;
 }
 
-function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
+/**
+ * Validate, publish, and attest one attempt's declared outputs.
+ *
+ * `evidence.agentReturned` is not a convenience flag, it is what makes this function's answer a
+ * statement about work that actually happened (#677). Everything below it is a pure function of the
+ * filesystem, and preparation deliberately seeds every goal lane's mirror with the canonical empty
+ * findings array so that a lane which genuinely searched and found nothing still satisfies its
+ * contract. Those two facts together are a laundering machine. Once goal lanes carry
+ * `continueOnFail`, a lane killed at its timeout is TERMINAL, so Smithers makes its verifier
+ * runnable; a filesystem-only verifier then finds the seeded `[]`, validates it, copies it into the
+ * canonical artifact directory and writes a verification marker over it. Downstream -- through
+ * `goalSearchDependencyIsUnverified`, `assertVerifiedDependency`, `dependencyFindingSources` and
+ * `materializeMissingDedupeArtifact` -- that lane reads as a completed search with zero findings. For
+ * a security audit that is strictly worse than the 97-event cascade the tolerance replaced: it
+ * attests to a search nobody ran, and the attestation is indistinguishable from a real negative.
+ *
+ * So the caller must state whether the agent returned, and the answer has to come from Smithers' own
+ * durable output row rather than from anything in the workspace. A row is written by the engine when
+ * a task completes, before the completion is reported and therefore before any render can see the
+ * task as terminal; a killed, cancelled, credit-exhausted, or disconnected attempt has none; and no
+ * model can author one. Bytes in the worktree prove nothing by comparison -- an agent that wrote an
+ * empty `findings.json` early and was then killed mid-search leaves exactly the artifact a
+ * successful negative result leaves.
+ *
+ * Refusal THROWS rather than returning a row, and that is deliberate: `outputs.verification` is
+ * itself consumed as evidence (`recordGoalSearchCoverage` reads it to decide `unverified` versus
+ * `completed`, and `readyGroupIds` gates dynamic expansion on it), so a "verified nothing" row would
+ * relocate the same lie one level up. The failing verifier is the honest outcome; `continueOnFail`
+ * on a goal lane's verifier is what keeps that failure from cascading, and it can no longer turn a
+ * refusal into an attestation.
+ *
+ * The check is not scoped to goal lanes. No other group can reach it -- without `continueOnFail` a
+ * non-goal agent task is terminal only when it succeeded, so its row always exists -- but a
+ * `continueOnFail` added elsewhere later must fail closed here by default instead of silently
+ * inheriting this hole.
+ */
+function verifyArtifacts(
+  task: (typeof taskSpecs)[number],
+  evidence: { agentReturned: boolean }
+): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   // A model-controlled workspace can pre-create arbitrary sidecars. Remove
   // any stale marker before validating so only this verifier can publish the
   // success boundary consumed by downstream preparation tasks.
   clearArtifactVerificationMarker(task);
+  if (evidence.agentReturned !== true) {
+    // Ordered after the clear on purpose. The in-agent verification runs inside the agent task, before
+    // Smithers commits that task's row, so an attempt killed in exactly that window can leave a marker
+    // behind with no row to back it. Demoting such a lane means REMOVING the marker, not merely
+    // declining to write one -- otherwise `goalSearchDependencyIsUnverified` would still report it
+    // verified and every consumer would read the stale attestation.
+    throw new Error(
+      `artifact-contract failure: refusing to verify ${task.attemptId} because its agent produced no output row`
+    );
+  }
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   verifyInvariantLedgerSourceEvidence(task, artifactRoots);
   const publications = new Map<string, Buffer>();
@@ -6411,6 +6568,253 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
   });
 }
 
+/**
+ * Where the run-level goal-search census lives.
+ *
+ * The run root, beside `source-proofs/` and `.ultrafuzz-verification/`, because this is the same kind
+ * of thing they are: a runtime-owned, model-free record about a run rather than a declared node
+ * artifact. Putting it here instead of adding a topology output is deliberate -- a new declared output
+ * would have to be produced by SOME node, and every candidate is either a node that may itself have
+ * been killed (a goal lane) or a node whose output is agent-authored (`dedupe-findings`,
+ * `final-report`), and coverage honesty is exactly the claim an agent must not be the source of.
+ *
+ * An absent run root returns `undefined` rather than throwing, following
+ * `artifactVerificationMarkerLocation`: this census is diagnostic evidence, and a run whose root is
+ * not materialized yet must not have its render aborted over it. An UNSAFE path still throws, because
+ * that is a security signal and not a missing file.
+ */
+function goalSearchCoveragePath(runRoot: string): string | undefined {
+  let resolvedRunRoot: string;
+  try {
+    resolvedRunRoot = realpathSync(path.resolve(process.cwd(), runRoot));
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined;
+    throw error;
+  }
+  const candidate = path.resolve(resolvedRunRoot, GOAL_SEARCH_COVERAGE_FILE);
+  if (!isStrictlyInsideDirectory(resolvedRunRoot, candidate)) {
+    throw new Error("goal-coverage failure: unsafe goal search coverage path");
+  }
+  return candidate;
+}
+
+/**
+ * How many findings did this goal lane actually publish?
+ *
+ * Only the CANONICAL artifact directory is read, never the task worktree mirror. The canonical bytes
+ * are the ones `publishVerifiedArtifacts` wrote and `writeArtifactVerificationMarker` then bound to a
+ * digest, so a count taken from them is a count of verified findings. `undefined` means the count is
+ * unknown, and the census says so rather than reporting zero -- an unknown count reported as zero is
+ * the precise mistake this whole record exists to prevent.
+ */
+function verifiedGoalSearchFindingCount(task: (typeof taskSpecs)[number]): number | undefined {
+  const findingsOutput = task.outputs.find((output) => output.primary && output.contract === "ultrafuzz/findings@1");
+  if (findingsOutput === undefined) {
+    return undefined;
+  }
+  try {
+    const artifactDir = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir));
+    const resolvedPath = resolveRegularArtifactFile(
+      artifactDir,
+      path.resolve(artifactDir, findingsOutput.path),
+      `artifact-contract failure: output is not a regular file ${findingsOutput.path}`
+    );
+    const validation = validateArtifactContract(
+      "ultrafuzz/findings@1",
+      readFileSync(resolvedPath, "utf8"),
+      findingsOutput.path
+    );
+    return validation.ok && Array.isArray(validation.value) ? validation.value.length : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Last recorded lane-state signature per run root; see `recordGoalSearchCoverage`. */
+const goalSearchCoverageSignatures = new Map<string, string>();
+
+/**
+ * Record which goal searches completed and which did not (issue #677).
+ *
+ * This is the honesty counterpart to `continueOnFail` on the goal lanes. Once a goal search may end
+ * with no output and the run still finishes, the difference between "77 classes were hunted and none
+ * was exploitable" and "3 of 77 classes were hunted" is invisible in the artifacts -- both leave the
+ * same empty `findings.json` behind, because preparation seeds every goal lane with the canonical
+ * empty findings array so that a lane which produced nothing still satisfies its contract. The
+ * distinguishing evidence is not in the artifacts at all; it is in Smithers' own durable output rows,
+ * which is why the two probes are passed in from the render:
+ *
+ *   - no `outputs.task` row  -> the agent never returned. Timed out, killed, or failed outright. This
+ *     is the 7200000ms case, and it is the one that must never be read as coverage.
+ *   - a task row but no `outputs.verification` row -> the agent returned but its artifacts did not
+ *     satisfy their contract. Also not coverage, and distinct from the case above, because the two
+ *     have different fixes: one is a budget problem, the other is a contract problem.
+ *   - both rows -> the search ran to completion, and the verified findings count says whether the
+ *     completed answer was positive or negative.
+ *
+ * Called on every render pass, so it is gated on a cheap lane-state signature built purely from
+ * Smithers' in-memory output rows. Without that gate an 18-hour run would re-read and re-validate 88
+ * findings documents on every one of thousands of renders; with it, the artifact reads happen only
+ * when a lane actually settles. The gate is exact rather than merely cheap: published artifacts are
+ * immutable once their verifier has produced its row, so the only way a lane's findings count can
+ * change is a retry, and a retry necessarily moves the lane through the signature.
+ */
+function recordGoalSearchCoverage(
+  tasks: typeof taskSpecs,
+  hasAgentOutput: (nodeId: string) => boolean,
+  hasVerification: (nodeId: string) => boolean
+): void {
+  const lanes = tasks.filter((task) => isGoalSearchTask(task));
+  const runRoot = lanes[0]?.runRoot;
+  if (runRoot === undefined) {
+    return;
+  }
+  const signature = lanes
+    .map((task) => `${task.attemptId}:${hasAgentOutput(task.id) ? 1 : 0}${hasVerification(task.verifierId) ? 1 : 0}`)
+    .sort()
+    .join("|");
+  if (goalSearchCoverageSignatures.get(runRoot) === signature) {
+    return;
+  }
+  const goals = lanes
+    .map((task) => {
+      const agentReturned = hasAgentOutput(task.id);
+      const verified = agentReturned && hasVerification(task.verifierId);
+      const findingCount = verified ? verifiedGoalSearchFindingCount(task) : undefined;
+      const status = !agentReturned
+        ? "stopped-early"
+        : !verified
+          ? "unverified"
+          : findingCount === undefined
+            ? "completed"
+            : findingCount > 0
+              ? "completed-with-findings"
+              : "completed-no-findings";
+      return {
+        node_id: task.metadata.node.concreteNodeId,
+        logical_node_id: task.metadata.node.logicalNodeId,
+        attempt_id: task.attemptId,
+        status,
+        finding_count: findingCount ?? null
+      };
+    })
+    .sort((left, right) => left.attempt_id.localeCompare(right.attempt_id));
+  const count = (predicate: (status: string) => boolean): number =>
+    goals.filter((goal) => predicate(goal.status)).length;
+  const record = {
+    schema_version: GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
+    run_id: __ULTRAFUZZ_RUN_ID_LITERAL__,
+    totals: {
+      planned: goals.length,
+      completed: count((status) => status.startsWith("completed")),
+      completed_with_findings: count((status) => status === "completed-with-findings"),
+      completed_no_findings: count((status) => status === "completed-no-findings"),
+      stopped_early: count((status) => status === "stopped-early"),
+      unverified: count((status) => status === "unverified")
+    },
+    goals
+  };
+  const contents = `${JSON.stringify(record, null, 2)}\n`;
+  const coveragePath = goalSearchCoveragePath(runRoot);
+  if (coveragePath === undefined) {
+    return;
+  }
+  writeFileDurable(coveragePath, contents);
+  goalSearchCoverageSignatures.set(runRoot, signature);
+}
+
+/**
+ * Read the census back, defensively.
+ *
+ * Absent, unparsable, or schema-mismatched is not an error here: it is the "coverage is unknown"
+ * answer, and the caller stamps the same `"unavailable"` sentinel the property-implementation coverage
+ * reconstruction already uses for its producer-free topologies. A relocated cloud worker legitimately
+ * hits this path, because the census is written by the controller render into the controller run root.
+ */
+function readGoalSearchCoverage(runRoot: string): unknown | undefined {
+  try {
+    const coveragePath = goalSearchCoveragePath(runRoot);
+    if (coveragePath === undefined) {
+      return undefined;
+    }
+    const resolvedPath = resolveRegularArtifactFile(
+      path.dirname(coveragePath),
+      coveragePath,
+      "goal-coverage failure: goal search coverage is not a regular file"
+    );
+    const parsed = JSON.parse(readFileSync(resolvedPath, "utf8")) as unknown;
+    if (!isPlainRecord(parsed) || parsed.schema_version !== GOAL_SEARCH_COVERAGE_SCHEMA_VERSION) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function replaceReportGoalSearchCoverage(contents: string, coverage: unknown): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(parsed)) {
+    return undefined;
+  }
+  const report = { ...parsed };
+  delete report.goal_search_coverage;
+  return `${JSON.stringify({ ...report, goal_search_coverage: coverage }, null, 2)}\n`;
+}
+
+/**
+ * Stamp the runtime-owned goal-search census into the terminal report (issue #677).
+ *
+ * Deliberately built as a twin of `reconstructAuthoritativeReportImplementationCoverage`: the report
+ * is the stage the coverage claim is actually made at, `ultrafuzz/report@1` is a loose object so an
+ * added top-level key validates unchanged, and the canonical projection preserves unknown report
+ * fields, so the same mechanism that already carries authoritative property coverage into the report
+ * carries authoritative goal coverage. Reconstructing it after the agent returns rather than asking
+ * the agent for it is the whole point -- a model that ran out of budget is the last thing that should
+ * be describing how much budget it had.
+ *
+ * The report agent cannot see this stamp, since it lands after the agent's own writes; making the
+ * numbers visible to the reviewing and reporting agents while they work needs the run-root census file
+ * named in `review/dedupe-findings.md` and `review/final-report.md`, which are prompt-owned.
+ */
+function reconstructAuthoritativeGoalSearchCoverage(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "final-report") {
+    return;
+  }
+  const reportOutput = task.outputs.find(
+    (output) => output.path === "report.json" && output.contract === "ultrafuzz/report@1"
+  );
+  if (reportOutput === undefined) {
+    return;
+  }
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const reportPaths = taskArtifactRoots(task, artifactDir).flatMap((artifactRoot) => {
+    try {
+      return [
+        resolveRegularArtifactFile(
+          artifactRoot,
+          path.resolve(artifactRoot, reportOutput.path),
+          `artifact-contract failure: output is not a regular file ${reportOutput.path}`
+        )
+      ];
+    } catch {
+      return [];
+    }
+  });
+  const coverage = readGoalSearchCoverage(task.runRoot) ?? "unavailable";
+  for (const reportPath of reportPaths) {
+    const reconstructed = replaceReportGoalSearchCoverage(readBoundedFinalReportJson(reportPath), coverage);
+    if (reconstructed !== undefined) {
+      writeFileDurable(reportPath, reconstructed);
+    }
+  }
+}
+
 export default smithers((ctx) => {
   // The dispatch is re-validated against the exact outer contract here, so an unknown or aliased
   // dispatch key is refused inside the workflow itself rather than only wherever it was submitted.
@@ -6463,6 +6867,18 @@ export default smithers((ctx) => {
     taskSpecs = taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks);
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
+  if (!cloudWorker) {
+    // #677: record the goal-search census from Smithers' own durable output rows. Only the controller
+    // renders the whole graph, so only the controller can see which goal lanes settled; a relocated
+    // worker sees one attempt and must not overwrite a run-wide record from that keyhole view. This
+    // runs on every render pass, which is also how the dynamic goal expansion above works, and the
+    // writer is a no-op unless the bytes changed.
+    recordGoalSearchCoverage(
+      taskSpecs,
+      (nodeId) => ctx.outputMaybe(outputs.task, { nodeId }) !== undefined,
+      (nodeId) => ctx.outputMaybe(outputs.verification, { nodeId }) !== undefined
+    );
+  }
   const selectedTaskSpecs = cloudWorker
     ? availableTaskSpecs.filter((task) => task.id === dispatch.task_id)
     : availableTaskSpecs;
@@ -6474,6 +6890,49 @@ export default smithers((ctx) => {
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
+          // #672/#677: finding no bug for an assigned goal is a NEGATIVE RESULT, not a run failure, so
+          // a goal lane is allowed to fail without taking this `<Parallel>` -- and with it every fan-in
+          // that depends on all 88 goals -- down with it. This is scoped to the `goals` topology group
+          // on purpose and must stay that way: for every other node an absent artifact really is a
+          // broken contract, and the 97-event cascade the 18-hour run produced was that contract
+          // working exactly as designed. Both the agent task and its verifier carry the flag, because a
+          // lane killed mid-write leaves artifacts its verifier will legitimately reject, and leaving
+          // `verify:*` fatal would simply move the same cascade one node downstream. The preparation
+          // task deliberately does NOT carry it: preparation is synchronous, deterministic, model-free
+          // work, so a preparation failure is a real defect (#672) that should still fail loudly, and a
+          // lane whose mirror was never prepared cannot produce a defensible negative result anyway.
+          //
+          // `continueOnFail` on a verifier means "this failure does not take the graph down", never
+          // "this node cannot fail". Getting those two confused is what made the tolerance dangerous:
+          // a killed lane's verifier became runnable AND unfailable, and because verification was a
+          // pure function of the filesystem it happily attested the empty artifacts preparation had
+          // seeded. `verifyArtifacts` now refuses without a durable agent output row, so for a lane
+          // that never ran the verifier FAILS -- once, visibly, without cascading -- and the lane
+          // stays unattested and unpublished. That is the outcome the flag is here to survive.
+          //
+          // Note that Smithers' `depsOptional` is not the lever here: it relaxes `deps`, the typed
+          // render-time output wiring, and this template expresses dependencies with `dependsOn`
+          // (ordering) plus its own artifact handoff. The equivalent tolerance therefore lives in
+          // `assertTaskInputs`, which now treats a goal lane with no verification marker as a missing
+          // dependency instead of a failed one, while still failing closed for every other class.
+          // It is not the lever for the row gate below either, and not for lack of trying: wiring the
+          // verifier as `deps` on the agent task resolves to this very probe internally, but an
+          // unresolved dep DEFERS the node, and a deferral that survives to quiescence fails the whole
+          // run with `DEPENDENCY_DEADLOCK` -- a killed goal lane would take the run down harder than
+          // the cascade #677 removed. Relaxing that with the optional-deps flag then buys nothing the
+          // plain probe does not already give, so the probe is read directly and the decision is made
+          // inside `verifyArtifacts`, where it is one function's documented precondition instead of
+          // three props spread across two execution modes.
+          const goalSearch = isGoalSearchTask(task);
+          // #677: does Smithers hold a durable output row for this attempt's agent task? This is the
+          // only "did the work happen" evidence in the run that a model cannot author, and it is the
+          // same probe the goal-search census uses, so the census and the verifier can never disagree.
+          // Read during render deliberately: the engine re-renders after every task completion before
+          // it schedules anything new (`requireRerenderOnOutputChange` defaults on), and the row is
+          // persisted before the completion is reported, so the render that first makes this verifier
+          // runnable is a render in which a successful agent's row is already visible. A cloud worker
+          // renders the same lane against its own run state and reaches the same answer for it.
+          const agentReturned = ctx.outputMaybe(outputs.task, { nodeId: task.id }) !== undefined;
           if (task.execution.mode === "cloud" && !cloudWorker) {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
@@ -6525,6 +6984,7 @@ export default smithers((ctx) => {
                   heartbeatTimeoutMs={task.execution.resources.timeoutSeconds * 1000}
                   retries={task.retries}
                   retryPolicy={task.retryPolicy}
+                  continueOnFail={goalSearch}
                   meta={task.metadata}
                 />
                 <Task
@@ -6532,6 +6992,7 @@ export default smithers((ctx) => {
                   output={outputs.verification}
                   dependsOn={[task.id]}
                   retries={0}
+                  continueOnFail={goalSearch}
                   metadata={{
                     category: "artifact-contract",
                     agentTaskId: task.id,
@@ -6539,7 +7000,7 @@ export default smithers((ctx) => {
                     executionMode: "cloud"
                   }}
                 >
-                  {() => verifyArtifacts(task)}
+                  {() => verifyArtifacts(task, { agentReturned })}
                 </Task>
               </Fragment>
             );
@@ -6580,6 +7041,14 @@ export default smithers((ctx) => {
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={cloudWorker ? 0 : task.retries}
                 retryPolicy={task.retryPolicy}
+                // Excluded on the cloud worker's own single-task render. There `continueOnFail` would let the
+                // inner run finish despite a killed agent, so `smithers up` exits 0, the worker records a
+                // "completed" durability checkpoint, and the sandbox retry then skips `runDurableWorkflow`
+                // entirely -- spending the lane's second attempt on a publication retry instead of on
+                // re-running the agent. A worker render has exactly one task and therefore no siblings to
+                // protect, and an honest worker failure produces the identical controller-side outcome: no
+                // agent output row, so `agentReturned` is false there too.
+                continueOnFail={goalSearch && !cloudWorker}
                 metadata={task.metadata}
               >
                 {fullTaskPrompt}
@@ -6589,13 +7058,14 @@ export default smithers((ctx) => {
                 output={outputs.verification}
                 dependsOn={[task.id]}
                 retries={0}
+                continueOnFail={goalSearch && !cloudWorker}
                 metadata={{
                   category: "artifact-contract",
                   agentTaskId: task.id,
                   attemptId: task.attemptId
                 }}
               >
-                {() => verifyArtifacts(task)}
+                {() => verifyArtifacts(task, { agentReturned })}
               </Task>
             </Worktree>
           );
