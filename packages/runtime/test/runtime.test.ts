@@ -268,6 +268,61 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
+async function loadGeneratedPiAgent(project: string): Promise<{
+  createPiAgent(options?: Record<string, unknown>): {
+    opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "pi-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const piSource = fs
+    .readFileSync(path.join(agentsDir, "pi.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  fs.writeFileSync(path.join(fixture, "pi.mjs"), transpile(piSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  const piModule = (await import(pathToFileURL(path.join(fixture, "pi.mjs")).href)) as {
+    createPiAgent(options?: Record<string, unknown>): {
+      opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+      }>;
+    };
+  };
+  return { createPiAgent: piModule.createPiAgent };
+}
+
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
@@ -1268,18 +1323,21 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/pi.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
   assert.match(agentsIndexText, /export \{ createDeepSeekAgent \} from ".\/deepseek";/);
   assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
+  assert.match(agentsIndexText, /export \{ createPiAgent \} from ".\/pi";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*DeepSeekAgent: createDeepSeekAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*PiAgent: createPiAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi|Pi)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -1326,6 +1384,27 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(kimiAgentText, /--thinking/);
   assert.doesNotMatch(kimiAgentText, /--no-thinking/);
   assert.doesNotMatch(kimiAgentText, /final-message-only/);
+  const piAgentText = fs.readFileSync(path.join(project, ".smithers/agents/pi.ts"), "utf8");
+  assert.match(piAgentText, /PiAgent as SmithersPiAgent/);
+  assert.match(piAgentText, /createPiAgent/);
+  // The provider is the adapter's identity, not a configuration field.
+  assert.match(piAgentText, /PI_PROVIDER = "openrouter"/);
+  assert.match(piAgentText, /provider: PI_PROVIDER/);
+  assert.match(piAgentText, /OPENROUTER_API_KEY/);
+  assert.match(piAgentText, /PI_CODING_AGENT_DIR/);
+  assert.match(piAgentText, /sessionDir: auth\.sessionDir/);
+  assert.match(piAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  // `apiKey` is the only Smithers option that emits `--api-key`; the adapter
+  // must never set it, and must never assemble argv of its own.
+  assert.doesNotMatch(piAgentText, /apiKey:/);
+  assert.doesNotMatch(piAgentText, /"--api-key"/);
+  assert.doesNotMatch(piAgentText, /extraArgs/);
+  assert.doesNotMatch(piAgentText, /baseURL|baseUrl|OPENROUTER_BASE_URL/);
+  // pi owns the model catalogue; the profile supplies an opaque id.
+  assert.doesNotMatch(piAgentText, /model:\s*"[\w./-]+"/);
+  assert.doesNotMatch(piAgentText, /PI_CODING_AGENT_SESSION_DIR/);
+  assert.doesNotMatch(piAgentText, /=\s*createPiAgent\(\)/);
+  assert.doesNotMatch(piAgentText, /function readStringTable/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -2727,6 +2806,129 @@ test(
     }
     assert.ok(failure instanceof Error);
     assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
+  }
+);
+
+test(
+  "generated Pi adapter binds OpenRouter through env and keeps the credential out of argv",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { createPiAgent } = await loadGeneratedPiAgent(project);
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const stockConfig = fs.readFileSync(configPath, "utf8");
+    const credential = "sk-or-v1-not-a-real-openrouter-credential";
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouter: process.env.OPENROUTER_API_KEY,
+      named: process.env.PI_OPENROUTER_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = credential;
+    delete process.env.PI_OPENROUTER_KEY;
+    try {
+      const configDir = path.resolve(process.cwd(), ".ultrafuzz/pi-coding-agent");
+      const agent = createPiAgent({ model: "openai/gpt-mini-latest", addDir: ["/tmp/artifacts"] });
+      const command = await agent.buildCommand({ prompt: "find a bug", cwd: project, options: {} });
+
+      // The complete OpenRouter binding is `--provider openrouter` plus an
+      // opaque catalogue id; pi owns the endpoint, so there is no base URL.
+      assert.equal(command.command, "pi");
+      assert.deepEqual(command.args, [
+        "--print",
+        "--provider",
+        "openrouter",
+        "--model",
+        "openai/gpt-mini-latest",
+        "--session-dir",
+        path.join(configDir, "sessions"),
+        "find a bug"
+      ]);
+
+      // The acceptance criterion: no credential value anywhere in argv, and no
+      // `--api-key` flag, because the adapter never sets Smithers' `apiKey`.
+      assert.equal(command.args.includes("--api-key"), false);
+      assert.equal(
+        command.args.some((argument) => argument.includes(credential)),
+        false
+      );
+      assert.equal((agent.opts as { apiKey?: string }).apiKey, undefined);
+
+      // The credential reaches the child only through the environment, and that
+      // environment went through workflowControlChildEnvironment: every
+      // controller-only variable is blanked in both layers Smithers composes.
+      const childEnv = { ...process.env, ...agent.opts.env, ...command.env };
+      assert.equal(childEnv.OPENROUTER_API_KEY, credential);
+      assert.equal(agent.opts.env.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
+
+      // Isolation: pi's config directory and session storage stay off the
+      // operator's real home (~/.pi/agent), and install telemetry is off.
+      assert.equal(agent.opts.env.PI_CODING_AGENT_DIR, configDir);
+      assert.equal(agent.opts.sessionDir, path.join(configDir, "sessions"));
+      assert.equal(agent.opts.env.PI_TELEMETRY, "0");
+      assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
+
+      // Profile reasoning maps onto pi's existing --thinking level.
+      const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
+      const thinkingCommand = await thinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
+      const thinkingIndex = thinkingCommand.args.indexOf("--thinking");
+      assert.notEqual(thinkingIndex, -1);
+      assert.equal(thinkingCommand.args[thinkingIndex + 1], "high");
+      // The throw must name the file and the key, not just the range: this is the
+      // error an operator hits copying `reasoning = "max"` off another profile.
+      assert.throws(
+        () => createPiAgent({ reasoningEffort: "ludicrous" }),
+        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh/u
+      );
+
+      // api_key_env names only where ultrafuzz reads the operator's value from;
+      // pi always receives it as OPENROUTER_API_KEY, the name pi looks up.
+      fs.writeFileSync(
+        configPath,
+        stockConfig.replace(
+          /\[agents\.PiAgent\]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"/u,
+          '[agents.PiAgent]\nauth = "api-key"\napi_key_env = "PI_OPENROUTER_KEY"'
+        ),
+        "utf8"
+      );
+      process.env.PI_OPENROUTER_KEY = "sk-or-v1-named-variable-credential";
+      const namedAgent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      assert.equal(namedAgent.opts.env.OPENROUTER_API_KEY, "sk-or-v1-named-variable-credential");
+      assert.equal(namedAgent.opts.env.PI_OPENROUTER_KEY, undefined);
+
+      // A missing credential fails loudly, naming the variable it wanted.
+      delete process.env.PI_OPENROUTER_KEY;
+      assert.throws(
+        () => createPiAgent({ model: "openai/gpt-mini-latest" }),
+        /agents\.PiAgent in .*ultrafuzz\.toml uses api-key auth, but PI_OPENROUTER_KEY is not set/u
+      );
+
+      // Subscription auth has no meaning for this adapter and is rejected.
+      fs.writeFileSync(
+        configPath,
+        stockConfig.replace(
+          /\[agents\.PiAgent\]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"/u,
+          '[agents.PiAgent]\nauth = "subscription"'
+        ),
+        "utf8"
+      );
+      assert.throws(
+        () => createPiAgent({ model: "openai/gpt-mini-latest" }),
+        /agents\.PiAgent in .*ultrafuzz\.toml supports only api-key auth, not subscription/u
+      );
+    } finally {
+      fs.writeFileSync(configPath, stockConfig, "utf8");
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouter;
+      if (previous.named === undefined) delete process.env.PI_OPENROUTER_KEY;
+      else process.env.PI_OPENROUTER_KEY = previous.named;
+    }
   }
 );
 
@@ -5301,8 +5503,9 @@ test("init reports an agent registry that does not export a generated agent", as
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, and KimiAgent
-  // existed: the registry predates the adapters, and init preserves project-owned files.
+  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
+  // and PiAgent existed: the registry predates the adapters, and init preserves
+  // project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
@@ -5315,15 +5518,16 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 3, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 4, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
-  // A registry that names Claude, DeepSeek, and Kimi without registering their
-  // factories is still stale: nothing resolves it, since generated adapters export
-  // only factories.
+  // A registry that names Claude, DeepSeek, Kimi, and Pi without registering
+  // their factories is still stale: nothing resolves it, since generated
+  // adapters export only factories.
   fs.writeFileSync(
     registryPath,
     'import { createCodexAgent } from "./codex";\n' +
@@ -5334,10 +5538,11 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 3, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 4, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });

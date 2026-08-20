@@ -59,6 +59,19 @@ agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
+# Opt-in Pi profile. Select it per node/group in .ultrafuzz/topology.yml
+# (model_profiles = ["pi"]), or for a one-off run with `--agent PiAgent`.
+# PiAgent always routes through OpenRouter, so `model` is an opaque OpenRouter
+# catalogue id resolved by the pi CLI itself.
+# `reasoning` is optional here. The levels supported today are off, minimal,
+# low, medium, high, and xhigh. Unlike [models.kimi] and [models.deepseek]
+# above, "max" is not accepted yet: the pi CLI understands it, but the
+# orchestrator's Pi thinking option stops at xhigh, so a profile asking for
+# "max" fails when the agent is constructed instead of stepping down a level.
+[models.pi]
+agent = "PiAgent"
+model = "openai/gpt-mini-latest"
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
@@ -86,6 +99,14 @@ auth = "subscription"
 # routes the Claude Code harness to DeepSeek's Anthropic-compatible endpoint.
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
+
+[agents.PiAgent]
+# The pi CLI is API-key only here: the generated adapter fixes the provider to
+# OpenRouter and reads OPENROUTER_API_KEY (unless api_key_env names another
+# variable), handing it to pi through the child environment so no credential
+# value ever reaches argv.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
 
 [permissions]
 trust_model = "skip-permissions"
