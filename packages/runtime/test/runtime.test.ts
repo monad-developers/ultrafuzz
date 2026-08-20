@@ -6036,7 +6036,7 @@ test("init reports an agent registry that does not export a generated agent", as
   initProject({ projectRoot: project, force: true });
 
   // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
-  // and PiAgent existed: the registry predates the adapters, and init preserves
+  // OpenCodeAgent, and PiAgent existed: the registry predates the adapters, and init preserves
   // project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
@@ -6050,14 +6050,15 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 4, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 5, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
-  // A registry that names Claude, DeepSeek, Kimi, and Pi without registering
+  // A registry that names Claude, DeepSeek, Kimi, OpenCode, and Pi without registering
   // their factories is still stale: nothing resolves it, since generated
   // adapters export only factories.
   fs.writeFileSync(
@@ -6070,10 +6071,11 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 4, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 5, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
   // A registry that exports every generated agent stays quiet.
