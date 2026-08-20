@@ -1262,7 +1262,10 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.ok(proofEnd > proofStart, source);
   assert.ok(workflowStart > proofStart, source);
   assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
-  assert.match(source, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/u);
+  assert.match(source, /baseBranch=\{usesPinnedSource \? pinnedSourceBranch : localSourceCommit\}/u);
+  assert.match(source, /function resolveLocalSourceCommit\(\): string \| undefined/u);
+  assert.match(source, /if \(usesPinnedSource\) return undefined/u);
+  assert.match(source, /\/\^\[0-9a-f\]\{40\}\$\/u\.test\(commit\)/u);
   assert.match(source, /if \(!usesPinnedSource\) return/u);
   assert.match(source, /preservePinnedSourceProof\(task\)/u);
   assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);

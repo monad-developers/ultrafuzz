@@ -354,6 +354,13 @@ const retryFailureTemplate = __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__;
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
+// Smithers defaults `<Worktree baseBranch>` to "main". For a benchmark run that is correct,
+// because `ultrafuzz-pinned` names the sealed revision; for an ordinary run launched from any
+// other revision it silently bases every task worktree on a tree the run was never pointed at,
+// so agents audit the wrong source and the run's own commit pinning is not what executes.
+// Resolve the launch revision instead of naming a branch: a commit id is what the run pinned,
+// it needs no branch to exist, and it cannot drift while the run is in flight.
+const localSourceCommit = resolveLocalSourceCommit();
 
 function dynamicExecutionPath(task: (typeof compiledBaseTasks)[number], value: string, label: string): string {
   const relative = path.relative(sourceProjectRoot, path.resolve(value));
@@ -1137,6 +1144,27 @@ function dynamicallyAvailableTaskSpecs(
 function sourceUsesPinnedBranch(): boolean {
   return invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef);
 }
+/**
+ * The commit every task worktree branches from when the run is not using the pinned benchmark ref.
+ *
+ * Returning `undefined` restores Smithers' own default of "main", which is only right when HEAD
+ * actually is main. Resolving HEAD to an id keeps a run reproducible against the revision it was
+ * launched from, which is the whole point of pinning a source for an audit.
+ */
+function resolveLocalSourceCommit(): string | undefined {
+  if (usesPinnedSource) return undefined;
+  try {
+    const commit = execFileSync("git", ["rev-parse", "HEAD^{commit}"], {
+      cwd: process.cwd(),
+      encoding: "utf8"
+    }).trim();
+    return /^[0-9a-f]{40}$/u.test(commit) ? commit : undefined;
+  } catch {
+    // Not a git checkout, or HEAD is unborn. Fall back to the Smithers default rather than
+    // failing workflow generation over a worktree base.
+    return undefined;
+  }
+}
 function readCloudExecutionGeneration(): string {
   if (!usesCloudExecution) return "base";
   const generationPath = path.resolve(dynamicRunRoot, "smithers", "cloud-execution-generation.json");
@@ -1429,46 +1457,88 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
   return roots;
 }
 
+/**
+ * Name the preparation step that threw, because the stack cannot.
+ *
+ * Bun discards the user frames of an error raised inside a Smithers task body. Every one of
+ * the 53 `prepare:*` failures in issue #672 arrived as a bare
+ * `TypeError: undefined is not an object (evaluating 'get')` whose entire stack was
+ * `at run (node:async_hooks:68:37)` and `at processTicksAndRejections (native:7:39)` -- no
+ * file, no line, nothing to bisect, across 26% of every node failure in an 18-hour run.
+ *
+ * Preparation is synchronous, so the throw site is still on the stack when we catch it here.
+ * Recording which of the twelve steps failed turns "somewhere in preparation" into one step,
+ * and `cause` keeps the original error and its stack intact for anything that inspects it.
+ */
+function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw new Error(
+      `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
 function prepareArtifactMirror(
   task: (typeof taskSpecs)[number],
   options: { replayWorkspacePatches?: boolean; pinnedSubmodules?: "restore" | "verify" } = {}
 ): z.infer<typeof preparationOutput> {
-  const workspaceRoot = realpathSync(task.workspacePath);
+  const workspaceRoot = preparationStep(task.attemptId, "resolve-workspace-root", () =>
+    realpathSync(task.workspacePath)
+  );
   if (options.pinnedSubmodules === "verify") {
-    verifyPinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: task.executionSnapshotRoot,
-      workspaceRoot,
-      expectation: task.pinnedSubmodules ?? undefined
-    });
+    preparationStep(task.attemptId, "verify-pinned-submodules", () =>
+      verifyPinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: task.executionSnapshotRoot,
+        workspaceRoot,
+        expectation: task.pinnedSubmodules ?? undefined
+      })
+    );
   } else {
-    hydratePinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: task.executionSnapshotRoot,
-      workspaceRoot,
-      expectation: task.pinnedSubmodules ?? undefined
-    });
+    preparationStep(task.attemptId, "hydrate-pinned-submodules", () =>
+      hydratePinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: task.executionSnapshotRoot,
+        workspaceRoot,
+        expectation: task.pinnedSubmodules ?? undefined
+      })
+    );
   }
-  preservePinnedSourceProof(task);
-  materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
-  assertTaskInputs(task, workspaceRoot);
-  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true);
-  restoreInvariantSuiteWorkspaceSnapshot(task, {
-    // On the post-agent pass, preserve source files authored in this attempt
-    // until materializeWorkspacePatch captures them. Initial preparation and
-    // retry reset calls use the default and remove stale sources.
-    preserveCurrentSources: options.replayWorkspacePatches === false
-  });
-  materializeInvariantSuiteFromDependencies(task, workspaceRoot);
-  captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
+  preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () =>
+    materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"))
+  );
+  preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
+  preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
+    materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true)
+  );
+  preparationStep(task.attemptId, "restore-invariant-suite-snapshot", () =>
+    restoreInvariantSuiteWorkspaceSnapshot(task, {
+      // On the post-agent pass, preserve source files authored in this attempt
+      // until materializeWorkspacePatch captures them. Initial preparation and
+      // retry reset calls use the default and remove stale sources.
+      preserveCurrentSources: options.replayWorkspacePatches === false
+    })
+  );
+  preparationStep(task.attemptId, "materialize-invariant-suite", () =>
+    materializeInvariantSuiteFromDependencies(task, workspaceRoot)
+  );
+  preparationStep(task.attemptId, "capture-invariant-suite-snapshot", () =>
+    captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot)
+  );
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
-  mkdirSync(candidate, { recursive: true });
-  const mirrorRoot = realpathSync(candidate);
+  preparationStep(task.attemptId, "create-artifact-mirror", () => mkdirSync(candidate, { recursive: true }));
+  const mirrorRoot = preparationStep(task.attemptId, "resolve-artifact-mirror", () => realpathSync(candidate));
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
-  captureInvariantSuiteBaseline(task, workspaceRoot);
+  preparationStep(task.attemptId, "capture-invariant-suite-baseline", () =>
+    captureInvariantSuiteBaseline(task, workspaceRoot)
+  );
 
   for (const output of task.outputs) {
     const artifactPath = path.resolve(mirrorRoot, output.path);
@@ -2565,6 +2635,11 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       if (entry.contract === "ultrafuzz/generated-tests@1") {
         for (const companion of verifyGeneratedTestFiles(dependency, validation.value)) {
           rememberExpectedVerifiedPublication(expectedPublicationShas, companion.path, companion.contents);
+        }
+      }
+      if (entry.contract === "ultrafuzz/goal-plan@1") {
+        for (const selected of verifyGoalPlanSelectedRecordSnapshots(dependency, validation.value)) {
+          rememberExpectedVerifiedPublication(expectedPublicationShas, selected.path, selected.contents);
         }
       }
     }
@@ -6481,7 +6556,7 @@ export default smithers((ctx) => {
               key={task.id}
               path={task.workspacePath}
               branch={task.branch}
-              {...(usesPinnedSource ? { baseBranch: pinnedSourceBranch } : {})}
+              baseBranch={usesPinnedSource ? pinnedSourceBranch : localSourceCommit}
             >
               <Task
                 id={task.preparationId}

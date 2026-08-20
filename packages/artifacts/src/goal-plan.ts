@@ -112,8 +112,8 @@ const selectedRecordPath = z.string().superRefine((value, context) => {
       message: `Selected record path must start with ${SELECTED_RECORD_PATH_PREFIX}`
     });
   }
-  if (!value.endsWith(".md")) {
-    context.addIssue({ code: "custom", message: "Selected record path must be a Markdown file" });
+  if (!value.endsWith(".md") && !value.endsWith(".yml")) {
+    context.addIssue({ code: "custom", message: "Selected record path must be a Markdown or YAML file" });
   }
 });
 

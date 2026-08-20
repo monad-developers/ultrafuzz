@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { loadTopology } from "../src/index.js";
+import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
@@ -97,6 +97,57 @@ describe("packaged topology collection", () => {
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-campaign")?.required_commands).toEqual([
         "recon"
       ]);
+    }
+  });
+
+  // Regression guard for #673. `maxAttemptsFor` falls back to 1, so an agentic group that
+  // forgets `max_attempts` silently compiles to `retries: 0` and the bounded retry policy
+  // from #572 never engages. That is how an 18-hour run ended up with all 179 compiled
+  // tasks at `retries: 0`, where one stochastic provider failure was terminal for the node
+  // and everything downstream of it.
+  it("gives every agentic node in every shipped topology a retry budget", () => {
+    for (const name of ["full", "invariant-only", "smoke"]) {
+      const topology = loadTopology(REPOSITORY_ROOT, {
+        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
+        requirePromptFiles: true
+      });
+      const graph = expandTopology(topology, { projectRoot: REPOSITORY_ROOT });
+      const agentic = graph.nodes.filter((node) => node.kind === "agentic");
+      expect(agentic.length, `${name} must ship agentic nodes`).toBeGreaterThan(0);
+
+      const withoutBudget = agentic.filter((node) => node.retryPolicy.maxAttempts < 2).map((node) => node.id);
+      expect(
+        withoutBudget,
+        `${name}.yml compiles these agentic nodes with no retry budget; set max_attempts on their group defaults`
+      ).toEqual([]);
+    }
+  });
+
+  // Regression guard for #675. A group `timeout_seconds` pin wins over the profile and
+  // config defaults in the runtime's resolution order, so a stale pin silently shadows a
+  // raised default -- which is how nodes kept dying at the 2h group pin in a run
+  // configured for a longer window.
+  it("keeps group timeout pins at or above the long-running agentic window", () => {
+    const MINIMUM_AGENTIC_TIMEOUT_SECONDS = 14_400;
+    for (const name of ["full", "invariant-only", "smoke"]) {
+      const topology = loadTopology(REPOSITORY_ROOT, {
+        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
+        requirePromptFiles: true
+      });
+      for (const [groupId, group] of Object.entries(topology.groups)) {
+        const pinned = group.defaults?.timeout_seconds;
+        if (pinned === undefined) {
+          continue;
+        }
+        const hasAgenticNodes = topology.nodes.some((node) => node.kind === "agentic" && node.group === groupId);
+        if (!hasAgenticNodes) {
+          continue;
+        }
+        expect(
+          pinned,
+          `${name}.yml group \`${groupId}\` pins timeout_seconds=${pinned}, which shadows the profile default`
+        ).toBeGreaterThanOrEqual(MINIMUM_AGENTIC_TIMEOUT_SECONDS);
+      }
     }
   });
 });
