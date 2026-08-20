@@ -32,10 +32,11 @@ const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
 const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
 
 /**
- * DeepSeek's supported coding-agent integration is Claude Code over its
- * Anthropic-compatible endpoint. Keep it as a distinct factory so credentials,
- * model selection, telemetry semantics, and pricing provenance never inherit
- * Anthropic defaults accidentally.
+ * Runs the Claude Code harness against DeepSeek's Anthropic-compatible
+ * endpoint: a compatibility pairing, not DeepSeek's first-party coding agent.
+ * Keep it as a distinct factory so credentials, model selection, telemetry
+ * semantics, and pricing provenance never inherit Anthropic defaults
+ * accidentally.
  */
 export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): SmithersClaudeCodeAgent {
   const reasoningEffort = deepSeekReasoningEffort(options.reasoningEffort);
