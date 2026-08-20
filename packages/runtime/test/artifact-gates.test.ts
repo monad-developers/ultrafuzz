@@ -3756,6 +3756,84 @@ test("project discovery gate rejects an untracked scan probe source in a pinned 
   );
 });
 
+// Issue #650: a normal run can share a repository with a stale benchmark ref. The run's recorded
+// source_ref is authoritative; merely seeing refs/heads/ultrafuzz-pinned must not make the host gate
+// compare the normal checkout against an unrelated benchmark commit.
+test("project discovery gate ignores a stale pinned ref for a recorded ordinary run", () => {
+  const project = tempProject();
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  fs.mkdirSync(path.join(project, "src"), { recursive: true });
+  fs.writeFileSync(path.join(project, "src", "Counter.sol"), "contract Counter { function mainOnly() external {} }\n");
+  git(["add", "src/Counter.sol"]);
+  git(["commit", "--quiet", "-m", "main source"]);
+  const stalePinnedRevision = git(["rev-parse", "HEAD"]);
+  git(["update-ref", "refs/heads/ultrafuzz-pinned", stalePinnedRevision]);
+
+  git(["switch", "--quiet", "-c", "develop"]);
+  fs.writeFileSync(
+    path.join(project, "src", "Counter.sol"),
+    "contract Counter { function developOnly() external {} }\n"
+  );
+  git(["add", "src/Counter.sol"]);
+  git(["commit", "--quiet", "-m", "develop source"]);
+  const sourceRevision = git(["rev-parse", "HEAD"]);
+  assert.notEqual(sourceRevision, stalePinnedRevision);
+
+  const runId = "run-invariant-stale-pinned-ref";
+  const sourceRef = `refs/ultrafuzz/runs/${runId}/source`;
+  git(["update-ref", sourceRef, sourceRevision]);
+  const layout = createRunLayout({
+    projectRoot: project,
+    runId,
+    runMetadata: {
+      mode: "run",
+      workflow_ids: [],
+      source_revision: sourceRevision,
+      source_ref: sourceRef,
+      redacted_config_fingerprint: "0".repeat(64),
+      forge_guard: {
+        enabled: false,
+        active: false,
+        virtual_memory_limit_kb: 1,
+        rayon_threads: 1
+      }
+    }
+  });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  git(["worktree", "add", "--quiet", "--detach", discoveryWorkspace, sourceRevision]);
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    invariantProbeLedger([
+      {
+        id: "probe-counter",
+        source_path: "src/Counter.sol",
+        query: "invariant harness scan",
+        result: "Scanned the develop source"
+      }
+    ])
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_SOURCE_UNPINNED"),
+    false,
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 // The mirrored rule must not over-fire: a tracked, unmodified, pinned probe source is exactly what
 // the run accepts, so the gate has to accept it too.
 test("project discovery gate accepts a pinned and unchanged scan probe source", () => {

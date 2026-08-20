@@ -47,6 +47,7 @@ If you need to install any dependencies, ask for my approval first.
 - [EVMBench integration](benchmarks/evmbench/README.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
+- [Licensing](docs/licensing.md)
 
 ## Evals
 

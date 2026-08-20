@@ -21,10 +21,10 @@ import {
   layoutForRunRoot,
   manifestDigest,
   nodeAttemptLedgerIdentity,
-  normalizeNodeAttemptFailureMessage,
   queryNodeAttempts,
   readRegularFileSnapshot,
   readRunMetadataDocument,
+  reconcileNodeAttemptLedgerEntry,
   replayEvents,
   replayNodeAttempts,
   readRunState,
@@ -32,6 +32,7 @@ import {
   parseSmithersTaskManifestBytes,
   replayUsageEvents,
   safeResolveInside,
+  sensitiveEnvironmentValues,
   sha256Bytes,
   sha256File,
   updateNodeState,
@@ -80,7 +81,9 @@ import {
   pricingForContext,
   resolveLiveModelPricing,
   type ModelPricing,
-  type PricingCatalogMetadata
+  type PricingCatalogFetch,
+  type PricingCatalogMetadata,
+  type PricingHostnameLookup
 } from "./model-pricing.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import {
@@ -338,6 +341,9 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  /** Trusted transport seams for hermetic embedders and tests. */
+  pricingFetch?: PricingCatalogFetch;
+  pricingLookupHostname?: PricingHostnameLookup;
   /**
    * Observational callers may retain the last coherent local snapshot when a
    * Smithers event stream is malformed. Mutation-capable synchronization stays
@@ -437,6 +443,13 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: loaded.diagnostics };
   }
   const previousControlState = structuredClone(readRunState(layout));
+  const forbiddenSecretValues = sensitiveEnvironmentValues(
+    input.env ?? process.env,
+    loaded.tasks.flatMap((task) => [
+      ...task.execution.agentCredentialEnv,
+      ...(task.execution.modal?.credentialEnv ?? [])
+    ])
+  );
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
@@ -547,6 +560,7 @@ export async function synchronizeLinkedWorkflowRun(
       inspect,
       events,
       attemptAuthorities,
+      forbiddenSecretValues,
       control
     });
   } catch (error) {
@@ -640,7 +654,7 @@ export async function synchronizeLinkedWorkflowRun(
     if (preStatusWriteBudgetDiagnostic !== undefined) {
       return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
     }
-    updateRunStatus(layout, finalStatus);
+    updateRunStatus(layout, finalStatus, undefined, { forbiddenSecretValues });
   }
   const recoveryBeforeStatusUpdate = stateBeforeStatusUpdate.provenance?.recovery;
   if (
@@ -662,7 +676,8 @@ export async function synchronizeLinkedWorkflowRun(
           recovery_id: recoveryBeforeStatusUpdate.recovery_id,
           prior_status: "failed",
           failed_nodes: recoveryBeforeStatusUpdate.failed_nodes
-        }
+        },
+        forbiddenSecretValues
       });
     }
     const state = readRunState(layout);
@@ -671,7 +686,13 @@ export async function synchronizeLinkedWorkflowRun(
       recovered: true,
       recovered_at: new Date(synchronizationClock(control)).toISOString()
     };
-    writeRunState(layout, { ...state, provenance: { ...state.provenance!, recovery: recovered } });
+    writeRunState(
+      layout,
+      { ...state, provenance: { ...state.provenance!, recovery: recovered } },
+      {
+        forbiddenSecretValues
+      }
+    );
   }
   const observedAtMs = synchronizationClock(control);
   const workflowControl = projectWorkflowControlState({
@@ -710,7 +731,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
   }
   if (workflowControl.changed || deadlineApplied) {
-    writeRunState(layout, workflowControl.state);
+    writeRunState(layout, workflowControl.state, { forbiddenSecretValues });
   }
   if (deadlineApplied) {
     if (exceededDeadlineAt === undefined) {
@@ -722,7 +743,8 @@ export async function synchronizeLinkedWorkflowRun(
       payload: {
         workflow_run_id: evidence.smithersRunId,
         deadline_at: exceededDeadlineAt
-      }
+      },
+      forbiddenSecretValues
     });
   }
   if (
@@ -752,7 +774,8 @@ export async function synchronizeLinkedWorkflowRun(
         accounting_available: accountingResult.available,
         recovery_due: workflowControl.recoveryDue,
         deadline_exceeded: deadlineApplied
-      }
+      },
+      forbiddenSecretValues
     });
   }
   // Persist the backstop. Returning it in `diagnostics` alone is not enough: the
@@ -776,7 +799,8 @@ export async function synchronizeLinkedWorkflowRun(
       appendEvent(layout, {
         eventType: "workflow-failure-unattributed",
         status: deadlineApplied ? "timed-out" : "failed",
-        payload
+        payload,
+        forbiddenSecretValues
       });
     }
   }
@@ -1202,6 +1226,8 @@ async function synchronizeWorkflowAccounting(input: {
           models: missingModels,
           env: input.env,
           signal: input.control.signal,
+          fetchImpl: input.control.pricingFetch,
+          lookupHostname: input.control.pricingLookupHostname,
           timeoutMs:
             input.control.deadlineMs === undefined
               ? undefined
@@ -2740,6 +2766,7 @@ async function synchronizeTasks(input: {
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
   attemptAuthorities: SmithersNodeAttemptAuthorities;
+  forbiddenSecretValues: readonly string[];
   control: WorkflowSynchronizationControl;
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
@@ -2802,10 +2829,8 @@ async function synchronizeTasks(input: {
     });
 
     const previousIsImmutable = immutableTerminalFinalization(previous);
-    const needsFinalization =
-      !previousIsImmutable &&
-      terminalStatus(evidence.status) &&
-      workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const needsFinalization = !previousIsImmutable && terminalStatus(evidence.status) && evidenceSupersedesPrevious;
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
           layout: input.layout,
@@ -2847,7 +2872,8 @@ async function synchronizeTasks(input: {
         currentAttempt: evidence.attempt,
         currentStatus: patchStatus,
         finalization,
-        attemptAuthorities: input.attemptAuthorities
+        attemptAuthorities: input.attemptAuthorities,
+        forbiddenSecretValues: input.forbiddenSecretValues
       });
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
       changed ||= ledger.appended;
@@ -2870,7 +2896,7 @@ async function synchronizeTasks(input: {
       timed_out: patchStatus === "timed-out",
       ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
-      last_error: finalization.lastError,
+      last_error: monotonicReplayedLastError(previous, finalization.lastError, evidenceSupersedesPrevious),
       provenance: {
         ...withoutSupersededFailure(withoutTerminalDisposition(previous?.provenance), patchStatus, finalization),
         workflow: {
@@ -2887,8 +2913,10 @@ async function synchronizeTasks(input: {
     const stateChanged = nodePatchChanges(previous, patch);
     if (stateChanged) {
       assertSynchronizationBudget(input.control);
-      updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control);
+      updateNodeState(input.layout, task.attemptId, patch, undefined, {
+        forbiddenSecretValues: input.forbiddenSecretValues
+      });
+      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control, input.forbiddenSecretValues);
       changed = true;
     }
     syncedNodes += 1;
@@ -2904,7 +2932,8 @@ async function synchronizeTasks(input: {
           previous_status: previous?.status,
           ...(evidence.workflowState === undefined ? {} : { workflow_state: evidence.workflowState }),
           ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt })
-        }
+        },
+        forbiddenSecretValues: input.forbiddenSecretValues
       });
     }
   }
@@ -2944,7 +2973,9 @@ async function synchronizeTasks(input: {
     };
     if (nodePatchChanges(previous, patch)) {
       assertSynchronizationBudget(input.control);
-      updateNodeState(input.layout, concreteNodeId, patch);
+      updateNodeState(input.layout, concreteNodeId, patch, undefined, {
+        forbiddenSecretValues: input.forbiddenSecretValues
+      });
       changed = true;
     }
   }
@@ -3553,11 +3584,12 @@ function appendNodeEvents(
   layout: RunLayout,
   nodeId: string,
   events: PendingNodeEvent[],
-  control: WorkflowSynchronizationControl
+  control: WorkflowSynchronizationControl,
+  forbiddenSecretValues: readonly string[]
 ): void {
   for (const event of events) {
     assertSynchronizationBudget(control);
-    appendEvent(layout, { ...event, nodeId });
+    appendEvent(layout, { ...event, nodeId, forbiddenSecretValues });
   }
 }
 
@@ -3571,6 +3603,7 @@ function appendTerminalTaskAttempts(input: {
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
   attemptAuthorities: SmithersNodeAttemptAuthorities;
+  forbiddenSecretValues: readonly string[];
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const terminalAttempts = terminalWorkflowAttempts(input.events);
   const state = readRunState(input.layout);
@@ -3642,8 +3675,6 @@ function appendTerminalTaskAttempts(input: {
             sourceWorkflowRunId: reuseSource.workflowRunId,
             sourceEventSequence: reuseSource.sourceEventSequence
           };
-    const normalizedFailureMessage =
-      failureMessage === undefined ? undefined : normalizeNodeAttemptFailureMessage(failureMessage);
     const appendInput: AppendNodeAttemptInput = {
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
@@ -3663,7 +3694,8 @@ function appendTerminalTaskAttempts(input: {
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory }),
-      ...(normalizedFailureMessage === undefined ? {} : { failureMessage: normalizedFailureMessage })
+      ...(failureMessage === undefined ? {} : { failureMessage }),
+      forbiddenSecretValues: input.forbiddenSecretValues
     };
     const candidate = createNodeAttemptLedgerEntry(input.layout, appendInput);
     const identity = nodeAttemptLedgerIdentity(candidate);
@@ -3677,11 +3709,14 @@ function appendTerminalTaskAttempts(input: {
     }
     const recordedEntry = existingByIdentity.get(identity);
     if (recordedEntry !== undefined) {
-      if (!isDeepStrictEqual(recordedEntry, candidate)) {
+      const reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, candidate, {
+        failureMessage
+      });
+      if (reconciled === undefined) {
         throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
       }
-      candidatesByIdentity.set(identity, candidate);
-      candidates.push(candidate);
+      candidatesByIdentity.set(identity, reconciled);
+      candidates.push(reconciled);
       currentAttemptExecuted ||= isCurrent && recordedEntry.reuse.status === "executed";
       continue;
     }
@@ -4291,6 +4326,15 @@ function workflowEvidenceSupersedesPrevious(
   if (previous === undefined || previous.status !== evidence.status) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
+}
+
+function monotonicReplayedLastError(
+  previous: NodeState | undefined,
+  observed: string | undefined,
+  evidenceSupersedesPrevious: boolean
+): string | undefined {
+  if (!evidenceSupersedesPrevious && previous?.last_error !== undefined) return previous.last_error;
+  return observed;
 }
 
 function preparationWorkflowStateIsFailure(evidence: NodeWorkflowEvidence): boolean {

@@ -74,13 +74,23 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
+import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import {
+  assertLaunchCheckoutRevision,
+  captureLaunchSourceRevision,
+  deleteRunSourceRevision,
+  publishRunSourceRevision
+} from "./source-revision.js";
 import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
 interface PlanRunHooks {
+  enforceDataGovernance?: boolean;
+  afterSourceCapture?(source: ReturnType<typeof captureLaunchSourceRevision>): Promise<void> | void;
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
@@ -89,6 +99,20 @@ interface PlanRunHooks {
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const projectRoot = path.resolve(input.projectRoot);
+  const runId = input.runId ?? generateRunId(input.mode ?? "run");
+  let sourceRevision: ReturnType<typeof captureLaunchSourceRevision>;
+  try {
+    sourceRevision = captureLaunchSourceRevision(projectRoot, runId);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_FAILED")]);
+  }
+  try {
+    await hooks.afterSourceCapture?.(sourceRevision);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_HOOK_FAILED")
+    ]);
+  }
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
     return runtimeFailure<PlanRunValue>(validation.diagnostics);
@@ -130,7 +154,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
   };
 
-  const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
   const redacted = redactResolvedConfig(resolved.config);
   const redactedConfigFingerprint = sha256Stable(redacted.config);
@@ -192,6 +215,44 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
+  let controllerSource: ReturnType<typeof inspectControllerSource>;
+  try {
+    controllerSource = inspectControllerSource(projectRoot);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_UNTRUSTED")]);
+  }
+  const graphFingerprint = fingerprintGraph(expandedGraph);
+  const governanceConfig = resolved.config;
+  const prepareGovernance = () =>
+    prepareDataGovernance({
+      projectRoot,
+      config: governanceConfig,
+      graph,
+      graphFingerprint,
+      configFingerprint,
+      promptDigest,
+      sourceRunId: input.sourceRunId,
+      referenceExpectationsDigest: referenceExpectationsSource?.sourceDigest,
+      operatorPrompt: input.prompt,
+      workflowInput: input.workflowInput,
+      env: input.env,
+      controllerOwnedPaths: [
+        runRoot,
+        path.join(projectRoot, ".ultrafuzz", "runs"),
+        path.join(projectRoot, ".smithers", "node_modules"),
+        path.join(projectRoot, ".smithers", "workflows")
+      ]
+    });
+  let governance: ReturnType<typeof prepareDataGovernance>;
+  try {
+    governance = prepareGovernance();
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]);
+  }
+  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics))
+    return runtimeFailure<PlanRunValue>(governance.diagnostics);
+  // Authenticate disclosure before provider preflight can create a cloud app
+  // or otherwise contact an external execution environment.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =
@@ -202,7 +263,46 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(preMaterializeDiagnostics)) {
     return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
   }
-  const graphFingerprint = fingerprintGraph(expandedGraph);
+  try {
+    assertControllerSourceDigest(projectRoot, controllerSource.digest);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_CHANGED_DURING_PREFLIGHT")
+    ]);
+  }
+  if (hooks.enforceDataGovernance === true && hooks.beforeMaterialize !== undefined) {
+    let current: ReturnType<typeof prepareDataGovernance>;
+    try {
+      current = prepareGovernance();
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")
+      ]);
+    }
+    if (
+      current.provenance.policy_digest !== governance.provenance.policy_digest ||
+      current.provenance.input_digest !== governance.provenance.input_digest
+    ) {
+      const changed = new Error(
+        "campaign policy or effective input changed during preflight; review and acknowledge it again"
+      );
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(changed, "governance", "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT")
+      ]);
+    }
+    if (hasRuntimeErrors(current.diagnostics)) return runtimeFailure<PlanRunValue>(current.diagnostics);
+    governance = current;
+  }
+  const governanceBytes = Buffer.from(`${JSON.stringify(governance.provenance, null, 2)}\n`, "utf8");
+  const governanceReference = {
+    schema_version: governance.provenance.schema_version,
+    path: DATA_GOVERNANCE_PROVENANCE_PATH,
+    sha256: sha256Bytes(governanceBytes),
+    policy_digest: governance.provenance.policy_digest,
+    input_digest: governance.provenance.input_digest,
+    sensitivity: governance.provenance.policy.sensitivity,
+    acknowledgement_status: governance.provenance.acknowledgement_status
+  };
   const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,
@@ -247,6 +347,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       runMetadata: {
         mode: input.mode ?? "run",
         workflow_ids: [],
+        ...(sourceRevision === undefined
+          ? {}
+          : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
         redacted_config_fingerprint: redactedConfigFingerprint,
         prompt_digest: promptDigest,
         audit_profile: {
@@ -271,6 +374,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
+    writeFileDurable(path.join(layout.root, DATA_GOVERNANCE_PROVENANCE_PATH), governanceBytes);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
   }
@@ -300,46 +404,82 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (validation.value.topology === undefined) {
     throw new Error("validated run plan is missing its topology summary");
   }
-  writeRunPlanDocument(path.join(layout.root, "plan.json"), {
-    schema_version: RUN_PLAN_SCHEMA_VERSION,
-    run_id: runId,
-    mode: input.mode ?? "run",
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    prompt_digest: promptDigest,
-    execution: resolved.config.execution,
-    topology: validation.value.topology,
-    audit_profile: {
-      id: auditPolicy.auditProfile,
-      catalog_digest: auditPolicy.catalogDigest,
-      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
-      topology_path_origin: auditPolicy.topologyPathOrigin,
-      topology_digest: auditPolicy.topologyDigest,
+  if (sourceRevision !== undefined) {
+    try {
+      assertLaunchCheckoutRevision(projectRoot, sourceRevision);
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CHANGED")]);
+    }
+  }
+  let sourceRefCreated = false;
+  try {
+    if (sourceRevision !== undefined) sourceRefCreated = publishRunSourceRevision(projectRoot, sourceRevision);
+    writeRunPlanDocument(path.join(layout.root, "plan.json"), {
+      schema_version: RUN_PLAN_SCHEMA_VERSION,
+      run_id: runId,
+      mode: input.mode ?? "run",
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      ...(sourceRevision === undefined
+        ? {}
+        : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
       prompt_digest: promptDigest,
-      expanded_graph_fingerprint: graphFingerprint,
-      effective_settings: auditPolicy.effectiveSettings,
-      setting_origins: auditPolicy.settingOrigins,
-      overridden_settings: auditPolicy.overriddenSettings,
-      topology_overridden: auditPolicy.topologyOverridden
-    },
-    rendered_prompts: persistedRenderedPrompts,
-    policy_posture: Object.fromEntries(
-      Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
-    ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
-  });
+      controller_source_digest: controllerSource.digest,
+      execution: resolved.config.execution,
+      topology: validation.value.topology,
+      audit_profile: {
+        id: auditPolicy.auditProfile,
+        catalog_digest: auditPolicy.catalogDigest,
+        effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+        topology_path_origin: auditPolicy.topologyPathOrigin,
+        topology_digest: auditPolicy.topologyDigest,
+        prompt_digest: promptDigest,
+        expanded_graph_fingerprint: graphFingerprint,
+        effective_settings: auditPolicy.effectiveSettings,
+        setting_origins: auditPolicy.settingOrigins,
+        overridden_settings: auditPolicy.overriddenSettings,
+        topology_overridden: auditPolicy.topologyOverridden
+      },
+      data_governance: governanceReference,
+      rendered_prompts: persistedRenderedPrompts,
+      policy_posture: Object.fromEntries(
+        Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
+      ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
+    });
+  } catch (error) {
+    if (sourceRefCreated && sourceRevision !== undefined) {
+      try {
+        deleteRunSourceRevision(projectRoot, sourceRevision);
+      } catch (rollbackError) {
+        return runtimeFailure<PlanRunValue>([
+          diagnosticFromError(
+            new AggregateError([error, rollbackError], "run plan persistence and source ref rollback failed"),
+            "runtime",
+            "RUN_SOURCE_REVISION_ROLLBACK_FAILED"
+          )
+        ]);
+      }
+    }
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_PERSIST_FAILED")]);
+  }
 
   return runtimeResult(true, {
     run_id: runId,
     run_root: layout.root,
     ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+    ...(sourceRevision === undefined
+      ? {}
+      : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
     graph,
     expanded_graph: expandedGraph,
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
     prompt_digest: promptDigest,
+    data_governance: governanceReference,
+    controller_source_digest: controllerSource.digest,
     output_root: outputRoot,
     state_nodes: stateNodes,
     resolved_config: resolved.config,

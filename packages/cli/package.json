@@ -2,6 +2,7 @@
   "name": "@ultrafuzz/cli",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ultrafuzz": "./dist/index.js"
@@ -39,7 +40,7 @@
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
-    "adm-zip": "^0.5.18",
+    "adm-zip": "^0.6.0",
     "tar-stream": "^3.2.0"
   },
   "devDependencies": {

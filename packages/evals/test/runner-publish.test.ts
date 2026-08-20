@@ -524,7 +524,7 @@ describe("runner", () => {
       evalRunId: "missing-backend-eval",
       row,
       suite,
-      env: { PATH: path.join(project, "empty-bin") }
+      env: { PATH: path.join(project, "empty-bin"), ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1" }
     });
 
     expect(record.status).toBe("failed");

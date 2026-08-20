@@ -31,7 +31,12 @@ import {
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
-import { parseResolvedConfigJsonBytes, serializeResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import {
+  parseProjectConfigToml,
+  parseResolvedConfigJsonBytes,
+  resolveConfig,
+  serializeResolvedConfigJsonBytes
+} from "@ultrafuzz/config";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -65,17 +70,46 @@ import {
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
-  syncRun,
+  syncRun as runtimeSyncRun,
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
+import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
+import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
-import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
+import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
+const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
+  "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
+  "SMITHERS_FAKE_CLOUD_ENV_LOG",
+  "SMITHERS_FAKE_CONTEXT_LOG",
+  "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
+  "SMITHERS_FAKE_ENV_LOG",
+  "SMITHERS_FAKE_EXECUTED_AS_LOG",
+  "SMITHERS_FAKE_FAIL_UP",
+  "SMITHERS_FAKE_FORGE_GUARD_LOG",
+  "SMITHERS_FAKE_FORKED_RUN_ID",
+  "SMITHERS_FAKE_INPUT_LOG",
+  "SMITHERS_FAKE_KEEP_WORKTREES_LOG",
+  "SMITHERS_FAKE_KIMI_ENV_LOG",
+  "SMITHERS_FAKE_LOG",
+  "SMITHERS_FAKE_MARKER",
+  "SMITHERS_FAKE_OPENROUTER_ENV_LOG",
+  "SMITHERS_FAKE_PATH_LOG",
+  "SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS",
+  "SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG",
+  "SMITHERS_FAKE_RUN_EXISTS",
+  "SMITHERS_FAKE_SNAPSHOT_ATTEMPT",
+  "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
+] as const;
+const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
+const TEST_DATA_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:anthropic","model:deepseek","model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","model:moonshot","model:openai","model:openrouter"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:anthropic","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:deepseek","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:moonshot","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openrouter","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":["~anthropic/claude-sonnet-latest:free","~vendor/model.latest:free+preview@2026"]}`;
+process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-homes-"));
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
@@ -125,7 +159,61 @@ function withFakeCliEntrypoint<T extends { projectRoot: string; ultrafuzzCliEntr
 }
 
 function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> {
-  return runtimeStartRun(withFakeCliEntrypoint(input));
+  const environmentAllowlist = [
+    ...SMITHERS_TEST_ENVIRONMENT_ALLOWLIST,
+    ...(input.env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")
+  ]
+    .map((name) => name.trim())
+    .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
+    .join(",");
+  const ambientRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent", "KimiAgent"]
+      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
+      .map((name) => [name, undefined])
+  );
+  return runtimeStartRun(
+    withFakeCliEntrypoint({
+      ...input,
+      env: {
+        ...ambientRouteEnvironment,
+        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
+        ALL_PROXY: undefined,
+        HTTP_PROXY: undefined,
+        HTTPS_PROXY: undefined,
+        NO_PROXY: undefined,
+        all_proxy: undefined,
+        http_proxy: undefined,
+        https_proxy: undefined,
+        no_proxy: undefined,
+        OPENAI_BASE_URL: undefined,
+        KIMI_BASE_URL: undefined,
+        ...input.env,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: environmentAllowlist
+      }
+    })
+  );
+}
+
+const testPricingCatalogs = new Map<string, string>();
+let testPricingCatalogSequence = 0;
+
+const testPricingFetch: typeof fetch = async (input) => {
+  const url = input instanceof Request ? input.url : String(input);
+  const catalog = testPricingCatalogs.get(url);
+  if (catalog === undefined) throw new Error(`unexpected pricing catalog URL in test: ${url}`);
+  return new Response(catalog, { headers: { "content-type": "application/json" } });
+};
+
+function syncRun(
+  input: Parameters<typeof runtimeSyncRun>[0],
+  control: NonNullable<Parameters<typeof runtimeSyncRun>[1]> = {}
+): ReturnType<typeof runtimeSyncRun> {
+  return runtimeSyncRun(input, {
+    ...control,
+    pricingFetch: testPricingFetch,
+    pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }]
+  });
 }
 
 function resumeRun(input: Parameters<typeof runtimeResumeRun>[0]): ReturnType<typeof runtimeResumeRun> {
@@ -208,11 +296,17 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "kimi.mjs"), transpile(kimiSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -225,6 +319,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
     "utf8"
   );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const kimiModule = (await import(pathToFileURL(path.join(fixture, "kimi.mjs")).href)) as {
     KimiCode029Agent: new (options: Record<string, unknown>) => {
       issuedSessionId?: string;
@@ -259,7 +354,8 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   createCodexAgent(options?: Record<string, unknown>): unknown;
   workflowControlChildEnvironment(
     additions?: Record<string, string | undefined>,
-    source?: Record<string, string | undefined>
+    source?: Record<string, string | undefined>,
+    route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent"; configDir?: string }
   ): Record<string, string>;
 }> {
   const fixture = path.join(project, "codex-agent-executable-test");
@@ -280,7 +376,8 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
@@ -288,10 +385,21 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     "utf8"
   );
   fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
     "utf8"
   );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
@@ -305,7 +413,8 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   const environmentModule = (await import(pathToFileURL(path.join(fixture, "environment.mjs")).href)) as {
     workflowControlChildEnvironment(
       additions?: Record<string, string | undefined>,
-      source?: Record<string, string | undefined>
+      source?: Record<string, string | undefined>,
+      route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent"; configDir?: string }
     ): Record<string, string>;
   };
   return {
@@ -315,7 +424,40 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
-async function loadGeneratedOpenRouterAgent(project: string): Promise<{
+async function loadGeneratedOpenRouterAgent(
+  project: string,
+  retryPolicy?: {
+    retryWindowMs: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    jitterFraction: number;
+    provisionalCallbackLimit?: number;
+    actionSnapshotLimit?: number;
+    actionSnapshotBytes?: number;
+  },
+  testInstrumentation?: {
+    acknowledgeProvisionalRateLimit?: boolean;
+    expireRetryDeadlineBeforeReplacementBuild?: number;
+  }
+): Promise<{
+  OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+    generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+    buildCommand: (params: {
+      prompt: string;
+      cwd: string;
+      options: Record<string, unknown>;
+    }) => Promise<Record<string, unknown>>;
+  };
+  decideOpenRouter429Recovery(input: {
+    retryAttempt: number;
+    nowMs: number;
+    retryDeadlineMs: number;
+    totalDeadlineMs?: number;
+    random: number;
+  }):
+    | { kind: "rate-limit-exhausted" }
+    | { kind: "total-timeout" }
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
     generate(options?: {
@@ -359,13 +501,100 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
     .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
-  const openRouterSource = fs
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  let openRouterSource = fs
     .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./codex"', 'from "./codex.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  if (retryPolicy !== undefined) {
+    for (const [from, to] of [
+      [
+        "const OPENROUTER_429_RECOVERY_WINDOW_MS = 120_000;",
+        `const OPENROUTER_429_RECOVERY_WINDOW_MS = ${retryPolicy.retryWindowMs};`
+      ],
+      [
+        "const OPENROUTER_429_INITIAL_DELAY_MS = 1_000;",
+        `const OPENROUTER_429_INITIAL_DELAY_MS = ${retryPolicy.initialDelayMs};`
+      ],
+      ["const OPENROUTER_429_MAX_DELAY_MS = 30_000;", `const OPENROUTER_429_MAX_DELAY_MS = ${retryPolicy.maxDelayMs};`],
+      [
+        "const OPENROUTER_429_JITTER_FRACTION = 0.25;",
+        `const OPENROUTER_429_JITTER_FRACTION = ${retryPolicy.jitterFraction};`
+      ]
+    ] as const) {
+      const replaced = openRouterSource.replace(from, to);
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter retry policy source: ${from}`);
+      openRouterSource = replaced;
+    }
+    if (retryPolicy.provisionalCallbackLimit !== undefined) {
+      const from = "const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = 256;";
+      const replaced = openRouterSource.replace(
+        from,
+        `const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = ${retryPolicy.provisionalCallbackLimit};`
+      );
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
+      openRouterSource = replaced;
+    }
+    for (const [from, value] of [
+      ["const OPENROUTER_ACTION_SNAPSHOT_LIMIT = 256;", retryPolicy.actionSnapshotLimit],
+      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes]
+    ] as const) {
+      if (value === undefined) continue;
+      const replaced = openRouterSource.replace(from, from.replace(/= .*;/u, `= ${value};`));
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
+      openRouterSource = replaced;
+    }
+  }
+  if (testInstrumentation?.acknowledgeProvisionalRateLimit === true) {
+    const from = 'this.#provisionalRateLimit = matchState === "provisional";';
+    const replaced = openRouterSource.replace(
+      from,
+      `${from}
+    if (
+      this.#provisionalRateLimit &&
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE === "stderr-provisional-post-terminal"
+    ) {
+      const acknowledgementPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
+      if (acknowledgementPath !== undefined) writeFileSync(acknowledgementPath, "observed\\n", "utf8");
+    }`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter provisional transition source");
+    openRouterSource = replaced;
+  }
+  const expirationBuild = testInstrumentation?.expireRetryDeadlineBeforeReplacementBuild;
+  if (expirationBuild !== undefined) {
+    assert.equal(
+      Number.isSafeInteger(expirationBuild) && expirationBuild > 0,
+      true,
+      "generated OpenRouter deadline expiration build must be a positive integer"
+    );
+    const counterFrom = 'const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");';
+    const counterReplacement = `${counterFrom}\nlet openRouterTestReplacementBuildCount = 0;`;
+    let replaced = openRouterSource.replace(counterFrom, counterReplacement);
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter attempt-deadline source");
+    openRouterSource = replaced;
+
+    const deadlineFrom = "    const deadlineError = openRouterAttemptDeadlineError(params.options);";
+    replaced = openRouterSource.replace(
+      deadlineFrom,
+      `    const instrumentedAttemptDeadlines = (params.options as Record<PropertyKey, unknown>)[
+      OPENROUTER_ATTEMPT_DEADLINES
+    ] as OpenRouterAttemptDeadlines | undefined;
+    if (
+      instrumentedAttemptDeadlines?.retryDeadlineMs !== undefined &&
+      ++openRouterTestReplacementBuildCount >= ${expirationBuild}
+    ) {
+      instrumentedAttemptDeadlines.retryDeadlineMs = performance.now() - 1;
+    }
+${deadlineFrom}`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter build deadline source");
+    openRouterSource = replaced;
+  }
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
   fs.writeFileSync(
@@ -374,24 +603,57 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
     "utf8"
   );
   fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
     path.join(fixture, "toml.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
     "utf8"
   );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+      generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+      buildCommand: (params: {
+        prompt: string;
+        cwd: string;
+        options: Record<string, unknown>;
+      }) => Promise<Record<string, unknown>>;
+    };
+    decideOpenRouter429Recovery(input: {
+      retryAttempt: number;
+      nowMs: number;
+      retryDeadlineMs: number;
+      totalDeadlineMs?: number;
+      random: number;
+    }):
+      | { kind: "rate-limit-exhausted" }
+      | { kind: "total-timeout" }
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
       generate(options?: {
         prompt?: unknown;
         onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
         onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
       }): Promise<{ text: string }>;
       stream(options?: {
         prompt?: unknown;
         onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
         onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
       }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
@@ -406,11 +668,23 @@ async function loadGeneratedOpenRouterAgent(project: string): Promise<{
   };
 }
 
-function installOpenRouterRetryCodexFixture(project: string): { bin: string; counter: string } {
+function installOpenRouterRetryCodexFixture(project: string): {
+  bin: string;
+  counter: string;
+  journal: string;
+  sentinel: string;
+  provisionalAck: string;
+  warningAck: string;
+} {
   const bin = path.join(project, "openrouter-retry-bin");
   const counter = path.join(project, "openrouter-retry-count");
+  const journal = path.join(project, "openrouter-retry-journal.jsonl");
+  const sentinel = path.join(project, "openrouter-retry-sentinel");
+  const provisionalAck = path.join(project, "openrouter-retry-provisional-ack");
+  const warningAck = path.join(project, "openrouter-retry-warning-ack");
   fs.mkdirSync(bin, { recursive: true });
   fs.writeFileSync(counter, "0", "utf8");
+  fs.writeFileSync(journal, "", "utf8");
   const executable = path.join(bin, "codex");
   fs.writeFileSync(
     executable,
@@ -421,15 +695,303 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
+const journalPath = process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL;
+const sentinelPath = process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL;
+const provisionalAckPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
+const warningAckPath = process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK;
 let count = 0;
 try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
 count += 1;
 fs.writeFileSync(counterPath, String(count), "utf8");
+const failureCount = Number(process.env.OPENROUTER_RETRY_FIXTURE_FAILURES ?? "1");
+const mode = process.env.OPENROUTER_RETRY_FIXTURE_MODE ?? "initial";
+const argv = process.argv.slice(2);
+const resumed = argv[0] === "exec" && argv[1] === "resume";
+const resumeSession = resumed ? argv.at(-2) : undefined;
+let stdin = "";
 process.stdin.resume();
+process.stdin.on("data", (chunk) => { stdin += chunk; });
 process.stdin.on("end", () => {
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "fixture-" + count }) + "\\n");
+  const substantiveMode = mode.startsWith("substantive-") ||
+    [
+      "missing-session",
+      "conflicting-session",
+      "fresh-conflicting-session",
+      "late-conflicting-session",
+      "stderr-only",
+      "resume-hang"
+    ].includes(mode);
+  if (substantiveMode && !resumed) fs.appendFileSync(sentinelPath, "mutation\\n", "utf8");
+  fs.appendFileSync(journalPath, JSON.stringify({
+    count,
+    argv,
+    stdin,
+    invocation: resumed ? "resume" : "fresh",
+    resumeSession,
+    sentinel: fs.existsSync(sentinelPath) ? fs.readFileSync(sentinelPath, "utf8") : ""
+  }) + "\\n", "utf8");
+  const sessionId = mode === "conflicting-session" && resumed
+    ? "conflicting-session"
+    : mode === "initial"
+      ? "fixture-" + count
+      : "fixture-session";
+  if (!(mode === "missing-session" && count === 1)) {
+    process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");
+  }
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
-  if (count === 1 && process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+  if (mode === "callback-hang") {
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stdout-callback-hang") {
+    // BaseCliAgent's onStdout contract carries extracted assistant text rather
+    // than raw Codex JSONL. Emit a recognized streaming-text envelope so this
+    // fixture exercises a live onStdout callback before the child exits.
+    process.stdout.write(JSON.stringify({
+      type: "message",
+      role: "assistant",
+      content: "live stdout before hang"
+    }) + "\\n");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-callback-hang") {
+    process.stderr.write("live stderr before hang");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-429-hang" && count <= failureCount) {
+    process.stderr.write("HTTP 429 request id: fixture-" + count + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-replay" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "fixture progress" }
+    }) + "\\n");
+  }
+  if (mode === "substantive-snapshot-overflow" && resumed) {
+    for (const snapshot of [1, 4]) {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+      }) + "\\n");
+    }
+  }
+  if (mode === "late-conflicting-session" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "late-before-conflict", type: "agent_message", text: "before conflict" }
+    }) + "\\n");
+    process.stdout.write(
+      JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) +
+        "\\n" +
+        JSON.stringify({ type: "message", role: "assistant", content: "must stay quarantined" }) +
+        "\\n"
+    );
+    setTimeout(() => {
+      fs.appendFileSync(sentinelPath, "wrong-session-mutation\\n", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "post-conflict", type: "agent_message", text: "must stay quarantined" }
+      }) + "\\n");
+      process.stderr.write("wrong-session-stderr must stay quarantined\\n");
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "WRONG", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 100);
+    return;
+  }
+  if (mode === "resume-hang" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "resume-message", type: "agent_message", text: "resume began" }
+    }) + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-updates" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "completed" }
+    }) + "\\n");
+  }
+  if (mode === "warning-burst") {
+    for (let warning = 0; warning < 256; warning += 1) {
+      process.stderr.write("ordinary warning " + warning + "\\n");
+    }
+    // stdout and stderr use separate pipes. Wait for an explicit parent
+    // acknowledgement so success cannot overtake the warning burst.
+    const warningAckDeadline = setTimeout(() => {
+      clearInterval(warningAckTimer);
+      process.stderr.write("warning-burst acknowledgement timed out\\n");
+      process.exitCode = 1;
+    }, 5_000);
+    const warningAckTimer = setInterval(() => {
+      if (!fs.existsSync(warningAckPath)) return;
+      clearInterval(warningAckTimer);
+      clearTimeout(warningAckDeadline);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 1);
+    return;
+  }
+  if (
+    mode === "stderr-left-boundary-negative" ||
+    mode === "stderr-right-boundary-negative" ||
+    mode === "stderr-long-s-boundary-negative"
+  ) {
+    const first =
+      mode === "stderr-left-boundary-negative"
+        ? "prefix"
+        : mode === "stderr-long-s-boundary-negative"
+          ? "HTTP ſtatus 429"
+          : "HTTP 429";
+    const second = mode === "stderr-left-boundary-negative" ? "HTTP 429 suffix\\n" : "suffix\\n";
+    process.stderr.write(first);
+    setTimeout(() => {
+      if (mode === "stderr-right-boundary-negative" || mode === "stderr-long-s-boundary-negative") {
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: mode + " boundary disproved"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "provisional-safe", type: "agent_message", text: mode + " event preserved" }
+        }) + "\\n");
+      }
+      process.stderr.write(second);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 10);
+    return;
+  }
+  if (count <= failureCount && mode !== "empty-success" && mode !== "warning-burst") {
+    const rateLimitMessage =
+      "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
+    if (mode === "stderr-provisional-post-terminal") {
+      // The test-generated relay acknowledges only after its actual
+      // provisional transition, regardless of how this write is chunked.
+      process.stderr.write("provisional boundary ready\\nHTTP 429");
+      const provisionalAckDeadline = setTimeout(() => {
+        clearInterval(provisionalAckTimer);
+        process.stderr.write("\\nprovisional boundary acknowledgement timed out\\n");
+        process.exitCode = 1;
+      }, 5_000);
+      const provisionalAckTimer = setInterval(() => {
+        if (!provisionalAckPath || !fs.existsSync(provisionalAckPath)) return;
+        clearInterval(provisionalAckTimer);
+        clearTimeout(provisionalAckDeadline);
+        fs.appendFileSync(sentinelPath, "provisional-post-terminal-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "provisional post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "provisional-post-terminal",
+            type: "command_execution",
+            command: "provisional post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        process.stderr.write("\\n");
+        process.exitCode = 1;
+      }, 1);
+      return;
+    }
+    if (mode === "stderr-post-terminal" || mode === "stdout-post-terminal") {
+      if (mode === "stderr-post-terminal") {
+        process.stderr.write(rateLimitMessage + "\\n");
+      } else {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+      }
+      setTimeout(() => {
+        fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "post-terminal",
+            type: "command_execution",
+            command: "post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
+        process.exitCode = 1;
+      }, 20);
+      return;
+    }
+    if (mode === "stderr-oversized") {
+      process.stderr.write(
+        "429 Too Many Requests request id: fixture-" + count + " " + "x".repeat(70 * 1024)
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (mode === "stderr-character-split") {
+      const splitMessage = "HTTP\\n429 Too Many Requests request id: fixture-" + count;
+      let splitIndex = 0;
+      const splitTimer = setInterval(() => {
+        process.stderr.write(splitMessage[splitIndex] ?? "");
+        splitIndex += 1;
+        if (splitIndex >= splitMessage.length) {
+          clearInterval(splitTimer);
+          process.exitCode = 1;
+        }
+      }, 1);
+      return;
+    }
+    if (mode === "stderr-unicode-prefix-split") {
+      process.stderr.write("İ\\nH");
+      setTimeout(() => {
+        process.stderr.write("TTP 429 request id: fixture-" + count + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
+    if (mode === "structured-429-partial-stderr") {
+      process.stderr.write("HTT");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
     const substantiveEvents = {
       "substantive-command": {
         type: "item.started",
@@ -458,13 +1020,67 @@ process.stdin.on("end", () => {
       "substantive-todo": {
         type: "item.started",
         item: { id: "todo-1", type: "todo_list", items: [{ text: "fixture task", completed: false }] }
+      },
+      "substantive-429-message": {
+        type: "item.completed",
+        item: { id: "message-429", type: "agent_message", text: "Investigated HTTP 429 handling" }
       }
     };
-    const substantiveEvent = substantiveEvents[process.env.OPENROUTER_RETRY_FIXTURE_MODE];
+    if (mode === "substantive-updates" && count === 1) {
+      process.stdout.write(JSON.stringify({
+        type: "item.updated",
+        item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+      }) + "\\n");
+    }
+    if ((mode === "substantive-stdout-only" && count === 1) || mode === "substantive-stdout-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: mode === "substantive-stdout-replay" ? "replayed stdout progress" : "stdout-only substantive progress"
+      }) + "\\n");
+    }
+    if (mode === "substantive-stdout-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: "oversized-replay-" + "x".repeat(1_024)
+      }) + "\\n");
+    }
+    if (mode === "substantive-action-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "oversized-action", type: "agent_message", text: "x".repeat(1_024) }
+      }) + "\\n");
+    }
+    if (mode === "substantive-snapshot-overflow" && count === 1) {
+      for (const snapshot of [1, 2, 3, 4]) {
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+        }) + "\\n");
+      }
+    }
+    const substantiveEvent = count === 1
+      ? substantiveEvents[mode] ?? (substantiveMode && mode !== "substantive-updates" && mode !== "substantive-snapshot-overflow" && mode !== "substantive-stdout-only" && mode !== "substantive-stdout-replay" && mode !== "substantive-stdout-oversized-replay" && mode !== "substantive-action-oversized-replay"
+        ? { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "fixture progress" } }
+        : undefined)
+      : undefined;
     if (substantiveEvent) process.stdout.write(JSON.stringify(substantiveEvent) + "\\n");
-    const message = process.env.OPENROUTER_RETRY_FIXTURE_MODE === "unrelated"
+    if (mode === "fresh-conflicting-session" && count === 1) {
+      process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) + "\\n");
+    }
+    const message = mode === "unrelated"
       ? "fixture path /tmp/job-429 is unavailable"
-      : "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-1";
+      : rateLimitMessage;
+    if (mode === "stderr-only") {
+      const splitAt = Math.max(1, message.indexOf("429") + 2);
+      process.stderr.write(message.slice(0, splitAt));
+      setTimeout(() => {
+        process.stderr.write(message.slice(splitAt) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
     process.stdout.write(JSON.stringify({ type: "error", message }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message } }) + "\\n");
     process.exitCode = 1;
@@ -472,10 +1088,10 @@ process.stdin.on("end", () => {
   }
   const outputIndex = process.argv.indexOf("--output-last-message");
   if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
-  if (process.env.OPENROUTER_RETRY_FIXTURE_MODE !== "empty-success") {
+  if (mode !== "empty-success") {
     process.stdout.write(JSON.stringify({
       type: "item.completed",
-      item: { id: "message-1", type: "agent_message", text: "OK" }
+      item: { id: "final-message", type: "agent_message", text: "OK" }
     }) + "\\n");
   }
   process.stdout.write(JSON.stringify({
@@ -486,10 +1102,36 @@ process.stdin.on("end", () => {
 `,
     { encoding: "utf8", mode: 0o755 }
   );
-  return { bin, counter };
+  return { bin, counter, journal, sentinel, provisionalAck, warningAck };
+}
+
+type OpenRouterRetryFixtureEntry = {
+  count: number;
+  argv: string[];
+  stdin: string;
+  invocation: "fresh" | "resume";
+  resumeSession?: string;
+  sentinel: string;
+};
+
+function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFixtureEntry[] {
+  const text = fs.readFileSync(pathname, "utf8").trim();
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as OpenRouterRetryFixtureEntry);
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
+  createDeepSeekAgent(options?: Record<string, unknown>): {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      env?: Record<string, string>;
+    }>;
+  };
+  CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
+    buildCommand(params: {
+      prompt: string;
+      cwd: string;
+      options: Record<string, unknown>;
+    }): Promise<{ args: string[] }>;
+  };
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
     stream(options: Record<string, unknown>): Promise<{
@@ -527,11 +1169,24 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
-    .replace('from "./environment"', 'from "./environment.mjs"');
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
   fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
+  const claudeSource = fs
+    .readFileSync(path.join(agentsDir, "claude.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  fs.writeFileSync(path.join(fixture, "claude.mjs"), transpile(claudeSource), "utf8");
   fs.writeFileSync(
     path.join(fixture, "environment.mjs"),
     transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
     "utf8"
   );
   fs.writeFileSync(
@@ -544,7 +1199,13 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
     "utf8"
   );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
+    createDeepSeekAgent(options?: Record<string, unknown>): {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        env?: Record<string, string>;
+      }>;
+    };
     DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
       generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
       stream(options: Record<string, unknown>): Promise<{
@@ -563,7 +1224,20 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
       };
     };
   };
-  return { DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent };
+  const claudeModule = (await import(pathToFileURL(path.join(fixture, "claude.mjs")).href)) as {
+    CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
+      buildCommand(params: {
+        prompt: string;
+        cwd: string;
+        options: Record<string, unknown>;
+      }): Promise<{ args: string[] }>;
+    };
+  };
+  return {
+    createDeepSeekAgent: deepSeekModule.createDeepSeekAgent,
+    CompatibleClaudeCodeAgent: claudeModule.CompatibleClaudeCodeAgent,
+    DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent
+  };
 }
 
 function shellQuote(value: string): string {
@@ -662,71 +1336,18 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
   return paths;
 }
 
-// `failures` makes the fake npm exit non-zero for its first N invocations, so a test
-// can drive the install retry loop. The npm log doubles as the attempt counter.
-function writeFakeNpmInstaller(
-  project: string,
-  failures: { count: number; stderr: readonly string[] } = { count: 0, stderr: [] }
-): {
-  binDir: string;
-  npmLogPath: string;
-  smithersLogPath: string;
-} {
-  const binDir = path.join(project, "fake-bin");
-  const npm = path.join(binDir, "npm");
-  const npmLogPath = path.join(project, "npm-install.log");
-  const smithersLogPath = path.join(project, "local-smithers.log");
-  const paths = fakeInstalledSmithersPaths(project);
-  writeFakeInstalledSmithersDependencies(project);
-  fs.mkdirSync(binDir, { recursive: true });
-  fs.writeFileSync(
-    npm,
-    [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${shellQuote(npmLogPath)}`,
-      ...(failures.count > 0
-        ? [
-            `if [ "$(wc -l < ${shellQuote(npmLogPath)})" -le ${failures.count} ]; then`,
-            ...failures.stderr.map((line) => `  printf '%s\\n' ${shellQuote(line)} >&2`),
-            "  exit 1",
-            "fi"
-          ]
-        : []),
-      `mkdir -p ${shellQuote(path.dirname(paths.target))} ${shellQuote(path.dirname(paths.shim))}`,
-      `cat > ${shellQuote(paths.packageJson)} <<'EOS'`,
-      JSON.stringify({
-        name: "smthrs",
-        version: SMITHERS_VERSION,
-        bin: { smithers: SMITHERS_BIN_PATH }
-      }),
-      "EOS",
-      `cat > ${shellQuote(paths.target)} <<'EOS'`,
-      "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "printf '%s\\n' '{\"ok\":true}'",
-      "EOS",
-      `chmod +x ${shellQuote(paths.target)}`,
-      `rm -f ${shellQuote(paths.shim)}`,
-      `ln -s ${shellQuote(path.relative(path.dirname(paths.shim), paths.target))} ${shellQuote(paths.shim)}`,
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(npm, 0o755);
-  return { binDir, npmLogPath, smithersLogPath };
-}
-
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const statusOverride = path.join(project, "fake-smithers-status-override.json");
+  const alreadyPausedMarker = path.join(project, "fake-smithers-already-paused");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ] && [ -n "$SMITHERS_FAKE_SNAPSHOT_ATTEMPT" ]; then',
       '  case "$2" in',
       "    */.smithers/workflows/*.tsx)",
@@ -742,13 +1363,13 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  esac",
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
-      '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
+      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$CLAUDE_CONFIG_DIR" "$SMITHERS_UNDOCUMENTED_SECRET" "$ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
-      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
-      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
+      '  printf \'%s|%s|%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$KIMI_CODE_HOME" "$KIMI_SHARE_DIR" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$DEEPSEEK_API_KEY" "$ANTHROPIC_API_KEY" > "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG"',
@@ -758,6 +1379,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$OPENAI_API_KEY" "$DEEPSEEK_API_KEY" > "$SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_SENSITIVE_ENV_LOG" ]; then',
+      '  printf \'%s|%s|%s\\n\' "$1" "$ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES" "$OPENAI_SESSION_TOKEN" >> "$SMITHERS_FAKE_SENSITIVE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
@@ -781,7 +1405,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
       "      exit 0",
-      '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
+      `    elif [ -f ${shellQuote(alreadyPausedMarker)} ]; then`,
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"paused"}}\'',
       "    else",
       '      printf \'%s\\n\' \'{"ok":true,"data":{"status":"pause-requested"}}\'',
@@ -803,8 +1427,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    esac",
       "    ;;",
       "  status)",
-      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
-      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      `    if [ -f ${shellQuote(statusOverride)} ]; then`,
+      `      cat ${shellQuote(statusOverride)}`,
       "    else",
       // The runner emits its envelope only under --full-output, and emits the bare
       // document otherwise. A fake that always enveloped hid a caller that never
@@ -827,8 +1451,17 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: commandLog,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST.join(",")
   };
+}
+
+function setFakeSmithersStatus(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function markFakeSmithersAlreadyPaused(project: string): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-already-paused"), "\n", "utf8");
 }
 
 function currentPsEnvelope(runs: unknown[]): unknown {
@@ -877,14 +1510,14 @@ function currentStatusEnvelope(workflowRunId = "__RUN_ID__"): Record<string, unk
 }
 
 function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-ps-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-ps-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const psPath = path.join(project, "fake-smithers-ps.json");
   fs.writeFileSync(psPath, `${JSON.stringify(ps, null, 2)}\n`, "utf8");
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
-    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', '  cat "$SMITHERS_FAKE_PS"', "  exit 0", "fi", "exit 1", ""].join("\n"),
+    ["#!/bin/sh", 'if [ "$1" = "ps" ]; then', `  cat ${shellQuote(psPath)}`, "  exit 0", "fi", "exit 1", ""].join("\n"),
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
@@ -909,7 +1542,7 @@ function fakeLifecycleSmithersEnv(
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
   }
 ): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
@@ -997,20 +1630,19 @@ function fakeLifecycleSmithersEnv(
     );
   }
   const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-commands.log");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
-      '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "fi",
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  inspect)",
       ...(input.inspectMarkerPath === undefined ? [] : [`    touch ${shellQuote(input.inspectMarkerPath)}`]),
-      '    cat "$SMITHERS_FAKE_INSPECT"',
+      `    cat ${shellQuote(inspectPath)}`,
       "    ;;",
       "  node)",
-      '    cat "$SMITHERS_FAKE_NODE_DETAILS/$2.json"',
+      `    cat ${shellQuote(nodeDetailsDirectory)}/"$2.json"`,
       "    ;;",
       "  cancel)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancel-requested"}}\'',
@@ -1018,22 +1650,22 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    case "$*" in',
-      '      *--full-output*) cat "$SMITHERS_FAKE_STATUS_EVENTS" ;;',
+      `      *--full-output*) cat ${shellQuote(statusEventsPath)} ;;`,
       '      *) if [ "$3" = "--type" ] && [ "$4" = "token" ]; then',
-      '           cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      `           cat ${shellQuote(tokenEventsPath)}`,
       "         else",
-      '           cat "$SMITHERS_FAKE_EVENTS"',
+      `           cat ${shellQuote(eventsPath)}`,
       "         fi ;;",
       "    esac",
       "    ;;",
       "  timeline)",
-      '    cat "$SMITHERS_FAKE_TIMELINE"',
+      `    cat ${shellQuote(timelinePath)}`,
       "    ;;",
       "  status)",
-      '    cat "$SMITHERS_FAKE_STATUS"',
+      `    cat ${shellQuote(statusPath)}`,
       "    ;;",
       "  why)",
-      '    cat "$SMITHERS_FAKE_WHY"',
+      `    cat ${shellQuote(whyPath)}`,
       "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -1073,7 +1705,7 @@ function fakeLifecycleSmithersEnv(
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_LOG: commandLog,
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
     SMITHERS_FAKE_TOKEN_EVENTS: tokenEventsPath,
@@ -1082,12 +1714,15 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_WHY: whyPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     SMITHERS_FAKE_NODE_DETAILS: nodeDetailsDirectory,
-    ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+    ULTRAFUZZ_PRICING_CATALOG_URL: "off",
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: SMITHERS_TEST_ENVIRONMENT_ALLOWLIST.join(",")
   };
 }
 
 function pricingCatalogDataUrl(catalog: unknown): string {
-  return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
+  const url = `https://pricing.test/catalog-${testPricingCatalogSequence++}.json`;
+  testPricingCatalogs.set(url, JSON.stringify(catalog));
+  return url;
 }
 
 type TestSmithersRunStatus = (typeof SMITHERS_RUN_STATUSES)[number];
@@ -1596,12 +2231,13 @@ function writeReferenceCache(xdgCacheHome: string): void {
 }
 
 function writeFanoutProject(project: string, discoveryMarkdownPath = "setup/project-discovery.md"): void {
+  initProject({ projectRoot: project, force: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "workspaces"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "setup"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "strategies"), { recursive: true });
   fs.mkdirSync(path.join(project, ".smithers", "agents"), { recursive: true });
   fs.writeFileSync(
-    path.join(project, ".smithers", "agents", "index.ts"),
+    path.join(project, ".ultrafuzz", "test-agent-index.ts"),
     "const createAgent = () => null;\n" +
       "export const agentFactories = {\n" +
       "  ClaudeAgent: createAgent,\n" +
@@ -1804,6 +2440,20 @@ test(
   }
 );
 
+test("init resolves one-hour node and execution-resource timeout defaults", () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+
+  const config = fs.readFileSync(path.join(project, "ultrafuzz.toml"), "utf8");
+  const parsed = parseProjectConfigToml(config);
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.diagnostics));
+  const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+  assert.equal(resolved.ok, true, JSON.stringify(resolved.diagnostics));
+  assert.equal(resolved.value?.run.defaultTimeoutSeconds, 3600);
+  assert.equal(resolved.value?.execution.resources.timeoutSeconds, 3600);
+});
+
 test("init preserves existing project-owned files and validate exposes launch posture", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# custom\n", "utf8");
@@ -1838,7 +2488,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
-  assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
+  assert.match(codexAgentText, /return { apiKey, configDir, env: { CODEX_API_KEY: apiKey } }/);
   assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
   assert.match(codexAgentText, /function codexProviderBaseUrl/);
   assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
@@ -1875,6 +2525,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
   assert.match(claudeAgentText, /createClaudeAgent/);
   assert.match(claudeAgentText, /permissionMode:\s*"bypassPermissions"/);
+  assert.match(claudeAgentText, /settingSources:\s*"user"/);
   assert.match(claudeAgentText, /extraArgs:\s*\["--effort",\s*options\.reasoningEffort\]/);
   assert.match(claudeAgentText, /claudeAuthOptions/);
   assert.match(claudeAgentText, /ANTHROPIC_API_KEY/);
@@ -1894,6 +2545,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(deepSeekAgentText, /https:\/\/api\.deepseek\.com\/anthropic/);
   assert.match(deepSeekAgentText, /ANTHROPIC_AUTH_TOKEN/);
   assert.match(deepSeekAgentText, /DEEPSEEK_API_KEY/);
+  assert.match(deepSeekAgentText, /settingSources:\s*""/);
   assert.match(deepSeekAgentText, /cacheReadTokens/);
   assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
   assert.match(deepSeekAgentText, /import \{ parseStrictJson \} from "\.\/strict-json";/u);
@@ -1981,7 +2633,7 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
     .replaceAll('from "smthrs"', 'from "smithers-orchestrator"');
   assert.equal(
     crypto.createHash("sha256").update(stock032Source).digest("hex"),
-    "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5"
+    "7865f1be1715d36d016c7b2814081b70e70a9aca7e30d5b41f5d91bf2337f681"
   );
   fs.writeFileSync(codexPath, stock032Source, "utf8");
 
@@ -2104,7 +2756,7 @@ test("non-force init never follows or overwrites linked adapter paths", () => {
   }
 });
 
-test("startRun gives manual update guidance for a customized stale adapter", async () => {
+test("startRun rejects a customized controller adapter before submission", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   writeSmallTopology(project);
@@ -2114,10 +2766,10 @@ test("startRun gives manual update guidance for a customized stale adapter", asy
   const run = await startRun({ projectRoot: project, runId: "stale-custom-agent", env: fakeSmithersEnv(project) });
 
   assert.equal(run.ok, false);
-  assert.equal(run.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
-  assert.match(run.diagnostics[0]?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init/u);
-  assert.match(run.diagnostics[0]?.message ?? "", /update this adapter manually/u);
+  assert.equal(run.diagnostics[0]?.code, "CONTROLLER_SOURCE_UNTRUSTED");
+  assert.match(run.diagnostics[0]?.message ?? "", /must exactly match the packaged stock closure/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /ultrafuzz init --force/u);
+  assert.equal(fs.existsSync(path.join(project, "smithers-commands.log")), false);
 });
 
 test("init preserves a dangling adapter symlink without writing through it", () => {
@@ -2169,6 +2821,240 @@ test("init does not modify a regular file swapped after the anchored open", { co
 });
 
 test(
+  "generated Codex commands accept a sealed ambient proxy and reject drift",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const snapshot = path.join(project, "execution-snapshot"),
+      authority = path.join(snapshot, "controls/data-governance.json");
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const names = [
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+      ],
+      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    for (const name of names) delete process.env[name];
+    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+    try {
+      process.env.HTTPS_PROXY = "https://proxy.a.invalid";
+      const hash = crypto
+        .createHash("sha256")
+        .update(
+          JSON.stringify({ agent: "CodexAgent", config: null, route: [["HTTPS_PROXY", process.env.HTTPS_PROXY]] })
+        )
+        .digest("hex");
+      fs.writeFileSync(authority, `{"required_source_destinations":["model:codex-route-${hash}"]}`, "utf8");
+      const build = () =>
+        new CompatibleCodexAgent().buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      const accepted = await build();
+      await accepted.cleanup?.();
+      assert.throws(
+        () =>
+          workflowControlChildEnvironment(
+            {
+              HTTPS_PROXY: "https://proxy.b.invalid",
+              ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json")
+            },
+            process.env,
+            { agent: "CodexAgent" }
+          ),
+        /provider route changed/u
+      );
+      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      await assert.rejects(build(), /provider route changed/u);
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test("planned routes equal final generated-adapter validation", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-route-equivalence-")),
+    codexHome = path.join(homes, "codex", "configured"),
+    openRouterHome = path.join(homes, "openrouter", "managed"),
+    snapshot = path.join(project, "route-snapshot"),
+    authority = path.join(snapshot, "controls/data-governance.json");
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(openRouterHome, { recursive: true });
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.writeFileSync(
+    path.join(codexHome, "config.toml"),
+    'model_provider = "gateway"\n[model_providers.gateway]\nbase_url = "https://gateway.invalid/v1"\n'
+  );
+  fs.writeFileSync(
+    path.join(openRouterHome, "config.toml"),
+    'model_provider = "openrouter"\n[model_providers.openrouter]\nbase_url = "https://openrouter.ai/api/v1"\n'
+  );
+  const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+    names = [
+      "ALL_PROXY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "OPENAI_BASE_URL",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+    ],
+    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+  try {
+    const codexDestination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [codexDestination] }));
+    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project),
+      codex = await new CompatibleCodexAgent({
+        configDir: codexHome,
+        env: { OPENAI_BASE_URL: "https://gateway.invalid/v1" }
+      }).buildCommand({ prompt: "route", cwd: project, options: {} });
+    await codex.cleanup?.();
+    const openRouterDestination = modelDestination("OpenRouterAgent", config, {});
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [openRouterDestination] }));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project),
+      openrouter = await new OpenRouterCodexAgent({
+        configDir: openRouterHome,
+        env: { OPENAI_BASE_URL: "https://openrouter.ai/api/v1" }
+      }).buildCommand({ prompt: "route", cwd: project, options: {} });
+    await (openrouter.cleanup as (() => Promise<void>) | undefined)?.();
+    const claudeEnv = {
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: homes,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_REGION",
+        AWS_REGION: "us-east-1",
+        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
+      },
+      claudeDestination = modelDestination("ClaudeAgent", config, claudeEnv);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [claudeDestination] }));
+    assert.doesNotThrow(() => workflowControlChildEnvironment({}, claudeEnv, { agent: "ClaudeAgent" }));
+    assert.throws(
+      () =>
+        workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
+    assert.equal(codexDestination.startsWith("model:codex-route-"), true);
+    assert.equal(openRouterDestination, "model:openrouter");
+    assert.equal(claudeDestination.startsWith("model:claude-route-"), true);
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("generated Claude route validation ignores Azure CLI extension plumbing", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const snapshot = path.join(project, "route-snapshot");
+  const authority = path.join(snapshot, "controls", "data-governance.json");
+  const claudeHome = path.join(project, "claude-home");
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.mkdirSync(claudeHome);
+  fs.writeFileSync(
+    path.join(claudeHome, "settings.json"),
+    '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
+    "utf8"
+  );
+  fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
+  const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+  const child = workflowControlChildEnvironment(
+    { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
+    {
+      AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+    },
+    { agent: "ClaudeAgent", configDir: claudeHome }
+  );
+  assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
+});
+
+test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-quoted-route-")),
+    codexHome = path.join(homes, "codex", "configured"),
+    configPath = path.join(codexHome, "config.toml"),
+    snapshot = path.join(project, "route-snapshot"),
+    authority = path.join(snapshot, "controls/data-governance.json"),
+    names = [
+      "ALL_PROXY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "all_proxy",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "OPENAI_BASE_URL",
+      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+    ],
+    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(path.dirname(authority), { recursive: true });
+  fs.writeFileSync(
+    configPath,
+    '"model_provider" = "gateway"\n["model_providers"."gateway"]\n"base_url" = "https://gateway.invalid/v1"\n'
+  );
+  for (const name of names) delete process.env[name];
+  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+  try {
+    const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+      destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+    assert.match(destination, /^model:codex-route-/u);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project),
+      accepted = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
+        prompt: "route",
+        cwd: project,
+        options: {}
+      });
+    await accepted.cleanup?.();
+    fs.writeFileSync(
+      configPath,
+      '"model_provider" = "drifted"\n["model_providers"."drifted"]\n"base_url" = "https://drifted.invalid/v1"\n'
+    );
+    await assert.rejects(
+      new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({ prompt: "route", cwd: project, options: {} }),
+      /provider route changed/u
+    );
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
   { skip: !runningUnderBun },
   async () => {
@@ -2199,6 +3085,29 @@ test(
   }
 );
 
+test("linked workflow classifies sensitive allowlist values from the ambient environment", () => {
+  const names = ["ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "AMBIENT_RPC_URL"] as const;
+  const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = "AMBIENT_RPC_URL";
+  process.env.AMBIENT_RPC_URL = `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`;
+  try {
+    const ambient = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, undefined);
+    assert.equal(ambient.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "AMBIENT_RPC_URL");
+
+    const explicitlyReplaced = linkedWorkflowExecutionEnvironment({ executionSnapshot: { env: {} } } as never, {
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE",
+      FOUNDRY_PROFILE: "ci"
+    });
+    assert.equal(explicitlyReplaced.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+  } finally {
+    for (const name of names) {
+      const value = saved[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test(
   "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
   { skip: !runningUnderBun },
@@ -2218,8 +3127,8 @@ test(
       "utf8"
     );
     const { createCodexAgent } = await loadGeneratedCodexAgent(project);
-    const codexHome = path.join(project, "codex-home");
-    fs.mkdirSync(codexHome, { recursive: true });
+    const codexHome = path.join(process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT!, "codex");
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
 
     const agentEnvironment = (): Record<string, string> =>
       (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
@@ -2308,14 +3217,15 @@ test(
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    const codexHome = path.join(project, ".ultrafuzz", "openrouter-test-codex");
+    const providerHomeRoot = path.join(project, ".ultrafuzz", "provider-homes");
+    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
         .readFileSync(configPath, "utf8")
         .replace(
           '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"',
-          `[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "ROUTER_ALIAS"\nconfig_dir = ${JSON.stringify(codexHome)}`
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"\nconfig_dir = "openrouter-test-codex"'
         ),
       "utf8"
     );
@@ -2323,15 +3233,15 @@ test(
     const model = "~vendor/model.latest:free+preview@2026";
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
-      alias: process.env.ROUTER_ALIAS,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
       baseUrl: process.env.OPENAI_BASE_URL
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ROUTER_ALIAS = "deterministic-openrouter-test-key";
-    process.env.OPENROUTER_API_KEY = "unselected-openrouter-key";
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
     process.env.OPENAI_BASE_URL = "https://ambient-route.invalid/v1";
@@ -2356,8 +3266,7 @@ test(
         "/tmp/dependency artifacts"
       ]);
       assert.equal(command.outputFormat, "stream-json");
-      assert.equal(command.env?.ROUTER_ALIAS, "deterministic-openrouter-test-key");
-      assert.equal(command.env?.OPENROUTER_API_KEY, "");
+      assert.equal(command.env?.OPENROUTER_API_KEY, "deterministic-openrouter-test-key");
       assert.equal(command.env?.OPENAI_API_KEY, "deterministic-openrouter-test-key");
       assert.equal(command.env?.CODEX_API_KEY, "");
       assert.equal(command.env?.OPENAI_BASE_URL, "https://openrouter.ai/api/v1");
@@ -2378,7 +3287,7 @@ test(
           "",
           "[model_providers.openrouter.auth]",
           'command = "node"',
-          'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "ROUTER_ALIAS"]',
+          'args = ["-e", "process.stdout.write(process.env[process.argv[1]] ?? \'\')", "OPENROUTER_API_KEY"]',
           ""
         ].join("\n")
       );
@@ -2388,7 +3297,7 @@ test(
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
-        ROUTER_ALIAS: previous.alias,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
@@ -2401,8 +3310,447 @@ test(
   }
 );
 
+test("generated OpenRouter adapter bounds its 429 recovery policy independently from caller timeout", async () => {
+  if (!runningUnderBun) return;
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const { decideOpenRouter429Recovery } = await loadGeneratedOpenRouterAgent(project);
+
+  const baseDelays = [0, 1, 2, 3, 4, 5, 6].map((retryAttempt) =>
+    decideOpenRouter429Recovery({
+      retryAttempt,
+      nowMs: 0,
+      retryDeadlineMs: 120_000,
+      random: 0
+    })
+  );
+  assert.deepEqual(
+    baseDelays.map((decision) => (decision.kind === "backoff" ? decision.delayMs : decision.kind)),
+    [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
+  );
+  assert.deepEqual(
+    decideOpenRouter429Recovery({
+      retryAttempt: 5,
+      nowMs: 0,
+      retryDeadlineMs: 120_000,
+      random: 1
+    }),
+    { kind: "backoff", delayMs: 37_499, afterDelay: "retry" }
+  );
+  assert.deepEqual(
+    decideOpenRouter429Recovery({
+      retryAttempt: 8,
+      nowMs: 119_500,
+      retryDeadlineMs: 120_000,
+      random: 0
+    }),
+    { kind: "rate-limit-exhausted" }
+  );
+  assert.deepEqual(
+    decideOpenRouter429Recovery({
+      retryAttempt: 0,
+      nowMs: 0,
+      retryDeadlineMs: 500,
+      totalDeadlineMs: 500,
+      random: 0
+    }),
+    { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
+  );
+  assert.deepEqual(
+    decideOpenRouter429Recovery({
+      retryAttempt: 0,
+      nowMs: 120_000,
+      retryDeadlineMs: 120_000,
+      random: 0
+    }),
+    { kind: "rate-limit-exhausted" }
+  );
+  assert.deepEqual(
+    decideOpenRouter429Recovery({
+      retryAttempt: 0,
+      nowMs: 1,
+      retryDeadlineMs: 120_000,
+      totalDeadlineMs: 1,
+      random: 0
+    }),
+    { kind: "total-timeout" }
+  );
+});
+
 test(
-  "generated OpenRouter adapter retries an initial 429 but never replays substantive model work",
+  "generated OpenRouter adapter decreases one caller timeout across exact-session recovery",
+  { skip: !runningUnderBun, timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+    const observedTimeouts: number[] = [];
+    let invocation = 0;
+    agent.buildCommand = async (params) => {
+      invocation += 1;
+      const timeout = params.options.timeout;
+      const totalMs =
+        typeof timeout === "number"
+          ? timeout
+          : timeout !== null && typeof timeout === "object" && "totalMs" in timeout
+            ? (timeout as { totalMs?: unknown }).totalMs
+            : undefined;
+      assert.equal(typeof totalMs, "number");
+      observedTimeouts.push(totalMs as number);
+      const rateLimitMessage = `last status: 429 Too Many Requests, request id: timeout-${invocation}`;
+      const lines: Record<string, unknown>[] = [
+        { type: "thread.started", thread_id: "timeout-session" },
+        { type: "turn.started" }
+      ];
+      if (invocation === 1) {
+        lines.push({
+          type: "item.completed",
+          item: { id: "progress", type: "agent_message", text: "substantive progress" }
+        });
+      }
+      if (invocation < 3) {
+        lines.push({ type: "error", message: rateLimitMessage });
+        lines.push({ type: "turn.failed", error: { message: rateLimitMessage } });
+      } else {
+        lines.push({ type: "item.completed", item: { id: "answer", type: "agent_message", text: "OK" } });
+        lines.push({ type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } });
+      }
+      const script = `${lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")} ${
+        invocation < 3 ? "process.exitCode = 1;" : ""
+      }`;
+      return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+    };
+
+    const result = await agent.generate({ prompt: "One total timeout", timeout: { totalMs: 2_000 } });
+
+    assert.equal(result.text, "OK");
+    assert.equal(invocation, 3);
+    assert.equal(observedTimeouts.length, 3);
+    assert.equal(observedTimeouts[0]! > observedTimeouts[1]!, true);
+    assert.equal(observedTimeouts[1]! > observedTimeouts[2]!, true);
+    assert.equal(
+      observedTimeouts.every((timeout) => timeout <= 2_000 && timeout > 0),
+      true
+    );
+  }
+);
+
+test(
+  "generated OpenRouter adapter does not start a request after event-loop delay crosses its recovery deadline",
+  { skip: !runningUnderBun, timeout: 5_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 500,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+    let invocation = 0;
+    let delayedPastDeadline = false;
+    agent.buildCommand = async () => {
+      invocation += 1;
+      const message = `last status: 429 Too Many Requests, request id: deadline-${invocation}`;
+      const lines = [
+        { type: "thread.started", thread_id: "deadline-session" },
+        { type: "turn.started" },
+        { type: "error", message },
+        { type: "turn.failed", error: { message } }
+      ];
+      const script = `${lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")} process.exitCode = 1;`;
+      return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+    };
+
+    await assert.rejects(
+      agent.generate({
+        prompt: "Do not cross the recovery deadline",
+        onStderr: (text: string) => {
+          if (!text.includes("[ultrafuzz]") || delayedPastDeadline) return;
+          delayedPastDeadline = true;
+          const unblockAt = performance.now() + 600;
+          while (performance.now() < unblockAt) {
+            // Deliberately delay the retry timer past its independently
+            // bounded window, as a busy host event loop can do in production.
+          }
+        }
+      }),
+      /request id: deadline-1/u
+    );
+    assert.equal(delayedPastDeadline, true);
+    assert.equal(invocation, 1);
+  }
+);
+
+test(
+  "generated OpenRouter adapter checks recovery and caller deadlines after asynchronous command construction",
+  { skip: !runningUnderBun, timeout: 5_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 500,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    type ParentBuildCommand = (params: unknown) => Promise<{ command: string; args: string[]; outputFormat: string }>;
+    const parentPrototype = Object.getPrototypeOf(OpenRouterCodexAgent.prototype) as {
+      buildCommand: ParentBuildCommand;
+    };
+    const originalParentBuildCommand = parentPrototype.buildCommand;
+    try {
+      let recoveryBuilds = 0;
+      let recoveryProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        recoveryBuilds += 1;
+        if (recoveryBuilds === 2) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 600));
+        }
+        const message = "last status: 429 Too Many Requests, request id: delayed-build-" + String(recoveryBuilds);
+        const lines =
+          recoveryBuilds === 1
+            ? [
+                { type: "thread.started", thread_id: "delayed-build-session" },
+                { type: "turn.started" },
+                { type: "error", message },
+                { type: "turn.failed", error: { message } }
+              ]
+            : [
+                { type: "thread.started", thread_id: "delayed-build-session" },
+                { type: "turn.started" },
+                { type: "item.completed", item: { id: "answer", type: "agent_message", text: "WRONG" } },
+                { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } }
+              ];
+        const script = lines.map((line) => "console.log(" + JSON.stringify(JSON.stringify(line)) + ");").join("");
+        return {
+          command: process.execPath,
+          args: ["-e", script + (recoveryBuilds === 1 ? "process.exitCode = 1;" : "")],
+          outputFormat: "stream-json"
+        };
+      };
+      const recoveryAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+      await assert.rejects(
+        recoveryAgent.generate({
+          prompt: "Do not spawn after delayed recovery command construction",
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") recoveryProcessStarts += 1;
+          }
+        }),
+        /request id: delayed-build-1/u
+      );
+      assert.equal(recoveryBuilds, 2);
+      assert.equal(recoveryProcessStarts, 1);
+
+      let totalBuilds = 0;
+      let totalProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        totalBuilds += 1;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        return {
+          command: process.execPath,
+          args: ["-e", 'console.log("must not start");'],
+          outputFormat: "stream-json"
+        };
+      };
+      const totalAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+      await assert.rejects(
+        totalAgent.generate({
+          prompt: "Do not spawn after delayed caller timeout",
+          timeout: 50,
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") totalProcessStarts += 1;
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+          return true;
+        }
+      );
+      assert.equal(totalBuilds, 1);
+      assert.equal(totalProcessStarts, 0);
+
+      let absoluteBuilds = 0;
+      let absoluteProcessStarts = 0;
+      parentPrototype.buildCommand = async () => {
+        absoluteBuilds += 1;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 75));
+        const successLines = [
+          { type: "thread.started", thread_id: "late-success-session" },
+          { type: "turn.started" },
+          { type: "item.completed", item: { id: "answer", type: "agent_message", text: "LATE" } },
+          { type: "turn.completed", usage: { input_tokens: 2, output_tokens: 1 } }
+        ];
+        const script =
+          "setTimeout(() => {" +
+          successLines.map((line) => "console.log(" + JSON.stringify(JSON.stringify(line)) + ");").join("") +
+          "}, 100);";
+        return { command: process.execPath, args: ["-e", script], outputFormat: "stream-json" };
+      };
+      const absoluteAgent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+      await assert.rejects(
+        absoluteAgent.generate({
+          prompt: "Carry the absolute caller deadline into a late-starting child",
+          timeout: 120,
+          onProcess: (event: { phase: "started" | "exited" }) => {
+            if (event.phase === "started") absoluteProcessStarts += 1;
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+          return true;
+        }
+      );
+      assert.equal(absoluteBuilds, 1);
+      assert.equal(absoluteProcessStarts, 1);
+    } finally {
+      parentPrototype.buildCommand = originalParentBuildCommand;
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter bounds provisional callbacks and exact replay snapshots",
+  { skip: !runningUnderBun, timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        jitterFraction: 0,
+        provisionalCallbackLimit: 1,
+        actionSnapshotLimit: 2,
+        actionSnapshotBytes: 512
+      },
+      { acknowledgeProvisionalRateLimit: true }
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      provisionalAck: process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK = fixture.provisionalAck;
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
+    try {
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-provisional-post-terminal";
+      const overflowEvents: Record<string, unknown>[] = [];
+      let overflowStdout = "";
+      const overflowResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Fail closed when provisional callbacks overflow",
+        onEvent: (event) => overflowEvents.push(event),
+        onStdout: (text: string) => {
+          overflowStdout += text;
+        }
+      });
+      assert.equal(overflowResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(fs.readFileSync(fixture.provisionalAck, "utf8"), "observed\n");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "provisional-post-terminal-mutation\n");
+      assert.doesNotMatch(JSON.stringify(overflowEvents), /provisional-post-terminal/u);
+      assert.doesNotMatch(overflowStdout, /provisional post-terminal/u);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-snapshot-overflow";
+      const snapshotEvents: Record<string, unknown>[] = [];
+      const snapshotResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Keep recent replay snapshots within a bounded LRU",
+        onEvent: (event) => snapshotEvents.push(event)
+      });
+      assert.equal(snapshotResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      const snapshotText = JSON.stringify(snapshotEvents);
+      assert.equal((snapshotText.match(/"id":"snapshot-1"/gu) ?? []).length, 2);
+      assert.equal((snapshotText.match(/"id":"snapshot-4"/gu) ?? []).length, 1);
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-stdout-oversized-replay";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "3";
+      let oversizedReplayStdout = "";
+      const oversizedReplayResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate an oversized stdout replay with a bounded digest",
+        onStdout: (text: string) => {
+          oversizedReplayStdout += text;
+        }
+      });
+      assert.equal(oversizedReplayResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "4");
+      assert.equal((oversizedReplayStdout.match(/oversized-replay-/gu) ?? []).length, 1);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-action-oversized-replay";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "3";
+      const oversizedReplayEvents: Record<string, unknown>[] = [];
+      const oversizedActionResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate an oversized action replay with a bounded digest",
+        onEvent: (event) => oversizedReplayEvents.push(event)
+      });
+      assert.equal(oversizedActionResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "4");
+      assert.equal(
+        oversizedReplayEvents.filter((event) => JSON.stringify(event).includes('"id":"oversized-action"')).length,
+        1
+      );
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK: previous.provisionalAck,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter retries before output and resumes exact sessions after substantive work",
   { skip: !runningUnderBun, timeout: 20_000 },
   async () => {
     const project = tempProject();
@@ -2410,20 +3758,65 @@ test(
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
     const fixture = installOpenRouterRetryCodexFixture(project);
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 2,
+        jitterFraction: 0
+      },
+      { acknowledgeProvisionalRateLimit: true }
+    );
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       key: process.env.OPENROUTER_API_KEY,
       path: process.env.PATH,
       counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
-      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      provisionalAck: process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK,
+      warningAck: process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
     process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
-    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK = fixture.provisionalAck;
+    process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK = fixture.warningAck;
+    const resetFixture = (mode: string, failures = 1) => {
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      fs.rmSync(fixture.provisionalAck, { force: true });
+      fs.rmSync(fixture.warningAck, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = String(failures);
+    };
+    const assertExactResume = (prompt: string) => {
+      const journal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(journal.length, 2);
+      assert.equal(journal[0]?.invocation, "fresh");
+      assert.equal(journal[1]?.invocation, "resume");
+      assert.equal(journal[1]?.resumeSession, "fixture-session");
+      assert.deepEqual(journal[1]?.argv.slice(0, 2), ["exec", "resume"]);
+      assert.equal(journal[1]?.argv.includes("--sandbox"), false);
+      assert.equal(journal[1]?.argv.includes("--add-dir"), false);
+      assert.equal(journal[0]?.stdin, prompt);
+      assert.match(journal[1]?.stdin ?? "", /Continue the existing task from the current session state/u);
+      assert.equal(journal.filter((entry) => entry.stdin.includes(prompt)).length, 1);
+      assert.deepEqual(
+        journal.map((entry) => entry.sentinel),
+        ["mutation\n", "mutation\n"]
+      );
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+    };
     try {
+      resetFixture("initial");
       const retryEvents: Record<string, unknown>[] = [];
       let retryStderr = "";
       const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
@@ -2441,15 +3834,10 @@ test(
       assert.match(retryStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
       assert.doesNotMatch(JSON.stringify(retryEvents), /fixture-1/u);
       assert.match(JSON.stringify(retryEvents), /fixture-2/u);
-
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
-        prompt: "Retry stream fixture"
-      });
-      assert.equal(await streamResult.text, "OK");
-      const streamedText = await streamResult.textStream.getReader().read();
-      assert.deepEqual(streamedText, { value: "OK", done: false });
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "fresh"]
+      );
 
       for (const [mode, eventKind] of [
         ["substantive-command", "command"],
@@ -2460,22 +3848,397 @@ test(
         ["substantive-web", "web_search"],
         ["substantive-todo", "todo_list"]
       ] as const) {
-        fs.writeFileSync(fixture.counter, "0", "utf8");
-        process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
-        const substantiveEvents: Record<string, unknown>[] = [];
-        await assert.rejects(
-          createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-            prompt: `Do not replay ${eventKind} fixture`,
-            onEvent: (event) => substantiveEvents.push(event)
-          }),
-          /429 Too Many Requests/u
+        resetFixture(mode);
+        const prompt = `Do not replay ${eventKind} fixture`;
+        const events: Record<string, unknown>[] = [];
+        const recovered = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt,
+          onEvent: (event) => events.push(event)
+        });
+        assert.equal(recovered.text, "OK", eventKind);
+        assertExactResume(prompt);
+        assert.match(JSON.stringify(events), new RegExp(`"kind":"${eventKind}"`, "u"), eventKind);
+        assert.equal(events.filter((event) => event.type === "started").length, 1, eventKind);
+        assert.equal(events.filter((event) => event.type === "completed" && event.ok === true).length, 1, eventKind);
+        assert.equal(
+          events.some((event) => event.type === "completed" && event.ok === false),
+          false,
+          eventKind
         );
-        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1", eventKind);
-        assert.match(JSON.stringify(substantiveEvents), new RegExp(`"kind":"${eventKind}"`, "u"), eventKind);
+        assert.doesNotMatch(JSON.stringify(events), /request id: fixture-1/u, eventKind);
       }
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "unrelated";
+      resetFixture("substantive-stdout-only");
+      const stdoutOnlyPrompt = "Resume stdout-only substantive progress without replay";
+      const stdoutOnlyEvents: Record<string, unknown>[] = [];
+      let stdoutOnlyText = "";
+      const stdoutOnlyResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: stdoutOnlyPrompt,
+        onEvent: (event) => stdoutOnlyEvents.push(event),
+        onStdout: (text: string) => {
+          stdoutOnlyText += text;
+        }
+      });
+      assert.equal(stdoutOnlyResult.text, "OK");
+      assertExactResume(stdoutOnlyPrompt);
+      assert.equal((stdoutOnlyText.match(/stdout-only substantive progress/gu) ?? []).length, 1);
+      assert.equal(stdoutOnlyEvents.filter((event) => event.type === "started").length, 1);
+
+      resetFixture("substantive-stdout-replay", 7);
+      let replayedStdoutText = "";
+      const replayedStdoutResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate replayed stdout across repeated recovery",
+        onStdout: (text: string) => {
+          replayedStdoutText += text;
+        }
+      });
+      assert.equal(replayedStdoutResult.text, "OK");
+      assert.equal((replayedStdoutText.match(/replayed stdout progress/gu) ?? []).length, 1);
+      const replayedStdoutJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(replayedStdoutJournal.length, 8);
+      assert.equal(replayedStdoutJournal.filter((entry) => entry.invocation === "fresh").length, 1);
+      const replayedStdoutMarkers = replayedStdoutJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(replayedStdoutMarkers).size, 1);
+
+      resetFixture("substantive-command");
+      const streamPrompt = "Resume the stream fixture without replay";
+      const streamEvents: Record<string, unknown>[] = [];
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: streamPrompt,
+        onEvent: (event) => streamEvents.push(event)
+      });
+      assert.equal(await streamResult.text, "OK");
+      const streamedText = await streamResult.textStream.getReader().read();
+      assert.deepEqual(streamedText, { value: "OK", done: false });
+      assertExactResume(streamPrompt);
+      assert.equal(streamEvents.filter((event) => event.type === "started").length, 1);
+      assert.equal(
+        streamEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+
+      resetFixture("substantive-replay");
+      const replayEvents: Record<string, unknown>[] = [];
+      const replayResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Deduplicate replayed action fixture",
+        onEvent: (event) => replayEvents.push(event)
+      });
+      assert.equal(replayResult.text, "OK");
+      assert.equal((JSON.stringify(replayEvents).match(/"id":"message-1"/gu) ?? []).length, 1);
+
+      resetFixture("substantive-updates");
+      const updateEvents: Record<string, unknown>[] = [];
+      const updateResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve evolving action updates",
+        onEvent: (event) => updateEvents.push(event)
+      });
+      assert.equal(updateResult.text, "OK");
+      const updateStatuses = updateEvents
+        .filter((event) => JSON.stringify(event).includes('"id":"update-1"'))
+        .map((event) => (event.action as { detail?: { status?: unknown } }).detail?.status);
+      assert.deepEqual(updateStatuses, ["in_progress", "completed"]);
+
+      resetFixture("substantive-429-message");
+      const substantive429Events: Record<string, unknown>[] = [];
+      const substantive429Result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve a substantive message that mentions HTTP 429",
+        onEvent: (event) => substantive429Events.push(event)
+      });
+      assert.equal(substantive429Result.text, "OK");
+      assert.equal(
+        substantive429Events.filter((event) => JSON.stringify(event).includes("Investigated HTTP 429 handling")).length,
+        1
+      );
+
+      resetFixture("stderr-only");
+      const stderrOnlyEvents: Record<string, unknown>[] = [];
+      let stderrOnlyStderr = "";
+      const stderrOnlyResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover a stderr-only rate limit",
+        onEvent: (event) => stderrOnlyEvents.push(event),
+        onStderr: (text) => {
+          stderrOnlyStderr += text;
+        }
+      });
+      assert.equal(stderrOnlyResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(
+        stderrOnlyEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+      assert.doesNotMatch(stderrOnlyStderr, /request id: fixture-1/u);
+
+      resetFixture("structured-429-partial-stderr");
+      const classifiedPartialChunks: string[] = [];
+      const classifiedPartialResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Do not release partial stderr while classifying a structured rate limit",
+        onStderr: (text) => {
+          classifiedPartialChunks.push(text);
+        }
+      });
+      assert.equal(classifiedPartialResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(classifiedPartialChunks.includes("HTT"), false);
+
+      resetFixture("stderr-429-hang");
+      let idleTimeoutRecoveryStderr = "";
+      const idleTimeoutRecoveryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover a latched stderr rate limit after the child idles",
+        timeout: { idleMs: 100, totalMs: 2_000 },
+        onStderr: (text) => {
+          idleTimeoutRecoveryStderr += text;
+        }
+      });
+      assert.equal(idleTimeoutRecoveryResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(idleTimeoutRecoveryStderr, /request id: fixture-1/u);
+
+      for (const terminalMode of ["stderr-post-terminal", "stdout-post-terminal"] as const) {
+        resetFixture(terminalMode);
+        const postTerminalEvents: Record<string, unknown>[] = [];
+        let postTerminalStdout = "";
+        let postTerminalStderr = "";
+        const postTerminalResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: `Quarantine ${terminalMode} trailing output`,
+          onEvent: (event) => postTerminalEvents.push(event),
+          onStdout: (text: string) => {
+            postTerminalStdout += text;
+          },
+          onStderr: (text: string) => {
+            postTerminalStderr += text;
+          }
+        });
+        assert.equal(postTerminalResult.text, "OK");
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+        const postTerminalJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+        assert.deepEqual(
+          postTerminalJournal.map((entry) => entry.invocation),
+          ["fresh", "resume"]
+        );
+        assert.equal(postTerminalJournal[1]?.resumeSession, "fixture-session");
+        assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "post-terminal-observed-mutation\n");
+        assert.doesNotMatch(JSON.stringify(postTerminalEvents), /post-terminal/u);
+        assert.doesNotMatch(postTerminalStdout, /post-terminal/u);
+        assert.doesNotMatch(postTerminalStderr, /post-terminal/u);
+      }
+
+      resetFixture("stderr-post-terminal");
+      const noStderrCallbackEvents: Record<string, unknown>[] = [];
+      let noStderrCallbackStdout = "";
+      const noStderrCallbackResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine a stderr terminal without an onStderr callback",
+        onEvent: (event) => noStderrCallbackEvents.push(event),
+        onStdout: (text: string) => {
+          noStderrCallbackStdout += text;
+        }
+      });
+      assert.equal(noStderrCallbackResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(JSON.stringify(noStderrCallbackEvents), /post-terminal/u);
+      assert.doesNotMatch(noStderrCallbackStdout, /post-terminal/u);
+
+      resetFixture("stderr-provisional-post-terminal");
+      const provisionalTerminalEvents: Record<string, unknown>[] = [];
+      const provisionalTerminalProcessEvents: Array<{ phase: "started" | "exited"; pid: number | undefined }> = [];
+      let provisionalTerminalStdout = "";
+      const provisionalTerminalResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine cross-channel output while a stderr terminal is provisional",
+        onEvent: (event) => provisionalTerminalEvents.push(event),
+        onProcess: (event: { phase: "started" | "exited"; pid: number | undefined }) =>
+          provisionalTerminalProcessEvents.push(event),
+        onStdout: (text: string) => {
+          provisionalTerminalStdout += text;
+        }
+      });
+      assert.equal(provisionalTerminalResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+      assert.equal(fs.readFileSync(fixture.provisionalAck, "utf8"), "observed\n");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "provisional-post-terminal-mutation\n");
+      assert.doesNotMatch(JSON.stringify(provisionalTerminalEvents), /provisional-post-terminal/u);
+      assert.doesNotMatch(provisionalTerminalStdout, /provisional post-terminal/u);
+      assert.equal(provisionalTerminalProcessEvents.filter((event) => event.phase === "started").length, 2);
+      assert.equal(provisionalTerminalProcessEvents.filter((event) => event.phase === "exited").length, 1);
+
+      for (const boundaryMode of [
+        "stderr-left-boundary-negative",
+        "stderr-right-boundary-negative",
+        "stderr-long-s-boundary-negative"
+      ] as const) {
+        resetFixture(boundaryMode, 0);
+        const boundaryEvents: Record<string, unknown>[] = [];
+        let boundaryStderr = "";
+        let boundaryStdout = "";
+        const boundaryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: `Do not latch ${boundaryMode}`,
+          onEvent: (event) => boundaryEvents.push(event),
+          onStdout: (text: string) => {
+            boundaryStdout += text;
+          },
+          onStderr: (text) => {
+            boundaryStderr += text;
+          }
+        });
+        assert.equal(boundaryResult.text, "OK", boundaryMode);
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1", boundaryMode);
+        assert.match(boundaryStderr, /prefixHTTP 429 suffix|HTTP 429suffix|HTTP ſtatus 429suffix/u, boundaryMode);
+        assert.equal(
+          boundaryEvents.some((event) => event.type === "completed" && event.ok === true),
+          true,
+          boundaryMode
+        );
+        if (boundaryMode !== "stderr-left-boundary-negative") {
+          assert.match(boundaryStdout, new RegExp(boundaryMode + " boundary disproved", "u"));
+          assert.match(JSON.stringify(boundaryEvents), new RegExp(boundaryMode + " event preserved", "u"));
+          const lifecycleStartedIndex = boundaryEvents.findIndex((event) => event.type === "started");
+          const lifecycleTurnIndex = boundaryEvents.findIndex(
+            (event) => event.type === "action" && (event.action as { kind?: unknown }).kind === "turn"
+          );
+          const provisionalEventIndex = boundaryEvents.findIndex((event) =>
+            JSON.stringify(event).includes(boundaryMode + " event preserved")
+          );
+          assert.equal(lifecycleStartedIndex >= 0, true);
+          assert.equal(lifecycleTurnIndex > lifecycleStartedIndex, true);
+          assert.equal(provisionalEventIndex > lifecycleTurnIndex, true);
+        }
+      }
+
+      resetFixture("stderr-oversized");
+      let oversizedRetryStderr = "";
+      const oversizedRetryResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine an oversized unterminated rate limit",
+        onStderr: (text) => {
+          oversizedRetryStderr += text;
+        }
+      });
+      assert.equal(oversizedRetryResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(oversizedRetryStderr, /request id: fixture-1/u);
+
+      resetFixture("stderr-character-split");
+      let characterSplitStderr = "";
+      const characterSplitResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Quarantine a character-split multiline rate limit",
+        onStderr: (text) => {
+          characterSplitStderr += text;
+        }
+      });
+      assert.equal(characterSplitResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(characterSplitStderr, /request id: fixture-1/u);
+
+      resetFixture("stderr-unicode-prefix-split");
+      let unicodePrefixStderr = "";
+      const unicodePrefixResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Preserve source indexes across a Unicode prefix",
+        onStderr: (text) => {
+          unicodePrefixStderr += text;
+        }
+      });
+      assert.equal(unicodePrefixResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(unicodePrefixStderr, /request id: fixture-1/u);
+
+      resetFixture("warning-burst", 0);
+      const warningBurstEvents: Record<string, unknown>[] = [];
+      let warningBurstStderr = "";
+      const warningBurstResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Bound pre-substantive warning retention",
+        onEvent: (event) => warningBurstEvents.push(event),
+        onStderr: (text) => {
+          warningBurstStderr += text;
+          if (!warningBurstStderr.includes("ordinary warning 255")) return;
+          // The underlying adapter parses warning events after invoking its
+          // raw stderr callback. A microtask acknowledges only after that
+          // synchronous parser has staged the complete burst.
+          queueMicrotask(() => fs.writeFileSync(fixture.warningAck, "observed\n", "utf8"));
+        }
+      });
+      assert.equal(warningBurstResult.text, "OK");
+      assert.equal(
+        warningBurstEvents.filter(
+          (event) => event.type === "action" && (event.action as { kind?: unknown }).kind === "warning"
+        ).length,
+        1
+      );
+      assert.match(JSON.stringify(warningBurstEvents), /ordinary warning 255/u);
+
+      resetFixture("missing-session");
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({ prompt: "Missing session fixture" }),
+        /429 Too Many Requests/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+
+      resetFixture("missing-session");
+      const explicitResume = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Continue an explicit known session",
+        resumeSession: "fixture-session"
+      });
+      assert.equal(explicitResume.text, "OK");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["resume", "resume"]
+      );
+
+      resetFixture("fresh-conflicting-session");
+      const freshConflictEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Fresh session conflict fixture",
+          onEvent: (event) => freshConflictEvents.push(event)
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(JSON.stringify(freshConflictEvents), /conflicting-session/u);
+
+      resetFixture("conflicting-session");
+      const conflictEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Conflicting session fixture",
+          onEvent: (event) => conflictEvents.push(event)
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.doesNotMatch(JSON.stringify(conflictEvents), /"answer":"OK"|"text":"OK"/u);
+
+      resetFixture("late-conflicting-session");
+      const lateConflictEvents: Record<string, unknown>[] = [];
+      let lateConflictStdout = "";
+      let lateConflictStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Late session conflict fixture",
+          onEvent: (event) => lateConflictEvents.push(event),
+          onStdout: (text: string) => {
+            lateConflictStdout += text;
+          },
+          onStderr: (text) => {
+            lateConflictStderr += text;
+          }
+        }),
+        /returned session conflicting-session, expected fixture-session/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.match(JSON.stringify(lateConflictEvents), /before conflict/u);
+      assert.doesNotMatch(JSON.stringify(lateConflictEvents), /must stay quarantined|"answer":"OK"|"text":"OK"/u);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+      assert.doesNotMatch(lateConflictStdout, /must stay quarantined|WRONG/u);
+      assert.doesNotMatch(lateConflictStderr, /must stay quarantined/u);
+
+      resetFixture("unrelated");
       let unrelatedStderr = "";
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
@@ -2487,10 +4250,9 @@ test(
         /job-429/u
       );
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.doesNotMatch(unrelatedStderr, /retrying/u);
+      assert.doesNotMatch(unrelatedStderr, /retrying|resuming/u);
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "empty-success";
+      resetFixture("empty-success");
       let callbackStderr = "";
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
@@ -2505,10 +4267,109 @@ test(
         /HTTP 429 from caller callback/u
       );
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.doesNotMatch(callbackStderr, /retrying/u);
+      assert.doesNotMatch(callbackStderr, /retrying|resuming/u);
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "initial";
+      resetFixture("callback-hang");
+      let processCallbackStderr = "";
+      const processCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Successful process callback fixture",
+          onProcess: () => {
+            throw new Error("HTTP 429 from caller process callback");
+          },
+          onStderr: (text) => {
+            processCallbackStderr += text;
+          }
+        }),
+        /HTTP 429 from caller process callback/u
+      );
+      assert.equal(performance.now() - processCallbackStartedAt < 400, true);
+      assert.equal(Number(fs.readFileSync(fixture.counter, "utf8")) <= 1, true);
+      assert.doesNotMatch(processCallbackStderr, /retrying|resuming/u);
+
+      resetFixture("stdout-callback-hang");
+      const stdoutCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a hanging process from stdout",
+          onStdout: (_text: string) => {
+            throw new Error("caller stdout callback stopped process");
+          }
+        }),
+        /caller stdout callback stopped process/u
+      );
+      assert.equal(performance.now() - stdoutCallbackStartedAt < 400, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("stderr-callback-hang");
+      const stderrCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a hanging process from stderr",
+          onStderr: () => {
+            throw new Error("caller stderr callback stopped process");
+          }
+        }),
+        /caller stderr callback stopped process/u
+      );
+      assert.equal(performance.now() - stderrCallbackStartedAt < 400, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("initial", 0);
+      let rejectedWithUndefined = false;
+      try {
+        await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Caller throws undefined",
+          onEvent: () => {
+            throw undefined;
+          }
+        });
+      } catch (error) {
+        rejectedWithUndefined = true;
+        assert.equal(error, undefined);
+      }
+      assert.equal(rejectedWithUndefined, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+
+      resetFixture("substantive-command");
+      let substantiveCallbackStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Substantive caller callback fixture",
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes('"kind":"command"')) {
+              throw new Error("HTTP 429 from substantive caller callback");
+            }
+          },
+          onStderr: (text) => {
+            substantiveCallbackStderr += text;
+          }
+        }),
+        /HTTP 429 from substantive caller callback/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.doesNotMatch(substantiveCallbackStderr, /retrying|resuming/u);
+
+      resetFixture("resume-hang");
+      const hangingCallbackStartedAt = performance.now();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Stop a resumed process after a callback failure",
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("resume began")) {
+              throw new Error("caller callback stopped resumed process");
+            }
+          }
+        }),
+        /caller callback stopped resumed process/u
+      );
+      assert.equal(performance.now() - hangingCallbackStartedAt < 1_000, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+
+      resetFixture("initial");
       const preAbortedController = new AbortController();
       preAbortedController.abort(new Error("fixture pre-aborted"));
       await assert.rejects(
@@ -2523,51 +4384,443 @@ test(
       );
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "0");
 
-      const controller = new AbortController();
+      const backoffController = new AbortController();
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
           prompt: "Abort backoff fixture",
-          abortSignal: controller.signal,
+          abortSignal: backoffController.signal,
           onStderr: (text) => {
             if (text.includes("OpenRouter returned HTTP 429")) {
-              controller.abort(new Error("fixture cancelled during backoff"));
+              backoffController.abort(new Error("fixture cancelled during backoff"));
             }
           }
         }),
         (error: unknown) => {
           assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
-          assert.match(String(error), /OpenRouter retry aborted during initial HTTP 429 backoff/u);
+          assert.match(String(error), /OpenRouter retry aborted during HTTP 429 recovery/u);
           return true;
         }
       );
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
 
-      fs.writeFileSync(fixture.counter, "0", "utf8");
-      let timeoutStderr = "";
+      resetFixture("resume-hang");
+      const resumeController = new AbortController();
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Abort resumed process fixture",
+          abortSignal: resumeController.signal,
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("resume began")) {
+              resumeController.abort(new Error("fixture cancelled inside resume"));
+            }
+          }
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code?: unknown }).code, "PROCESS_ABORTED");
+          return true;
+        }
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+
+      resetFixture("resume-hang");
       const timeoutStartedAt = performance.now();
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Bounded timeout fixture",
-          timeout: 500,
-          onStderr: (text) => {
-            timeoutStderr += text;
-          }
+          prompt: "Bounded resume timeout fixture",
+          timeout: 250
         }),
         (error: unknown) => {
           assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
           return true;
         }
       );
-      assert.match(timeoutStderr, /OpenRouter returned HTTP 429 before model output; retrying/u);
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
-      assert.equal(performance.now() - timeoutStartedAt < 1_500, true);
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(performance.now() - timeoutStartedAt < 1_000, true);
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         OPENROUTER_API_KEY: previous.key,
         PATH: previous.path,
         OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
-        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK: previous.provisionalAck,
+        OPENROUTER_RETRY_FIXTURE_WARNING_ACK: previous.warningAck,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter resumes generate and stream through seven same-session 429s",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 2,
+      jitterFraction: 0
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-command";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "7";
+    try {
+      const longRetryEvents: Record<string, unknown>[] = [];
+      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Recover after seven same-session rate limits",
+        onEvent: (event) => longRetryEvents.push(event)
+      });
+      assert.equal(result.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      assert.equal(longRetryEvents.filter((event) => event.type === "started").length, 1);
+      assert.equal(
+        longRetryEvents.some((event) => event.type === "completed" && event.ok === false),
+        false
+      );
+      assert.doesNotMatch(JSON.stringify(longRetryEvents), /request id: fixture-[1-7]/u);
+      const generateJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      const generatePrompt = "Recover after seven same-session rate limits";
+      assert.deepEqual(
+        generateJournal.map((entry) => entry.invocation),
+        ["fresh", "resume", "resume", "resume", "resume", "resume", "resume", "resume"]
+      );
+      assert.equal(
+        generateJournal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(generateJournal.filter((entry) => entry.stdin.includes(generatePrompt)).length, 1);
+      const generateRecoveryMarkers = generateJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(generateRecoveryMarkers).size, 1);
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: "Stream after seven same-session rate limits"
+      });
+      assert.equal(await streamResult.text, "OK");
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "8");
+      const streamJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      const streamPrompt = "Stream after seven same-session rate limits";
+      assert.equal(streamJournal.filter((entry) => entry.invocation === "fresh").length, 1);
+      assert.equal(streamJournal.filter((entry) => entry.invocation === "resume").length, 7);
+      assert.equal(
+        streamJournal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(streamJournal.filter((entry) => entry.stdin.includes(streamPrompt)).length, 1);
+      const streamRecoveryMarkers = streamJournal.slice(1).map((entry) => {
+        const marker = /OpenRouter transport recovery marker: ([0-9a-f-]+)\./u.exec(entry.stdin)?.[1];
+        assert.ok(marker);
+        return marker;
+      });
+      assert.equal(new Set(streamRecoveryMarkers).size, 1);
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter rethrows the last 429 without starting an attempt at its retry deadline",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 1_000,
+      initialDelayMs: 100,
+      maxDelayMs: 100,
+      jitterFraction: 0
+    });
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "substantive-command";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+    try {
+      const finalEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Exhaust the bounded same-session recovery window",
+          onEvent: (event) => finalEvents.push(event)
+        }),
+        (error: unknown) => {
+          const finalAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+          assert.equal(finalAttempt > 1, true);
+          assert.match(String(error), new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
+          const finalEventText = JSON.stringify(finalEvents);
+          for (let attempt = 1; attempt < finalAttempt; attempt += 1) {
+            assert.doesNotMatch(finalEventText, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
+          }
+          assert.match(finalEventText, new RegExp(`request id: fixture-${finalAttempt}\\b`, "u"));
+          return true;
+        }
+      );
+      const journal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.equal(journal[0]?.invocation, "fresh");
+      assert.equal(
+        journal.slice(1).every((entry) => entry.invocation === "resume"),
+        true
+      );
+      assert.equal(
+        journal.slice(1).every((entry) => entry.resumeSession === "fixture-session"),
+        true
+      );
+      assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "mutation\n");
+      const settledAttemptCount = fs.readFileSync(fixture.counter, "utf8");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), settledAttemptCount);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-only";
+      let finalStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Expose only the final exhausted stderr rate limit",
+          onStderr: (text) => {
+            finalStderr += text;
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      const finalStderrAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(finalStderrAttempt > 1, true);
+      for (let attempt = 1; attempt < finalStderrAttempt; attempt += 1) {
+        assert.doesNotMatch(finalStderr, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
+      }
+      assert.equal(
+        (finalStderr.match(new RegExp(`request id: fixture-${finalStderrAttempt}\\b`, "gu")) ?? []).length,
+        1
+      );
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-oversized";
+      let finalOversizedStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Retain one bounded oversized final diagnostic",
+          onStderr: (text) => {
+            finalOversizedStderr += text;
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      const finalOversizedAttempt = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(finalOversizedAttempt > 1, true);
+      for (let attempt = 1; attempt < finalOversizedAttempt; attempt += 1) {
+        assert.doesNotMatch(finalOversizedStderr, new RegExp(`request id: fixture-${attempt}\\b`, "u"));
+      }
+      assert.equal(
+        (finalOversizedStderr.match(new RegExp(`request id: fixture-${finalOversizedAttempt}\\b`, "gu")) ?? []).length,
+        1
+      );
+      assert.equal(finalOversizedStderr.length <= OPENROUTER_TEST_STDERR_PENDING_LIMIT * 2, true);
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-429-hang";
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+      let idleExhaustionStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Preserve the provider 429 when idle-timeout recovery exhausts",
+          // The idle clock includes the watchdog and fixture process startup.
+          // Leave enough launch headroom that this exercises a child which
+          // emitted a 429 and then went idle, not a pre-output startup timeout.
+          timeout: { idleMs: 500, totalMs: 5_000 },
+          onStderr: (text) => {
+            idleExhaustionStderr += text;
+          }
+        }),
+        /HTTP 429 request id: fixture-/u
+      );
+      const idleExhaustionAttempts = Number(fs.readFileSync(fixture.counter, "utf8"));
+      assert.equal(idleExhaustionAttempts > 1 && idleExhaustionAttempts < 100, true);
+      assert.match(idleExhaustionStderr, new RegExp("request id: fixture-" + String(idleExhaustionAttempts), "u"));
+
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stdout-post-terminal";
+      const finalReleaseOrder: string[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Release final trailing evidence before completion",
+          onStdout: (text: string) => {
+            if (text.includes("post-terminal")) finalReleaseOrder.push("stdout");
+          },
+          onStderr: (text: string) => {
+            if (text.includes("post-terminal")) finalReleaseOrder.push("stderr");
+          },
+          onEvent: (event) => {
+            if (JSON.stringify(event).includes("post-terminal")) finalReleaseOrder.push("event");
+            if (event.type === "completed") finalReleaseOrder.push("completion");
+          }
+        }),
+        /429 Too Many Requests/u
+      );
+      assert.equal(finalReleaseOrder.includes("stdout"), true);
+      assert.equal(finalReleaseOrder.includes("stderr"), true);
+      assert.equal(finalReleaseOrder.includes("event"), true);
+      assert.equal(finalReleaseOrder.at(-1), "completion");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+test(
+  "generated OpenRouter adapter retains the last real 429 when a replacement build crosses the retry deadline",
+  { skip: !runningUnderBun, timeout: 20_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      {
+        retryWindowMs: 5_000,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        jitterFraction: 0
+      },
+      { expireRetryDeadlineBeforeReplacementBuild: 2 }
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    process.env.OPENROUTER_RETRY_FIXTURE_MODE = "stderr-oversized";
+    process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "100";
+    try {
+      let finalStderr = "";
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Cross the retry deadline after deciding to replace the final real attempt",
+          onStderr: (text) => {
+            finalStderr += text;
+          }
+        }),
+        (error: unknown) => {
+          assert.match(String(error), /request id: fixture-2\b/u);
+          return true;
+        }
+      );
+
+      // Two provider children ran. The instrumented third replacement crossed
+      // its deadline inside buildCommand, before it could increment the child
+      // fixture counter or append a journal entry.
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+      assert.equal(readOpenRouterRetryFixtureJournal(fixture.journal).length, 2);
+      assert.doesNotMatch(finalStderr, /request id: fixture-1\b/u);
+      assert.equal((finalStderr.match(/request id: fixture-2\b/gu) ?? []).length, 1);
+      assert.doesNotMatch(finalStderr, /request id: fixture-3\b/u);
+      assert.equal(finalStderr.length <= OPENROUTER_TEST_STDERR_PENDING_LIMIT * 2, true);
+
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
@@ -2628,6 +4881,8 @@ test(
       ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
       ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR: "17",
       ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT: `/proc/${process.pid}/fd/17`,
+      ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT: snapshotRoot,
+      ULTRAFUZZ_PROVIDER_HOME_ROOT: path.join(project, "operator-provider-homes"),
       MY_ALIAS: aliasedControlPath
     };
     const { createCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
@@ -2638,7 +4893,8 @@ test(
         ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3",
         ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
         ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR: "19",
-        ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT: `/proc/${process.pid}/fd/19`
+        ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT: `/proc/${process.pid}/fd/19`,
+        ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT: snapshotRoot
       },
       source
     );
@@ -2649,10 +4905,115 @@ test(
       "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
       "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
       "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
-      "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
+      "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
+      "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT",
+      "ULTRAFUZZ_PROVIDER_HOME_ROOT"
     ]) {
       assert.equal(sanitized[name], "", `${name} escaped into a model child environment`);
     }
+
+    const providerScoped = workflowControlChildEnvironment(
+      {
+        OPENAI_API_KEY: "active-openai-key",
+        CUSTOM_ACTIVE_KEY: "active-custom-key",
+        CODEX_HOME: "/operator/codex"
+      },
+      {
+        OPENAI_API_KEY: "ambient-openai-key",
+        ANTHROPIC_API_KEY: "ambient-anthropic-key",
+        DEEPSEEK_API_KEY: "ambient-deepseek-key",
+        OPENROUTER_API_KEY: "ambient-openrouter-key",
+        CUSTOM_PROVIDER_KEY: "ambient-custom-key",
+        CLAUDE_CONFIG_DIR: "/operator/claude",
+        KIMI_CODE_HOME: "/operator/kimi",
+        ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES:
+          "OPENAI_API_KEY,ANTHROPIC_API_KEY,DEEPSEEK_API_KEY,OPENROUTER_API_KEY,CUSTOM_PROVIDER_KEY,CUSTOM_ACTIVE_KEY"
+      }
+    );
+    assert.equal(providerScoped.OPENAI_API_KEY, "active-openai-key");
+    assert.equal(providerScoped.CUSTOM_ACTIVE_KEY, "active-custom-key");
+    assert.equal(providerScoped.CODEX_HOME, "/operator/codex");
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "OPENROUTER_API_KEY",
+      "CUSTOM_PROVIDER_KEY",
+      "CLAUDE_CONFIG_DIR",
+      "KIMI_CODE_HOME"
+    ]) {
+      assert.equal(providerScoped[name], "", `${name} leaked into the OpenAI child`);
+    }
+    assert.equal(providerScoped.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES, "");
+
+    const allowlistedSource = linkedWorkflowExecutionEnvironment(
+      { executionSnapshot: { env: {} } } as never,
+      {
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+          "AWS_ACCESS_KEY_ID,AWS_CUSTOM_TOKEN,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_AUTH,CUSTOM_SHARED_TOKEN,DATABASE_PASSWD,FOUNDRY_PROFILE,MAINNET_RPC_URL,SSH_PRIVATE_KEY",
+        AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+        AWS_CUSTOM_TOKEN: "configured-for-codex",
+        AWS_SESSION_TOKEN: "claude-route-token",
+        aws_case_token: "case-variant-claude-token",
+        CUSTOM_AUTH: "custom-auth-secret",
+        CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+        DATABASE_PASSWD: "database-password",
+        FOUNDRY_PROFILE: "ci",
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`,
+        SSH_PRIVATE_KEY: "private-key"
+      },
+      ["aws_custom_token"]
+    );
+    assert.ok(allowlistedSource.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES?.split(",").includes("MAINNET_RPC_URL"));
+    const codexAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({}, allowlistedSource, { agent: "CodexAgent" })
+    };
+    assert.equal(codexAllowlisted.AWS_ACCESS_KEY_ID, "");
+    assert.equal(codexAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(codexAllowlisted.AWS_SESSION_TOKEN, "");
+    assert.equal(codexAllowlisted.aws_case_token, "");
+    assert.equal(codexAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(codexAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(codexAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(codexAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(codexAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(codexAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(codexAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const claudeAllowlisted = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_ACCESS_KEY_ID: "", AWS_SESSION_TOKEN: "" }, allowlistedSource, {
+        agent: "ClaudeAgent"
+      })
+    };
+    assert.equal(claudeAllowlisted.AWS_ACCESS_KEY_ID, "AKIA0123456789ABCDEF");
+    assert.equal(claudeAllowlisted.AWS_CUSTOM_TOKEN, "");
+    assert.equal(claudeAllowlisted.AWS_SESSION_TOKEN, "claude-route-token");
+    assert.equal(claudeAllowlisted.aws_case_token, "case-variant-claude-token");
+    assert.equal(claudeAllowlisted.CUSTOM_AUTH, "");
+    assert.equal(claudeAllowlisted.CUSTOM_SHARED_TOKEN, "");
+    assert.equal(claudeAllowlisted.DATABASE_PASSWD, "");
+    assert.equal(claudeAllowlisted.MAINNET_RPC_URL, "");
+    assert.equal(claudeAllowlisted.SSH_PRIVATE_KEY, "");
+    assert.equal(claudeAllowlisted.FOUNDRY_PROFILE, "ci");
+    assert.equal(claudeAllowlisted.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES, "");
+    const explicitlyRestored = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ CUSTOM_SHARED_TOKEN: "configured-active-token" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(explicitlyRestored.CUSTOM_SHARED_TOKEN, "configured-active-token");
+    const configuredCodexCredential = {
+      ...allowlistedSource,
+      ...workflowControlChildEnvironment({ AWS_CUSTOM_TOKEN: "configured-for-codex" }, allowlistedSource, {
+        agent: "CodexAgent"
+      })
+    };
+    assert.equal(configuredCodexCredential.AWS_CUSTOM_TOKEN, "configured-for-codex");
+    assert.throws(
+      () => workflowControlChildEnvironment({}, { ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: "NOT-AN-ENV" }),
+      /provider credential environment list is invalid/u
+    );
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -2682,7 +5043,13 @@ test(
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const { CompatibleClaudeCodeAgent, DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    fs.mkdirSync(path.join(project, ".claude"));
+    fs.writeFileSync(
+      path.join(project, ".claude", "settings.json"),
+      '{"env":{"ANTHROPIC_BASE_URL":"https://target.invalid"}}'
+    );
+    fs.writeFileSync(path.join(project, ".claude", "settings.local.json"), '{"permissions":{"allow":["Bash(*)"]}}');
     const agent = new DeepSeekClaudeCodeAgent({
       model: "deepseek-v4-pro",
       extraArgs: ["--effort", "max"],
@@ -2694,6 +5061,23 @@ test(
     const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
     assert.equal(command.command, "claude");
     assert.equal(command.args.includes("deepseek-v4-pro"), true);
+    const claude = new CompatibleClaudeCodeAgent({ permissionMode: "bypassPermissions", settingSources: "project" });
+    const claudeCommand = await claude.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+    assert.deepEqual(
+      command.args.flatMap((value, index) =>
+        value === "--setting-sources" ? command.args.slice(index, index + 2) : []
+      ),
+      ["--setting-sources", ""]
+    );
+    assert.deepEqual(
+      claudeCommand.args.flatMap((value, index) =>
+        value === "--setting-sources" ? claudeCommand.args.slice(index, index + 2) : []
+      ),
+      ["--setting-sources", "user"]
+    );
+    for (const args of [command.args, claudeCommand.args]) {
+      assert.equal(args.includes("--dangerously-skip-permissions"), true);
+    }
     assert.deepEqual(command.args.slice(command.args.indexOf("--effort"), command.args.indexOf("--effort") + 2), [
       "--effort",
       "max"
@@ -3312,23 +5696,42 @@ default_effort = "high"
     await crashResumed.cleanup?.();
     assert.ok(isolatedDirs.every((directory) => !fs.existsSync(directory)));
 
+    const apiKeyGovernance = path.join(project, "kimi-api-governance.json");
+    const apiKeyDestination = modelDestination(
+      "KimiAgent",
+      { agents: { KimiAgent: { auth: "api-key" } } } as never,
+      process.env
+    );
+    fs.writeFileSync(apiKeyGovernance, JSON.stringify({ required_source_destinations: [apiKeyDestination] }) + "\n");
+    const previousGovernancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = apiKeyGovernance;
     const apiKeyAgent = new KimiCode029Agent({
       model: "kimi-k3",
+      configDir: sourceConfig,
       ultrafuzzAuthMode: "api-key",
       ultrafuzzReasoningEffort: "low",
       apiKey: "test-key"
     });
-    const apiKeyCommand = await apiKeyAgent.buildCommand({
-      prompt: "API key smoke",
-      cwd: "/workspace/target",
-      options: {}
-    });
+    let apiKeyCommand: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>> | undefined;
+    try {
+      apiKeyCommand = await apiKeyAgent.buildCommand({
+        prompt: "API key smoke",
+        cwd: "/workspace/target",
+        options: {}
+      });
+    } finally {
+      if (previousGovernancePath === undefined) delete process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+      else process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = previousGovernancePath;
+    }
+    assert.ok(apiKeyCommand);
     const apiKeyConfigDir = apiKeyCommand.env?.KIMI_SHARE_DIR;
     assert.ok(apiKeyConfigDir);
     assert.equal(apiKeyCommand.env?.KIMI_CODE_HOME, apiKeyConfigDir);
+    assert.equal(apiKeyCommand.env?.KIMI_API_KEY, "test-key");
     const apiKeyConfig = fs.readFileSync(path.join(apiKeyConfigDir, "config.toml"), "utf8");
     assert.match(apiKeyConfig, /default_model = "kimi-k3"/);
-    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"\napi_key = "test-key"/);
+    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"/);
+    assert.doesNotMatch(apiKeyConfig, /api_key|test-key/u);
     assert.match(apiKeyConfig, /base_url = "https:\/\/api\.moonshot\.ai\/v1"/);
     assert.match(apiKeyConfig, /\[models\."kimi-k3"\]/);
     assert.match(apiKeyConfig, /model = "k3"/);
@@ -3432,8 +5835,12 @@ test(
       else process.env.KIMI_BASE_URL = previousBaseUrl;
     }
     assert.ok(command.env?.KIMI_CODE_HOME);
+    assert.equal(command.env?.KIMI_API_KEY, "contract-test-key");
+    const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
+    assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /api_key|contract-test-key/u);
     execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
-      encoding: "utf8"
+      encoding: "utf8",
+      env: { ...process.env, ...command.env }
     });
     const parserArgs = [...command.args];
     const modelIndex = parserArgs.indexOf("--model");
@@ -3443,8 +5850,7 @@ test(
       cwd: project,
       env: {
         ...process.env,
-        KIMI_CODE_HOME: command.env.KIMI_CODE_HOME,
-        KIMI_SHARE_DIR: command.env.KIMI_CODE_HOME,
+        ...command.env,
         NO_PROXY: "127.0.0.1,localhost"
       },
       encoding: "utf8",
@@ -3461,7 +5867,9 @@ test(
       `${parsed.stdout}\n${parsed.stderr}`,
       /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
     );
+    const runtimeHome = command.env.KIMI_CODE_HOME;
     await command.cleanup?.();
+    assert.equal(fs.existsSync(runtimeHome), false);
   }
 );
 
@@ -4517,7 +6925,7 @@ test("validate rejects unknown agent references before launch", async () => {
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, false);
-  assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+  assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "CONFIG_MODEL_AGENT_INVALID"));
 
   const run = await startRun({
     projectRoot: project,
@@ -4526,7 +6934,7 @@ test("validate rejects unknown agent references before launch", async () => {
     env: fakeSmithersEnv(project)
   });
   assert.equal(run.ok, false);
-  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "CONFIG_MODEL_AGENT_INVALID"));
 });
 
 test("validate requires agentFactories entries for every configured model profile", async () => {
@@ -4788,26 +7196,17 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   );
 });
 
-test("validate accepts quoted factory keys for current custom agent IDs", async () => {
+test("validate accepts quoted factory keys for stock agent IDs", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
   writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs.readFileSync(configPath, "utf8").replace('agent = "CodexAgent"', 'agent = "custom.agent:v1-beta"'),
-    "utf8"
-  );
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
     fs
       .readFileSync(registryPath, "utf8")
-      .replace(
-        "  OpenRouterAgent: createOpenRouterAgent\n",
-        '  OpenRouterAgent: createOpenRouterAgent,\n  "custom.agent:v1-beta": createCodexAgent\n'
-      ),
+      .replace("  CodexAgent: createCodexAgent,", '  "CodexAgent": createCodexAgent,'),
     "utf8"
   );
 
@@ -5491,14 +7890,27 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       modal: {
         app: "ultrafuzz-test",
         image: "ultrafuzz-test",
-        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       }
     }
   };
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const { assertCurrentCloudAgentCredentialEnvironment, compileSmithersWorkflow } = await import("../src/smithers.js");
+  const cloudEnv = {
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
+      "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+    AWS_REGION: "us-east-1",
+    AWS_SESSION_TOKEN: "secret",
+    aws_case_token: "case-variant-claude-token",
+    CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
+    MAINNET_RPC_URL: "https://rpc.invalid",
+    PRIVATE_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`
+  };
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
+    env: cloudEnv,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-cloud-nodes",
@@ -5513,7 +7925,38 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     memoryMiB: 16384,
     timeoutSeconds: 1800
   });
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(discovery.execution.agentCredentialEnv, [
+    "AWS_REGION",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "MAINNET_RPC_URL",
+    "OPENAI_API_KEY",
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
+  ]);
+  assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_REGION",
+    "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "MAINNET_RPC_URL",
+    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+    "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
+    "aws_case_token"
+  ]);
+  assert.doesNotThrow(() =>
+    assertCurrentCloudAgentCredentialEnvironment(
+      plan.value!.resolved_config,
+      compiled.tasks,
+      Object.fromEntries(Object.entries(cloudEnv).reverse())
+    )
+  );
+  assert.throws(
+    () =>
+      assertCurrentCloudAgentCredentialEnvironment(plan.value!.resolved_config, compiled.tasks, {
+        ...cloudEnv,
+        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`
+      }),
+    /cloud agent credential classification changed after workflow compilation/u
+  );
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
@@ -5571,7 +8014,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
       modal: {
         app: "ultrafuzz-test",
         image: "ultrafuzz-test",
-        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       }
     }
   };
@@ -5579,6 +8022,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
     config: plan.value!.resolved_config,
+    env: { KIMI_BASE_URL: "https://kimi.example.invalid/v1" },
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
     workflowName: "ultrafuzz-cloud-kimi-nodes",
@@ -5588,7 +8032,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
   const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
   assert.ok(discovery);
   assert.equal(discovery.agentRef, "KimiAgent");
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]);
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "KIMI_BASE_URL", "MOONSHOT_API_KEY"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -5600,6 +8044,7 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const quotedProjectRoot = path.join(project, 'checkout"quoted');
   fs.mkdirSync(quotedProjectRoot);
+  initProject({ projectRoot: quotedProjectRoot, force: true });
   const compiled = compileSmithersWorkflow({
     projectRoot: quotedProjectRoot,
     config: plan.value!.resolved_config,
@@ -5850,7 +8295,7 @@ test("planRun rejects cloud retry chains before creating the run directory", asy
     .replace("same_agent_attempts = 1", "same_agent_attempts = 2");
   fs.writeFileSync(
     configPath,
-    `${config}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]\n`,
+    `${config}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
     "utf8"
   );
 
@@ -5858,7 +8303,7 @@ test("planRun rejects cloud retry chains before creating the run directory", asy
   const result = await planRun({
     projectRoot: project,
     runId,
-    env: { UFZ_PROVIDER_ONE: "provider-one", UFZ_PROVIDER_TWO: "provider-two", OPENAI_API_KEY: "agent-key" }
+    env: { MODAL_TOKEN_ID: "provider-one", MODAL_TOKEN_SECRET: "provider-two", OPENAI_API_KEY: "agent-key" }
   });
 
   assert.equal(result.ok, false);
@@ -5985,13 +8430,16 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
 
   // The default profile is CodexAgent/gpt-5.5/xhigh; switching only the agent
   // must not hand Codex's model and reasoning to Claude.
+  const claudeHome = path.join(project, "claude-home");
+  const environmentLog = path.join(project, "claude-environment.log");
   const run = await startRun({
     projectRoot: project,
     runId: "agent-switch",
     agent: "ClaudeAgent",
-    env: fakeSmithersEnv(project)
+    env: { ...fakeSmithersEnv(project), CLAUDE_CONFIG_DIR: claudeHome, SMITHERS_FAKE_ENV_LOG: environmentLog }
   });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), `|||${claudeHome}||\n`);
 
   const smithersTasks = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
@@ -6325,7 +8773,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
   assert.match(workflowSource, /<Worktree/);
-  assert.match(workflowSource, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/);
+  assert.match(
+    workflowSource,
+    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision/u
+  );
   assert.match(workflowSource, /function preservePinnedSourceProof/);
   assert.match(workflowSource, /"source-proofs"/);
   assert.doesNotMatch(workflowSource, /const layers =/);
@@ -6559,6 +9010,115 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   );
 });
 
+test("a divergent published control file leaves status readable while execution stays closed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-control-status";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Diverge the PUBLISHED snapshot copy of the generated workflow, which is what the seal check
+  // compares once a snapshot exists. The project copy stays byte-identical to the seal, exactly as
+  // observed in issue #674.
+  const snapshotsRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots");
+  const generations = fs.readdirSync(snapshotsRoot);
+  assert.equal(generations.length, 1, JSON.stringify(generations));
+  const workflowsDir = path.join(snapshotsRoot, generations[0]!, ".smithers", "workflows");
+  const workflowFile = fs.readdirSync(workflowsDir).find((entry) => entry.endsWith(".tsx"));
+  assert.ok(workflowFile, "published snapshot has no generated workflow");
+  const snapshotWorkflowPath = path.join(workflowsDir, workflowFile!);
+  const pristine = fs.readFileSync(snapshotWorkflowPath, "utf8");
+  // Published snapshots are intentionally read-only, so reaching this state takes a deliberate
+  // override — which is exactly what an operator hot-patching a sealed run has to do.
+  const publishedMode = fs.statSync(snapshotWorkflowPath).mode;
+  fs.chmodSync(snapshotWorkflowPath, 0o644);
+  fs.writeFileSync(snapshotWorkflowPath, `${pristine}\n// diverged\n`, "utf8");
+  fs.chmodSync(snapshotWorkflowPath, publishedMode);
+
+  // Execution authority still fails closed, and still refuses to resume.
+  const strict = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(strict.ok, false);
+  if (!strict.ok) {
+    assert.equal(strict.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(strict.diagnostics[0]?.message ?? "", /sealed workflow control file changed: workflow/u);
+  }
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+
+  // An observer reads the same run, and is told exactly what diverged.
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
+  if (observed.ok) {
+    assert.equal(observed.verifiedControl.divergences.length, 1);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /sealed workflow control file changed: workflow/u);
+    // The message must name which copy was compared and both digests, so the divergence is
+    // diagnosable without reproducing the capture by hand.
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /published execution snapshot copy/u);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /sealed [0-9a-f]{64} \d+ bytes/u);
+    assert.match(observed.verifiedControl.divergences[0] ?? "", /observed [0-9a-f]{64} \d+ bytes/u);
+  }
+
+  // status reports the run instead of replacing it with an error, and carries the divergence as a warning.
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, runId);
+  assert.equal(health.value?.verdict, "running-healthy");
+  const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
+  assert.equal(diverged.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(diverged[0]?.severity, "warning");
+  // The divergence is reported exactly once. Synchronization re-reads the same evidence strictly, so
+  // running it here would report the identical mismatch a second time as INVALID and leave a healthy
+  // response contradicting itself.
+  assert.equal(
+    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID").length,
+    0,
+    JSON.stringify(health.diagnostics)
+  );
+  const skipped = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED");
+  assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(skipped[0]?.severity, "warning");
+
+  // The divergence is never silently repaired.
+  assert.equal(fs.readFileSync(snapshotWorkflowPath, "utf8"), `${pristine}\n// diverged\n`);
+});
+
+test("an observer still refuses a run whose sealed execution files diverged", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-execution-file";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Execution files are what `status` itself runs: the snapshot env binds the runner executable and the
+  // sealed module URLs inside the snapshot. Tolerating divergence here would mean executing tampered
+  // code to report the tampering, so this must stay fatal even for a read-only caller.
+  const seal = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "control-integrity.json"), "utf8")
+  ) as { execution_files: { snapshot_path: string }[] };
+  const generations = fs.readdirSync(path.join(run.value!.run_root, "smithers", "execution-snapshots"));
+  const snapshotRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots", generations[0]!);
+  const target = path.join(snapshotRoot, ...seal.execution_files[0]!.snapshot_path.split("/"));
+  const originalMode = fs.statSync(target).mode;
+  fs.chmodSync(target, 0o644);
+  fs.appendFileSync(target, "\n// diverged\n", "utf8");
+  fs.chmodSync(target, originalMode);
+
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, false);
+  if (!observed.ok) {
+    assert.equal(observed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(observed.diagnostics[0]?.message ?? "", /sealed workflow execution file changed/u);
+  }
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, false);
+  assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+});
+
 test("getRunHealth accepts the terminal degraded verdict without converting it to done", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -6569,7 +9129,7 @@ test("getRunHealth accepts the terminal degraded verdict without converting it t
 
   const envelope = currentStatusEnvelope("ultrafuzz-degraded-health-run");
   const data = envelope.data as Record<string, unknown>;
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...data,
@@ -6597,7 +9157,7 @@ test("getRunHealth binds the workflow health summary to the run it asked about",
   const run = await startRun({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(currentStatusEnvelope("ultrafuzz-another-run"));
+  setFakeSmithersStatus(project, currentStatusEnvelope("ultrafuzz-another-run"));
   const foreign = await getRunHealth({ projectRoot: project, runId: "bound-health-run", env });
   assert.equal(foreign.ok, false);
   assert.deepEqual(
@@ -6634,7 +9194,7 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
   ];
 
   for (const invalid of invalidDocuments) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(invalid.value);
+    setFakeSmithersStatus(project, invalid.value);
     const health = await getRunHealth({ projectRoot: project, runId: "strict-health-run", env });
     assert.equal(health.ok, false, invalid.label);
     assert.equal(health.value, undefined, invalid.label);
@@ -6657,7 +9217,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
   const base = envelope.data as Record<string, unknown>;
 
   for (const verdict of ["orphaned", "cancel-pending"] as const) {
-    env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+    setFakeSmithersStatus(project, {
       ...envelope,
       data: {
         ...base,
@@ -6691,7 +9251,7 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
   }
 
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify({
+  setFakeSmithersStatus(project, {
     ...envelope,
     data: {
       ...base,
@@ -6727,7 +9287,7 @@ test("pauseRun accepts the workflow runner pause-request exit and is idempotent 
   assert.equal(requested.value?.status, "pause-requested");
   assert.equal(requested.value?.submitted, true);
 
-  env.SMITHERS_FAKE_ALREADY_PAUSED = "1";
+  markFakeSmithersAlreadyPaused(project);
   const paused = await pauseRun({ projectRoot: project, runId: "pause-run", env });
   assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
   assert.equal(paused.value?.status, "paused");
@@ -6895,6 +9455,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
     SMITHERS_SNAPSHOT_SOCK: "/outer/snapshot.sock",
     OPENAI_API_KEY: "configured-agent-key",
     AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
+    SMITHERS_UNDOCUMENTED_SECRET: "must-not-forward",
     FOUNDRY_PROFILE: "ci",
     ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE"
   };
@@ -6902,9 +9463,105 @@ test("startRun forwards configured and explicitly allowed environment variables 
   const run = await startRun({ projectRoot: project, runId: "filtered-environment", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci|||OPENAI_API_KEY\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
+
+test(
+  "two active API-key providers reach generated children with only their own credential",
+  { skip: !runningUnderBun, timeout: 120_000 },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+    fs.writeFileSync(
+      topologyPath,
+      fs
+        .readFileSync(topologyPath, "utf8")
+        .replace(
+          "    prompt: setup/project-discovery.md\n    depends_on:\n",
+          "    prompt: setup/project-discovery.md\n    model_profiles:\n      - default\n    depends_on:\n"
+        )
+        .replace(
+          "  - id: __finish__\n",
+          `  - id: deepseek-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    model_profiles:
+      - deepseek
+    depends_on:
+      - __start__
+    outputs:
+      - path: setup/deepseek-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+`
+        )
+        .replace(
+          "    depends_on:\n      - project-discovery\n",
+          "    depends_on:\n      - project-discovery\n      - deepseek-discovery\n"
+        ),
+      "utf8"
+    );
+
+    const controllerEnvironmentLog = path.join(project, "smithers-multi-provider-environment.log");
+    const controllerCredentialLog = path.join(project, "smithers-multi-provider-credentials.log");
+    const openAiKey = "active-openai-key";
+    const deepSeekKey = "active-deepseek-key";
+    const run = await startRun({
+      projectRoot: project,
+      runId: "multi-provider-credential-isolation",
+      env: {
+        ...fakeSmithersEnv(project),
+        SMITHERS_FAKE_ENV_LOG: controllerEnvironmentLog,
+        SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG: controllerCredentialLog,
+        OPENAI_API_KEY: openAiKey,
+        DEEPSEEK_API_KEY: deepSeekKey
+      }
+    });
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.equal(fs.readFileSync(controllerCredentialLog, "utf8"), `${openAiKey}|${deepSeekKey}\n`);
+    const controllerEnvironment = fs.readFileSync(controllerEnvironmentLog, "utf8").trimEnd().split("|");
+    assert.equal(controllerEnvironment[0], openAiKey);
+    const providerCredentialNames = controllerEnvironment.at(-1);
+    assert.equal(providerCredentialNames, "DEEPSEEK_API_KEY,OPENAI_API_KEY");
+
+    const saved = Object.fromEntries(
+      ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"].map(
+        (name) => [name, process.env[name]]
+      )
+    );
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES = providerCredentialNames!;
+    process.env.OPENAI_API_KEY = openAiKey;
+    process.env.DEEPSEEK_API_KEY = deepSeekKey;
+    try {
+      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      const codexEnvironment = (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
+      assert.equal(codexEnvironment.CODEX_API_KEY, openAiKey);
+      assert.equal(codexEnvironment.DEEPSEEK_API_KEY, "");
+
+      const { createDeepSeekAgent } = await loadGeneratedDeepSeekAgent(project);
+      const deepSeekCommand = await createDeepSeekAgent().buildCommand({
+        prompt: "isolate",
+        cwd: project,
+        options: {}
+      });
+      assert.equal(deepSeekCommand.env?.ANTHROPIC_AUTH_TOKEN, deepSeekKey);
+      assert.equal(deepSeekCommand.env?.OPENAI_API_KEY, "");
+      assert.equal(deepSeekCommand.env?.CODEX_API_KEY, "");
+      assert.equal(deepSeekCommand.env?.DEEPSEEK_API_KEY, "");
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
 
 test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
@@ -6939,7 +9596,7 @@ test("startRun rejects an untracked cwd executable before task worktrees or mode
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "empty-path-required-command")), false);
 });
 
-test("startRun rejects controller-only paths as credential environment names", async () => {
+test("startRun rejects noncanonical built-in credential environment names", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -6960,7 +9617,7 @@ test("startRun rejects controller-only paths as credential environment names", a
   });
 
   assert.equal(run.ok, false);
-  assert.match(run.diagnostics[0]?.message ?? "", /credential environment cannot name controller-only variable/u);
+  assert.equal(run.diagnostics[0]?.code, "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL");
   assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
 });
 
@@ -6978,7 +9635,7 @@ test("startRun forwards cloud provider credentials through the Smithers environm
 [execution.providers.modal]
 app = "ultrafuzz-test"
 image = "ultrafuzz-test"
-credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `,
     "utf8"
   );
@@ -6988,9 +9645,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     pinnedRunner.target,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
-      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
-      "fi",
+      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi',
+      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
       "printf '%s\\n' '{\"ok\":true}'",
       ""
     ].join("\n"),
@@ -6998,12 +9654,14 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
   );
   fs.chmodSync(pinnedRunner.target, 0o755);
   const controllerEnvironment = fakeSmithersEnv(project);
+  writeFakeNpmInstaller(project);
   const env = {
     ...controllerEnvironment,
+    SMITHERS_BIN: undefined,
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     OPENAI_API_KEY: "configured-agent-key",
-    UFZ_PROVIDER_ONE: "provider-one",
-    UFZ_PROVIDER_TWO: "provider-two"
+    MODAL_TOKEN_ID: "provider-one",
+    MODAL_TOKEN_SECRET: "provider-two"
   };
 
   const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
@@ -7050,7 +9708,7 @@ test("startRun forwards Kimi-specific runtime environment without exposing unrel
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(
     fs.readFileSync(kimiEnvironmentLog, "utf8"),
-    "||https://kimi.example.invalid/v1|/data/run/kimi-code-auth|/data/run/kimi-code-sessions|/data/run\n"
+    "||https://kimi.example.invalid/v1|||/data/run/kimi-code-auth|/data/run/kimi-code-sessions|/data/run\n"
   );
 });
 
@@ -7166,6 +9824,7 @@ test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", as
     "utf8"
   );
   const kimiEnvironmentLog = path.join(project, "smithers-kimi-api-environment.log");
+  const kimiHome = path.join(project, "kimi-api-home");
 
   const run = await startRun({
     projectRoot: project,
@@ -7175,14 +9834,16 @@ test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", as
       ...fakeSmithersEnv(project),
       SMITHERS_FAKE_KIMI_ENV_LOG: kimiEnvironmentLog,
       MOONSHOT_API_KEY: "moonshot-fallback-key",
-      KIMI_BASE_URL: "https://kimi.example.invalid/v1"
+      KIMI_BASE_URL: "https://kimi.example.invalid/v1",
+      KIMI_CODE_HOME: kimiHome,
+      KIMI_SHARE_DIR: kimiHome
     }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(
     fs.readFileSync(kimiEnvironmentLog, "utf8"),
-    "|moonshot-fallback-key|https://kimi.example.invalid/v1|||\n"
+    `|moonshot-fallback-key|https://kimi.example.invalid/v1|${kimiHome}|${kimiHome}|||\n`
   );
 });
 
@@ -7191,7 +9852,7 @@ test("startRun submits the exact sealed redacted workflow input bytes", async ()
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-redaction-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-command.log");
@@ -7791,12 +10452,16 @@ test("snapshot anchors close when executable acquisition rejects a replaced inte
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const installed = writeFakeInstalledSmithers(project);
-  const interpreter = path.join(project, "sealed-runner-interpreter");
+  const interpreter = path.join(path.dirname(project), `${path.basename(project)}-sealed-runner-interpreter`);
   fs.copyFileSync("/bin/sh", interpreter);
   fs.chmodSync(interpreter, 0o755);
   fs.writeFileSync(installed.target, `#!${interpreter}\nprintf '%s\\n' '{"ok":true}'\n`, "utf8");
   fs.chmodSync(installed.target, 0o755);
-  const env = { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "snapshot-anchor-cleanup.log") };
+  const env = bindSmithersExecutableCapability(
+    { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "snapshot-anchor-cleanup.log") },
+    installed.target,
+    project
+  );
   const run = await startRun({ projectRoot: project, runId: "snapshot-anchor-cleanup", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const evidence = await readLinkedWorkflowEvidence(project, "snapshot-anchor-cleanup");
@@ -8003,40 +10668,37 @@ ${`${marker} `.repeat(2000)}
   assert.doesNotMatch(workflowSource, new RegExp(marker, "u"));
 });
 
-test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
+test("startRun ignores target-local Smithers in favor of an operator install", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
   const logPath = path.join(project, "local-smithers.log");
   const executedAsLogPath = path.join(project, "local-smithers-executed-as.log");
-  const installed = writeFakeInstalledSmithers(project);
+  writeFakeInstalledSmithers(project);
+  writeFakeNpmInstaller(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath, SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath }
+    env: {
+      PATH: "",
+      SMITHERS_FAKE_LOG: logPath,
+      SMITHERS_FAKE_EXECUTED_AS_LOG: executedAsLogPath
+    }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
-  const executedAs = fs.readFileSync(executedAsLogPath, "utf8").trim();
-  if (process.platform !== "win32" && fs.existsSync("/proc/self/fd")) {
-    assert.match(executedAs, /^\/proc\/\d+\/fd\/\d+$/u);
-  } else {
-    assert.equal(executedAs, fs.realpathSync(installed.target));
-  }
+  assert.equal(fs.existsSync(executedAsLogPath), false);
 });
 
-test("startRun patches every described runner compatibility workaround", async () => {
-  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+test("compatibility patcher rewrites every described workaround", async () => {
+  const { applySmithersCompatibilityPatches, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-
-  const logPath = path.join(project, "patched-admission-smithers.log");
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
+  const stockRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
   assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   // Seeded from the descriptions themselves, so a newly described workaround is
   // covered here without a second edit and cannot land reported-but-never-applied.
@@ -8073,16 +10735,31 @@ test("startRun patches every described runner compatibility workaround", async (
   }
   for (const [source, anchors] of bySource) {
     fs.mkdirSync(path.dirname(source), { recursive: true });
+    if (source.endsWith(SMITHERS_BIN_PATH)) {
+      fs.cpSync(path.dirname(stockRunner), path.dirname(source), { recursive: true });
+      continue;
+    }
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
   }
 
-  const run = await startRun({
-    projectRoot: project,
-    runId: "patched-admission-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
-  });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  {
+    for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
+      const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
+      assert.ok(startup);
+      assert.match(
+        startup.patched,
+        /"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u
+      );
+    }
+    const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
+    assert.ok(relaunch);
+    assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
+    assert.throws(
+      () => bindSmithersExecutableCapability({}, stockRunner),
+      /delegate controller authority to target code/u
+    );
+  }
+  applySmithersCompatibilityPatches(project);
   for (const { patch, source } of sources) {
     // `patched` is the whole replacement text, so its presence is exactly the
     // statement "this workaround landed in the installed source".
@@ -8091,6 +10768,48 @@ test("startRun patches every described runner compatibility workaround", async (
       true,
       `${patch.id} is described but was never applied to ${source}`
     );
+  }
+  {
+    const delegation = sources.find(({ patch }) => patch.id === "local_delegation");
+    assert.ok(delegation);
+    const target = path.join(project, "hostile-target"),
+      targetRunner = path.join(target, ".smithers", "node_modules", "smthrs", ...SMITHERS_BIN_PATH.split("/")),
+      trustedMarker = path.join(project, "operator-cli-ran"),
+      hostileMarker = path.join(project, "target-cli-ran"),
+      cliRoot = path.join(nodeModules, "@smthrs", "cli");
+    fs.mkdirSync(path.dirname(targetRunner), { recursive: true });
+    fs.writeFileSync(
+      path.join(cliRoot, "package.json"),
+      `${JSON.stringify({ name: "@smthrs/cli", version: SMITHERS_VERSION, type: "module", exports: "./index.js" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(cliRoot, "index.js"),
+      `await Bun.write(process.env.ULTRAFUZZ_TRUSTED_MARKER, "trusted");\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(target, ".smithers", "node_modules", "smthrs", "package.json"),
+      `${JSON.stringify({ name: "smthrs", version: SMITHERS_VERSION, type: "module", bin: { smithers: SMITHERS_BIN_PATH } })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(targetRunner, `await Bun.write(process.env.ULTRAFUZZ_HOSTILE_MARKER, "hostile");\n`, "utf8");
+    execFileSync(
+      "bun",
+      [
+        `--config=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+        "--no-env-file",
+        "--no-install",
+        delegation.source,
+        "inspect"
+      ],
+      {
+        cwd: target,
+        env: { ...process.env, ULTRAFUZZ_TRUSTED_MARKER: trustedMarker, ULTRAFUZZ_HOSTILE_MARKER: hostileMarker }
+      }
+    );
+    assert.equal(fs.existsSync(trustedMarker), true);
+    assert.equal(fs.existsSync(hostileMarker), false);
   }
 });
 
@@ -8347,7 +11066,7 @@ if (phase === "engine" || phase === "supervisor") {
 );
 
 test(
-  "fixed fd transfer survives launcher and supervisor reuse before stable-path resumes start",
+  "fixed fd transfer survives parent exit and fd reuse across Bun engine, supervisor, and resume",
   { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
   async () => {
     const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
@@ -8376,10 +11095,28 @@ test(
     const ignoredResumeResultPath = path.join(coordinationRoot, "resume-ignored.json");
     const goPath = path.join(coordinationRoot, "go");
     const replacementPath = path.join(coordinationRoot, "replacement.txt");
+    const ambientName = `ufz-ambient-${path.basename(root)}`,
+      ambientRoot = path.join(os.tmpdir(), "node_modules", ambientName),
+      ambientMarker = path.join(coordinationRoot, "ambient-ran");
     fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(workflowPath, "sealed-workflow\n", "utf8");
     fs.writeFileSync(configPath, "sealed-config\n", "utf8");
+    {
+      fs.writeFileSync(path.join(root, "tsconfig.json"), "{}\n", "utf8");
+      fs.writeFileSync(path.join(root, "controls", "bunfig.toml"), "\n", "utf8");
+      fs.writeFileSync(path.join(root, "controls", "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
+      fs.writeFileSync(path.join(root, "sealed-relative.mjs"), 'export default "sealed-relative";\n', "utf8");
+      fs.mkdirSync(ambientRoot, { recursive: true });
+      fs.writeFileSync(
+        path.join(ambientRoot, "package.json"),
+        `${JSON.stringify({ name: ambientName, type: "module", exports: "./index.js" })}\n`
+      );
+      fs.writeFileSync(
+        path.join(ambientRoot, "index.js"),
+        `await Bun.write(${JSON.stringify(ambientMarker)}, "hostile");\n`
+      );
+    }
     fs.writeFileSync(replacementPath, "regular-file-replacement\n", "utf8");
     fs.writeFileSync(
       scriptPath,
@@ -8394,6 +11131,9 @@ const DETACHED_RUN_LOG_FILE_ENV = "SMITHERS_DETACHED_RUN_LOG_FILE";
 const DETACHED_ADMISSION_NONCE_ENV = "SMITHERS_DETACHED_ADMISSION_NONCE";
 const sleepArray = new Int32Array(new SharedArrayBuffer(4));
 const sleep = (milliseconds) => Atomics.wait(sleepArray, 0, 0, milliseconds);
+function waitForParentHandoff(parentPid, resultPath) { const deadline = Date.now() + 10_000; for (;;) { let alive = true; try { process.kill(parentPid, 0); } catch { alive = false; } if (!alive && existsSync(process.env.UFZ_GO_PATH)) return; if (Date.now() >= deadline) { writeFileSync(resultPath, JSON.stringify({ error: "parent-handoff-timeout" })); process.exit(81); } sleep(10); } }
+
+async function moduleProbe() { const relativeModule = await import("./sealed-relative.mjs"); let ambientError; try { await import(${JSON.stringify(ambientName)}); } catch (error) { ambientError = String(error); } return { relative_module: relativeModule.default, ambient_error: ambientError }; }
 
 function evidence(workflowArgument) {
   return {
@@ -8401,6 +11141,7 @@ function evidence(workflowArgument) {
     parent_pid: process.ppid,
     process_descriptor: Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR),
     process_root: process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT,
+    source_root: process.env.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT,
     persisted_root: process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT,
     inherited_descriptor_present: Object.prototype.hasOwnProperty.call(
       process.env,
@@ -8452,15 +11193,14 @@ ${supervisorPatch.patched}
 }
 
 function launchResume(phase, withLog) {
-  const stableRoot = process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT;
-  const args = [resolve(stableRoot, "descriptor-generations.mjs"), phase, process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH];
+  const args = [fileURLToPath(new URL("./descriptor-generations.mjs", import.meta.url)), phase, process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH];
   const cwd = process.cwd();
   const options = {};
   const logFd = withLog ? openSync(process.env.UFZ_LOG_PATH, "a") : null;
   try {
 ${resumeTransferPatch.patched}
     child.unref();
-    return { pid: child.pid, args };
+    return { pid: child.pid, args: args.map(rewriteSnapshotArgument) };
   } finally {
     if (logFd !== null) closeSync(logFd);
   }
@@ -8520,15 +11260,17 @@ if (phase === "launcher") {
 }
 
 if (phase === "supervisor") {
+  waitForParentHandoff(Number(process.env.UFZ_PARENT_PID), process.env.UFZ_SUPERVISOR_RECORD_PATH);
+  const modules = await moduleProbe();
   process.env.UFZ_PARENT_PID = String(process.pid);
   const ownEvidence = evidence(undefined);
   const logged = launchResume("resume-logged", true);
   const ignored = launchResume("resume-ignored", false);
-  writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
   const reusedDescriptor = closeAndReuseProcessDescriptor();
+  writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
   writeFileSync(
     process.env.UFZ_SUPERVISOR_RECORD_PATH,
-    JSON.stringify({ ...ownEvidence, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor })
+    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor })
   );
   process.exit(0);
 }
@@ -8539,24 +11281,15 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
     : phase === "resume-logged"
       ? process.env.UFZ_LOGGED_RESUME_RESULT_PATH
       : process.env.UFZ_IGNORED_RESUME_RESULT_PATH;
-  const parentPid = Number(process.env.UFZ_PARENT_PID);
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    let parentAlive = true;
-    try { process.kill(parentPid, 0); } catch { parentAlive = false; }
-    if (!parentAlive && existsSync(process.env.UFZ_GO_PATH)) break;
-    if (Date.now() >= deadline) {
-      writeFileSync(resultPath, JSON.stringify({ error: "parent-handoff-timeout" }));
-      process.exit(81);
-    }
-    sleep(10);
-  }
+  waitForParentHandoff(Number(process.env.UFZ_PARENT_PID), resultPath);
   try {
+    const modules = await moduleProbe();
     writeFileSync(
       resultPath,
       JSON.stringify({
         phase,
         ...evidence(workflowArgument),
+        ...modules,
         config: readFileSync(process.env.ULTRAFUZZ_CONFIG_PATH, "utf8"),
         workflow: readFileSync(workflowArgument, "utf8")
       })
@@ -8597,7 +11330,8 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
         "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR",
         "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
         "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR",
-        "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT"
+        "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
+        "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT"
       ]) {
         delete fixtureEnvironment[name];
       }
@@ -8639,14 +11373,24 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
         }
       });
       assert.equal(anchoredProbe.status, 0, anchoredProbe.stderr);
-      assertProcessOwnedSnapshotEvidence(JSON.parse(anchoredProbe.stdout) as TransferEvidence);
+      assertInheritedSnapshotEvidence(JSON.parse(anchoredProbe.stdout) as TransferEvidence);
 
-      const launcher = spawnSync(process.execPath, [scriptPath, "launcher", controllerWorkflowPath], {
-        cwd: root,
-        encoding: "utf8",
-        timeout: 10_000,
-        env: fixtureEnvironment
-      });
+      const launcher = spawnSync(
+        "bun",
+        [
+          `--config=${path.join(controllerRoot, "controls", "bunfig.toml")}`,
+          "--no-env-file",
+          "--no-install",
+          "--no-addons",
+          "--preserve-symlinks",
+          "--preserve-symlinks-main",
+          `--preload=${path.join(controllerRoot, "controls", "bun-module-confinement.js")}`,
+          path.join(controllerRoot, path.basename(scriptPath)),
+          "launcher",
+          controllerWorkflowPath
+        ],
+        { cwd: root, encoding: "utf8", timeout: 10_000, env: fixtureEnvironment }
+      );
       assert.equal(launcher.status, 0, launcher.stderr);
       const launcherEvidence = readTransferEvidence(launcherRecordPath);
       assertProcessOwnedSnapshotEvidence(launcherEvidence);
@@ -8678,26 +11422,33 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       }
 
       const supervisorEvidence = readTransferEvidence(supervisorRecordPath);
-      assertProcessOwnedSnapshotEvidence(supervisorEvidence);
+      assertInheritedSnapshotEvidence(supervisorEvidence);
       assert.equal(supervisorEvidence.reused_descriptor, supervisorEvidence.process_descriptor);
+      assert.equal(supervisorEvidence.relative_module, "sealed-relative");
+      assert.match(String(supervisorEvidence.ambient_error), /outside its sealed snapshot/u);
       addEvidencePids(pids, supervisorEvidence, "logged_pid", "ignored_pid");
 
       const resumeLaunch = JSON.parse(fs.readFileSync(resumeLaunchPath, "utf8")) as {
         logged?: string[];
         ignored?: string[];
       };
-      assert.deepEqual(resumeLaunch.logged, [scriptPath, "resume-logged", workflowPath]);
-      assert.deepEqual(resumeLaunch.ignored, [scriptPath, "resume-ignored", workflowPath]);
+      const resumeEntrypoint = "/proc/self/fd/3/descriptor-generations.mjs";
+      const resumeWorkflow = "/proc/self/fd/3/.smithers/workflows/fd-transfer.tsx";
+      assert.deepEqual(resumeLaunch.logged, [resumeEntrypoint, "resume-logged", resumeWorkflow]);
+      assert.deepEqual(resumeLaunch.ignored, [resumeEntrypoint, "resume-ignored", resumeWorkflow]);
 
       for (const resultPath of [engineResultPath, loggedResumeResultPath, ignoredResumeResultPath]) {
         const result = readTransferEvidence(resultPath);
         assert.equal(result.error, undefined);
-        assertProcessOwnedSnapshotEvidence(result);
+        assertInheritedSnapshotEvidence(result);
         assert.equal(result.config, "sealed-config\n");
         assert.equal(result.workflow, "sealed-workflow\n");
+        assert.equal(result.relative_module, "sealed-relative");
+        assert.match(String(result.ambient_error), /outside its sealed snapshot/u);
         assert.match(result.workflow_path ?? "", new RegExp(`^/proc/${result.pid}/fd/\\d+/.smithers/workflows/`, "u"));
         if (result.pid !== undefined) pids.add(result.pid);
       }
+      assert.equal(fs.existsSync(ambientMarker), false);
     } finally {
       if (replacementDescriptor !== undefined) fs.closeSync(replacementDescriptor);
       else {
@@ -8716,6 +11467,7 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       }
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(coordinationRoot, { recursive: true, force: true });
+      fs.rmSync(ambientRoot, { recursive: true, force: true });
     }
   }
 );
@@ -8725,6 +11477,7 @@ type TransferEvidence = {
   pid?: number;
   process_descriptor?: number;
   process_root?: string;
+  source_root?: string;
   inherited_descriptor_present?: boolean;
   config_path?: string;
   workflow_path?: string;
@@ -8744,6 +11497,7 @@ function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
   assert.equal(typeof evidence.pid, "number");
   assert.equal(typeof evidence.process_descriptor, "number");
   assert.equal(evidence.process_root, `/proc/${evidence.pid}/fd/${evidence.process_descriptor}`);
+  assert.equal(typeof evidence.source_root, "string");
   assert.equal(evidence.inherited_descriptor_present, false);
   assert.match(
     evidence.config_path ?? "",
@@ -8751,6 +11505,12 @@ function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
   );
   assert.equal(evidence.monitor_suppressed, "1");
   assert.equal(evidence.autopsy_suppressed, "0");
+}
+
+function assertInheritedSnapshotEvidence(evidence: TransferEvidence): void {
+  assertProcessOwnedSnapshotEvidence(evidence);
+  assert.equal(evidence.process_descriptor, 3);
+  assert.equal(evidence.source_root, "/proc/self/fd/3");
 }
 
 function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys: string[]): void {
@@ -8868,22 +11628,23 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
   }
 });
 
-test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
+test("startRun rejects an explicit project-local Smithers bin with a leading dot target", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
   const logPath = path.join(project, "published-smithers.log");
-  writeFakeInstalledSmithers(project, { binTarget: `./${SMITHERS_BIN_PATH}` });
+  const installed = writeFakeInstalledSmithers(project, { binTarget: `./${SMITHERS_BIN_PATH}` });
 
   const run = await startRun({
     projectRoot: project,
     runId: "published-smithers-bin-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+    env: { PATH: "", SMITHERS_BIN: installed.shim, SMITHERS_FAKE_LOG: logPath }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-published-smithers-bin-run\.tsx/);
+  assert.equal(run.ok, false);
+  assert.match(JSON.stringify(run.diagnostics), /workflow runner cannot .*inside the target project/u);
+  assert.equal(fs.existsSync(logPath), false);
 });
 
 test("package-manager-owned Smithers manifests use bounded strict parsing and narrow projections", () => {
@@ -8949,7 +11710,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   }
 });
 
-test("startRun accepts a package-manager package link and regular command shim inside node_modules", async () => {
+test("startRun rejects an explicitly selected project-local package-manager entrypoint", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -8960,26 +11721,39 @@ test("startRun accepts a package-manager package link and regular command shim i
   const run = await startRun({
     projectRoot: project,
     runId: "pnpm-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+    env: { PATH: "", SMITHERS_BIN: paths.target, SMITHERS_FAKE_LOG: logPath }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(run.ok, false);
   assert.equal(fs.realpathSync(paths.packageRoot).includes(`${path.sep}.pnpm${path.sep}`), true);
-  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-pnpm-smithers-run\.tsx/);
+  assert.match(JSON.stringify(run.diagnostics), /workflow runner cannot .*inside the target project/u);
+  assert.equal(fs.existsSync(logPath), false);
 });
 
-test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
+test("startRun installs, seals, and revalidates operator-owned Smithers", async (t) => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const installer = writeFakeNpmInstaller(project);
+  const injectedName = `ufz-parent-${path.basename(project)}`,
+    injectedRoot = path.join(os.tmpdir(), "node_modules", injectedName),
+    injectedMarker = path.join(injectedRoot, "executed");
+  fs.mkdirSync(injectedRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(injectedRoot, "package.json"),
+    `${JSON.stringify({ name: injectedName, version: "1.0.0", main: "index.js" })}\n`
+  );
+  fs.writeFileSync(
+    path.join(injectedRoot, "index.js"),
+    `require("node:fs").writeFileSync(${JSON.stringify(injectedMarker)}, "executed");\n`
+  );
+  t.after(() => fs.rmSync(injectedRoot, { recursive: true, force: true }));
+  const installer = writeFakeNpmInstaller(project, { count: 0, stderr: [], imported: injectedName });
 
   const run = await startRun({
     projectRoot: project,
     runId: "bootstrap-smithers-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -8987,9 +11761,48 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--ignore-scripts/);
-  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--package-lock=false/);
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--package-lock=true/);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
+  assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").includes(project), false);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+  assert.equal(fs.existsSync(injectedMarker), false);
+  {
+    const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
+      missing = await startRun({
+        projectRoot: project,
+        runId: "controller-parent-required",
+        env: { SMITHERS_FAKE_LOG: requiredInstaller.smithersLogPath }
+      });
+    assert.equal(missing.ok, false);
+    assert.match(JSON.stringify(missing.diagnostics), /dependency is unavailable/u);
+  }
+  {
+    const packageRoot = fs.readFileSync(installer.npmLogPath, "utf8").match(/--prefix (\S+)/u)?.[1];
+    assert.ok(packageRoot);
+    fs.appendFileSync(path.join(packageRoot, "node_modules", "smthrs", "index.js"), "// hostile\n");
+    installer.activate();
+    const tampered = await startRun({
+      projectRoot: project,
+      runId: "controller-cache-tamper",
+      env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
+    });
+    assert.equal(tampered.ok, false);
+    assert.match(JSON.stringify(tampered.diagnostics), /operator controller changed after installation/u);
+  }
+});
+
+test("operator controller locks require a canonical 64-byte SHA-512 integrity", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const installer = writeFakeNpmInstaller(project, { count: 0, stderr: [], integrity: "sha512-A" });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "short-controller-integrity",
+    env: { SMITHERS_FAKE_LOG: installer.smithersLogPath }
+  });
+  assert.equal(run.ok, false);
+  assert.match(JSON.stringify(run.diagnostics), /not registry-integrity bound/u);
 });
 
 // R54 died 90 seconds in, before its first task node: npm resolved a transitive
@@ -9012,7 +11825,6 @@ test("startRun retries a workflow runner install the registry fails transiently"
     projectRoot: project,
     runId: "transient-install-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -9040,7 +11852,6 @@ test("startRun does not retry a workflow runner install the registry rejects per
     projectRoot: project,
     runId: "permanent-install-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -9095,7 +11906,6 @@ test("startRun resolves the generated workspace as of a fixed instant, not the l
     projectRoot: project,
     runId: "pinned-resolution-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -9142,7 +11952,7 @@ test("the resolution cutoff cannot fall behind a pinned dependency", () => {
   assert.equal(Date.parse(SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF) < Date.now(), true);
 });
 
-test("startRun reinstalls a stale target-local Smithers package before launch", async () => {
+test("startRun ignores a stale target-local Smithers package", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -9153,7 +11963,6 @@ test("startRun reinstalls a stale target-local Smithers package before launch", 
     projectRoot: project,
     runId: "stale-smithers-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
@@ -9163,10 +11972,10 @@ test("startRun reinstalls a stale target-local Smithers package before launch", 
   const installed = JSON.parse(fs.readFileSync(fakeInstalledSmithersPaths(project).packageJson, "utf8")) as {
     version: string;
   };
-  assert.equal(installed.version, SMITHERS_VERSION);
+  assert.equal(installed.version, "0.26.0");
 });
 
-test("startRun repairs a target-local Smithers shim that points outside the pinned package", async () => {
+test("startRun ignores a target-local Smithers shim that points outside the pinned package", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -9181,14 +11990,13 @@ test("startRun repairs a target-local Smithers shim that points outside the pinn
     projectRoot: project,
     runId: "repaired-smithers-shim-run",
     env: {
-      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
-  assert.equal(fs.realpathSync(paths.shim), fs.realpathSync(paths.target));
+  assert.equal(fs.realpathSync(paths.shim), fs.realpathSync(wrongTarget));
 });
 
 test("generated workflow dependencies require exact runner pins while allowing typed custom packages", () => {
@@ -9266,7 +12074,7 @@ test("startRun creates the workflow log directory before submission", async () =
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-log-dir-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -9307,7 +12115,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-failed-submit-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -11371,16 +14179,21 @@ test("syncRun honors cancellation and an overall deadline before terminal synchr
 });
 
 test("syncRun aborts or times out a blocked inspection child without durable mutation", async () => {
+  // Leave enough headroom for a contended hosted runner while still proving
+  // that the child exits before the five-second forced-kill grace period.
+  const responsiveTerminationBudgetMs = 4_000;
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const binDir = path.join(project, "blocked-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-blocked-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
+  const inspectionStartedMarker = path.join(project, "inspection-started");
   fs.writeFileSync(
     smithers,
     `#!${process.execPath}
 if (process.argv[2] === "inspect") {
+  require("node:fs").writeFileSync(${JSON.stringify(inspectionStartedMarker)}, String(Date.now()));
   setInterval(() => {}, 1000);
 } else {
   process.stdout.write('{"ok":true}\\n');
@@ -11399,27 +14212,56 @@ if (process.argv[2] === "inspect") {
   const before = fs.readFileSync(statePath, "utf8");
 
   const controller = new AbortController();
-  const abortTimer = setTimeout(() => controller.abort(), 50);
-  const abortStartedAt = Date.now();
-  const cancelled = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { signal: controller.signal }
-  );
-  clearTimeout(abortTimer);
+  let abortIssuedAt: number | undefined;
+  const abortPoll = setInterval(() => {
+    if (abortIssuedAt !== undefined || !fs.existsSync(inspectionStartedMarker)) return;
+    clearInterval(abortPoll);
+    abortIssuedAt = Date.now();
+    controller.abort();
+  }, 10);
+  let abortFallbackFired = false;
+  const abortFallback = setTimeout(() => {
+    abortFallbackFired = true;
+    controller.abort();
+  }, 60_000);
+  const cancelled = await (async () => {
+    try {
+      return await syncRun({ projectRoot: project, runId: "sync-blocked-child", env }, { signal: controller.signal });
+    } finally {
+      clearInterval(abortPoll);
+      clearTimeout(abortFallback);
+    }
+  })();
   assert.equal(cancelled.ok, false);
   assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
-  assert.ok(Date.now() - abortStartedAt < 2_000);
+  assert.equal(abortFallbackFired, false);
+  assert.notEqual(abortIssuedAt, undefined);
+  assert.ok(Date.now() - abortIssuedAt! < responsiveTerminationBudgetMs);
   assert.equal(fs.readFileSync(statePath, "utf8"), before);
 
-  const deadlineStartedAt = Date.now();
+  fs.rmSync(inspectionStartedMarker, { force: true });
+  const deadlineRun = await startRun({ projectRoot: project, runId: "sync-blocked-deadline", env });
+  assert.equal(deadlineRun.ok, true, JSON.stringify(deadlineRun.diagnostics));
+  const deadlineStatePath = path.join(deadlineRun.value!.run_root, "state.json");
+  const deadlineStateBefore = fs.readFileSync(deadlineStatePath, "utf8");
+  const deadlineClock = 1_000;
+  const inspectionTimeoutMs = 5_000;
   const expired = await syncRun(
-    { projectRoot: project, runId: "sync-blocked-child", env },
-    { deadlineMs: deadlineStartedAt + 100 }
+    { projectRoot: project, runId: "sync-blocked-deadline", env },
+    {
+      deadlineMs: deadlineClock + inspectionTimeoutMs,
+      now: () => (fs.existsSync(inspectionStartedMarker) ? deadlineClock + inspectionTimeoutMs : deadlineClock)
+    }
   );
   assert.equal(expired.ok, false);
-  assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
-  assert.ok(Date.now() - deadlineStartedAt < 2_000);
-  assert.equal(fs.readFileSync(statePath, "utf8"), before);
+  assert.ok(
+    expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"),
+    JSON.stringify(expired.diagnostics)
+  );
+  assert.equal(fs.existsSync(inspectionStartedMarker), true);
+  const inspectionStartedAt = Number(fs.readFileSync(inspectionStartedMarker, "utf8"));
+  assert.ok(Date.now() - inspectionStartedAt < inspectionTimeoutMs * 2);
+  assert.equal(fs.readFileSync(deadlineStatePath, "utf8"), deadlineStateBefore);
 });
 
 test("syncRun requires the deterministic verifier task to succeed", async () => {
@@ -11778,6 +14620,67 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
       selection: "observed"
     }))
   );
+});
+
+test("syncRun keeps redacted failure state and attempt evidence stable across credential rotation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-rotated-credential";
+  const workflowRunId = "ultrafuzz-sync-rotated-credential";
+  const oldCredential = "old provider credential that must stay concealed";
+  const rotatedCredential = "new provider credential after rotation";
+  const failureEvents = (message: string): string =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message } }
+    ]);
+  const lifecycleEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: failureEvents(`provider echoed ${oldCredential}`)
+  });
+  const initialEnv = { ...lifecycleEnv, OPENAI_API_KEY: oldCredential };
+  const run = await startRun({ projectRoot: project, runId, env: initialEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const createdAt = (JSON.parse(fs.readFileSync(statePath, "utf8")) as { created_at: string }).created_at;
+  const synchronize = (env: NodeJS.ProcessEnv) =>
+    syncRun({ projectRoot: project, runId, env }, { now: () => Date.parse(createdAt) + 1_000 });
+
+  const first = await synchronize(initialEnv);
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.ok(!first.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const stateBeforeRotation = fs.readFileSync(statePath);
+  const ledgerBeforeRotation = fs.readFileSync(ledgerPath);
+  for (const evidence of [stateBeforeRotation, ledgerBeforeRotation]) {
+    assert.match(evidence.toString("utf8"), /provider echoed <redacted>/u);
+    assert.doesNotMatch(evidence.toString("utf8"), new RegExp(oldCredential, "u"));
+  }
+
+  const rotatedEnv = { ...initialEnv, OPENAI_API_KEY: rotatedCredential };
+  const replayed = await synchronize(rotatedEnv);
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const snapshots = [
+    [statePath, stateBeforeRotation],
+    [ledgerPath, ledgerBeforeRotation]
+  ] as const;
+  for (const [file, before] of snapshots) {
+    assert.deepEqual(fs.readFileSync(file), before);
+    assert.doesNotMatch(fs.readFileSync(file, "utf8"), new RegExp(`${oldCredential}|${rotatedCredential}`, "u"));
+  }
+
+  fs.writeFileSync(lifecycleEnv.SMITHERS_FAKE_EVENTS!, failureEvents(`different provider failure ${oldCredential}`));
+  const changed = await synchronize(rotatedEnv);
+  assert.equal(changed.ok, true, JSON.stringify(changed.diagnostics));
+  assert.ok(changed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  for (const [file, before] of snapshots) assert.deepEqual(fs.readFileSync(file), before);
 });
 
 test("syncRun records failed primaries and the actual fallback producer", async () => {
@@ -12358,18 +15261,23 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const env = fakeSmithersEnv(project);
   const credentialLog = path.join(project, "lifecycle-credential-env.log");
   const retryCredentialLog = path.join(project, "lifecycle-retry-credential-env.log");
+  const sensitiveEnvironmentLog = path.join(project, "lifecycle-sensitive-environment.log");
   const hostileCredential = "must-not-cross-sealed-lifecycle-boundary";
+  env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = `${env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? ""},OPENAI_SESSION_TOKEN,SMITHERS_FAKE_SENSITIVE_ENV_LOG`;
+  env.OPENAI_SESSION_TOKEN = "custom-sensitive-route-value";
   env.AWS_SECRET_ACCESS_KEY = hostileCredential;
   env.OPENAI_API_KEY = "sealed-primary-key";
   env.DEEPSEEK_API_KEY = "sealed-fallback-key";
   env.SMITHERS_FAKE_ENV_LOG = credentialLog;
   env.SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG = retryCredentialLog;
+  env.SMITHERS_FAKE_SENSITIVE_ENV_LOG = sensitiveEnvironmentLog;
   const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|\n");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   fs.writeFileSync(credentialLog, "", "utf8");
   fs.writeFileSync(retryCredentialLog, "", "utf8");
+  fs.writeFileSync(sensitiveEnvironmentLog, "", "utf8");
   const sealedPlan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
     rendered_prompts: Array<{
       rendered_prompt_path: string;
@@ -12503,6 +15411,22 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     assert.equal(sealedTasks.smithers_run_id, "ultrafuzz-lifecycle-run");
   }
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const sensitiveEnvironmentEntries = fs
+    .readFileSync(sensitiveEnvironmentLog, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => line.split("|"));
+  for (const command of ["up", "replay", "fork"]) {
+    assert.ok(
+      sensitiveEnvironmentEntries.some(
+        ([observedCommand, sensitiveNames, customValue]) =>
+          observedCommand === command &&
+          sensitiveNames?.split(",").includes("OPENAI_SESSION_TOKEN") &&
+          customValue === "custom-sensitive-route-value"
+      ),
+      `${command} must receive the custom sensitive allowlist metadata and value`
+    );
+  }
   assert.match(
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
@@ -12533,6 +15457,97 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   }
 });
 
+test(
+  "marker-less sealed legacy controllers permit empty sensitive sets and reject sensitive lifecycle actions",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    const env = fakeSmithersEnv(project);
+    const capabilityDeclaration =
+      'export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =\n  "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;\n\n';
+    const environmentTemplateSuffix = path.join("templates", "smithers", "agents", "environment.tsx");
+    const originalReadFileSync = fs.readFileSync;
+    const readFileSyncDescriptor = Object.getOwnPropertyDescriptor(fs, "readFileSync")!;
+    let markerlessTemplateReads = 0;
+    Object.defineProperty(fs, "readFileSync", {
+      ...readFileSyncDescriptor,
+      value: (...args: unknown[]) => {
+        const contents = Reflect.apply(originalReadFileSync, fs, args) as string | Buffer;
+        if (!String(args[0]).endsWith(environmentTemplateSuffix)) return contents;
+        const source = typeof contents === "string" ? contents : contents.toString("utf8");
+        assert.ok(source.includes(capabilityDeclaration));
+        markerlessTemplateReads += 1;
+        const markerless = source.replace(capabilityDeclaration, "");
+        return typeof contents === "string" ? markerless : Buffer.from(markerless, "utf8");
+      }
+    });
+    const run = await (async () => {
+      try {
+        assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+        writeSmallTopology(project);
+        const started = await startRun({ projectRoot: project, runId: "markerless-legacy-lifecycle", env });
+        return started;
+      } finally {
+        Object.defineProperty(fs, "readFileSync", readFileSyncDescriptor);
+      }
+    })();
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(markerlessTemplateReads >= 2);
+    const evidence = await readLinkedWorkflowEvidence(project, run.value!.run_id);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (evidence.ok) {
+      const sealedEnvironment = evidence.verifiedControl.executionFiles.find(
+        (file) => file.snapshotPath === ".smithers/agents/environment.ts"
+      );
+      assert.ok(sealedEnvironment);
+      assert.doesNotMatch(
+        sealedEnvironment.contents.toString("utf8"),
+        /ultrafuzz\.provider-scoped-sensitive-environment\.v1/u
+      );
+    }
+
+    const compatibleEnv = {
+      ...env,
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_LOG"
+    };
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+    const compatibleResume = await resumeRun({
+      projectRoot: project,
+      runId: run.value!.run_id,
+      force: true,
+      env: compatibleEnv
+    });
+    assert.equal(compatibleResume.ok, true, JSON.stringify(compatibleResume.diagnostics));
+    assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
+
+    const sensitiveEnv = {
+      ...env,
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "SMITHERS_FAKE_LOG,OPENAI_SESSION_TOKEN",
+      OPENAI_SESSION_TOKEN: "custom-sensitive-route-value"
+    };
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+    const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+    const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+    const actions = [
+      ["resume", () => resumeRun({ projectRoot: project, runId: run.value!.run_id, force: true, env: sensitiveEnv })],
+      ["replay", () => replayRun({ projectRoot: project, runId: run.value!.run_id, env: sensitiveEnv })],
+      ["fork", () => forkRun({ projectRoot: project, runId: run.value!.run_id, forkFrame: 44, env: sensitiveEnv })]
+    ] as const;
+    for (const [action, submit] of actions) {
+      const result = await submit();
+      assert.equal(result.ok, false, `${action} unexpectedly accepted marker-less sensitive environment evidence`);
+      assert.equal(result.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+      assert.match(
+        result.diagnostics[0]?.message ?? "",
+        /sealed controller predates provider-scoped sensitive allowlisted environment handling.*start a new run/u
+      );
+      assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+      assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
+    }
+  }
+);
+
 test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -12549,7 +15564,7 @@ test("lifecycle relaunch rejects a required backend that disappeared before new 
     "utf8"
   );
   const env = fakeSmithersEnv(project);
-  const recon = path.join(project, "fake-bin", "recon-required-test");
+  const recon = path.join(path.dirname(env.SMITHERS_BIN!), "recon-required-test");
   fs.writeFileSync(recon, "#!/bin/sh\necho recon test\n", "utf8");
   fs.chmodSync(recon, 0o755);
   const run = await startRun({ projectRoot: project, runId: "lifecycle-required-command", env });
@@ -13963,32 +16978,53 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
 [execution.providers.modal]
 app = "ultrafuzz-test"
 image = "ultrafuzz-test"
-credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `,
     "utf8"
   );
 
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-recovery-bin`);
   const smithers = path.join(binDir, "smithers");
   const logPath = path.join(project, "recovery-smithers.log");
   const cloudEnvironmentLog = path.join(project, "recovery-cloud-environment.log");
   const markerPath = path.join(project, "initial-submission-attempted");
-  const pinnedRunner = writeFakeInstalledSmithers(project);
+  const installer = writeFakeNpmInstaller(project);
+  const npmFixture = path.join(installer.binDir, "npm");
+  fs.chmodSync(npmFixture, 0o700);
+  const installedRunnerSource = [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+    'if [ "$1" = "up" ]; then',
+    `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > ${shellQuote(cloudEnvironmentLog)}`,
+    "fi",
+    'if [ "$1" = "inspect" ]; then',
+    `  printf '%s\\n' '{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}'`,
+    "  exit 4",
+    "fi",
+    `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+    `  : > ${shellQuote(markerPath)}`,
+    "  exit 42",
+    "fi",
+    `printf '%s\\n' '{"ok":true}'`,
+    ""
+  ].join("\n");
+  fs.appendFileSync(npmFixture, `\nfs.writeFileSync(target, ${JSON.stringify(installedRunnerSource)});\n`);
+  fs.chmodSync(npmFixture, 0o500);
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
-      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
+      'if [ "$1" = "up" ]; then',
+      `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> ${shellQuote(cloudEnvironmentLog)}`,
       "fi",
       'if [ "$1" = "inspect" ]; then',
       '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"No Smithers run history found at /workspace/target/smithers.db. Run \'\\\'\'smithers up <workflow>\'\\\'\' to start a run first."}}\'',
       "  exit 4",
       "fi",
-      'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
-      '  : > "$SMITHERS_FAKE_MARKER"',
+      `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
+      `  : > ${shellQuote(markerPath)}`,
       "  exit 42",
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",
@@ -13997,16 +17033,11 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  fs.copyFileSync(smithers, pinnedRunner.target);
-  fs.chmodSync(pinnedRunner.target, 0o755);
   const env = {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: logPath,
-    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
-    UFZ_PROVIDER_ONE: "provider-one",
-    UFZ_PROVIDER_TWO: "provider-two",
-    SMITHERS_FAKE_MARKER: markerPath
+    MODAL_TOKEN_ID: "provider-one",
+    MODAL_TOKEN_SECRET: "provider-two"
   };
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });

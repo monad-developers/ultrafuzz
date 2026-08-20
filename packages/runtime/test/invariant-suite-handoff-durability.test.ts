@@ -19,6 +19,8 @@ import {
   INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
+  INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+  INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
   parseRuntimeDocumentBytes,
   serializeRuntimeDocument
 } from "../src/index.js";
@@ -94,6 +96,11 @@ type WorkflowHelpers = {
   verifyInvariantSuiteBaseline?: (task: TaskSpecLike) => void;
   requireInvariantSuiteDependencyHandoff?: (task: TaskSpecLike) => void;
   requireInvariantSuiteWorkspaceSnapshot?: (task: TaskSpecLike) => Map<string, Buffer>;
+  loadInvariantSuiteWorkspaceSnapshot?: (
+    task: TaskSpecLike,
+    options?: { createRoot?: boolean }
+  ) => Map<string, Buffer> | undefined;
+  readAndValidateInvariantSuiteBaseline?: (root: string, baselinePath: string, attemptId: string) => { bytes: Buffer };
   assertSafeInvariantSuitePath?: (value: string) => string;
   assertSafeInvariantSuiteTestPath?: (value: string) => string;
   assertInvariantSuiteSourceBudget?: (fileCount: number, totalBytes: number) => void;
@@ -246,7 +253,6 @@ function loadWorkflowHelpers(
     rmSync: fs.rmSync,
     writeFileDurable,
     isStrictlyInsideDirectory,
-    isPlainRecord: (value: unknown): boolean => typeof value === "object" && value !== null && !Array.isArray(value),
     isMissingPathError: (error: unknown): boolean =>
       error instanceof Error && "code" in error && error.code === "ENOENT",
     pathEntryExists: (candidate: string): boolean => {
@@ -264,6 +270,8 @@ function loadWorkflowHelpers(
     INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
     INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
     INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
+    INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+    INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
     invariantSuiteNodeIds: INVARIANT_SUITE_NODE_IDS,
     invariantSuiteTombstones: state.tombstones,
     invariantSuiteDependencySnapshots: state.dependencySnapshots,
@@ -280,9 +288,15 @@ function loadWorkflowHelpers(
     INVARIANT_SUITE_HANDOFF_DIR: "invariant-suite-handoffs",
     INVARIANT_SUITE_HANDOFF_FILE: "handoff.json",
     INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION,
+    INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR: "invariant-suite-workspace-snapshots",
+    INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE: "snapshot.json",
+    INVARIANT_SUITE_WORKSPACE_FILES_DIR: "files",
     MAX_INVARIANT_SUITE_FILES: 512,
     MAX_INVARIANT_SUITE_SOURCE_BYTES: 16 * 1024 * 1024,
     MAX_INVARIANT_SUITE_TOTAL_BYTES: 64 * 1024 * 1024,
+    MAX_INVARIANT_SUITE_WORKSPACE_FILES: 4_096,
+    MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES: 16 * 1024 * 1024,
+    MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES: 128 * 1024 * 1024,
     MAX_INVARIANT_SUITE_SOURCE_DEPTH: 32,
     MAX_INVARIANT_SUITE_PATH_LENGTH: 4_096,
     MAX_INVARIANT_SUITE_SEGMENT_LENGTH: 255,
@@ -414,6 +428,7 @@ function createHarnessState(taskSpecs: TaskSpecLike[]): HarnessState {
 }
 
 const HANDOFF_RECORD_HELPERS = [
+  "isPlainRecord",
   "assertInvariantSuiteTombstoneBudget",
   "parseInvariantSuiteManifestRecord",
   "readInvariantSuiteManifestRecord",
@@ -477,12 +492,21 @@ const RETRY_HELPERS = [
 ] as const;
 
 const DISCOVERY_HELPERS = [
+  "isPlainRecord",
   "gitTestTreePaths",
   "recordInvariantSuiteTombstone",
   "invariantSuiteProtectedBaselinePath",
   "readAndValidateInvariantSuiteBaseline",
   "captureInvariantSuiteBaseline",
   "changedTestTreePaths"
+] as const;
+
+const WORKSPACE_SNAPSHOT_HELPERS = [
+  "isPlainRecord",
+  "invariantSuiteWorkspaceSnapshotRoot",
+  "invariantSuiteAttemptStateRoot",
+  "readStableWorkspaceSnapshotFile",
+  "loadInvariantSuiteWorkspaceSnapshot"
 ] as const;
 
 function writeSuiteSource(artifactDir: string, relativePath: string, contents: string): void {
@@ -571,6 +595,90 @@ function createInvariantChain(): {
   );
   return { runRoot, setup, handlers, coverage, state: createHarnessState([setup, handlers, coverage]) };
 }
+
+test("#667 generated invariant recovery validates records without an injected global helper", () => {
+  const { runRoot, setup, handlers, state } = createInvariantChain();
+  try {
+    assert.equal(Object.hasOwn(globalThis, "isPlainRecord"), false);
+
+    const baselineSource = Buffer.from("contract Properties {}\n", "utf8");
+    const baselinePath = path.join(handlers.artifactDir, "invariant-suite-baseline.json");
+    fs.writeFileSync(
+      baselinePath,
+      serializeRuntimeDocument(
+        INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
+        {
+          schema_version: INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
+          files: [
+            {
+              path: "test/recon/Properties.sol",
+              size: baselineSource.length,
+              sha256: createHash("sha256").update(baselineSource).digest("hex")
+            }
+          ]
+        },
+        "invariant suite baseline",
+        true
+      )
+    );
+    const baselineHelpers = loadWorkflowHelpers(
+      [...PROVENANCE_HELPERS, "isPlainRecord", "readAndValidateInvariantSuiteBaseline"],
+      state
+    );
+    assert.ok(baselineHelpers.readAndValidateInvariantSuiteBaseline);
+    assert.doesNotThrow(() =>
+      baselineHelpers.readAndValidateInvariantSuiteBaseline?.(
+        fs.realpathSync(handlers.artifactDir),
+        baselinePath,
+        handlers.attemptId
+      )
+    );
+
+    const snapshotRoot = path.join(runRoot, "invariant-suite-workspace-snapshots", handlers.attemptId);
+    const snapshotFilesRoot = path.join(snapshotRoot, "files");
+    const snapshotPath = path.join(snapshotFilesRoot, "src", "Harness.sol");
+    const snapshotSource = Buffer.from("contract Harness {}\n", "utf8");
+    fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
+    fs.writeFileSync(snapshotPath, snapshotSource);
+    fs.writeFileSync(
+      path.join(snapshotRoot, "snapshot.json"),
+      serializeRuntimeDocument(
+        INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
+        {
+          schema_version: INVARIANT_WORKSPACE_SNAPSHOT_SCHEMA_VERSION,
+          files: [
+            {
+              path: "src/Harness.sol",
+              size: snapshotSource.length,
+              sha256: createHash("sha256").update(snapshotSource).digest("hex")
+            }
+          ]
+        },
+        "invariant workspace snapshot",
+        true
+      )
+    );
+    const snapshotHelpers = loadWorkflowHelpers([...WORKSPACE_SNAPSHOT_HELPERS], state);
+    assert.ok(snapshotHelpers.loadInvariantSuiteWorkspaceSnapshot);
+    const loadedSnapshot = snapshotHelpers.loadInvariantSuiteWorkspaceSnapshot(handlers, { createRoot: false });
+    assert.equal(loadedSnapshot?.get("src/Harness.sol")?.equals(snapshotSource), true);
+
+    writeSuiteSource(setup.artifactDir, "test/recon/Properties.sol", baselineSource.toString("utf8"));
+    writeSuiteManifest(setup.artifactDir, setup.metadata.node.logicalNodeId, setup.attemptId, [
+      "test/recon/Properties.sol"
+    ]);
+    const handoffHelpers = loadWorkflowHelpers([...MATERIALIZATION_HELPERS], state);
+    assert.ok(handoffHelpers.materializeInvariantSuiteFromDependencies);
+    handoffHelpers.materializeInvariantSuiteFromDependencies(handlers, fs.realpathSync(handlers.workspacePath));
+    state.dependencySnapshots.clear();
+    state.tombstones.clear();
+    assert.doesNotThrow(() =>
+      handoffHelpers.materializeInvariantSuiteFromDependencies?.(handlers, fs.realpathSync(handlers.workspacePath))
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
 
 test("invariant-suite runtime readers accept only strict current-version manifests", () => {
   const helpers = loadWorkflowHelpers(
@@ -1242,7 +1350,7 @@ test("post-agent baseline verification requires both exact strict-JSON copies wi
     const protectedPath = path.join(runRoot, "protected", `${handlers.attemptId}.json`);
     fs.mkdirSync(path.dirname(protectedPath), { recursive: true });
     const helpers = loadWorkflowHelpers(
-      [...PROVENANCE_HELPERS, "readAndValidateInvariantSuiteBaseline", "verifyInvariantSuiteBaseline"],
+      [...PROVENANCE_HELPERS, "isPlainRecord", "readAndValidateInvariantSuiteBaseline", "verifyInvariantSuiteBaseline"],
       state,
       { invariantSuiteProtectedBaselinePath: () => protectedPath }
     );

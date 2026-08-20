@@ -34,3 +34,5 @@ allowBuilds:
   msgpackr-extract: false
   node-pty: false
   protobufjs: true
+patchedDependencies:
+  npm@11.19.0: patches/npm@11.19.0.patch

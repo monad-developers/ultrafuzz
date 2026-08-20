@@ -24,6 +24,7 @@ const {
   artifactContractSchemaBinding,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
+  assertArtifactPublicationsContainNoSecrets,
   assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
@@ -48,6 +49,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  sensitiveEnvironmentValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
@@ -69,6 +71,7 @@ const {
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
   smithersTaskAgentId,
+  targetIdentity,
   validateWorkspacePatchCapture,
   verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
@@ -447,6 +450,7 @@ const untrustedContentBoundary =
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
+const governedSource = readGovernedSource();
 const authorizedDefensiveSecurityContext = [
   "## Authorized Defensive Security Context",
   "",
@@ -456,7 +460,55 @@ const authorizedDefensiveSecurityContext = [
 ].join("\n");
 
 function sourceUsesPinnedBranch(): boolean {
-  return invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef);
+  const recordedRefs = new Set(taskSpecs.flatMap((task) => (task.sourceRef === null ? [] : [task.sourceRef])));
+  if (recordedRefs.size > 1) throw new Error("workflow tasks disagree on their recorded source ref");
+  const recordedRef = recordedRefs.values().next().value as string | undefined;
+  return recordedRef === undefined
+    ? invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef)
+    : recordedRef === pinnedSourceRef;
+}
+function readGovernedSource(): { commit: string; tree: string } | undefined {
+  const governancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+  if (governancePath === undefined) return undefined;
+  const governance = parseStrictJsonBytes(readRegularFileSnapshot(governancePath, 1024 * 1024)),
+    policy = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.policy) ? governance.policy : {},
+    target = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.target) ? governance.target : {},
+    { sensitivity } = policy,
+    { commit, tree, dirty } = target;
+  if (sensitivity === "private" && dirty !== false) throw new Error("private campaign source is not clean");
+  if (
+    typeof commit === "string" &&
+    typeof tree === "string" &&
+    /^[a-f0-9]{40,64}$/u.test(commit) &&
+    /^[a-f0-9]{40,64}$/u.test(tree)
+  )
+    return { commit, tree };
+  if (sensitivity === "private") throw new Error("private campaign source commit is invalid");
+  return undefined;
+}
+function assertGovernedWorkspaceSource(task: (typeof taskSpecs)[number]): void {
+  if (governedSource === undefined || task.execution.mode !== "local") return;
+  if (targetIdentity(task.workspacePath).commit !== governedSource.commit)
+    throw new Error("task workspace is not the acknowledged source commit");
+}
+
+function assertWorkspaceSourceRevision(task: (typeof taskSpecs)[number]): void {
+  if (task.sourceRevision === null) return;
+  const workspaceRoot = realpathSync(task.workspacePath);
+  const git = (revision: string): string =>
+    execFileSync("git", ["rev-parse", "--verify", revision], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+      .trim()
+      .toLowerCase();
+  const head = git("HEAD^{commit}");
+  const sourceRef = task.sourceRef === null ? task.sourceRevision : git(`${task.sourceRef}^{commit}`);
+  if (head !== task.sourceRevision || sourceRef !== task.sourceRevision) {
+    throw new Error(`source-revision failure: workspace ${task.attemptId} does not match the recorded launch commit`);
+  }
 }
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
@@ -1182,7 +1234,7 @@ function baseAgentForProfile(
   task: (typeof taskSpecs)[number],
   profile: (typeof taskSpecs)[number]["agentChain"][number]
 ): AgentLike | AgentLike[] | undefined {
-  const factory = agentFactories[profile.agentRef];
+  const factory = Object.hasOwn(agentFactories, profile.agentRef) ? agentFactories[profile.agentRef] : undefined;
   if (typeof factory !== "function") {
     throw new Error(`agent factory is not registered: ${profile.agentRef}`);
   }
@@ -1223,6 +1275,77 @@ function artifactAwareAgent(
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   const configuredModel = task.agentChain[chainIndex]?.modelName;
+  const credentialEnvironmentNames = [
+    ...(task.execution?.agentCredentialEnv ?? []),
+    ...(task.execution?.modal?.credentialEnv ?? [])
+  ];
+  const freshNormalizedAgentFailure = (error: unknown): Error => {
+    const fallback = "agent execution failed";
+    // Snapshot credentials before hostile getters can mutate the environment.
+    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env, credentialEnvironmentNames);
+    const safeSmithersControlCodes = new Set([
+      "AGENT_QUOTA_EXCEEDED",
+      "AGENT_CONFIG_INVALID",
+      "AGENT_SESSION_LOST",
+      "AGENT_CHECKPOINT_INVALID",
+      "TASK_ABORTED"
+    ]);
+    const readProperty = (value: object, key: string): unknown => {
+      try {
+        return Reflect.get(value, key);
+      } catch {
+        return undefined;
+      }
+    };
+    let sourceError: Error | undefined;
+    try {
+      if (error instanceof Error) sourceError = error;
+    } catch {}
+    const sourceMessage = sourceError === undefined ? undefined : readProperty(sourceError, "message");
+    const sourceName = sourceError === undefined ? undefined : readProperty(sourceError, "name");
+    const sourceCode = sourceError === undefined ? undefined : readProperty(sourceError, "code");
+    const sourceDetails = sourceError === undefined ? undefined : readProperty(sourceError, "details");
+    let failureMessage = fallback;
+    if (typeof error === "string") failureMessage = error;
+    else if (typeof sourceMessage === "string") failureMessage = sourceMessage;
+    const normalizedFailureMessage = normalizeNodeAttemptFailureMessage(failureMessage, forbiddenSecretValues);
+    // Retain only normalized text and allowlisted scheduler controls.
+    const normalizedError = new Error(normalizedFailureMessage ?? fallback) as Error & {
+      code?: string;
+      details?: Record<string, boolean | number>;
+    };
+    if (sourceName === "AbortError") {
+      Object.defineProperty(normalizedError, "name", {
+        configurable: true,
+        value: "AbortError",
+        writable: true
+      });
+    }
+    if (typeof sourceCode === "string" && safeSmithersControlCodes.has(sourceCode)) {
+      normalizedError.code = sourceCode;
+    }
+    if (sourceDetails !== null && typeof sourceDetails === "object") {
+      const details: Record<string, boolean | number> = {};
+      for (const key of ["failureQuota", "failureRetryable", "discardResumeSession", "discardAgentCheckpoint"]) {
+        const value = readProperty(sourceDetails, key);
+        if (typeof value === "boolean") details[key] = value;
+      }
+      const quotaResetAtMs = readProperty(sourceDetails, "quotaResetAtMs");
+      if (
+        Number.isSafeInteger(quotaResetAtMs) &&
+        (quotaResetAtMs as number) >= 0 &&
+        (quotaResetAtMs as number) <= 8_640_000_000_000_000
+      ) {
+        details.quotaResetAtMs = quotaResetAtMs as number;
+      }
+      const retryAfterMs = readProperty(sourceDetails, "retryAfterMs");
+      if (Number.isSafeInteger(retryAfterMs) && (retryAfterMs as number) >= 0) {
+        details.retryAfterMs = retryAfterMs as number;
+      }
+      if (Object.keys(details).length > 0) normalizedError.details = details;
+    }
+    return normalizedError;
+  };
   return {
     id: smithersTaskAgentId(task, chainIndex),
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
@@ -1231,7 +1354,17 @@ function artifactAwareAgent(
     ...(agent.supportsNativeStructuredOutput === undefined
       ? {}
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
-    ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
+    ...(agent.preflight === undefined
+      ? {}
+      : {
+          preflight: async (args) => {
+            try {
+              return await agent.preflight!(args);
+            } catch (error) {
+              throw freshNormalizedAgentFailure(error);
+            }
+          }
+        }),
     generate: async (args) => {
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
@@ -1240,6 +1373,7 @@ function artifactAwareAgent(
       // Restore the prepared roots immediately before each selected attempt so
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
+        assertWorkspaceSourceRevision(task);
         resetTaskArtifactsForRetry(task);
       }
       // Automatic retries are deliberately error-agnostic. Start a fresh
@@ -1278,13 +1412,21 @@ function artifactAwareAgent(
             execution
           )
         : retryArgs;
-      return await agent.generate(attemptArgs);
+      try {
+        return await agent.generate(attemptArgs);
+      } catch (error) {
+        throw freshNormalizedAgentFailure(error);
+      }
     }
   };
 }
 
 function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
   return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
@@ -1448,6 +1590,7 @@ function prepareArtifactMirror(
 ): z.infer<typeof preparationOutput> {
   const evidenceMode = options.evidenceMode ?? "create";
   const workspaceRoot = realpathSync(task.workspacePath);
+  if (options.replayWorkspacePatches !== false) assertWorkspaceSourceRevision(task);
   if (options.pinnedSubmodules === "verify") {
     verifyPinnedSubmodulesFromExecutionSnapshot({
       executionSnapshotRoot: task.executionSnapshotRoot,
@@ -5930,6 +6073,13 @@ function verifyArtifacts(
     if (primary === undefined) {
       throw new Error("artifact-contract failure: primary artifact is missing");
     }
+    assertArtifactPublicationsContainNoSecrets(
+      publications,
+      sensitiveEnvironmentValues(process.env, [
+        ...(task.execution?.agentCredentialEnv ?? []),
+        ...(task.execution?.modal?.credentialEnv ?? [])
+      ])
+    );
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
     writeArtifactVerificationMarker(task, artifacts, publications);
@@ -6536,6 +6686,9 @@ export default smithers((ctx) => {
                     run_id: __ULTRAFUZZ_RUN_ID_LITERAL__,
                     task_id: task.id,
                     attempt_id: task.attemptId,
+                    ...(task.sourceRevision === null
+                      ? {}
+                      : { source_revision: task.sourceRevision, source_ref: task.sourceRef }),
                     execution_generation: cloudExecutionGeneration,
                     execution_snapshot_root: cloudSnapshotRelativePath(
                       task.executionSnapshotRoot,
@@ -6589,7 +6742,13 @@ export default smithers((ctx) => {
               key={task.id}
               path={task.workspacePath}
               branch={task.branch}
-              {...(usesPinnedSource ? { baseBranch: pinnedSourceBranch } : {})}
+              {...(usesPinnedSource
+                ? { baseBranch: pinnedSourceBranch }
+                : task.sourceRevision !== null
+                  ? { baseBranch: task.sourceRevision }
+                  : task.execution.mode === "local" && governedSource
+                    ? { baseBranch: governedSource.commit }
+                    : {})}
             >
               <Task
                 id={task.preparationId}
@@ -6602,7 +6761,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => prepareArtifactMirror(task)}
+                {() => (assertGovernedWorkspaceSource(task), prepareArtifactMirror(task))}
               </Task>
               <Task
                 id={task.id}

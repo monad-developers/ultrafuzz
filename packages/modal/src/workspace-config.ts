@@ -8,8 +8,6 @@ import {
   type ModalModelSpec,
   type ModelProvider
 } from "./defaults.js";
-import { remoteAuthDir } from "./layout.js";
-
 export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number, auditProfile = "default"): string {
   const selectedProfile = modelProfileToml(model);
   const dynamicStrategiesEnumerator = auditProfile === "smoke" ? "" : "dynamic_strategies_enumerator = 3\n";
@@ -98,7 +96,7 @@ function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"]
   if (auth === "api-key") {
     return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
-  return `[agents.${agent}]\nauth = "subscription"\nconfig_dir = ${tomlString(remoteAuthDir(provider))}`;
+  return `[agents.${agent}]\nauth = "subscription"`;
 }
 
 function apiKeyEnv(provider: ModelProvider): string {

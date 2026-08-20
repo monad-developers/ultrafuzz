@@ -435,6 +435,7 @@ export async function launchModalBenchmark(input: {
   const configPath = path.resolve(input.configPath);
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
+  assertStandaloneModalBenchmarkAllowed(config);
   const candidateRevision = sourceRevision(repoRoot).toLowerCase();
   if (isPublicModalBenchmarkConfig(config) && candidateRevision !== config.public_benchmark.candidate_commit) {
     throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
@@ -1392,6 +1393,9 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
           'ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"'
         ]
       : [];
+  const providerHomeRoot =
+      subscriptionProvider === undefined ? undefined : path.posix.dirname(remoteAuthDir(subscriptionProvider)),
+    providerHomeEnv = providerHomeRoot === undefined ? [] : [`ULTRAFUZZ_PROVIDER_HOME_ROOT='${providerHomeRoot}'`];
   return [
     "set -euo pipefail",
     `staging_deadline=$((SECONDS + ${MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS}))`,
@@ -1404,10 +1408,13 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     'data_root="$volume_root/$ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT"',
     `install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} "$data_root"`,
     `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} "$data_root"`,
+    ...(providerHomeRoot === undefined
+      ? []
+      : [`install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} '${providerHomeRoot}'`]),
     ...ownedRuntimeDirectories.map(
       (directory) => `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} '${directory}'`
     ),
-    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${kimiRuntimeEnv.join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
+    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${[...providerHomeEnv, ...kimiRuntimeEnv].join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
   ].join("; ");
 }
 
@@ -1609,6 +1616,7 @@ export async function overseeModalBenchmarkOnce(
   if (isPublicModalBenchmarkConfig(config)) {
     throw new Error("public Modal benchmarks do not permit post-model recovery");
   }
+  assertStandaloneModalBenchmarkAllowed(config);
   const now = input.now ?? Date.now;
   const env = input.env ?? process.env;
   const recoveryPolicy = modalRecoveryPolicyForNodeTimeout(config.node_timeout_seconds, input.policy);
@@ -3129,6 +3137,13 @@ function sourceRevision(repoRoot: string): string {
   } catch {
     return "unknown";
   }
+}
+
+function assertStandaloneModalBenchmarkAllowed(config: ModalBenchmarkConfig): void {
+  if (!isPublicModalBenchmarkConfig(config))
+    throw new Error(
+      "private standalone Modal benchmarks require the separate eval disclosure authorization tracked by R-26"
+    );
 }
 
 async function requiredLaunchStateForInspection(

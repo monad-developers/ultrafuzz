@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { ResolvedConfig } from "@ultrafuzz/config";
+import { composeSmithersCommandPath } from "./smithers.js";
 
 const execFileAsync = promisify(execFile);
 const VERSION_PROBE_TIMEOUT_MS = 5_000;
@@ -26,15 +27,9 @@ export async function probeCommandsForExecution(
   if (config.execution.mode === "local") {
     const cwd = options.cwd ?? process.cwd();
     const sourcePath = Object.hasOwn(env, "PATH") ? env.PATH : process.env.PATH;
-    // Smithers prepends this directory to the PATH inherited by local tasks.
-    // Reproduce that effective lookup path during preflight. Relative and empty
-    // source entries are intentionally ignored by resolveExecutable because
-    // tasks execute in fresh worktrees, not the mutable controller checkout.
     const effectiveEnv = {
       ...env,
-      PATH: [path.join(cwd, ".smithers", "node_modules", ".bin"), sourcePath]
-        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-        .join(path.delimiter)
+      PATH: composeSmithersCommandPath(cwd, { ...env, PATH: sourcePath, ULTRAFUZZ_TRUSTED_BIN: undefined })
     };
     return Promise.all(
       uniqueCommands.map(async (name) => {

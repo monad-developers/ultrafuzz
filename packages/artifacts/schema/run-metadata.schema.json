@@ -27,6 +27,12 @@
     "source_run_id": {
       "$ref": "#/$defs/safeId"
     },
+    "source_revision": {
+      "$ref": "#/$defs/gitObjectId"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/runSourceRef"
+    },
     "mode": {
       "enum": ["run", "resume", "replay", "fork"]
     },
@@ -172,9 +178,40 @@
     }
   ],
   "$defs": {
+    "dataGovernance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "path",
+        "sha256",
+        "policy_digest",
+        "input_digest",
+        "sensitivity",
+        "acknowledgement_status"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.data-governance-provenance.v1" },
+        "path": { "const": "data-governance.json" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "policy_digest": { "$ref": "#/$defs/sha256" },
+        "input_digest": { "$ref": "#/$defs/sha256" },
+        "sensitivity": { "enum": ["public", "private"] },
+        "acknowledgement_status": { "enum": ["approved", "not-required", "pending"] }
+      }
+    },
     "safeId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runSourceRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
     },
     "sha256": {
       "type": "string",

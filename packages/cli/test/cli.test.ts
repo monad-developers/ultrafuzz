@@ -98,10 +98,13 @@ function fakeSmithersEnv(
   includeFinalReport = false,
   additionalTerminalNodeIds: readonly string[] = []
 ): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(inspectStatePath, "running\n", "utf8");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const statusOverridePath = path.join(project, "fake-smithers-status-override.json");
+  const invalidEventStreamPath = path.join(project, "fake-smithers-invalid-event-stream");
   const smithers = path.join(binDir, "smithers");
   const terminalNodeIds = [
     "project-discovery",
@@ -171,7 +174,7 @@ function fakeSmithersEnv(
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  ps)",
       `    printf '%s\\n' ${shellQuote(
@@ -195,7 +198,7 @@ function fakeSmithersEnv(
       )}`,
       "    ;;",
       "  inspect)",
-      "    inspect_state=$(tr -d '\\n' < \"$SMITHERS_FAKE_INSPECT_STATE\")",
+      `    inspect_state=$(tr -d '\\n' < ${shellQuote(inspectStatePath)})`,
       '    inspect_status="running"',
       '    inspect_nodes="[]"',
       '    if [ "$inspect_state" = "succeeded" ]; then',
@@ -205,10 +208,11 @@ function fakeSmithersEnv(
       `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"%s","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-08-09T00:00:01.000Z"},"steps":%s,"nodes":%s},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$inspect_status" "$2" "$inspect_state" "$inspect_nodes" "$inspect_nodes"`,
       "    ;;",
       "  events)",
-      '    if [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "events" ] && [ "$3" != "--type" ]; then',
+      `    invalid_event_stream=$(if [ -f ${shellQuote(invalidEventStreamPath)} ]; then tr -d '\\n' < ${shellQuote(invalidEventStreamPath)}; fi)`,
+      '    if [ "$invalid_event_stream" = "events" ] && [ "$3" != "--type" ]; then',
       "      printf '%s' '{\"malformed\":'",
       "      exit 0",
-      '    elif [ "$SMITHERS_FAKE_INVALID_EVENT_STREAM" = "token-events" ] && [ "$3" = "--type" ]; then',
+      '    elif [ "$invalid_event_stream" = "token-events" ] && [ "$3" = "--type" ]; then',
       "      printf '%s' '{\"malformed\":'",
       "      exit 0",
       "    fi",
@@ -217,7 +221,7 @@ function fakeSmithersEnv(
         JSON.stringify({ ok: true, data: [], meta: { command: "events", duration: "1ms" } })
       )} ;;`,
       "      *)",
-      '        if [ "$(tr -d \'\\n\' < "$SMITHERS_FAKE_INSPECT_STATE")" = "succeeded" ]; then',
+      `        if [ "$(tr -d '\\n' < ${shellQuote(inspectStatePath)})" = "succeeded" ]; then`,
       ...workflowEvents.map((event) => `          ${fakeWorkflowEventPrintf(event)}`),
       "        fi",
       "        ;;",
@@ -238,8 +242,8 @@ function fakeSmithersEnv(
       "    exit 2",
       "    ;;",
       "  status)",
-      '    if [ -n "$SMITHERS_FAKE_STATUS_JSON" ]; then',
-      "      printf '%s\\n' \"$SMITHERS_FAKE_STATUS_JSON\"",
+      `    if [ -f ${shellQuote(statusOverridePath)} ]; then`,
+      `      cat ${shellQuote(statusOverridePath)}`,
       "    else",
       `      printf '%s\\n' ${shellQuote(JSON.stringify(fakeStatusEnvelope()))}`,
       "    fi",
@@ -255,10 +259,16 @@ function fakeSmithersEnv(
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    SMITHERS_FAKE_INSPECT_STATE: inspectStatePath
+    SMITHERS_BIN: smithers
   };
+}
+
+function setFakeSmithersStatus(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function setFakeSmithersInvalidEventStream(project: string, stream: "events" | "token-events"): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-invalid-event-stream"), `${stream}\n`, "utf8");
 }
 
 function writeSmallTopology(project: string): void {
@@ -436,7 +446,7 @@ async function cli(
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1", ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
@@ -1120,17 +1130,40 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const runningState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status: string;
     nodes: Record<string, Record<string, unknown>>;
+    last_transition_at: string;
+    controller_lease: {
+      status: string;
+      duration_ms: number;
+      renewed_at: string;
+      expires_at: string;
+      recovery_attempts: number;
+    };
     workflow_deadline_at?: string;
   };
   const firstNodeId = Object.keys(runningState.nodes)[0]!;
   // These fixtures deliberately exercise multi-day elapsed durations. Keep
   // the synthetic run live so status synchronization does not correctly time
-  // it out at the real workflow deadline before duration rendering is tested.
-  runningState.workflow_deadline_at = new Date(Date.now() + 7 * 86_400_000).toISOString();
+  // it out or park it for controller loss before duration rendering is tested.
+  const fixtureNowMs = Date.now();
+  const fixtureNow = new Date(fixtureNowMs).toISOString();
+  const fixtureLeaseDurationMs = 7 * 86_400_000;
+  const fixtureStepStartedAt = new Date(fixtureNowMs - 600_000).toISOString();
+  runningState.last_transition_at = fixtureNow;
+  runningState.controller_lease = {
+    ...runningState.controller_lease,
+    status: "active",
+    duration_ms: fixtureLeaseDurationMs,
+    renewed_at: fixtureNow,
+    expires_at: new Date(fixtureNowMs + fixtureLeaseDurationMs).toISOString()
+  };
+  runningState.workflow_deadline_at = new Date(fixtureNowMs + fixtureLeaseDurationMs).toISOString();
   runningState.nodes[firstNodeId] = {
     ...runningState.nodes[firstNodeId],
     status: "running",
-    started_at: new Date(Date.now() - 600_000).toISOString()
+    started_at: fixtureStepStartedAt,
+    wait_since: fixtureStepStartedAt,
+    wait_reason: "active",
+    next_eligible_action: "task-complete"
   };
   fs.writeFileSync(statePath, `${JSON.stringify(runningState, null, 2)}\n`, "utf8");
 
@@ -1140,27 +1173,31 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
   assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
-  assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
+  assert.match(statusText.stdout, /^Time on current step: \d+ minutes on project-discovery$/mu);
 
   // Duration rendering is pure; exercise its boundaries without repeatedly
   // synchronizing synthetic node clocks through the fake workflow runner.
   for (const [elapsedSeconds, expected] of [
     [30, "less than a minute"],
     [60, "1 minute"],
+    [600, "10 minutes"],
     [5_400, "1h 30m"],
     [3 * 86_400, "3d 00h"]
   ] as const) {
     assert.equal(formatStatusDuration(elapsedSeconds), expected);
   }
 
-  // Restore the 10-minute step for the watch assertions below.
+  // Restore the running step for the watch assertions below.
   const restored = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     nodes: Record<string, Record<string, unknown>>;
   };
   restored.nodes[firstNodeId] = {
     ...restored.nodes[firstNodeId],
     status: "running",
-    started_at: new Date(Date.now() - 600_000).toISOString()
+    started_at: fixtureStepStartedAt,
+    wait_since: fixtureStepStartedAt,
+    wait_reason: "active",
+    next_eligible_action: "task-complete"
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
@@ -1380,7 +1417,7 @@ test("status --watch stops immediately on a degraded verdict even while product 
   writeSmallTopology(project);
   const run = await cli(project, ["run", "--run-id", "watch-degraded-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
-  env.SMITHERS_FAKE_STATUS_JSON = JSON.stringify(fakeStatusEnvelope("degraded"));
+  setFakeSmithersStatus(project, fakeStatusEnvelope("degraded"));
 
   const watched = await cli(project, ["status", "watch-degraded-run", "--watch", "--interval", "1", "--json"], env);
 
@@ -1396,7 +1433,6 @@ test("old commands and backend flags are rejected instead of aliased or shimmed"
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
 
   for (const argv of [
-    ["doctor", "--json"],
     ["list", "--json"],
     ["restart", "cli-run", "--json"],
     ["continue", "cli-run", "--json"],
@@ -1456,7 +1492,7 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
   const body = parseJson(failed);
   assert.equal(body.ok, false, JSON.stringify(body));
   assertNoSmithersSurface(body);
-  assert.match(JSON.stringify(body.diagnostics), /AGENT_REFERENCE_UNKNOWN/);
+  assert.match(JSON.stringify(body.diagnostics), /CONFIG_MODEL_AGENT_INVALID/);
 });
 
 test("run rejects an OpenRouter override whose effective model is invalid", async () => {
@@ -2530,10 +2566,8 @@ test("stats falls back to unchanged local evidence when workflow event output is
     ["token-events", "WORKFLOW_TOKEN_EVENTS_INVALID"]
   ] as const) {
     await context.test(stream, async () => {
-      const captured = await cli(project, ["stats", "stats-invalid-workflow-events", "--json"], {
-        ...env,
-        SMITHERS_FAKE_INVALID_EVENT_STREAM: stream
-      });
+      setFakeSmithersInvalidEventStream(project, stream);
+      const captured = await cli(project, ["stats", "stats-invalid-workflow-events", "--json"], env);
       assert.equal(captured.code, 0, captured.stderr);
       const body = parseJson(captured);
       assert.equal(body.ok, true);

@@ -9,6 +9,7 @@ import {
   readGroundTruthDocument,
   type GroundTruthSubject
 } from "@ultrafuzz/evals";
+import { MODAL_PUBLIC_BENCHMARK_ENV } from "@ultrafuzz/runtime";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
@@ -88,6 +89,7 @@ const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const RUN_ID = requiredEnv("ULTRAFUZZ_MODAL_RUN_ID");
 const CONFIG = loadModalBenchmarkConfig(REMOTE_CONFIG_PATH);
+if (isPublicModalBenchmarkConfig(CONFIG)) process.env[MODAL_PUBLIC_BENCHMARK_ENV] = "1";
 const LINEAGE = readModalWorkerLineage(REMOTE_LINEAGE_PATH);
 const MODEL = modelForModalWorkerLineage(CONFIG, LINEAGE);
 const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");

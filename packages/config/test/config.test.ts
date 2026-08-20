@@ -78,6 +78,7 @@ describe("config loading and resolution", () => {
       reasoning: "max"
     });
     expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
+    expect(resolved.value.run.defaultTimeoutSeconds).toBe(3600);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
@@ -91,7 +92,7 @@ describe("config loading and resolution", () => {
       resources: {
         cpu: 4,
         memoryMiB: 8192,
-        timeoutSeconds: 1800
+        timeoutSeconds: 3600
       },
       nodes: {},
       providers: {}
@@ -138,6 +139,17 @@ agents = ["sol-xhigh", "gpt55-xhigh"]
     });
     expect(unknown.ok).toBe(false);
     if (!unknown.ok) expect(unknown.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_UNKNOWN");
+    for (const inherited of ["constructor", "toString"]) {
+      const result = resolveConfig({
+        env: {},
+        projectConfig: { models: { default: inherited }, retry: { agents: ["default", inherited] } }
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.diagnostics.map(({ code }) => code)).toEqual(
+          expect.arrayContaining(["CONFIG_MODEL_DEFAULT_UNKNOWN", "CONFIG_RETRY_AGENT_UNKNOWN"])
+        );
+    }
 
     const duplicate = resolveConfig({
       env: {},
@@ -321,15 +333,15 @@ memory_mib = 32768
 app = "node-runs"
 image = "runner:stable"
 region = "region-a"
-credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const resolved = resolveConfig({
       projectConfig: parsed.value,
       env: {
-        CLOUD_CREDENTIAL_ONE: "first-secret-value",
-        CLOUD_CREDENTIAL_TWO: "second-secret-value"
+        MODAL_TOKEN_ID: "first-secret-value",
+        MODAL_TOKEN_SECRET: "second-secret-value"
       }
     });
     expect(resolved.ok).toBe(true);
@@ -346,7 +358,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     });
     const serialized = serializeRedactedResolvedConfigToml(resolved.value);
     expect(serialized).toContain("[execution.nodes.project-discovery.resources]");
-    expect(serialized).toContain('credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]');
+    expect(serialized).toContain('credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]');
     expect(serialized).not.toContain("first-secret-value");
     expect(serialized).not.toContain("second-secret-value");
     expect(validateExecutionNodeOverrides(resolved.value, ["project-discovery"])).toEqual([]);
@@ -366,7 +378,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     }
 
     const missingCredential = resolveConfig({
-      env: { CLOUD_CREDENTIAL_ONE: "available" },
+      env: { MODAL_TOKEN_ID: "available" },
       projectConfig: {
         execution: {
           mode: "cloud",
@@ -375,7 +387,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
             modal: {
               app: "node-runs",
               image: "runner:stable",
-              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
             }
           }
         }
@@ -385,7 +397,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     if (!missingCredential.ok) {
       expect(missingCredential.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_CREDENTIAL_MISSING");
       expect(missingCredential.diagnostics.map((entry) => entry.message).join("\n")).not.toContain(
-        "CLOUD_CREDENTIAL_TWO"
+        "MODAL_TOKEN_SECRET"
       );
     }
 
@@ -403,7 +415,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
             modal: {
               app: "node-runs",
               image: "runner:stable",
-              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
             }
           }
         }
@@ -444,7 +456,7 @@ reasoning = "max"
 
 [agents.CodexAgent]
 auth = "subscription"
-config_dir = ".codex/team"
+config_dir = "teams/codex"
 `);
     expect(project.ok).toBe(true);
     if (!project.ok) return;
@@ -486,7 +498,7 @@ config_dir = ".codex/team"
     expect(resolved.value.agents.CodexAgent).toEqual({
       auth: "subscription",
       apiKeyEnv: "OPENAI_API_KEY",
-      configDir: ".codex/team"
+      configDir: "teams/codex"
     });
   });
 
@@ -514,7 +526,7 @@ api_key_env = "OPENAI_API_KEY"
 [agents.KimiAgent]
 auth = "api-key"
 api_key_env = "MOONSHOT_API_KEY"
-config_dir = ".kimi-code"
+config_dir = "kimi-code"
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -523,8 +535,40 @@ config_dir = ".kimi-code"
     expect(parsed.value.agents?.KimiAgent).toEqual({
       auth: "api-key",
       apiKeyEnv: "MOONSHOT_API_KEY",
-      configDir: ".kimi-code"
+      configDir: "kimi-code"
     });
+
+    for (const [agent, canonical] of Object.entries({
+      ClaudeAgent: "ANTHROPIC_API_KEY",
+      CodexAgent: "OPENAI_API_KEY",
+      DeepSeekAgent: "DEEPSEEK_API_KEY",
+      KimiAgent: "KIMI_API_KEY",
+      OpenRouterAgent: "OPENROUTER_API_KEY"
+    })) {
+      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code).toBe(
+        "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL"
+      );
+      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: canonical } })).toEqual([]);
+    }
+    expect(
+      validateAgentConfigs({ constructor: { auth: "api-key" as const, apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code
+    ).toBe("CONFIG_AGENT_ID_INVALID");
+    {
+      const polluted = parseProjectConfigToml(
+        '[agents.__proto__]\nauth = "api-key"\napi_key_env = "AWS_SECRET_ACCESS_KEY"\n'
+      );
+      expect(polluted.ok).toBe(true);
+      if (polluted.ok) {
+        const result = resolveConfig({ env: {}, projectConfig: polluted.value });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.diagnostics.map(({ code }) => code)).toContain("CONFIG_AGENT_ID_INVALID");
+      }
+    }
+    for (const configDir of ["", "/tmp/provider", "../provider", ".codex", "team\\codex", "team/../codex"])
+      expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir } })[0]?.code).toBe(
+        "CONFIG_AGENT_CONFIG_DIR_UNSAFE"
+      );
+    expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir: "teams/codex" } })).toEqual([]);
 
     const invalid = resolveConfig({
       env: {},
@@ -792,7 +836,7 @@ describe("resolved config named semantic diagnostics", () => {
             modal: {
               app: "node-runs",
               image: "runner:stable",
-              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
             }
           }
         }
@@ -888,7 +932,7 @@ describe("model profile and triage validation", () => {
         models: {
           profiles: {
             "../bad": {
-              agent: "../missing",
+              agent: "constructor",
               model: "",
               reasoning: "",
               timeoutSeconds: 0

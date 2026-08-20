@@ -11,9 +11,11 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  ensureSafeDirectory,
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
   safeResolveInside,
+  writeFileDurable,
   type RunLayout,
   type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
@@ -37,6 +39,12 @@ const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.j
 const WORKFLOW_CONTROL_LOCK = ".workflow-control";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const BUN_MODULE_CONFINEMENT_PATH = "controls/bun-module-confinement.js";
+export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot, descriptorRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"); plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: outside, namespace: "file" }, () => { if (fs.realpathSync(sourceRoot) !== physicalRoot || fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); throw new Error("workflow controller module resolved outside its sealed snapshot"); }); } });\n`;
+const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
+  [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE),
+  "controls/bunfig.toml": Buffer.from("\n")
+};
 
 const WORKFLOW_CONTROL_FILE_KEYS = [
   "graph",
@@ -102,6 +110,26 @@ export interface VerifiedWorkflowControlSnapshot {
   executionFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[];
   bindings: WorkflowControlBindings;
   integrityContents: Buffer;
+  /**
+   * Digest divergences found against the seal. Always empty unless the caller opted into
+   * `tolerateDivergence`, which only a read-only observer may do. Execution paths leave the
+   * option unset and therefore still fail closed on the first divergence.
+   */
+  divergences: readonly string[];
+}
+
+/**
+ * A read-only caller — `ultrafuzz status` and friends — needs the run's identity and snapshot
+ * environment, not permission to execute it. Gating observability on execution-grade authority made a
+ * single divergent control file hide an otherwise healthy run for the rest of its life (issue #674).
+ * `tolerateDivergence` collects CONTROL-FILE digest divergences instead of throwing so the caller can
+ * report them as warnings. It deliberately does NOT relax:
+ *   - anything structural (an unparseable seal, a mismatched run ID, an unreadable control file), or
+ *   - execution-file divergence, because the snapshot env binds the runner executable and the sealed
+ *     module URLs inside the snapshot, so an observer still executes those files.
+ */
+export interface VerifyWorkflowControlSnapshotOptions {
+  tolerateDivergence?: boolean;
 }
 
 export interface VerifiedSealedTaskManifestSnapshot {
@@ -231,16 +259,17 @@ export function sealWorkflowControlFiles(input: {
   assertExactControlPath(input.inputPath, paths.inputPath, "workflow input");
 
   const contents = controlFileContents(input.projectRoot, input.layout, paths);
+  const executionFiles = withBunStartupControls(input.layout, input.executionFiles);
   const seal: WorkflowControlIntegritySeal = {
     schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
     run_id: input.layout.runId,
     files: controlFileEntriesFromContents(contents),
-    execution_files: executionFileEntries(input.executionFiles),
+    execution_files: executionFileEntries(executionFiles),
     bindings: deriveWorkflowControlBindings(
       input.layout.runId,
       contents,
       readBoundedRegularFile(input.layout.root, input.layout.statePath, "run state"),
-      readExecutionPlanForSeal(input.layout, input.executionFiles)
+      readExecutionPlanForSeal(input.layout, executionFiles)
     )
   };
   if (pathEntryExists(paths.integrityPath)) {
@@ -323,7 +352,16 @@ export function workflowControlGeneration(projectRoot: string, layout: RunLayout
   return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
 }
 
-export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLayout): VerifiedWorkflowControlSnapshot {
+export function verifyWorkflowControlSnapshot(
+  projectRoot: string,
+  layout: RunLayout,
+  options: VerifyWorkflowControlSnapshotOptions = {}
+): VerifiedWorkflowControlSnapshot {
+  const divergences: string[] = [];
+  const reportDivergence = (message: string): void => {
+    if (options.tolerateDivergence !== true) throw new Error(message);
+    divergences.push(message);
+  };
   const paths = workflowControlPaths(projectRoot, layout);
   const sealContents = readBoundedRegularFile(layout.root, paths.integrityPath, "workflow control seal");
   const seal = parseWorkflowControlIntegritySeal(sealContents);
@@ -347,7 +385,9 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     const observed = digestBytes(contents[key]);
     const expected = seal.files[key];
     if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
-      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+      reportDivergence(
+        `sealed workflow control file changed: ${controlFileLabel(key)} (sealed ${expected.sha256} ${expected.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes${hasPublishedSnapshot && key === "workflow" ? ", compared against the published execution snapshot copy" : ""})`
+      );
     }
   }
   const executionFiles = seal.execution_files.map((entry) => {
@@ -359,7 +399,13 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     );
     const observed = digestBytes(bytes);
     if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
-      throw new Error(`sealed workflow execution file changed: ${entry.snapshot_path}`);
+      // Never tolerated, even for an observer. The snapshot env binds SMITHERS_BIN and the sealed
+      // artifacts/runtime module URLs to paths INSIDE this snapshot, so `ultrafuzz status` executes
+      // these files to obtain a status summary. Downgrading this to a warning would mean running
+      // tampered code in order to report that the code was tampered with.
+      throw new Error(
+        `sealed workflow execution file changed: ${entry.snapshot_path} (sealed ${entry.sha256} ${entry.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes)`
+      );
     }
     return { sourcePath: entry.source_path, snapshotPath: entry.snapshot_path, contents: bytes };
   });
@@ -370,7 +416,7 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents
   );
   if (JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
-    throw new Error("workflow control completeness binding changed");
+    reportDivergence("workflow control completeness binding changed");
   }
   return {
     paths,
@@ -378,7 +424,8 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     contents,
     executionFiles,
     bindings: seal.bindings,
-    integrityContents: sealContents
+    integrityContents: sealContents,
+    divergences
   };
 }
 
@@ -586,6 +633,9 @@ export function materializeWorkflowExecutionSnapshot(input: {
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
+  for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS))
+    if (!expectedFiles.get(controlPath)?.equals(contents))
+      throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
   if (expectedFiles.has(workflowRelativePath)) {
     throw new Error("workflow execution snapshot collides with its generated workflow");
   }
@@ -641,12 +691,19 @@ export function materializeWorkflowExecutionSnapshot(input: {
     );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     assertExactDirectoryIdentity(snapshotRoot, snapshotStat.dev, snapshotStat.ino, "workflow execution snapshot");
-    const env = workflowSnapshotEnvironment(snapshotRoot, workflowRelativePath, dependencyMap, protectedEntries, {
-      snapshotsRootDevice: snapshots.device,
-      snapshotsRootInode: snapshots.inode,
-      snapshotDevice: snapshotStat.dev,
-      snapshotInode: snapshotStat.ino
-    });
+    const env = workflowSnapshotEnvironment(
+      input.projectRoot,
+      snapshotRoot,
+      workflowRelativePath,
+      dependencyMap,
+      protectedEntries,
+      {
+        snapshotsRootDevice: snapshots.device,
+        snapshotsRootInode: snapshots.inode,
+        snapshotDevice: snapshotStat.dev,
+        snapshotInode: snapshotStat.ino
+      }
+    );
     return {
       root: snapshotRoot,
       workflowPath: path.join(snapshotRoot, ...workflowRelativePath.split("/")),
@@ -1227,6 +1284,7 @@ function directoryIdentity(relativePath: string, stat: fs.Stats): WorkflowExecut
 }
 
 function workflowSnapshotEnvironment(
+  projectRoot: string,
   snapshotRoot: string,
   workflowRelativePath: string,
   dependencies: WorkflowExecutionDependencyMap,
@@ -1243,7 +1301,13 @@ function workflowSnapshotEnvironment(
     return pathEntryExists(entry) ? pathToFileURL(entry).href : "";
   };
   const configPath = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
-  if (moduleUrl("artifacts") === "" || moduleUrl("runtime") === "" || !pathEntryExists(configPath)) {
+  const governancePath = path.join(snapshotRoot, "controls", "data-governance.json");
+  if (
+    moduleUrl("artifacts") === "" ||
+    moduleUrl("runtime") === "" ||
+    !pathEntryExists(configPath) ||
+    !pathEntryExists(governancePath)
+  ) {
     throw new Error("workflow execution snapshot is missing a required sealed module or config");
   }
   let env: Record<string, string> = {
@@ -1251,12 +1315,15 @@ function workflowSnapshotEnvironment(
     ULTRAFUZZ_RUNTIME_MODULE: moduleUrl("runtime"),
     ...(moduleUrl("modal") === "" ? {} : { ULTRAFUZZ_MODAL_MODULE: moduleUrl("modal") }),
     ULTRAFUZZ_CONFIG_PATH: configPath,
+    ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath,
+    ULTRAFUZZ_BUN_MODULE_CONFINEMENT: path.join(snapshotRoot, ...BUN_MODULE_CONFINEMENT_PATH.split("/")),
     ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ...workflowRelativePath.split("/"))
   };
   if (dependencies.smithers_bin !== null) {
     env = bindSmithersExecutableCapability(
       env,
-      snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable")
+      snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable"),
+      projectRoot
     );
   }
   return bindWorkflowExecutionSnapshotCapability(env, {
@@ -1562,6 +1629,25 @@ function executionFileEntries(files: readonly WorkflowExecutionControlFile[]): W
         ...digestBytes(readBoundedRegularFileExact(file.sourcePath, `workflow execution file ${file.snapshotPath}`))
       };
     });
+}
+
+function withBunStartupControls(
+  layout: RunLayout,
+  files: readonly WorkflowExecutionControlFile[]
+): WorkflowExecutionControlFile[] {
+  const result = [...files],
+    snapshots = new Set(files.map((file) => validateSnapshotPath(file.snapshotPath))),
+    sourceRoot = ensureSafeDirectory(layout.root, "smithers/bun-startup-controls");
+  for (const [snapshotPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) {
+    if (snapshots.has(snapshotPath)) throw new Error("workflow execution files collide with Bun startup controls");
+    const sourcePath = safeResolveInside(sourceRoot, path.basename(snapshotPath), "Bun startup control source");
+    if (pathEntryExists(sourcePath)) {
+      if (!readBoundedRegularFile(layout.root, sourcePath, `Bun startup control ${snapshotPath}`).equals(contents))
+        throw new Error("workflow Bun startup control source changed before sealing");
+    } else writeFileDurable(sourcePath, contents);
+    result.push({ sourcePath, snapshotPath });
+  }
+  return result;
 }
 
 function readBoundedRegularFile(root: string, filePath: string, label: string): Buffer {

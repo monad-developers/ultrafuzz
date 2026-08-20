@@ -19,12 +19,12 @@ retention_days = 30
 [execution.resources]
 cpu = 4
 memory_mib = 8192
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [execution.providers.modal]
 app = "ultrafuzz"
 image = "ultrafuzz"
-credential_env = ["YOUR_PROVIDER_ID_VARIABLE", "YOUR_PROVIDER_SECRET_VARIABLE"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 
 [execution.nodes.project-discovery.resources]
 cpu = 8
@@ -32,12 +32,15 @@ memory_mib = 16384
 timeout_seconds = 2400
 ```
 
-`credential_env` identifies the two host variables used by the Modal client.
+`credential_env` is fixed to `["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]`, the two operator-owned host variables used by the Modal client. Provider routes selected through acknowledged environment variables are supported; host provider-home route files are rejected during cloud planning because they are not transported to Modal.
 Values are read only when configuration is resolved and when a sandbox is
 launched or cleaned; values are not serialized into run configuration,
 handoff archives, tags, errors, or logs. API-key agent credentials are injected
 through a per-launch Modal Secret. Subscription-based agent authentication is
-not supported by cloud node execution.
+not supported by cloud node execution. Credential-like names or values in
+`ULTRAFUZZ_AGENT_ENV_ALLOWLIST` are included only when their most-specific
+recognized route prefix belongs to the task's provider; ordinary allowlisted
+workflow inputs remain available to every task.
 
 An OpenRouter task uses the `api_key_env` configured for `OpenRouterAgent`
 (`OPENROUTER_API_KEY` by default). Only that named credential is forwarded for
@@ -104,6 +107,11 @@ logs, and other run evidence are excluded. Symlinks, hard links, special files,
 traversal, and paths outside the project are rejected. The controller records a
 SHA-256 identity for the archive and the worker verifies it before validated
 streaming extraction.
+
+Cloud launch requires the sealed governance target to record `dirty: false`,
+including for public campaigns. Commit every tracked or untracked source input
+that the cloud agents must analyze; Ultrafuzz rejects a target recorded as dirty
+instead of silently sending only its committed baseline.
 
 Dependency artifacts keep their existing producer directories. Fan-in nodes
 receive the collection of those declared artifact snapshots; Ultrafuzz never

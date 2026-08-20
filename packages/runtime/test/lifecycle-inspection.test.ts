@@ -20,17 +20,31 @@ import {
   initProject,
   listRunSnapshots,
   queryWorkflowEvents,
-  startRun,
+  startRun as runtimeStartRun,
   validateProject,
   watchWorkflowEvents,
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
+const TEST_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:openai"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":[]}`;
+const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> =>
+  runtimeStartRun({
+    ...input,
+    env: {
+      ULTRAFUZZ_PROVIDER_HOME_ROOT: path.join(
+        path.dirname(input.projectRoot),
+        `${path.basename(input.projectRoot)}-provider-homes`
+      ),
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_GOVERNANCE_POLICY,
+      ...input.env
+    }
+  });
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-inspect-"));
@@ -117,6 +131,24 @@ interface FakeInspectionFixtures {
   cancelExitCode?: number;
 }
 
+type FakeInspectionControl = "cancel-terminal" | "error-exit-code" | "error-text" | "kill-self";
+
+function fakeInspectionControlPath(project: string, control: FakeInspectionControl): string {
+  return path.join(project, `fake-${control}`);
+}
+
+function failFakeInspectionRunner(project: string, message: string, exitCode: number): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-text"), `${message}\n`, "utf8");
+  fs.writeFileSync(fakeInspectionControlPath(project, "error-exit-code"), `${exitCode}\n`, "utf8");
+}
+
+function enableFakeInspectionControl(
+  project: string,
+  control: Exclude<FakeInspectionControl, "error-exit-code" | "error-text">
+): void {
+  fs.writeFileSync(fakeInspectionControlPath(project, control), "", "utf8");
+}
+
 function smithersEventLine(input: {
   seq: number;
   timestampMs: number;
@@ -143,7 +175,7 @@ function smithersEventLine(input: {
  * with the exact JSON shapes the pinned engine emits.
  */
 function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const files = {
     why: path.join(project, "fake-why.json"),
@@ -191,7 +223,12 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(path.join(project, "smithers-commands.log"))}`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "kill-self"))} ]; then kill -9 $$; fi`,
+      `if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))} ]; then`,
+      `  if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-text"))} ]; then cat ${shellQuote(fakeInspectionControlPath(project, "error-text"))} >&2; fi`,
+      `  exit "$(cat ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))})"`,
+      "fi",
       'case "$1" in',
       "  why)",
       `    cat ${shellQuote(files.why)}`,
@@ -203,16 +240,16 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      '    if [ -n "$SMITHERS_FAKE_NODE_WATCH" ]; then',
-      '      cat "$SMITHERS_FAKE_NODE_WATCH"',
-      "    else",
-      `      cat ${shellQuote(files.node)}`,
-      "    fi",
+      `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
       "    ;;",
       "  events)",
       `    cat ${shellQuote(files.events)}`,
       "    ;;",
       "  cancel)",
+      `    if [ -f ${shellQuote(fakeInspectionControlPath(project, "cancel-terminal"))} ]; then`,
+      '      printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
+      "      exit 4",
+      "    fi",
       `    printf '%s\\n' '{"ok":true,"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
       `    exit ${fixtures.cancelExitCode ?? 2}`,
       "    ;;",
@@ -225,12 +262,14 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  return {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
-    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
-  };
+  return bindSmithersExecutableCapability(
+    {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers
+    },
+    smithers,
+    project
+  );
 }
 
 async function launchedProject(
@@ -298,8 +337,7 @@ test("cancelRun persists the canonical canceled state once the engine confirms",
 
 test("cancelRun reports a stable diagnostic when the engine command fails", async () => {
   const { project, env } = await launchedProject({});
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'boom' >&2\nexit 9\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "boom", 9);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -717,8 +755,7 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
 
 test("event queries report a diagnostic when the engine command exits nonzero", async () => {
   const { project, env } = await launchedProject({ events: "" });
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'run not found' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "run not found", 4);
 
   // A failed query must not look like a run with no events.
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
@@ -743,8 +780,7 @@ test("event queries report a diagnostic when the engine process is killed by a s
   const { project, env } = await launchedProject({ events: "" });
   // An OOM-style external kill leaves no exit code, which must still be a
   // failure rather than an empty success.
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nkill -9 $$\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  enableFakeInspectionControl(project, "kill-self");
 
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
@@ -886,20 +922,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
   const { project, env, runRoot } = await launchedProject({});
   // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
   // rerunning cancel to confirm an in-flight request must not error.
-  fs.writeFileSync(
-    env.SMITHERS_BIN!,
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
-      "  exit 4",
-      "fi",
-      "printf '%s\\n' '{\"ok\":true}'",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  enableFakeInspectionControl(project, "cancel-terminal");
 
   const confirmed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -912,8 +935,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
 
 test("cancelRun still fails on an unrelated engine error exit", async () => {
   const { project, env } = await launchedProject({});
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'database is locked' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  failFakeInspectionRunner(project, "database is locked", 4);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
@@ -985,7 +1007,7 @@ test("getWorkflowNode rejects an unexpected engine response", async () => {
   assert.equal(node.diagnostics[0]?.code, "WORKFLOW_NODE_INVALID");
 });
 
-test("diagnoseProject reports a healthy pinned install and the latest published version", async () => {
+test("diagnoseProject keeps project-local engine posture informational", async () => {
   const { project, env } = await launchedProject({});
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
 
@@ -996,7 +1018,7 @@ test("diagnoseProject reports a healthy pinned install and the latest published 
   assert.equal(doctor.value?.workflow_engine.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(doctor.value?.workflow_engine.layout_status, "ok");
   assert.equal(doctor.value?.workflow_engine.layout_detail, null);
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "ok");
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "unknown");
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
 });
@@ -1152,18 +1174,20 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
   }
 });
 
-test("diagnoseProject includes the project-local bin inherited by task execution", async () => {
+test("diagnoseProject never executes a target-local required-command shim", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const executable = path.join(project, ".smithers", "node_modules", ".bin", "recon");
-  fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
+  const marker = path.join(project, "target-recon-ran");
+  fs.writeFileSync(executable, `#!/bin/sh\nprintf hostile > ${shellQuote(marker)}\necho recon test\n`, "utf8");
   fs.chmodSync(executable, 0o755);
 
   const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: undefined }, offline: true });
 
-  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.path, executable);
+  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
+  assert.equal(fs.existsSync(marker), false);
 });
 test("startRun rejects a missing required backend before creating a run", async () => {
   const project = tempProject();
@@ -1261,7 +1285,7 @@ test("startRun delegates cloud requirements to the execution-provider probe befo
 [execution.providers.modal]
 app = "ultrafuzz-test"
 image = "ultrafuzz-test"
-credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `,
     "utf8"
   );
@@ -1272,8 +1296,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     runId: "missing-cloud-recon",
     env: {
       PATH: path.join(project, "controller-empty-bin"),
-      UFZ_PROVIDER_ONE: "provider-one",
-      UFZ_PROVIDER_TWO: "provider-two"
+      MODAL_TOKEN_ID: "provider-one",
+      MODAL_TOKEN_SECRET: "provider-two"
     },
     requiredCommandProbe: async (commands) => {
       probed = commands;
@@ -1301,7 +1325,7 @@ test("diagnoseProject probes topology commands in the configured cloud execution
 [execution.providers.modal]
 app = "ultrafuzz-test"
 image = "ultrafuzz-test"
-credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `,
     "utf8"
   );
@@ -1311,8 +1335,8 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     projectRoot: project,
     env: {
       PATH: path.join(project, "controller-empty-bin"),
-      UFZ_PROVIDER_ONE: "provider-one",
-      UFZ_PROVIDER_TWO: "provider-two"
+      MODAL_TOKEN_ID: "provider-one",
+      MODAL_TOKEN_SECRET: "provider-two"
     },
     offline: true,
     requiredCommandProbe: async (commands) => {
@@ -1393,37 +1417,27 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   // Named explicitly: these two were previously omitted from the posture report.
   assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
   assert.ok(Object.hasOwn(reported, "resume_hydration"));
-  // An incompatible source means the next run throws, so doctor must not pass it.
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "error");
-  assert.equal(doctor.ok, false);
-  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
+  // Target-owned dependencies never become controller authority.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "unknown");
+  assert.ok(!doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {
   const { project, env } = await launchedProject({});
 
   const missing = await diagnoseProject({ projectRoot: project, env, offline: true });
-  assert.equal(missing.ok, false);
   assert.equal(missing.value?.workflow_engine.installed_version, null);
-  assert.ok(missing.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_MISSING"));
+  assert.ok(!missing.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_MISSING"));
 
   writeFakeInstalledEngine(project, { version: "0.29.0" });
   const mismatched = await diagnoseProject({ projectRoot: project, env, offline: true });
-  assert.equal(mismatched.ok, false);
   assert.equal(mismatched.value?.workflow_engine.installed_version, "0.29.0");
-  assert.ok(mismatched.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH"));
-});
-
-test("diagnoseProject reports a modified installed manifest", async () => {
-  const { project, env } = await launchedProject({});
+  assert.ok(!mismatched.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH"));
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION, binTarget: "dist/other.js" });
-
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
-
-  assert.equal(doctor.ok, false);
   assert.equal(doctor.value?.workflow_engine.installed_bin_target, "dist/other.js");
   assert.equal(doctor.value?.workflow_engine.layout_status, "error");
-  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID"));
+  assert.ok(!doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID"));
 });
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {

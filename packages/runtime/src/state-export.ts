@@ -23,6 +23,7 @@ import {
 
 import type {
   QueryRunEventsValue,
+  RuntimeDiagnostic,
   RunHealthValue,
   RunHealthVerdict,
   RunListEntry,
@@ -170,14 +171,44 @@ export async function getRunHealth(input: {
     ]);
   }
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // `status` reports on a run; it never executes one. Reading it must not require the authority to
+  // resume it, or a single divergent control file makes an otherwise healthy run permanently
+  // unobservable (issue #674). Divergences are surfaced as warnings below rather than suppressed.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
+  const controlDiagnostics: RuntimeDiagnostic[] = evidence.verifiedControl.divergences.map((message) => ({
+    code: "WORKFLOW_CONTROL_EVIDENCE_DIVERGED",
+    message,
+    severity: "warning" as const,
+    source: "workflow",
+    path: evidence.verifiedControl.paths.integrityPath
+  }));
+  // Synchronization reads the same evidence strictly, so it cannot succeed while a divergence stands.
+  // Calling it anyway would re-report the one divergence a second time under
+  // WORKFLOW_CONTROL_EVIDENCE_INVALID, so a healthy response would describe the same mismatch as both
+  // diverged and invalid. Skip it and say so instead.
+  const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
+  if (controlDiagnostics.length === 0) {
+    const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+    syncDiagnostics.push(
+      ...(sync.ok
+        ? sync.diagnostics
+        : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })))
+    );
+  } else {
+    syncDiagnostics.push({
+      code: "WORKFLOW_STATE_SYNC_SKIPPED",
+      message:
+        "run state synchronization was skipped because sealed control evidence diverged; reported counts come from the workflow runner and local run state may be stale",
+      severity: "warning",
+      source: "runtime",
+      path: evidence.verifiedControl.paths.integrityPath
+    });
+  }
   const snapshot = await runSmithersInspectionCommand({
     args: [
       "status",

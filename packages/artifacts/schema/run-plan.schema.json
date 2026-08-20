@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:run-plan:2",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-plan:3",
   "title": "Ultrafuzz immutable run plan",
   "type": "object",
   "additionalProperties": false,
@@ -11,16 +11,18 @@
     "graph_fingerprint",
     "config_fingerprint",
     "redacted_config_fingerprint",
+    "controller_source_digest",
     "execution",
     "topology",
     "rendered_prompts",
     "policy_posture",
     "prompt_digest",
-    "audit_profile"
+    "audit_profile",
+    "data_governance"
   ],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.run-plan.v2"
+      "const": "ultrafuzz.run-plan.v3"
     },
     "run_id": {
       "$ref": "#/$defs/safeId"
@@ -31,6 +33,12 @@
     "source_run_id": {
       "$ref": "#/$defs/safeId"
     },
+    "source_revision": {
+      "$ref": "#/$defs/gitObjectId"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/runSourceRef"
+    },
     "graph_fingerprint": {
       "$ref": "#/$defs/sha256"
     },
@@ -38,6 +46,9 @@
       "$ref": "#/$defs/sha256"
     },
     "redacted_config_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "controller_source_digest": {
       "$ref": "#/$defs/sha256"
     },
     "execution": {
@@ -174,12 +185,24 @@
           "type": "boolean"
         }
       }
+    },
+    "data_governance": {
+      "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/dataGovernance"
     }
   },
   "$defs": {
     "safeId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runSourceRef": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
     },
     "sha256": {
       "type": "string",

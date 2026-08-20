@@ -57,19 +57,10 @@ effective attempt, and local fallback across different agent implementations
 cannot include an API-key-authenticated rung until per-rung credential isolation
 is available.
 
-Validation requires every configured model profile to name a factory in the
-canonical `.smithers/agents/index.ts` registry. A noncanonical or incomplete registry
-fails before launch even when the missing agent belongs only to an opt-in
-profile; regenerate it explicitly with `ultrafuzz init --force`.
-
-The registry is intentionally a bounded inline-static contract: export one
-top-level `const` as `agentFactories`, and compose object literals with local
-`const` aliases, static properties, static spreads, and an unshadowed
-`Object.freeze(...)`. Source-order overwrites apply. Imported or re-exported
-registry objects and dynamic computed properties are not inspected; keep
-factory imports as property values inside the canonical file. Nullish factories
-and unknown overriding spreads fail validation. The workflow also rejects a
-non-callable factory or a factory that returns no agents at execution time.
+Agent configuration and model profiles may name only `ClaudeAgent`, `CodexAgent`,
+`DeepSeekAgent`, `KimiAgent`, or `OpenRouterAgent`. The complete `.smithers/agents`
+tree must byte-match the packaged stock closure; custom adapters and registries
+are unsupported, and `ultrafuzz init --force` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
 
 Codex agent authentication is configured in TOML instead of in generated
 workflow adapter code:
@@ -80,10 +71,7 @@ auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-Set `auth = "api-key"` to bill through an OpenAI API key read from
-`api_key_env`. Set `auth = "subscription"` to use Codex CLI subscription auth
-from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
-at a specific Codex config directory.
+API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
 ## Claude agent
 
@@ -112,8 +100,7 @@ Set `auth = "subscription"` to run against your logged-in Claude Code CLI
 session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the
 subscription is used; optional `config_dir` sets an isolated `CLAUDE_CONFIG_DIR`
 for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
-to bill against the Anthropic API using the key read from `api_key_env`
-(default `ANTHROPIC_API_KEY`). Both modes drive the `claude` CLI, so it must be
+to bill against the Anthropic API using canonical `ANTHROPIC_API_KEY`. Both modes drive the `claude` CLI, so it must be
 installed either way; `auth` only changes how that CLI authenticates.
 
 When a Claude profile sets `reasoning`, the generated adapter passes it to the
@@ -126,8 +113,7 @@ filesystem and shell inside its worktree, because no operator is present to
 answer a permission prompt. This follows `permissions.trust_model =
 "skip-permissions"`, the only trust model ultrafuzz accepts, and matches how
 `CodexAgent` already runs. It is fixed rather than configurable per agent — a
-project that needs stricter behaviour must edit the generated
-`.smithers/agents/claude.ts`.
+project cannot replace the authenticated stock adapter.
 
 ## Kimi agent
 
@@ -146,9 +132,7 @@ auth = "subscription"
 
 Set `auth = "subscription"` to use the logged-in Kimi Code layout from
 `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`, or `~/.kimi-code`. Set `auth = "api-key"` to
-bill against Kimi/Moonshot-compatible API credentials; the default key name is
-`KIMI_API_KEY`; `MOONSHOT_API_KEY` is its automatic fallback, and
-`api_key_env = "MOONSHOT_API_KEY"` can select it explicitly. API-key mode writes
+bill through canonical `KIMI_API_KEY` with automatic `MOONSHOT_API_KEY` fallback. API-key mode writes
 the selected value into the supported Kimi provider `api_key` field in an
 isolated mode-`0600` config, rather than relying on an unused environment
 variable. The provider uses Kimi Code's open-platform default
@@ -217,9 +201,9 @@ DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,
 `https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
 competing Claude credentials and provider selectors, and uses an isolated
-`CLAUDE_CONFIG_DIR` (default `.ultrafuzz/deepseek-claude`) so unrelated Anthropic
+`CLAUDE_CONFIG_DIR` under the operator provider-home root so unrelated Anthropic
 credentials, routing, and session storage cannot take precedence. Project and
-managed Claude settings remain separate policy layers. Set `config_dir` under
+managed Claude settings sources are disabled. Set `config_dir` under
 `[agents.DeepSeekAgent]` to choose another isolated directory.
 The supported reasoning efforts are `low`, `high`, and `max`, and any other
 value is rejected before execution. See DeepSeek's
@@ -257,21 +241,22 @@ export OPENROUTER_API_KEY=...
 ultrafuzz run --agent OpenRouterAgent --model '~anthropic/claude-sonnet-latest:free'
 ```
 
-OpenRouter authentication is API-key only. `api_key_env` may name another
-environment variable, but the credential value is never written to config or
-run provenance. The generated adapter creates a mode-`0700` Codex home at
-`.ultrafuzz/openrouter-codex` by default, writes a mode-`0600` provider config
-that names the credential environment variable, and fixes its route to the official
-`https://openrouter.ai/api/v1` base URL. A configured `config_dir` selects a
-different adapter-managed Codex home; its `config.toml` is owned by this route.
+OpenRouter authentication is fixed to `OPENROUTER_API_KEY`; the key is never written to config or provenance. Its managed Codex home is under the operator provider-home root, and its route is fixed to `https://openrouter.ai/api/v1`.
 Competing provider credentials and ambient endpoint overrides are cleared from
 the model subprocess.
 
 Codex does not apply its provider request retry count to an HTTP 429 response.
-The adapter therefore retries an initial OpenRouter 429 up to four times with
-bounded exponential backoff and jitter. It stops retrying as soon as Codex
-emits any substantive model, tool, command, or file event, so work that may
-have changed the workspace is never replayed.
+The adapter therefore recovers from OpenRouter 429s for up to two minutes with
+exponential backoff, a 30-second base-delay cap, and up to 25% jitter. Before
+Codex emits substantive model, tool, command, or file activity, it starts a
+fresh attempt. After substantive activity, it captures Codex's exact thread ID
+and continues only with `codex exec resume` and a continuation prompt; it never
+replays the original task prompt or starts the task fresh against a workspace
+that may already have changed. Substantive progress in the resumed session
+starts a new recovery window, while the caller's total timeout continues to
+bound the whole operation. A missing or conflicting thread ID fails closed.
+If another complete backoff does not fit in the recovery window, no request is
+started at its deadline and the last provider rate-limit error is returned.
 
 The `model` value is an opaque OpenRouter catalogue ID. Ultrafuzz preserves it
 exactly through CLI overrides, resolved config, Codex `--model`, Modal launch
@@ -355,19 +340,19 @@ for prompt analysis today.
 
 ## Supported Environment Overrides
 
-| Variable                        | Effect                                                           |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                     |
-| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                  |
-| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                     |
-| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra variables forwarded to workflow processes. |
+| Variable                        | Effect                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                                 |
+| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                                      |
+| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                                   |
+| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                                      |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |
 
 Ultrafuzz automatically forwards only the credentials configured for active
 agents plus normal runtime essentials. Use `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` for
-deliberate workflow inputs such as RPC URLs or Foundry profiles. This is secret
-hygiene, not an agent sandbox; the trusted local execution model remains
-unchanged.
+deliberate non-secret workflow inputs such as Foundry profiles or
+credential-free RPC URLs. This is secret hygiene, not an agent sandbox; the
+trusted local execution model remains unchanged.
 
 ## Redaction
 

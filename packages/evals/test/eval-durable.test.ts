@@ -51,6 +51,7 @@ import {
   validateEvalJsonSchema
 } from "../src/eval-schema-registry.js";
 import { assertEvalSemanticGateRegistry, executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
+import { MAX_EVAL_PARALLEL_RUNS, MAX_EVAL_PARALLEL_TARGETS } from "../src/suite.js";
 import type { EvalFindingScore, FindingJudgeResult, HumanReviewQueueItem } from "../src/types.js";
 import {
   currentEvalRunRecord,
@@ -258,6 +259,20 @@ describe("eval durable schema registry", () => {
         findingsCountByNode: {}
       })
     ).toBeDefined();
+  });
+
+  it("keeps durable run-manifest concurrency limits aligned with suite planning", () => {
+    const manifest = canonicalFixtures().manifest;
+    manifest.suite.run.max_parallel_targets = MAX_EVAL_PARALLEL_TARGETS;
+    manifest.suite.run.max_parallel_runs = MAX_EVAL_PARALLEL_RUNS;
+    expect(validateEvalJsonSchema(EVAL_RUN_MANIFEST_SCHEMA_ID, manifest)).toMatchObject({ ok: true, issues: [] });
+
+    manifest.suite.run.max_parallel_targets += 1;
+    expect(validateEvalJsonSchema(EVAL_RUN_MANIFEST_SCHEMA_ID, manifest)).toMatchObject({ ok: false });
+
+    manifest.suite.run.max_parallel_targets = MAX_EVAL_PARALLEL_TARGETS;
+    manifest.suite.run.max_parallel_runs += 1;
+    expect(validateEvalJsonSchema(EVAL_RUN_MANIFEST_SCHEMA_ID, manifest)).toMatchObject({ ok: false });
   });
 
   it("accepts run audit lineage fields while rejecting unknown run-record fields", () => {

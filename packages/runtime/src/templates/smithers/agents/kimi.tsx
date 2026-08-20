@@ -25,6 +25,7 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import { KimiAgent as SmithersKimiAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { parseStrictJson, parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
@@ -163,14 +164,11 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     this.pendingFailureUsage = undefined;
     const opts = this.opts as KimiCode029Options;
     const knownSession = configuredSession(params, opts);
+    const apiKey = opts.ultrafuzzAuthMode === "api-key" ? requiredApiKey(opts.apiKey) : undefined;
     const apiKeyConfigDir =
-      opts.ultrafuzzAuthMode === "api-key"
-        ? createKimiApiKeyConfigDir(
-            opts.model ?? this.model,
-            opts.ultrafuzzReasoningEffort,
-            requiredApiKey(opts.apiKey)
-          )
-        : undefined;
+      apiKey === undefined
+        ? undefined
+        : createKimiApiKeyConfigDir(opts.model ?? this.model, opts.ultrafuzzReasoningEffort);
     const configuredSourceDir = opts.configDir;
     const buildOnlyConfigDir =
       apiKeyConfigDir === undefined && configuredSourceDir !== undefined
@@ -236,10 +234,24 @@ export class KimiCode029Agent extends SmithersKimiAgent {
       this.activeRuntimeHome = undefined;
       this.activeUsageBaseline = undefined;
     });
+    let env: Record<string, string>;
+    try {
+      env = workflowControlChildEnvironment(kimiCommandEnv(command.env, runtimeHome, apiKey), process.env, {
+        agent: "KimiAgent",
+        // API-key mode executes a generated isolated config, never the
+        // operator provider-home config used for subscription auth.
+        ...(opts.ultrafuzzAuthMode === "subscription" && configuredSourceDir !== undefined
+          ? { configDir: configuredSourceDir }
+          : {})
+      });
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
     return {
       ...command,
       args: kimiCode029Args(command.args, knownSession),
-      env: workflowControlChildEnvironment(kimiCommandEnv(command.env, runtimeHome)),
+      env,
       cleanup,
       benignStderrPatterns: [
         ...(command.benignStderrPatterns ?? []),
@@ -281,12 +293,13 @@ function kimiAuthOptions(reasoningEffort: KimiReasoningEffort): KimiAuthOptions 
     const apiKey = requiredEnv(config.api_key_env ?? "KIMI_API_KEY");
     return {
       apiKey,
+      configDir: resolveProviderHome("kimi", config.config_dir),
       ultrafuzzAuthMode: "api-key",
       ultrafuzzReasoningEffort: reasoningEffort
     };
   }
   if (auth === "subscription") {
-    const configDir = resolveConfigDir(config.config_dir ?? defaultKimiConfigDir());
+    const configDir = resolveProviderHome("kimi", config.config_dir);
     return {
       ultrafuzzAuthMode: "subscription",
       configDir,
@@ -315,17 +328,6 @@ function requiredEnv(name: string): string {
   throw new Error(`agents.KimiAgent auth is api-key, but none of ${names.join(", ")} are set`);
 }
 
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.KimiAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
-}
-
-function defaultKimiConfigDir(): string {
-  return process.env.KIMI_CODE_HOME ?? process.env.KIMI_SHARE_DIR ?? path.join(os.homedir(), ".kimi-code");
-}
-
 function kimiExtraArgs(options: KimiTaskOptions): string[] {
   return (options.addDir ?? []).flatMap((directory) => ["--add-dir", directory]);
 }
@@ -345,11 +347,7 @@ function requiredApiKey(value: string | undefined): string {
   return value;
 }
 
-function createKimiApiKeyConfigDir(
-  model: string | undefined,
-  reasoningEffort: KimiReasoningEffort,
-  apiKey: string
-): string {
+function createKimiApiKeyConfigDir(model: string | undefined, reasoningEffort: KimiReasoningEffort): string {
   const alias = model?.trim() || "kimi-k3";
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(alias)) {
     throw new Error(`KimiAgent model is not a safe Kimi Code alias: ${alias}`);
@@ -362,7 +360,6 @@ function createKimiApiKeyConfigDir(
     "",
     '[providers."ultrafuzz-kimi-api"]',
     'type = "kimi"',
-    `api_key = ${tomlString(apiKey)}`,
     `base_url = ${tomlString(kimiApiBaseUrl())}`,
     "",
     `[models.${tomlString(alias)}]`,
@@ -418,7 +415,7 @@ function tomlArray(values: readonly string[]): string {
 function materializeKimiSharedAuthHome(source: string): string {
   const explicit = process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME?.trim();
   if (explicit === undefined || explicit === "") return source;
-  const shared = resolveConfigDir(explicit);
+  const shared = resolveOperatorProviderPath(explicit);
   if (path.resolve(shared) === path.resolve(source)) return source;
   return withKimiSharedAuthLock(shared, () => {
     mkdirSync(shared, { recursive: true, mode: 0o700 });
@@ -647,11 +644,19 @@ function kimiSessionStoreDir(
   apiKeyConfigDir: string | undefined
 ): string | undefined {
   const explicit = process.env.ULTRAFUZZ_KIMI_SESSION_HOME?.trim();
-  if (explicit !== undefined && explicit !== "") return resolveConfigDir(explicit);
+  if (explicit !== undefined && explicit !== "") return resolveOperatorProviderPath(explicit);
   const modalRoot = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT?.trim();
-  if (modalRoot !== undefined && modalRoot !== "") return path.join(resolveConfigDir(modalRoot), "kimi-code");
+  if (modalRoot !== undefined && modalRoot !== "")
+    return path.join(resolveOperatorProviderPath(modalRoot), "kimi-code");
   if (apiKeyConfigDir !== undefined) return path.resolve(process.cwd(), ".ultrafuzz", "kimi-code");
   return configuredSourceDir;
+}
+
+function resolveOperatorProviderPath(value: string): string {
+  if (value.trim() === "" || !path.isAbsolute(value)) {
+    throw new Error("operator-supplied Kimi provider paths must be absolute");
+  }
+  return path.resolve(value);
 }
 
 interface KimiSessionIndexEntry {
@@ -1396,11 +1401,16 @@ function kimiCode029Args(args: string[], knownSession: string | undefined): stri
 
 function kimiCommandEnv(
   commandEnv: KimiCommand["env"],
-  isolatedConfigDir: string | undefined
+  isolatedConfigDir: string | undefined,
+  apiKey: string | undefined
 ): KimiCommandEnv | undefined {
   const configDir = isolatedConfigDir ?? commandEnv?.KIMI_SHARE_DIR;
-  if (configDir === undefined) return commandEnv;
-  return { ...commandEnv, KIMI_CODE_HOME: configDir, KIMI_SHARE_DIR: configDir };
+  if (configDir === undefined && apiKey === undefined) return commandEnv;
+  return {
+    ...commandEnv,
+    ...(configDir === undefined ? {} : { KIMI_CODE_HOME: configDir, KIMI_SHARE_DIR: configDir }),
+    ...(apiKey === undefined ? {} : { KIMI_API_KEY: apiKey })
+  };
 }
 
 function combineCleanup(

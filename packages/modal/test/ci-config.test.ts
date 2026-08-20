@@ -694,31 +694,37 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("uses a fast draft lane and cancels superseded CI work for the same pull request", () => {
+  it("uses a fast PR lane and reserves full release validation for integration events", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
       on: {
         push: { branches: string[] };
         pull_request: { types: string[] };
+        workflow_dispatch: null;
       };
       concurrency: { group: string; "cancel-in-progress": boolean };
       jobs: Record<
         string,
         {
+          name?: string;
           if?: string;
           needs?: string[];
           "timeout-minutes"?: number | string;
           strategy?: {
             "fail-fast": boolean;
             "max-parallel": number;
-            matrix: { include: Array<{ lane: string; gates: string; timeout_minutes: number }> };
+            matrix: {
+              include: Array<{ lane: string; description: string; gates: string; timeout_minutes: number }>;
+            };
           };
-          steps: Array<{ name?: string; if?: string; run?: string }>;
+          steps: Array<{ name?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown> }>;
         }
       >;
     };
 
     expect(workflow.on.push.branches).toEqual(["main"]);
+    expect(workflow.on).not.toHaveProperty("merge_group");
+    expect(workflow.on.workflow_dispatch).toBeNull();
     expect(workflow.on.pull_request.types).toEqual([
       "opened",
       "synchronize",
@@ -730,13 +736,36 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
 
-    const steps = workflow.jobs["draft-and-build-gates"]?.steps ?? [];
-    for (const name of ["Check formatting", "Lint", "Build"]) {
+    const draftAndBuild = workflow.jobs["draft-and-build-gates"];
+    expect(draftAndBuild?.name).toBe(
+      "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
+    );
+    const steps = draftAndBuild?.steps ?? [];
+    const bunSetup = steps.find((step) => step.name === "Set up Bun");
+    expect(bunSetup?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+    expect(bunSetup?.with?.["bun-version"]).toBe("1.3.14");
+    for (const name of [
+      "Test CI policy scripts",
+      "Enforce production dependency advisory policy",
+      "Check formatting",
+      "Lint",
+      "Build"
+    ]) {
       expect(steps.find((step) => step.name === name)?.if, `${name} must run for drafts`).toBeUndefined();
     }
-    const fullLane = "github.event_name == 'push' || github.event.pull_request.draft == false";
+    expect(steps.find((step) => step.name === "Test CI policy scripts")?.run).toBe("pnpm -w test:ci-scripts");
+    expect(steps.find((step) => step.name === "Enforce production dependency advisory policy")?.run).toBe(
+      "pnpm -w security:dependency-advisories"
+    );
+    const runtimeSmoke = steps.find((step) => step.name === "Run PR runtime smoke tests");
+    expect(runtimeSmoke?.if).toBe("github.event_name == 'pull_request'");
+    expect(runtimeSmoke?.run).toBe("pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt");
+
+    expect(workflow.jobs).not.toHaveProperty("pull-request-validation");
+
     const releaseValidation = workflow.jobs["release-validation"];
-    expect(releaseValidation?.if).toBe(fullLane);
+    expect(releaseValidation?.name).toBe("Full release validation (${{ matrix.description }})");
+    expect(releaseValidation?.if).toBe("github.event_name != 'pull_request'");
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
       "max-parallel": 7,
@@ -744,42 +773,50 @@ describe("public Modal benchmark configuration", () => {
         include: [
           {
             lane: "package-gates",
-            gates: "docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
+            description: "Package, dependency, and policy gates",
+            gates:
+              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
             timeout_minutes: 30,
             build_modal_dependencies: true
           },
           {
             lane: "runtime-supporting",
+            description: "Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts",
             gates: "runtime-supporting",
             timeout_minutes: 75,
             build_modal_dependencies: true
           },
           {
             lane: "runtime-1",
+            description: "Node.js 24 runtime integration tests, shard 1/4",
             gates: "runtime-1",
             timeout_minutes: 75,
             build_modal_dependencies: true
           },
           {
             lane: "runtime-2",
+            description: "Node.js 24 runtime integration tests, shard 2/4",
             gates: "runtime-2",
             timeout_minutes: 75,
             build_modal_dependencies: true
           },
           {
             lane: "runtime-3",
+            description: "Node.js 24 runtime integration tests, shard 3/4",
             gates: "runtime-3",
             timeout_minutes: 75,
             build_modal_dependencies: true
           },
           {
             lane: "runtime-4",
+            description: "Node.js 24 runtime integration tests, shard 4/4",
             gates: "runtime-4",
             timeout_minutes: 75,
             build_modal_dependencies: true
           },
           {
             lane: "cli-typecheck",
+            description: "CLI tests, benchmark history, and workspace typecheck",
             gates: "cli,benchmark-history,workspace-typecheck",
             timeout_minutes: 30
           }
@@ -801,6 +838,17 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
     expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    for (const name of [
+      "Check out repository",
+      "Set up pnpm",
+      "Set up Node.js",
+      "Install dependencies",
+      "Build release reporter dependencies",
+      "Download release validation lanes",
+      "Merge release validation report"
+    ]) {
+      expect(releaseGates?.steps.find((step) => step.name === name)?.if).toBe("github.event_name != 'pull_request'");
+    }
     expect(releaseGates?.steps.find((step) => step.name === "Install dependencies")?.run).toBe(
       "pnpm install --frozen-lockfile"
     );
@@ -809,6 +857,12 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(releaseGates?.steps.find((step) => step.name === "Merge release validation report")?.run).toContain(
       "--merge-report-dir"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Require release validation lanes")?.if).toContain(
+      "github.event_name != 'pull_request'"
+    );
+    expect(releaseGates?.steps.find((step) => step.name === "Upload release validation report")?.if).toBe(
+      "always() && github.event_name != 'pull_request'"
     );
   });
 

@@ -372,6 +372,8 @@ export interface StrictModalNodeInputDocument {
   run_id: string;
   task_id: string;
   attempt_id: string;
+  source_revision?: string;
+  source_ref?: string;
   execution_generation: string;
   execution_snapshot_root: string;
   workflow_path: string;

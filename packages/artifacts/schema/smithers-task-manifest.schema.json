@@ -25,6 +25,16 @@
       "maxLength": 4096,
       "pattern": "^[^\\u0000]+$"
     },
+    "source_revision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "source_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
     "pinned_submodules": {
       "anyOf": [
         { "type": "null" },
@@ -191,6 +201,16 @@
             "minLength": 1,
             "maxLength": 4096,
             "pattern": "^[^\\u0000]+$"
+          },
+          "sourceRevision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "sourceRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
           },
           "dependencies": {
             "type": "array",
@@ -608,6 +628,16 @@
                   },
                   "trustModel": {
                     "const": "skip-permissions"
+                  },
+                  "sourceRevision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "sourceRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
                   }
                 }
               },

@@ -27,6 +27,7 @@ import {
   sealWorkflowControlFiles,
   verifyWorkflowControlSnapshot
 } from "../src/workflow-integrity.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
@@ -56,6 +57,30 @@ nodes:
 `,
     "utf8"
   );
+}
+
+function writeTrustedNpmLauncher(root: string): string {
+  const binDir = path.join(root, "trusted-bin");
+  const launcher = path.join(binDir, process.platform === "win32" ? "npm-cli.js" : "npm");
+  const npmCli = fs.realpathSync(
+    path.join(
+      path.dirname(process.execPath),
+      ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
+    )
+  );
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    launcher,
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, [${JSON.stringify(npmCli)}, ...process.argv.slice(2)], { stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
+    "utf8"
+  );
+  fs.chmodSync(launcher, 0o555);
+  return binDir;
 }
 
 test("sealed recursive submodules hydrate a real task worktree without child Git metadata", (context) => {
@@ -503,15 +528,18 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
 
 test("pinned local and cloud compilation carry the exact manifest through sealed execution closures", async (context) => {
   const fixture = nestedSubmoduleFixture();
+  const npmInstaller = writeFakeNpmInstaller(fixture.source);
   context.after(() => {
     makeTreeWritable(fixture.root);
     fs.rmSync(fixture.root, { recursive: true, force: true });
+    fs.rmSync(npmInstaller.binDir, { recursive: true, force: true });
   });
 
   const snapshot = capturePinnedSubmoduleSnapshot(fixture.source);
   assert.ok(snapshot !== undefined);
   const manifestPath = writePinnedSubmoduleSnapshot(fixture.source, snapshot);
   const expectation = pinnedSubmoduleExpectation(snapshot);
+  const trustedBin = writeTrustedNpmLauncher(fixture.root);
   removeChildGitMetadata(fixture.source, snapshot.top_level_roots);
 
   const initialized = initProject({ projectRoot: fixture.source, force: true });
@@ -533,9 +561,11 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.ok(workflowSource.includes(expectation.manifest_sha256));
   assert.match(workflowSource, /"pinnedSubmodules": \{/u);
 
-  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
-    SMITHERS_BIN: "/bin/true"
-  });
+  const executionEnvironment = {
+    SMITHERS_BIN: "/bin/true",
+    ULTRAFUZZ_TRUSTED_BIN: trustedBin
+  };
+  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
   const pinnedPaths = executionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
@@ -563,11 +593,19 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, plan.value!.layout);
+  assert.deepEqual(
+    verifiedControl.executionFiles
+      .filter((file) => file.snapshotPath.startsWith("controls/bun"))
+      .map((file) => file.snapshotPath),
+    ["controls/bun-module-confinement.js", "controls/bunfig.toml"]
+  );
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,
     snapshot: verifiedControl
   });
+  assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
+  assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
   assert.equal(
     sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
     expectation.manifest_sha256
@@ -598,7 +636,7 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   const cloudPlan = await planRun({
     projectRoot: fixture.source,
     runId: "pinned-cloud-only",
-    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret" }
+    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret", ULTRAFUZZ_PROVIDER_HOME_ROOT: fixture.root }
   });
   assert.equal(cloudPlan.ok, true, JSON.stringify(cloudPlan.diagnostics));
   const cloudCompiled = compileSmithersWorkflow({
@@ -615,9 +653,11 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   const cloudTaskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(cloudCompiled.tasksPath));
   assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
 
-  const cloudExecutionFiles = await smithersExecutionControlFiles(cloudCompiled, cloudPlan.value!.layout, {
-    SMITHERS_BIN: "/bin/true"
-  });
+  const cloudExecutionFiles = await smithersExecutionControlFiles(
+    cloudCompiled,
+    cloudPlan.value!.layout,
+    executionEnvironment
+  );
   const cloudPinnedPaths = cloudExecutionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
