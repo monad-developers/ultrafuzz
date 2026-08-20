@@ -125,6 +125,8 @@ api_key_env = "DEEPSEEK_API_KEY"
 # unreachable and the agent would run unauthenticated. config_dir relocates the
 # state root; it is the XDG parent, so pointing it at ~/.config/opencode or
 # ~/.local/share/opencode picks nothing up.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
 
 [agents.PiAgent]
 # The pi CLI is API-key only here: the generated adapter fixes the provider to
