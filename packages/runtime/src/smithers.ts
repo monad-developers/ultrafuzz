@@ -19,6 +19,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { invariantPropertyPrioritySelection, resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
+import { loadAgentPreambleTemplate, renderAgentPreambleTemplate } from "@ultrafuzz/prompts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -4089,20 +4090,11 @@ export { topologyRuntimeBudgetForTimeout };
 export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   const { timeoutSeconds, finalizationReserveSeconds, workingBudgetSeconds } =
     topologyRuntimeBudgetForTimeout(timeoutMs);
-  return [
-    "## Topology Runtime Context",
-    "",
-    `- Timeout: ${timeoutSeconds} seconds total.`,
-    `- Finalization reserve: ${finalizationReserveSeconds} seconds.`,
-    `- Working budget before finalization: ${workingBudgetSeconds} seconds.`,
-    "- You have shell access, so you have a clock: run `date -u +%s` once at the very start of this node and keep that value as your node start epoch.",
-    `- Absolute working-budget deadline (UTC) = node start epoch + ${workingBudgetSeconds}. Absolute hard deadline (UTC) = node start epoch + ${timeoutSeconds}. Resolve both once at startup and record them in your notes, for example with \`date -u -d "+${workingBudgetSeconds} seconds" +%Y-%m-%dT%H:%M:%SZ\` and \`date -u -d "+${timeoutSeconds} seconds" +%Y-%m-%dT%H:%M:%SZ\`.`,
-    "- These are absolute timestamps rather than durations on purpose. Re-read the current time with `date -u +%s` (or `date -u`) before each expensive step and compare it against those two values instead of estimating how long you have been running.",
-    "- The deadlines are computed by you at startup and not printed here because this block is part of the hash-sealed workflow and cannot contain a wall-clock value.",
-    "- Stop starting new delegated or tool work when the finalization reserve begins.",
-    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
-    "- Crossing the hard deadline kills this node with no output at all, which is strictly worse than a complete, cleanly written negative result."
-  ].join("\n");
+  return renderAgentPreambleTemplate("topology-runtime-context", {
+    timeout_seconds: String(timeoutSeconds),
+    finalization_reserve_seconds: String(finalizationReserveSeconds),
+    working_budget_seconds: String(workingBudgetSeconds)
+  });
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
@@ -4162,6 +4154,12 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     2
   );
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
+    __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__: JSON.stringify(loadAgentPreambleTemplate("agent-prompt")),
+    __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__: JSON.stringify(
+      renderAgentPreambleTemplate("authorized-defensive-security-context")
+    ),
+    __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
+    __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__: JSON.stringify(loadAgentPreambleTemplate("retry-failure")),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),
