@@ -268,6 +268,59 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
+type GeneratedOpenCodeCommand = {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+};
+
+type GeneratedOpenCodeAgent = {
+  opts: { env: Record<string, string>; extraArgs?: string[]; variant?: string; yolo?: boolean };
+  buildCommand(params: {
+    prompt: string;
+    cwd: string;
+    options: Record<string, unknown>;
+  }): Promise<GeneratedOpenCodeCommand>;
+};
+
+async function loadGeneratedOpenCodeAgent(project: string): Promise<{
+  createOpenCodeAgent(options?: Record<string, unknown>): GeneratedOpenCodeAgent;
+}> {
+  const fixture = path.join(project, "opencode-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const openCodeSource = fs
+    .readFileSync(path.join(agentsDir, "opencode.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  fs.writeFileSync(path.join(fixture, "opencode.mjs"), transpile(openCodeSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  return (await import(pathToFileURL(path.join(fixture, "opencode.mjs")).href)) as {
+    createOpenCodeAgent(options?: Record<string, unknown>): GeneratedOpenCodeAgent;
+  };
+}
+
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
@@ -1268,18 +1321,21 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/opencode.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
   assert.match(agentsIndexText, /export \{ createDeepSeekAgent \} from ".\/deepseek";/);
   assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
+  assert.match(agentsIndexText, /export \{ createOpenCodeAgent \} from ".\/opencode";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*DeepSeekAgent: createDeepSeekAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*OpenCodeAgent: createOpenCodeAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi|OpenCode)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -1326,6 +1382,39 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(kimiAgentText, /--thinking/);
   assert.doesNotMatch(kimiAgentText, /--no-thinking/);
   assert.doesNotMatch(kimiAgentText, /final-message-only/);
+
+  const openCodeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/opencode.ts"), "utf8");
+  assert.match(openCodeAgentText, /OpenCodeAgent as SmithersOpenCodeAgent/);
+  assert.match(openCodeAgentText, /createOpenCodeAgent/);
+  assert.match(openCodeAgentText, /class CompatibleOpenCodeAgent extends SmithersOpenCodeAgent/);
+  assert.match(openCodeAgentText, /override async buildCommand/);
+  assert.match(openCodeAgentText, /extraArgs: \["--pure"\]/);
+  assert.match(openCodeAgentText, /yolo: true/);
+  assert.match(openCodeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  // Isolation is only real if every state root is named: an unnamed root is
+  // inherited and lands in the operator's home.
+  for (const name of [
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DISABLE_AUTOUPDATE",
+    "OPENCODE_DISABLE_SHARE",
+    "OPENCODE_DISABLE_MODELS_FETCH",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+    "OPENCODE_DISABLE_PROJECT_CONFIG",
+    "OPENCODE_DISABLE_LSP_DOWNLOAD"
+  ]) {
+    assert.match(openCodeAgentText, new RegExp(`${name}:`, "u"), `${name} is not pinned by the OpenCode adapter`);
+  }
+  // The adapter stays tight: it delegates argv, prompt assembly, output
+  // interpretation, usage accounting, and session handling to Smithers.
+  assert.doesNotMatch(openCodeAgentText, /=\s*createOpenCodeAgent\(\)/);
+  assert.doesNotMatch(openCodeAgentText, /createOutputInterpreter|override async generate|override stream/);
+  assert.doesNotMatch(openCodeAgentText, /mkdirSync|writeFileSync|rmSync/);
+  assert.doesNotMatch(openCodeAgentText, /model:\s*"openrouter\//);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -2727,6 +2816,208 @@ test(
     }
     assert.ok(failure instanceof Error);
     assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
+  }
+);
+
+/**
+ * Isolation for OpenCode is not implicit. `workflowControlChildEnvironment`
+ * returns a delta layered over the inherited environment, so any state root the
+ * adapter does not name by hand stays pointed at the operator's real home --
+ * which is exactly how an earlier ten-seat run wrote OpenCode's config
+ * directory, database, snapshots and downloaded binaries there.
+ */
+test(
+  "generated OpenCode adapter scopes every harness state root to the run and keeps the credential out of argv",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-isolation");
+    const artifactDir = path.join(runRoot, "artifacts", "recon");
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "opencode-test-key";
+    try {
+      const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+      const agent = createOpenCodeAgent({
+        model: "openrouter/anthropic/claude-opus-4-8",
+        reasoningEffort: "high",
+        addDir: [artifactDir]
+      });
+      const stateRoot = path.join(runRoot, "opencode");
+      assert.deepEqual(agent.opts.extraArgs, ["--pure"]);
+      assert.equal(agent.opts.yolo, true);
+      assert.equal(agent.opts.variant, "high");
+      assert.equal(agent.opts.env.XDG_CONFIG_HOME, path.join(stateRoot, "config"));
+      assert.equal(agent.opts.env.XDG_DATA_HOME, path.join(stateRoot, "data"));
+      assert.equal(agent.opts.env.XDG_CACHE_HOME, path.join(stateRoot, "cache"));
+      assert.equal(agent.opts.env.XDG_STATE_HOME, path.join(stateRoot, "state"));
+      assert.equal(agent.opts.env.XDG_RUNTIME_DIR, path.join(stateRoot, "runtime"));
+      assert.equal(agent.opts.env.OPENCODE_CONFIG_DIR, path.join(stateRoot, "config", "opencode"));
+      for (const name of [
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_DISABLE_SHARE",
+        "OPENCODE_DISABLE_MODELS_FETCH",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_LSP_DOWNLOAD"
+      ]) {
+        assert.equal(agent.opts.env[name], "1", `${name} was not suppressed`);
+      }
+      // No state root may resolve inside the operator's home.
+      for (const name of [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "OPENCODE_CONFIG_DIR"
+      ]) {
+        const value = agent.opts.env[name] ?? "";
+        assert.equal(value.startsWith(runRoot), true, `${name} escaped the run root: ${value}`);
+        assert.equal(
+          path.relative(os.homedir(), value).startsWith(".."),
+          true,
+          `${name} resolves inside the operator home: ${value}`
+        );
+      }
+      // The credential reaches the child environment and never the argv.
+      assert.equal(agent.opts.env.OPENROUTER_API_KEY, "opencode-test-key");
+      const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      assert.equal(command.command, "opencode");
+      assert.equal(command.args.includes("--pure"), true);
+      assert.equal(
+        command.args.some((argument) => argument.includes("opencode-test-key")),
+        false,
+        "credential leaked into the OpenCode argv"
+      );
+      // The subclass override is the only one: everything else -- argv, prompt
+      // assembly, output interpretation, usage, sessions -- stays with Smithers.
+      assert.equal(command.args.includes("-m"), true);
+      assert.equal(command.args.includes("openrouter/anthropic/claude-opus-4-8"), true);
+      // Controller-only capabilities are withheld, proving the command env went
+      // through workflowControlChildEnvironment.
+      for (const name of [
+        "ULTRAFUZZ_CONFIG_PATH",
+        "ULTRAFUZZ_RUNTIME_MODULE",
+        "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH",
+        "SMITHERS_BIN"
+      ]) {
+        assert.equal(command.env?.[name], "", `${name} escaped into the OpenCode child environment`);
+      }
+
+      // Without an artifact directory the state root still stays project-local.
+      const bare = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4-8" });
+      assert.equal(bare.opts.env.XDG_CONFIG_HOME, path.join(process.cwd(), ".ultrafuzz", "opencode", "config"));
+
+      delete process.env.OPENROUTER_API_KEY;
+      assert.throws(
+        () => createOpenCodeAgent({ addDir: [artifactDir] }),
+        /agents\.OpenCodeAgent auth is api-key, but OPENROUTER_API_KEY is not set/u
+      );
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.key;
+    }
+  }
+);
+
+/**
+ * OpenCodeAgent grants blanket tool approval by setting OPENCODE_PERMISSION from
+ * its own `buildCommand`. The scrub must merge over that value: replacing it
+ * would silently restore permission prompts nobody is there to answer.
+ */
+test(
+  "generated OpenCode adapter preserves the agent's own yolo permission env through the scrub",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENROUTER_API_KEY };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "opencode-test-key";
+    try {
+      const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+      const agent = createOpenCodeAgent({ model: "openrouter/anthropic/claude-opus-4-8" });
+      const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      assert.equal(command.env?.OPENCODE_PERMISSION, '{"*":"allow"}');
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.key;
+    }
+  }
+);
+
+/**
+ * The filesystem proof: run the real OpenCode CLI with HOME pointed at a
+ * throwaway root and assert it created nothing under any of OpenCode's default
+ * per-user locations. Skipped where the CLI is not installed; the env contract
+ * above is asserted unconditionally.
+ */
+test(
+  "generated OpenCode adapter writes no harness state under a redirected home",
+  { skip: !runningUnderBun },
+  async () => {
+    const openCodeVersion = spawnSync("opencode", ["--version"], { encoding: "utf8" });
+    if (openCodeVersion.status !== 0) return;
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-home-"));
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-home");
+    const artifactDir = path.join(runRoot, "artifacts", "recon");
+    const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENROUTER_API_KEY };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "opencode-invalid-test-key";
+    try {
+      const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+      const agent = createOpenCodeAgent({
+        model: "openrouter/anthropic/claude-opus-4-8",
+        addDir: [artifactDir]
+      });
+      const command = await agent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      const childEnv: Record<string, string> = {};
+      for (const [name, value] of Object.entries(process.env)) {
+        if (value !== undefined) childEnv[name] = value;
+      }
+      spawnSync(command.command, command.args, {
+        cwd: project,
+        encoding: "utf8",
+        env: { ...childEnv, HOME: home, ...agent.opts.env, ...command.env },
+        timeout: 60_000
+      });
+      // Every default per-user location OpenCode would otherwise populate.
+      for (const relative of [
+        [".config", "opencode"],
+        [".local", "share", "opencode"],
+        [".local", "state", "opencode"],
+        [".cache", "opencode"]
+      ]) {
+        const leaked = path.join(home, ...relative);
+        assert.equal(fs.existsSync(leaked), false, `OpenCode wrote harness state to ${leaked}`);
+      }
+      assert.equal(fs.existsSync(path.join(runRoot, "opencode")), true, "no run-scoped OpenCode state root was used");
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.key;
+      fs.rmSync(home, { force: true, recursive: true });
+    }
   }
 );
 
@@ -5203,8 +5494,9 @@ test("init reports an agent registry that does not export a generated agent", as
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, and KimiAgent
-  // existed: the registry predates the adapters, and init preserves project-owned files.
+  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent, and
+  // OpenCodeAgent existed: the registry predates the adapters, and init preserves
+  // project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
@@ -5217,11 +5509,12 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 3, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 4, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
 
   // A registry that names Claude, DeepSeek, and Kimi without registering their
   // factories is still stale: nothing resolves it, since generated adapters export
@@ -5236,10 +5529,11 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 3, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 4, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
 
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });

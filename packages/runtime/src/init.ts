@@ -65,6 +65,14 @@ const AGENT_TEMPLATES = [
       "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
       "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f"
     ])
+  },
+  {
+    file: "opencode.ts",
+    template: "smithers/agents/opencode.tsx",
+    ref: "OpenCodeAgent",
+    // No shipped digest: the adapter is new, so there is no earlier stock byte
+    // sequence a project could be holding that init may overwrite in place.
+    stockSha256: new Set<string>()
   }
 ] as const;
 

@@ -228,6 +228,50 @@ subscription plan cannot supply a zero or unrelated rate. The current
 DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
 million cache-hit input tokens, and $0.87 per million output tokens.
 
+## OpenCode agent
+
+`ultrafuzz init` also generates a dedicated `OpenCodeAgent`. It is opt-in and
+non-default: nothing selects it until a topology group or `--agent` names it.
+The default root config includes an opt-in OpenCode profile:
+
+```toml
+[models.opencode]
+agent = "OpenCodeAgent"
+model = "openrouter/anthropic/claude-opus-4-8"
+
+[agents.OpenCodeAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The adapter runs the installed OpenCode CLI with `--pure`, so no external
+plugin is loaded, and with OpenCode's permission checks bypassed, matching
+`permissions.trust_model = "skip-permissions"`. OpenCode addresses models as
+`provider/model` and resolves the identifier against its own catalogue, so the
+profile's `model` is opaque to Ultrafuzz; a profile `reasoning` value is passed
+through as OpenCode's provider-defined variant rather than a fixed effort
+ladder. `api-key` auth places the named variable in the child environment only
+— OpenCode reads provider credentials from the environment and emits no
+credential flag, so the key never appears in a command line, a process listing,
+or a log. `subscription` auth places no credential and uses whatever OpenCode
+already holds under its state root.
+
+**Run-scoped state.** OpenCode otherwise writes its config directory, database
+and write-ahead log, snapshots, tool output, cached model catalogue, and
+downloaded binaries into the operator's real home. The adapter names every one
+of those roots explicitly — `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and
+`OPENCODE_CONFIG_DIR` — under a directory belonging to the run, and disables
+autoupdate, session sharing, model-catalogue fetch, default plugins, project
+config, and LSP downloads. A child process is not implicitly sandboxed: a root
+left unnamed is inherited, which is why the list is explicit rather than
+derived. Set `config_dir` under `[agents.OpenCodeAgent]` to anchor that state
+somewhere else — for example at an OpenCode configuration directory that
+already holds subscription credentials.
+
+`ultrafuzz doctor` requires the `opencode` executable whenever a selected
+profile uses `OpenCodeAgent`.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml
