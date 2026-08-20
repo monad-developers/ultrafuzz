@@ -271,8 +271,8 @@ profile's `model` is opaque to Ultrafuzz; a profile `reasoning` value is passed
 through as OpenCode's provider-defined variant rather than a fixed effort
 ladder. `api-key` auth places the named variable in the child environment only
 — OpenCode reads provider credentials from the environment and emits no
-credential flag, so the key never appears in a command line, a process listing,
-or a log. `auth = "subscription"` is **rejected**: OpenCode reads `auth.json`
+credential flag, so the key never appears in a command line or a process
+listing. `auth = "subscription"` is **rejected**: OpenCode reads `auth.json`
 from `$XDG_DATA_HOME/opencode`, and the adapter always relocates
 `XDG_DATA_HOME` into the run, so a subscription login held in the operator's
 home is unreachable by construction. Building an agent from it would produce a

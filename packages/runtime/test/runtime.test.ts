@@ -2833,7 +2833,7 @@ test(
  * directory, database, snapshots and downloaded binaries there.
  */
 test(
-  "generated OpenCode adapter scopes every harness state root to the run and keeps the credential out of argv",
+  "generated OpenCode adapter scopes the harness state roots it names to the run and keeps the credential out of argv",
   // Bun's node:test shim ignores `skip` but honours `timeout`, and applies a
   // 5s default without one. `initProject` plus the transpile in
   // `loadGeneratedOpenCodeAgent` exceeds that on a cold cache.
@@ -2867,7 +2867,8 @@ test(
       assert.equal(agent.opts.env.XDG_STATE_HOME, path.join(stateRoot, "state"));
       assert.equal(agent.opts.env.XDG_RUNTIME_DIR, path.join(stateRoot, "runtime"));
       assert.equal(agent.opts.env.OPENCODE_CONFIG_DIR, path.join(stateRoot, "config", "opencode"));
-      // OpenCode shells out to npm and bun; those caches are separate roots.
+      // npm ignores the XDG base directories and falls back to ~/.npm, so this closes a
+      // real leak; bun already resolves under XDG_CACHE_HOME, so this only pins the path.
       assert.equal(agent.opts.env.npm_config_cache, path.join(stateRoot, "cache", "npm"));
       assert.equal(agent.opts.env.BUN_INSTALL_CACHE_DIR, path.join(stateRoot, "cache", "bun"));
       // OPENCODE_DB is resolved ahead of XDG_DATA_HOME and wins, so naming the
@@ -3043,7 +3044,7 @@ test(
 const openCodeCliInstalled = runningUnderBun && spawnSync("opencode", ["--version"], { encoding: "utf8" }).status === 0;
 const openCodeFilesystemProof = openCodeCliInstalled ? test : test.skip;
 openCodeFilesystemProof(
-  "generated OpenCode adapter writes no harness state under a redirected home",
+  "generated OpenCode adapter writes none of the named harness state roots under a redirected home",
   { timeout: 180_000 },
   async () => {
     const project = tempProject();

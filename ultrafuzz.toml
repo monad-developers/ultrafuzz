@@ -60,7 +60,9 @@ model = "deepseek-v4-pro"
 reasoning = "max"
 
 # Opt-in OpenCode profile. Select it per node/group in .ultrafuzz/topology.yml
-# (model_profiles = ["opencode"]), or for a one-off run with `--agent OpenCodeAgent`.
+# (model_profiles = ["opencode"]). `--agent OpenCodeAgent` does not select this
+# profile -- it overrides the default profile's agent and drops its model and
+# reasoning -- so pair it with `--model` for a one-off run.
 # OpenCode addresses models as `provider/model` and resolves the id against its
 # own catalogue; `reasoning` is passed through as the provider-defined variant.
 [models.opencode]
@@ -99,9 +101,10 @@ api_key_env = "DEEPSEEK_API_KEY"
 # The generated adapter runs the OpenCode CLI with `--pure` and points the
 # OpenCode state roots it names -- the XDG base directories, OPENCODE_CONFIG_DIR
 # and OPENCODE_DB, plus the npm and bun caches -- at a run-scoped directory, so
-# none of those roots resolves into your home. That is the list the adapter
-# names, not a guarantee that OpenCode has no other state root; docs/config.md
-# has the full list and the same caveat.
+# none of those roots resolves to a shared per-user location such as ~/.local/share
+# or ~/.npm. The roots are project-local, so they sit under the project directory
+# itself. That is the list the adapter names, not a guarantee that OpenCode has no
+# other state root; docs/config.md has the full list and the same caveat.
 # "api-key" reads OPENROUTER_API_KEY unless api_key_env names another variable,
 # and places it in the child environment only, never on the command line.
 # "subscription" is rejected: OpenCode reads auth.json from $XDG_DATA_HOME, which
