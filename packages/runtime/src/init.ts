@@ -70,6 +70,14 @@ const AGENT_TEMPLATES = [
     ])
   },
   {
+    file: "opencode.ts",
+    template: "smithers/agents/opencode.tsx",
+    ref: "OpenCodeAgent",
+    // No shipped digest: the adapter is new, so there is no earlier stock byte
+    // sequence a project could be holding that init may overwrite in place.
+    stockSha256: new Set<string>()
+  },
+  {
     file: "pi.ts",
     template: "smithers/agents/pi.tsx",
     ref: "PiAgent",

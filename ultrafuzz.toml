@@ -59,6 +59,16 @@ agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
+# Opt-in OpenCode profile. Select it per node/group in .ultrafuzz/topology.yml
+# (model_profiles = ["opencode"]). `--agent OpenCodeAgent` does not select this
+# profile -- it overrides the default profile's agent and drops its model and
+# reasoning -- so pair it with `--model` for a one-off run.
+# OpenCode addresses models as `provider/model` and resolves the id against its
+# own catalogue; `reasoning` is passed through as the provider-defined variant.
+[models.opencode]
+agent = "OpenCodeAgent"
+model = "openrouter/anthropic/claude-opus-4.8"
+
 # Opt-in Pi profile. Select it per node/group in .ultrafuzz/topology.yml
 # (model_profiles = ["pi"]), or for a one-off run with `--agent PiAgent`.
 # PiAgent always routes through OpenRouter, so `model` is an opaque OpenRouter
@@ -99,6 +109,24 @@ auth = "subscription"
 # routes the Claude Code harness to DeepSeek's Anthropic-compatible endpoint.
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
+
+[agents.OpenCodeAgent]
+# The generated adapter runs the OpenCode CLI with `--pure` and points the
+# OpenCode state roots it names -- the XDG base directories, OPENCODE_CONFIG_DIR
+# and OPENCODE_DB, plus the npm and bun caches -- at a run-scoped directory, so
+# none of those roots resolves to a shared per-user location such as ~/.local/share
+# or ~/.npm. The roots are project-local, so they sit under the project directory
+# itself. That is the list the adapter names, not a guarantee that OpenCode has no
+# other state root; docs/config.md has the full list and the same caveat.
+# "api-key" reads OPENROUTER_API_KEY unless api_key_env names another variable,
+# and places it in the child environment only, never on the command line.
+# "subscription" is rejected: OpenCode reads auth.json from $XDG_DATA_HOME, which
+# the adapter always relocates into the run, so a login held in your home is
+# unreachable and the agent would run unauthenticated. config_dir relocates the
+# state root; it is the XDG parent, so pointing it at ~/.config/opencode or
+# ~/.local/share/opencode picks nothing up.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
 
 [agents.PiAgent]
 # The pi CLI is API-key only here: the generated adapter fixes the provider to

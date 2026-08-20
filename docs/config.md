@@ -247,6 +247,76 @@ subscription plan cannot supply a zero or unrelated rate. The current
 DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
 million cache-hit input tokens, and $0.87 per million output tokens.
 
+## OpenCode agent
+
+`ultrafuzz init` also generates a dedicated `OpenCodeAgent`. It is opt-in and
+non-default: nothing selects it until a topology group or `--agent` names it.
+The default root config includes an opt-in OpenCode profile:
+
+```toml
+[models.opencode]
+agent = "OpenCodeAgent"
+model = "openrouter/anthropic/claude-opus-4.8"
+
+[agents.OpenCodeAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The adapter runs the installed OpenCode CLI with `--pure`, so no external
+plugin is loaded, and with OpenCode's permission checks bypassed, matching
+`permissions.trust_model = "skip-permissions"`. OpenCode addresses models as
+`provider/model` and resolves the identifier against its own catalogue, so the
+profile's `model` is opaque to Ultrafuzz; a profile `reasoning` value is passed
+through as OpenCode's provider-defined variant rather than a fixed effort
+ladder. `api-key` auth places the named variable in the child environment only
+— OpenCode reads provider credentials from the environment and emits no
+credential flag, so the key never appears in a command line or a process
+listing. `auth = "subscription"` is **rejected**: OpenCode reads `auth.json`
+from `$XDG_DATA_HOME/opencode`, and the adapter always relocates
+`XDG_DATA_HOME` into the run, so a subscription login held in the operator's
+home is unreachable by construction. Building an agent from it would produce a
+silently unauthenticated run, so the adapter throws instead, naming
+`agents.OpenCodeAgent.auth`.
+
+**Run-scoped state.** OpenCode otherwise writes its config directory, database
+and write-ahead log, snapshots, tool output, cached model catalogue, and
+downloaded binaries into the operator's real home. A child process is not
+implicitly sandboxed, so the adapter names each of those locations under a
+directory belonging to the run rather than deriving them:
+
+- `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, and
+  `XDG_RUNTIME_DIR` — the base directories OpenCode resolves state from.
+- `OPENCODE_CONFIG_DIR` — OpenCode's own configuration directory.
+- `OPENCODE_DB` — the database, its write-ahead log, and its shared-memory
+  file. OpenCode resolves this ahead of `XDG_DATA_HOME` and honours an absolute
+  value outright, so redirecting the XDG roots alone still leaves an inherited
+  value pointing outside the run.
+- `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_MODELS_PATH`,
+  `OPENCODE_TUI_CONFIG`, and `OPENCODE_PLUGIN_META_FILE` — set empty, because
+  each names a single file that would otherwise be read from, or written
+  outside, the run.
+- `npm_config_cache` — OpenCode shells out to npm, which ignores the XDG base
+  directories and falls back to `~/.npm`, so its cache has to be named
+  separately.
+- `BUN_INSTALL_CACHE_DIR` — bun already resolves its cache under
+  `XDG_CACHE_HOME`, so this pins the exact directory rather than closing a leak
+  of its own.
+
+It also disables autoupdate, session sharing, model-catalogue fetch, default
+plugins, project config, and LSP downloads. This list is what the adapter
+actually sets; it is not a claim that OpenCode has no other state root.
+
+Set `config_dir` under `[agents.OpenCodeAgent]` to anchor that state somewhere
+else. `config_dir` is the XDG parent, not OpenCode's own directory:
+`XDG_DATA_HOME` becomes `<config_dir>/data`, so pointing it at
+`~/.config/opencode` or `~/.local/share/opencode` picks nothing up.
+
+`ultrafuzz doctor` requires the `opencode` executable whenever any configured
+profile uses `OpenCodeAgent` — every profile in `[models.*]` is checked, not
+only the one a run selects, so keeping the shipped `[models.opencode]` profile
+means every contributor needs the CLI installed.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml
