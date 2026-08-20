@@ -45,9 +45,13 @@ function openCodeChildEnvironment(addDir: readonly string[] | undefined): Record
   return {
     // A child process is not implicitly sandboxed: the scrub above returns a
     // delta layered over the inherited environment, so any root not named here
-    // stays pointed at the operator's real home. These are every root OpenCode
-    // resolves state from -- config, database and write-ahead log, snapshots,
-    // tool output, cached catalogue and downloaded binaries.
+    // stays pointed at the operator's real home. What follows is the set of
+    // roots this adapter names and pins -- config, database and write-ahead
+    // log, snapshots, tool output, cached catalogue, downloaded binaries, and
+    // the package-manager caches -- enumerated against opencode 1.18.18. It is
+    // not a proof that no other root exists: OPENCODE_DB, npm_config_cache and
+    // BUN_INSTALL_CACHE_DIR were each added after the list was believed
+    // complete. Re-enumerate when the qualified CLI version moves.
     XDG_CONFIG_HOME: path.join(root, "config"),
     XDG_DATA_HOME: path.join(root, "data"),
     XDG_CACHE_HOME: path.join(root, "cache"),
@@ -72,8 +76,11 @@ function openCodeChildEnvironment(addDir: readonly string[] | undefined): Record
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DISABLE_LSP_DOWNLOAD: "1",
-    // OpenCode shells out to npm and bun; their caches are separate roots that
-    // stay in the operator's home unless they are named here too.
+    // OpenCode shells out to npm and bun. npm ignores the XDG base directories
+    // and falls back to ~/.npm, so its cache has to be named separately; bun
+    // already resolves its cache under XDG_CACHE_HOME, so this pins the exact
+    // directory rather than closing a leak of its own. Both are pinned by
+    // "generated OpenCode adapter redirects the npm and bun caches".
     npm_config_cache: path.join(root, "cache", "npm"),
     BUN_INSTALL_CACHE_DIR: path.join(root, "cache", "bun"),
     ...openCodeCredential(config)

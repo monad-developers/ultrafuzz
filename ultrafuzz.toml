@@ -99,7 +99,9 @@ api_key_env = "DEEPSEEK_API_KEY"
 # The generated adapter runs the OpenCode CLI with `--pure` and points the
 # OpenCode state roots it names -- the XDG base directories, OPENCODE_CONFIG_DIR
 # and OPENCODE_DB, plus the npm and bun caches -- at a run-scoped directory, so
-# no run writes harness state into your home. See docs/config.md for the list.
+# none of those roots resolves into your home. That is the list the adapter
+# names, not a guarantee that OpenCode has no other state root; docs/config.md
+# has the full list and the same caveat.
 # "api-key" reads OPENROUTER_API_KEY unless api_key_env names another variable,
 # and places it in the child environment only, never on the command line.
 # "subscription" is rejected: OpenCode reads auth.json from $XDG_DATA_HOME, which

@@ -2834,7 +2834,10 @@ test(
  */
 test(
   "generated OpenCode adapter scopes every harness state root to the run and keeps the credential out of argv",
-  { skip: !runningUnderBun },
+  // Bun's node:test shim ignores `skip` but honours `timeout`, and applies a
+  // 5s default without one. `initProject` plus the transpile in
+  // `loadGeneratedOpenCodeAgent` exceeds that on a cold cache.
+  { skip: !runningUnderBun, timeout: 120_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3079,14 +3082,19 @@ openCodeFilesystemProof(
         env: { ...inherited, HOME: home, ...agent.opts.env, ...command.env },
         timeout: 60_000
       });
-      // Every default per-user location OpenCode would otherwise populate,
-      // including the npm cache its own subprocesses write.
+      // Every default per-user location OpenCode would otherwise populate.
+      // `.npm` is deliberately not in this list. OpenCode spawns npm only while
+      // resolving a provider SDK, and this invocation sometimes exits on the
+      // auth failure before that subprocess creates its cache -- the run-scoped
+      // npm cache appeared in 2 of 3 sampled runs here. An assertion that flips
+      // on that race would pass whether or not the adapter still sets
+      // npm_config_cache, so it is pinned deterministically instead by
+      // "generated OpenCode adapter redirects the npm and bun caches" below.
       for (const relative of [
         [".config", "opencode"],
         [".local", "share", "opencode"],
         [".local", "state", "opencode"],
-        [".cache", "opencode"],
-        [".npm"]
+        [".cache", "opencode"]
       ]) {
         const leaked = path.join(home, ...relative);
         assert.equal(fs.existsSync(leaked), false, `OpenCode wrote harness state to ${leaked}`);
@@ -3130,6 +3138,119 @@ openCodeFilesystemProof(
       fs.rmSync(home, { force: true, recursive: true });
       fs.rmSync(leakHome, { force: true, recursive: true });
       fs.rmSync(path.dirname(inheritedDb), { force: true, recursive: true });
+    }
+  }
+);
+
+/**
+ * `npm_config_cache` and `BUN_INSTALL_CACHE_DIR` are the two roots the adapter
+ * names that belong to tools other than OpenCode, and the OpenCode proof above
+ * cannot pin them: whether OpenCode's npm subprocess outlives the auth failure
+ * is a race, so an assertion there passes with or without the variable set.
+ * This arm drives npm and bun directly under the adapter's own environment,
+ * where the outcome is deterministic -- deleting either line from the template
+ * failed this test in 2 of 2 sampled runs each.
+ *
+ * The two variables do different work, and the assertions say so rather than
+ * treating them alike. npm ignores the XDG base directories, so dropping
+ * `npm_config_cache` puts `_cacache` straight into `$HOME/.npm` -- a real leak,
+ * checked here as a matched pair. bun resolves its cache under
+ * `XDG_CACHE_HOME`, which the adapter already redirects, so dropping
+ * `BUN_INSTALL_CACHE_DIR` moves the directory but cannot reach the operator's
+ * home; the control asserts exactly that weaker property.
+ */
+const npmCliInstalled = runningUnderBun && spawnSync("npm", ["--version"], { encoding: "utf8" }).status === 0;
+const openCodePackageCacheProof = npmCliInstalled ? test : test.skip;
+openCodePackageCacheProof(
+  "generated OpenCode adapter redirects the npm and bun caches out of the operator home",
+  { timeout: 120_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-pkg-"));
+    const leakHome = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-opencode-pkg-leak-"));
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-package-cache");
+    const artifactDir = path.join(runRoot, "artifacts", "recon");
+    const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENROUTER_API_KEY };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "opencode-invalid-test-key";
+    try {
+      const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+      const agent = createOpenCodeAgent({
+        model: "openrouter/anthropic/claude-opus-4.8",
+        addDir: [artifactDir]
+      });
+      const stateRoot = path.join(runRoot, "opencode");
+      const inherited: Record<string, string> = {};
+      for (const [name, value] of Object.entries(process.env)) {
+        if (value !== undefined) inherited[name] = value;
+      }
+      const isolated = { ...inherited, HOME: home, ...agent.opts.env };
+      // `npm cache verify` creates and reports the cache directory and needs no
+      // registry; `bun pm cache` prints the directory bun would install into.
+      const npmIsolated = spawnSync("npm", ["cache", "verify"], {
+        cwd: project,
+        encoding: "utf8",
+        env: isolated,
+        timeout: 60_000
+      });
+      assert.equal(npmIsolated.status, 0, `npm cache verify failed: ${npmIsolated.stderr}`);
+      assert.equal(
+        fs.existsSync(path.join(stateRoot, "cache", "npm", "_cacache")),
+        true,
+        "the npm cache was not redirected into the run-scoped state root"
+      );
+      assert.equal(fs.existsSync(path.join(home, ".npm")), false, "npm wrote its cache into the operator home");
+      const bunIsolated = spawnSync("bun", ["pm", "cache"], {
+        cwd: project,
+        encoding: "utf8",
+        env: isolated,
+        timeout: 60_000
+      });
+      assert.equal(bunIsolated.status, 0, `bun pm cache failed: ${bunIsolated.stderr}`);
+      assert.equal(bunIsolated.stdout.trim(), path.join(stateRoot, "cache", "bun"));
+
+      // Control: the same commands with only those two variables dropped.
+      const leaking: Record<string, string> = { ...inherited, HOME: leakHome, ...agent.opts.env };
+      delete leaking.npm_config_cache;
+      delete leaking.BUN_INSTALL_CACHE_DIR;
+      const npmLeak = spawnSync("npm", ["cache", "verify"], {
+        cwd: project,
+        encoding: "utf8",
+        env: leaking,
+        timeout: 60_000
+      });
+      assert.equal(npmLeak.status, 0, `npm cache verify failed: ${npmLeak.stderr}`);
+      assert.equal(
+        fs.existsSync(path.join(leakHome, ".npm", "_cacache")),
+        true,
+        "dropping npm_config_cache did not put the npm cache in the operator home, so the positive arm proves nothing"
+      );
+      const bunLeak = spawnSync("bun", ["pm", "cache"], {
+        cwd: project,
+        encoding: "utf8",
+        env: leaking,
+        timeout: 60_000
+      });
+      assert.equal(bunLeak.status, 0, `bun pm cache failed: ${bunLeak.stderr}`);
+      // Weaker on purpose: without BUN_INSTALL_CACHE_DIR the path still lands
+      // under the redirected XDG_CACHE_HOME, so the variable pins the location
+      // rather than closing a leak. It moves, and it stays out of the home.
+      assert.notEqual(bunLeak.stdout.trim(), path.join(stateRoot, "cache", "bun"));
+      assert.equal(
+        path.relative(stateRoot, bunLeak.stdout.trim()).startsWith(".."),
+        false,
+        `bun resolved its cache outside the run-scoped state root: ${bunLeak.stdout.trim()}`
+      );
+      assert.equal(fs.existsSync(path.join(leakHome, ".bun")), false, "bun wrote its cache into the operator home");
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.key;
+      fs.rmSync(home, { force: true, recursive: true });
+      fs.rmSync(leakHome, { force: true, recursive: true });
     }
   }
 );

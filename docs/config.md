@@ -296,8 +296,12 @@ directory belonging to the run rather than deriving them:
   `OPENCODE_TUI_CONFIG`, and `OPENCODE_PLUGIN_META_FILE` — set empty, because
   each names a single file that would otherwise be read from, or written
   outside, the run.
-- `npm_config_cache` and `BUN_INSTALL_CACHE_DIR` — OpenCode shells out to npm
-  and bun, whose caches are separate roots.
+- `npm_config_cache` — OpenCode shells out to npm, which ignores the XDG base
+  directories and falls back to `~/.npm`, so its cache has to be named
+  separately.
+- `BUN_INSTALL_CACHE_DIR` — bun already resolves its cache under
+  `XDG_CACHE_HOME`, so this pins the exact directory rather than closing a leak
+  of its own.
 
 It also disables autoupdate, session sharing, model-catalogue fetch, default
 plugins, project config, and LSP downloads. This list is what the adapter
