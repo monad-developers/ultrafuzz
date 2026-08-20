@@ -5,7 +5,7 @@ import { workflowControlChildEnvironment, workflowControlCredentialValue } from 
 import { readStringTable, stringField } from "./toml";
 
 type PiAuthConfig = { configPath: string; auth?: string; api_key_env?: string; config_dir?: string };
-type PiAuthOptions = { env: Record<string, string>; sessionDir: string };
+type PiAuthOptions = { env: Record<string, string>; sessionDir: string; configPath: string };
 export type PiTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type PiThinking = NonNullable<NonNullable<ConstructorParameters<typeof SmithersPiAgent>[0]>["thinking"]>;
 type PiCommandParams = Parameters<SmithersPiAgent["buildCommand"]>[0];
@@ -32,7 +32,7 @@ export class CompatiblePiAgent extends SmithersPiAgent {
 
 export function createPiAgent(options: PiTaskOptions = {}): SmithersPiAgent {
   const auth = piAuthOptions();
-  const thinking = piThinking(options.reasoningEffort);
+  const thinking = piThinking(options.reasoningEffort, auth.configPath);
   // `addDir` has no pi equivalent -- pi has no add-directory flag -- and
   // inventing argv for one would be this adapter second-guessing the harness.
   return new CompatiblePiAgent({
@@ -54,6 +54,7 @@ function piAuthOptions(): PiAuthOptions {
   }
   const configDir = resolveConfigDir(config.config_dir ?? PI_CONFIG_DIR, config.configPath);
   return {
+    configPath: config.configPath,
     sessionDir: path.join(configDir, "sessions"),
     // The credential is delivered through the child environment only: Smithers'
     // `apiKey` option is the one path that emits `--api-key` into argv, so this
@@ -94,8 +95,10 @@ function resolveConfigDir(value: string, configPath: string): string {
 }
 
 /** Profile `reasoning` maps onto pi's existing `--thinking` level. */
-function piThinking(value: string | undefined): PiThinking | undefined {
+function piThinking(value: string | undefined, configPath: string): PiThinking | undefined {
   if (value === undefined) return undefined;
   if ((PI_THINKING_LEVELS as readonly string[]).includes(value)) return value as PiThinking;
-  throw new Error(`PiAgent reasoning must be one of ${PI_THINKING_LEVELS.join(", ")}: ${value}`);
+  throw new Error(
+    `models.<profile>.reasoning in ${configPath} is ${value}, which PiAgent does not support; use one of ${PI_THINKING_LEVELS.join(", ")}`
+  );
 }
