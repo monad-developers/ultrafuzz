@@ -3190,6 +3190,12 @@ openCodePackageCacheProof(
       const isolated = { ...inherited, HOME: home, ...agent.opts.env };
       // `npm cache verify` creates and reports the cache directory and needs no
       // registry; `bun pm cache` prints the directory bun would install into.
+      // bun >= 1.3.14 refuses to run `pm cache` in a directory with no
+      // package.json, so give it a minimal one -- the scaffold does not ship one.
+      const projectManifest = path.join(project, "package.json");
+      if (!fs.existsSync(projectManifest)) {
+        fs.writeFileSync(projectManifest, JSON.stringify({ name: "ufz-cache-probe", private: true }), "utf8");
+      }
       const npmIsolated = spawnSync("npm", ["cache", "verify"], {
         cwd: project,
         encoding: "utf8",
