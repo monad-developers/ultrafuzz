@@ -63,6 +63,11 @@ reasoning = "max"
 # (model_profiles = ["pi"]), or for a one-off run with `--agent PiAgent`.
 # PiAgent always routes through OpenRouter, so `model` is an opaque OpenRouter
 # catalogue id resolved by the pi CLI itself.
+# `reasoning` is optional here. The levels supported today are off, minimal,
+# low, medium, high, and xhigh. Unlike [models.kimi] and [models.deepseek]
+# above, "max" is not accepted yet: the pi CLI understands it, but the
+# orchestrator's Pi thinking option stops at xhigh, so a profile asking for
+# "max" fails when the agent is constructed instead of stepping down a level.
 [models.pi]
 agent = "PiAgent"
 model = "openai/gpt-mini-latest"

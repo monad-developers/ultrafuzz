@@ -291,8 +291,18 @@ written to a `sessions` directory beneath it via `--session-dir`, and
 `PI_TELEMETRY=0` suppresses install telemetry.
 
 When a Pi profile sets `reasoning`, the adapter passes it to pi as
-`--thinking <level>`. The accepted levels are `off`, `minimal`, `low`,
+`--thinking <level>`. The levels supported today are `off`, `minimal`, `low`,
 `medium`, `high`, and `xhigh`; any other value is rejected before execution.
+
+Note that `max` is not currently among them, even though the `pi` CLI itself
+accepts it (`VALID_THINKING_LEVELS` in pi 0.84.2 has seven entries, ending in
+`max`). The orchestrator's `PiAgentOptions.thinking` union stops at `xhigh`, so
+the adapter validates against that narrower range and throws when a profile
+asks for `max`. This matters because the shipped `[models.kimi]` and
+`[models.deepseek]` profiles both set `reasoning = "max"`: copying that line
+onto `[models.pi]` fails when the agent is constructed, rather than degrading
+to a lower level. The supported range can widen once the orchestrator option
+accepts `max`.
 
 ## Forge process guard
 
