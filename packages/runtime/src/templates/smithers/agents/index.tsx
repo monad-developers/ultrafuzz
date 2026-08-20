@@ -3,12 +3,14 @@ import { createCodexAgent } from "./codex";
 import { createDeepSeekAgent } from "./deepseek";
 import { createKimiAgent } from "./kimi";
 import { createOpenCodeAgent } from "./opencode";
+import { createPiAgent } from "./pi";
 
 export { createClaudeAgent } from "./claude";
 export { createCodexAgent } from "./codex";
 export { createDeepSeekAgent } from "./deepseek";
 export { createKimiAgent } from "./kimi";
 export { createOpenCodeAgent } from "./opencode";
+export { createPiAgent } from "./pi";
 
 // Agents are constructed per task from the selected model profile, never at
 // import time: an agent's auth is only read when that agent is actually used,
@@ -18,5 +20,6 @@ export const agentFactories = {
   CodexAgent: createCodexAgent,
   DeepSeekAgent: createDeepSeekAgent,
   KimiAgent: createKimiAgent,
-  OpenCodeAgent: createOpenCodeAgent
+  OpenCodeAgent: createOpenCodeAgent,
+  PiAgent: createPiAgent
 };

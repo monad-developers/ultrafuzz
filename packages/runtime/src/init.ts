@@ -76,6 +76,14 @@ const AGENT_TEMPLATES = [
     // No shipped digest: the adapter is new, so there is no earlier stock byte
     // sequence a project could be holding that init may overwrite in place.
     stockSha256: new Set<string>()
+  },
+  {
+    file: "pi.ts",
+    template: "smithers/agents/pi.tsx",
+    ref: "PiAgent",
+    // No stock digest yet: this adapter has never shipped in a released
+    // scaffold, so any pi.ts already on disk is the operator's and is preserved.
+    stockSha256: new Set<string>()
   }
 ] as const;
 
