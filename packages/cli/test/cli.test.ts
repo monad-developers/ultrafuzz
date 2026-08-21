@@ -1410,6 +1410,41 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
+test("status surfaces a terminal product and live workflow lifecycle divergence", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const runId = "status-lifecycle-divergence";
+  const run = await cli(project, ["run", "--run-id", runId, "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "failed\n", "utf8");
+
+  const jsonStatus = await cli(project, ["status", runId, "--json"], env);
+
+  assert.equal(jsonStatus.code, 0, `${jsonStatus.stderr}\n${jsonStatus.stdout}`);
+  const jsonBody = parseJson(jsonStatus);
+  const jsonData = jsonBody.data as { status?: string; workflow_status?: string };
+  assert.equal(jsonData.status, "failed");
+  assert.equal(jsonData.workflow_status, "running");
+  const diagnostics = jsonBody.diagnostics as Array<{ code?: string; severity?: string }>;
+  assert.equal(
+    diagnostics.some(
+      (diagnostic) => diagnostic.code === "RUN_WORKFLOW_STATUS_DIVERGED" && diagnostic.severity === "warning"
+    ),
+    true,
+    JSON.stringify(diagnostics)
+  );
+
+  const textStatus = await cli(project, ["status", runId], env);
+
+  assert.equal(textStatus.code, 0, `${textStatus.stderr}\n${textStatus.stdout}`);
+  assert.match(
+    textStatus.stdout,
+    /^Lifecycle divergence: Ultrafuzz is terminal failed, but the workflow runner is running; workflow work may still be active\.$/mu
+  );
+});
+
 test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async () => {
   const project = tempProject();
   const env = fakeSmithersEnv(project);

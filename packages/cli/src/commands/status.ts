@@ -17,6 +17,13 @@ import { formatStatusDuration } from "../status-rendering.js";
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
+const LIVE_WORKFLOW_RUN_STATUSES = new Set([
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota"
+]);
 const STOP_WATCH_VERDICTS = new Set<RunHealthValue["verdict"]>([
   "done",
   "degraded",
@@ -107,6 +114,7 @@ function renderHealth(value: RunHealthValue): string {
     `Run: ${value.run_id}`,
     ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
     `Status: ${value.verdict} (${value.status})`,
+    ...lifecycleDivergenceLines(value),
     `Reason: ${value.reason}`,
     `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
     `ETA: ${renderEta(value.eta)}`,
@@ -121,6 +129,13 @@ function renderHealth(value: RunHealthValue): string {
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+function lifecycleDivergenceLines(value: RunHealthValue): string[] {
+  if (!TERMINAL_RUN_STATUSES.has(value.status) || !LIVE_WORKFLOW_RUN_STATUSES.has(value.workflow_status)) return [];
+  return [
+    `Lifecycle divergence: Ultrafuzz is terminal ${value.status}, but the workflow runner is ${value.workflow_status}; workflow work may still be active.`
+  ];
 }
 
 function renderEta(eta: RunHealthValue["eta"]): string {

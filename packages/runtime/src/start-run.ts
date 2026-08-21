@@ -495,7 +495,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     // hide the failed run that this retry is recovering.
     if (action === "resume" && input.retryFailed === true) {
       const { syncRun } = await import("./workflow-sync.js");
-      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      const synchronization = await syncRun(
+        { projectRoot: input.projectRoot, runId: input.runId, env: input.env },
+        { deferWorkflowDeadlineEnforcement: true }
+      );
       if (!synchronization.ok) {
         return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
       }
@@ -680,17 +683,19 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       lifecycleResultAt: lifecycleResultEvent.timestamp
     });
     const submittedAt = new Date().toISOString();
-    if (!lifecycleResult.alreadyRunning) {
+    if (!lifecycleResult.alreadyRunning || action === "resume") {
       const state = readRunState(evidence.layout);
-      const leaseDurationMs = sealedConfig.run.controllerLeaseSeconds * 1_000;
-      state.concurrency.requested_concurrency = requestedConcurrency;
-      state.controller_lease = {
-        ...state.controller_lease,
-        status: "active",
-        duration_ms: leaseDurationMs,
-        renewed_at: submittedAt,
-        expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
-      };
+      if (!lifecycleResult.alreadyRunning) {
+        const leaseDurationMs = sealedConfig.run.controllerLeaseSeconds * 1_000;
+        state.concurrency.requested_concurrency = requestedConcurrency;
+        state.controller_lease = {
+          ...state.controller_lease,
+          status: "active",
+          duration_ms: leaseDurationMs,
+          renewed_at: submittedAt,
+          expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
+        };
+      }
       state.workflow_deadline_at = new Date(
         Date.parse(submittedAt) + sealedConfig.run.workflowDeadlineSeconds * 1_000
       ).toISOString();
