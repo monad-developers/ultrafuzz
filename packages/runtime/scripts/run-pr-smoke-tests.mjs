@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const supportingTestFiles = [
+  "dist-test/test/agent-adapter-boundaries.test.js",
   "dist-test/test/runtime-test-shard.test.js",
   "dist-test/test/source-revision.test.js",
   "dist-test/test/workflow-control.test.js"
@@ -14,7 +15,9 @@ const namedTests = new Map([
       "init resolves one-hour node and execution-resource timeout defaults",
       "validate rejects unknown agent references before launch",
       "plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission",
-      "compileSmithersWorkflow gates native dependencies on deterministic artifact verification"
+      "compileSmithersWorkflow gates native dependencies on deterministic artifact verification",
+      "resume reopens a terminal failed workflow with only pending ready work",
+      "forced retry resume renews a stale terminal deadline without duplicating an active workflow"
     ]
   ],
   [
@@ -22,6 +25,13 @@ const namedTests = new Map([
     ["generated workflow input is an exact current-only envelope with bounded JSON operator data"]
   ]
 ]);
+const bunTestFile = "test/runtime.test.ts";
+const bunTestNames = [
+  "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
+  "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
+  "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
+  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry"
+];
 const smokeEnvironment = { ...process.env };
 delete smokeEnvironment.ULTRAFUZZ_RUNTIME_TEST_SHARD;
 const selectedTestNames = [...namedTests.values()].flat();
@@ -34,6 +44,12 @@ for (const [sourcePath, names] of namedTests) {
     }
   }
 }
+const bunTestSource = readFileSync(bunTestFile, "utf8");
+for (const name of bunTestNames) {
+  if (!bunTestSource.includes(JSON.stringify(name))) {
+    throw new Error(`PR Bun runtime smoke test is not registered: ${name}`);
+  }
+}
 
 runNodeTests(supportingTestFiles);
 runNodeTests(
@@ -41,6 +57,7 @@ runNodeTests(
   selectedTestNames,
   selectedTestNames
 );
+runBunTests(`dist-test/${bunTestFile.replace(/\.ts$/u, ".js")}`, bunTestNames);
 
 function runNodeTests(files, testNames, expectedTestNames) {
   const args = ["--test", "--test-reporter=tap"];
@@ -62,6 +79,20 @@ function runNodeTests(files, testNames, expectedTestNames) {
   if (expectedTestNames !== undefined) assertNamedTestsPassed(result.stdout ?? "", expectedTestNames);
 }
 
+function runBunTests(file, testNames) {
+  const pattern = `^(?:${testNames.map(escapeRegExp).join("|")})$`;
+  const result = spawnSync("bun", ["test", file, "--test-name-pattern", pattern], {
+    encoding: "utf8",
+    env: smokeEnvironment,
+    stdio: ["inherit", "pipe", "pipe"]
+  });
+  process.stdout.write(result.stdout ?? "");
+  process.stderr.write(result.stderr ?? "");
+  if (result.error !== undefined) throw result.error;
+  if (result.status !== 0) process.exit(result.status ?? 1);
+  assertBunTestsPassed(`${result.stdout ?? ""}\n${result.stderr ?? ""}`, testNames);
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -74,5 +105,12 @@ function assertNamedTestsPassed(output, expectedTestNames) {
   const expected = [...expectedTestNames].sort();
   if (passedTestNames.length !== expected.length || passedTestNames.some((name, index) => name !== expected[index])) {
     throw new Error(`PR runtime smoke passed unexpected tests: ${JSON.stringify(passedTestNames)}`);
+  }
+}
+
+function assertBunTestsPassed(output, expectedTestNames) {
+  const missing = expectedTestNames.filter((name) => !output.includes(`(pass) ${name}`));
+  if (missing.length > 0) {
+    throw new Error(`PR Bun runtime smoke did not execute expected tests: ${JSON.stringify(missing)}`);
   }
 }

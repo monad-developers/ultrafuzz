@@ -121,7 +121,9 @@ export function commandFromRuntime<CommandName extends CliKnownCommand, Source>(
         : project === undefined
           ? (result.value as CliCommandDataMap[CommandName])
           : project(result.value),
-    text: result.value ? text(result.value) : diagnosticsText(result.diagnostics),
+    text: result.value
+      ? `${result.ok ? "" : diagnosticsText(result.diagnostics)}${text(result.value)}`
+      : diagnosticsText(result.diagnostics),
     diagnostics: result.diagnostics
   };
 }
