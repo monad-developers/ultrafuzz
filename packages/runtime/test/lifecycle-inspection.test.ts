@@ -1280,7 +1280,8 @@ test("startRun delegates cloud requirements to the execution-provider probe befo
     configPath,
     `${fs
       .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
 
 [execution.providers.modal]
 app = "ultrafuzz-test"
@@ -1296,6 +1297,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     runId: "missing-cloud-recon",
     env: {
       PATH: path.join(project, "controller-empty-bin"),
+      OPENAI_BASE_URL: undefined,
       MODAL_TOKEN_ID: "provider-one",
       MODAL_TOKEN_SECRET: "provider-two"
     },
