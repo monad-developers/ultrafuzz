@@ -9057,7 +9057,7 @@ test("getRunHealth reports a terminal product status while workflow health is li
 
   const health = await getRunHealth({ projectRoot: project, runId, env });
 
-  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.ok, false, JSON.stringify(health.diagnostics));
   assert.equal(health.value?.status, "failed");
   assert.equal(health.value?.workflow_status, "running");
   const divergence = health.diagnostics.filter((diagnostic) => diagnostic.code === "RUN_WORKFLOW_STATUS_DIVERGED");
@@ -9071,8 +9071,7 @@ test("getRunHealth reports a terminal product status while workflow health is li
   const unattributed = health.diagnostics.find(
     (diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"
   );
-  assert.equal(unattributed?.severity, "warning");
-  assert.equal(unattributed?.details?.status_observed_severity, "error");
+  assert.equal(unattributed?.severity, "error");
 });
 
 test("a divergent published control file leaves status readable while execution stays closed", async () => {
@@ -15983,12 +15982,10 @@ test("resume keeps an already-running linked workflow attached without launching
     env
   });
   assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.equal(forced.value?.submitted, true);
+  assert.equal(forced.value?.submitted, false);
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(
-    forcedCommands,
-    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
-  );
+  assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
+  assert.doesNotMatch(forcedCommands, /^up /mu);
 });
 
 test("resume rejects non-current Smithers inspect evidence before making lifecycle decisions", async () => {

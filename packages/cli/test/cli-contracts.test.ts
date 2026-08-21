@@ -283,6 +283,26 @@ test("unknown Oclif invocation failures remain closed and value-free", () => {
   );
 });
 
+test("known command failures can retain a valid typed data snapshot", () => {
+  assert.equal(
+    validateCliResultEnvelope({
+      schema_version: CLI_SCHEMA_VERSION,
+      command: "status",
+      ok: false,
+      diagnostics: [
+        {
+          code: "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE",
+          message: "terminal workflow evidence has no failed node",
+          severity: "error",
+          source: "workflow"
+        }
+      ],
+      data: statusData()
+    }).ok,
+    true
+  );
+});
+
 test("EVMBench consumes the same registered CLI v2 definitions without a parallel shape authority", () => {
   const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
   for (const name of ["initData", "runData", "statusData", "reportData"] as const) {

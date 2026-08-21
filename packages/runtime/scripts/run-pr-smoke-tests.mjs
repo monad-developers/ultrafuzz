@@ -14,7 +14,9 @@ const namedTests = new Map([
       "init resolves one-hour node and execution-resource timeout defaults",
       "validate rejects unknown agent references before launch",
       "plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission",
-      "compileSmithersWorkflow gates native dependencies on deterministic artifact verification"
+      "compileSmithersWorkflow gates native dependencies on deterministic artifact verification",
+      "resume reopens a terminal failed workflow with only pending ready work",
+      "forced retry resume renews a stale terminal deadline without duplicating an active workflow"
     ]
   ],
   [

@@ -1422,11 +1422,12 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
 
   const jsonStatus = await cli(project, ["status", runId, "--json"], env);
 
-  assert.equal(jsonStatus.code, 0, `${jsonStatus.stderr}\n${jsonStatus.stdout}`);
+  assert.equal(jsonStatus.code, 1, `${jsonStatus.stderr}\n${jsonStatus.stdout}`);
   const jsonBody = parseJson(jsonStatus);
   const jsonData = jsonBody.data as { status?: string; workflow_status?: string };
   assert.equal(jsonData.status, "failed");
   assert.equal(jsonData.workflow_status, "running");
+  assert.equal(jsonBody.ok, false);
   const diagnostics = jsonBody.diagnostics as Array<{ code?: string; severity?: string }>;
   assert.equal(
     diagnostics.some(
@@ -1435,12 +1436,16 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
     true,
     JSON.stringify(diagnostics)
   );
+  const observedFailure = diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE");
+  assert.equal(observedFailure?.severity, "error", JSON.stringify(diagnostics));
 
   const textStatus = await cli(project, ["status", runId], env);
 
-  assert.equal(textStatus.code, 0, `${textStatus.stderr}\n${textStatus.stdout}`);
+  assert.equal(textStatus.code, 1, `${textStatus.stderr}\n${textStatus.stdout}`);
+  assert.equal(textStatus.stdout, "");
+  assert.match(textStatus.stderr, /^error: WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE:/mu);
   assert.match(
-    textStatus.stdout,
+    textStatus.stderr,
     /^Lifecycle divergence: Ultrafuzz is terminal failed, but the workflow runner is running; workflow work may still be active\.$/mu
   );
 });

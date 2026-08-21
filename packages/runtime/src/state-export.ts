@@ -207,7 +207,7 @@ export async function getRunHealth(input: {
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
     const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-    syncDiagnostics.push(...sync.diagnostics.map(statusObservationDiagnostic));
+    syncDiagnostics.push(...sync.diagnostics);
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",
@@ -262,8 +262,9 @@ export async function getRunHealth(input: {
     health.workflow_status,
     evidence.layout.statePath
   );
+  const diagnostics = [...syncDiagnostics, ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence])];
   return runtimeResult<RunHealthValue>(
-    true,
+    !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
     {
       ...base,
       workflow_run_id: evidence.smithersRunId,
@@ -278,25 +279,8 @@ export async function getRunHealth(input: {
         nowMs: Date.now()
       })
     },
-    [...syncDiagnostics, ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence])]
+    diagnostics
   );
-}
-
-function statusObservationDiagnostic(diagnostic: RuntimeDiagnostic): RuntimeDiagnostic {
-  if (diagnostic.severity !== "error") return diagnostic;
-  return {
-    ...diagnostic,
-    // A successful status envelope cannot contain error-severity diagnostics,
-    // but status can still return an independent runner snapshot when state
-    // synchronization observes a failed run. Preserve the source severity so
-    // structured consumers can distinguish that condition from an ordinary
-    // warning without making the observational command itself fail.
-    severity: "warning",
-    details: {
-      ...diagnostic.details,
-      status_observed_severity: diagnostic.severity
-    }
-  };
 }
 
 function workflowLifecycleDivergenceDiagnostic(
