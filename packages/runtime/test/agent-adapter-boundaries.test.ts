@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +19,7 @@ type SourcePolicy = {
   maxLines: number;
   maxSyntaxNodes: number;
   purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
+  sourceSha256: string;
 };
 
 type SourceUnit = {
@@ -62,21 +64,71 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
   }
 };
 
-// Syntax-node ceilings are the exact main@fe0922ea shape. Unlike identifier
-// probes, they ignore comments, strings, and identifier spelling while making
-// any structural growth an explicit policy review. Line ceilings retain a
+// Syntax-node ceilings and exact source fingerprints are the reviewed
+// main@fe0922ea shape. The fingerprint makes every replacement visible even
+// when it preserves or reduces aggregate structure; line ceilings retain a
 // small formatting/documentation margin.
 const sourcePolicies: Record<string, SourcePolicy> = {
-  "claude.tsx": { maxLines: 100, maxSyntaxNodes: 452, purpose: "adapter" },
-  "codex.tsx": { maxLines: 175, maxSyntaxNodes: 851, purpose: "adapter" },
-  "deepseek.tsx": { maxLines: 350, maxSyntaxNodes: 1_596, purpose: "adapter" },
-  "environment.tsx": { maxLines: 425, maxSyntaxNodes: 2_209, purpose: "data-governance" },
-  "index.tsx": { maxLines: 30, maxSyntaxNodes: 77, purpose: "registry" },
-  "kimi.tsx": { maxLines: 1_525, maxSyntaxNodes: 8_919, purpose: "adapter" },
-  "openrouter.tsx": { maxLines: 1_250, maxSyntaxNodes: 6_719, purpose: "adapter" },
-  "provider-home.tsx": { maxLines: 75, maxSyntaxNodes: 556, purpose: "provider-home" },
-  "strict-json.tsx": { maxLines: 350, maxSyntaxNodes: 1_965, purpose: "strict-input" },
-  "toml.tsx": { maxLines: 120, maxSyntaxNodes: 526, purpose: "toml" }
+  "claude.tsx": {
+    maxLines: 100,
+    maxSyntaxNodes: 452,
+    purpose: "adapter",
+    sourceSha256: "04c785868e9a6955d1f048fb1377b61dca6f3da0e4de6a305536a8b0979f73d9"
+  },
+  "codex.tsx": {
+    maxLines: 175,
+    maxSyntaxNodes: 851,
+    purpose: "adapter",
+    sourceSha256: "614e45e4ecba581ca8e32f1ae0f69be223da25fb4d8ecdcc964b9d820265feda"
+  },
+  "deepseek.tsx": {
+    maxLines: 350,
+    maxSyntaxNodes: 1_596,
+    purpose: "adapter",
+    sourceSha256: "c0c8cacff536100b8fb8af2fdec51e382c79e54c5700059f7ff1d3f9cb947818"
+  },
+  "environment.tsx": {
+    maxLines: 425,
+    maxSyntaxNodes: 2_209,
+    purpose: "data-governance",
+    sourceSha256: "067fbb00ac6418af8f52e8e48f8d30d69549611a6815f98cb9dbcb9bbee4ca71"
+  },
+  "index.tsx": {
+    maxLines: 30,
+    maxSyntaxNodes: 77,
+    purpose: "registry",
+    sourceSha256: "89dff9ebf9e542adac8465a6f1b13dfdf79e204cdfab0f0f320da1afc86aaf23"
+  },
+  "kimi.tsx": {
+    maxLines: 1_525,
+    maxSyntaxNodes: 8_919,
+    purpose: "adapter",
+    sourceSha256: "104e72c4fe049514a20112897c2740764629fa54e7115dfffcfd4c28e7077b07"
+  },
+  "openrouter.tsx": {
+    maxLines: 1_250,
+    maxSyntaxNodes: 6_719,
+    purpose: "adapter",
+    sourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f"
+  },
+  "provider-home.tsx": {
+    maxLines: 75,
+    maxSyntaxNodes: 556,
+    purpose: "provider-home",
+    sourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744"
+  },
+  "strict-json.tsx": {
+    maxLines: 350,
+    maxSyntaxNodes: 1_965,
+    purpose: "strict-input",
+    sourceSha256: "16c909eb1f01c82e1174db61877a30028b58a49466714865f1243293f10b186b"
+  },
+  "toml.tsx": {
+    maxLines: 120,
+    maxSyntaxNodes: 526,
+    purpose: "toml",
+    sourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae"
+  }
 };
 
 function lineCount(source: string): number {
@@ -91,6 +143,10 @@ function syntaxNodeCount(sourceFile: ts.SourceFile): number {
   };
   visit(sourceFile);
   return count;
+}
+
+function sourceFingerprint(source: string): string {
+  return crypto.createHash("sha256").update(source, "utf8").digest("hex");
 }
 
 function parseSource(relativePath: string, source: string): SourceUnit {
@@ -372,6 +428,14 @@ test("syntax budgets ignore names and comments but catch structural orchestratio
     ).ast
   );
   assert.equal(renamed, baseline);
+  assert.notEqual(
+    sourceFingerprint("export async function run(task: string) { return task; }\n"),
+    sourceFingerprint(
+      "// resumeSession and prompt_tokens are documentation, not classification markers.\n" +
+        "export async function invoke(prompt: string) { return prompt; }\n"
+    ),
+    "an equal-size replacement must still require an explicit source-policy review"
+  );
 
   for (const addition of [
     'import { readdir } from "node:fs/promises"; export async function run() { return readdir("."); }\n',
@@ -422,6 +486,11 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     assert.ok(
       syntaxNodes <= policy.maxSyntaxNodes,
       `${relativePath} grew past its ${policy.maxSyntaxNodes}-node structural ceiling; classify the change before accepting it`
+    );
+    assert.equal(
+      sourceFingerprint(source.source),
+      policy.sourceSha256,
+      `${relativePath} changed from its reviewed source fingerprint; audit responsibilities and update the policy explicitly`
     );
   }
 

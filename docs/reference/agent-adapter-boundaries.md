@@ -27,17 +27,19 @@ without a matching re-export.
 The line ceilings deliberately allow only a small formatting margin: Claude
 100, Codex 175, DeepSeek 350, Kimi 1,525, and OpenRouter 1,250 lines. The listed
 responsibilities are explicit review declarations, not conclusions inferred
-from identifier names. Alongside line ceilings, the gate records an exact
-TypeScript syntax-node ceiling and reviewed purpose for every `.ts` and `.tsx`
-source under the adapter tree. The count uses the workspace-pinned TypeScript
-parser and ignores comments, string contents, and identifier spelling, but
-structural code growth requires a policy update. This is an auditable
-structural freeze, not a claim of complete semantic classification.
+from identifier names. Alongside line ceilings, the gate records a reviewed
+purpose, TypeScript syntax-node ceiling, and exact SHA-256 source fingerprint
+for every `.ts` and `.tsx` source under the adapter tree. The syntax count uses
+the workspace-pinned TypeScript parser; the fingerprint ensures that an
+equal-size or smaller behavior replacement still fails until the source policy
+and responsibility classification receive explicit review. This is an
+auditable source freeze, not a claim that CI can infer semantics.
 
 The inventory walk is recursive. A new helper, either `.ts` or `.tsx`, fails
 until it receives an explicit purpose and structural ceiling; moving code into
-an existing helper consumes that helper's syntax budget. Any policy update must
-classify a changed adapter responsibility in the same reviewed pull request.
+an existing helper changes that helper's reviewed fingerprint. Any policy
+update must classify a changed adapter responsibility in the same reviewed
+pull request.
 
 The gate is `packages/runtime/test/agent-adapter-boundaries.test.ts`. It scans
 every TypeScript source file in the adapter directory, derives shipped adapters
