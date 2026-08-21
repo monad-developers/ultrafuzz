@@ -1,6 +1,6 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
-import { getRunHealth, type RunHealthValue } from "@ultrafuzz/runtime";
+import { getRunHealth, isLiveWorkflowRunStatus, type RunHealthValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
@@ -107,6 +107,7 @@ function renderHealth(value: RunHealthValue): string {
     `Run: ${value.run_id}`,
     ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
     `Status: ${value.verdict} (${value.status})`,
+    ...lifecycleDivergenceLines(value),
     `Reason: ${value.reason}`,
     `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
     `ETA: ${renderEta(value.eta)}`,
@@ -121,6 +122,13 @@ function renderHealth(value: RunHealthValue): string {
     );
   }
   return `${lines.join("\n")}\n`;
+}
+
+function lifecycleDivergenceLines(value: RunHealthValue): string[] {
+  if (!TERMINAL_RUN_STATUSES.has(value.status) || !isLiveWorkflowRunStatus(value.workflow_status)) return [];
+  return [
+    `Lifecycle divergence: Ultrafuzz is terminal ${value.status}, but the workflow runner is ${value.workflow_status}; workflow work may still be active.`
+  ];
 }
 
 function renderEta(eta: RunHealthValue["eta"]): string {

@@ -1534,6 +1534,8 @@ function fakeLifecycleSmithersEnv(
   project: string,
   input: {
     inspect: unknown;
+    resumeInspect?: unknown;
+    failInspectOnInvocation?: number;
     events?: string;
     tokenEvents?: string;
     inspectMarkerPath?: string;
@@ -1547,6 +1549,8 @@ function fakeLifecycleSmithersEnv(
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
+  const resumeInspectPath = path.join(project, "fake-smithers-resume-inspect.json");
+  const inspectCountPath = path.join(project, "fake-smithers-inspect-count");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
   const tokenEventsPath =
     input.tokenEvents === undefined ? eventsPath : path.join(project, "fake-smithers-token-events.ndjson");
@@ -1556,6 +1560,10 @@ function fakeLifecycleSmithersEnv(
   const whyPath = path.join(project, "fake-smithers-why.json");
   const nodeDetailsDirectory = path.join(project, "fake-smithers-node-details");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
+  if (input.resumeInspect !== undefined) {
+    fs.writeFileSync(resumeInspectPath, `${JSON.stringify(input.resumeInspect, null, 2)}\n`, "utf8");
+  }
+  fs.writeFileSync(inspectCountPath, "0\n", "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
   if (input.tokenEvents !== undefined) fs.writeFileSync(tokenEventsPath, input.tokenEvents, "utf8");
   fs.writeFileSync(
@@ -1640,6 +1648,17 @@ function fakeLifecycleSmithersEnv(
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  inspect)",
+      `    inspect_count=$(cat ${shellQuote(inspectCountPath)})`,
+      "    inspect_count=$((inspect_count + 1))",
+      `    printf '%s\\n' "$inspect_count" > ${shellQuote(inspectCountPath)}`,
+      ...(input.failInspectOnInvocation === undefined
+        ? []
+        : [
+            `    if [ "$inspect_count" -eq ${input.failInspectOnInvocation} ]; then`,
+            "      printf '%s\\n' 'fake inspect failure' >&2",
+            "      exit 1",
+            "    fi"
+          ]),
       ...(input.inspectMarkerPath === undefined ? [] : [`    touch ${shellQuote(input.inspectMarkerPath)}`]),
       `    cat ${shellQuote(inspectPath)}`,
       "    ;;",
@@ -1693,6 +1712,13 @@ function fakeLifecycleSmithersEnv(
       "          ;;",
       "      esac",
       "    fi",
+      ...(input.resumeInspect === undefined
+        ? []
+        : [
+            '    case "$*" in',
+            `      *--resume*) cp ${shellQuote(resumeInspectPath)} ${shellQuote(inspectPath)} ;;`,
+            "    esac"
+          ]),
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  *)",
@@ -9068,6 +9094,44 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   );
 });
 
+test("getRunHealth reports a terminal product status while workflow health is live", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "lifecycle-status-divergence";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "launcher exited while workflow work remained active" },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+
+  assert.equal(health.ok, false, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.status, "failed");
+  assert.equal(health.value?.workflow_status, "running");
+  const divergence = health.diagnostics.filter((diagnostic) => diagnostic.code === "RUN_WORKFLOW_STATUS_DIVERGED");
+  assert.equal(divergence.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(divergence[0]?.severity, "warning");
+  assert.deepEqual(divergence[0]?.details, {
+    run_status: "failed",
+    workflow_status: "running"
+  });
+  assert.match(divergence[0]?.message ?? "", /workflow work may still be active/u);
+  const unattributed = health.diagnostics.find(
+    (diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"
+  );
+  assert.equal(unattributed?.severity, "error");
+});
+
 test("a divergent published control file leaves status readable while execution stays closed", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -15976,12 +16040,10 @@ test("resume keeps an already-running linked workflow attached without launching
     env
   });
   assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.equal(forced.value?.submitted, true);
+  assert.equal(forced.value?.submitted, false);
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(
-    forcedCommands,
-    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
-  );
+  assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
+  assert.doesNotMatch(forcedCommands, /^up /mu);
 });
 
 test("resume rejects non-current Smithers inspect evidence before making lifecycle decisions", async () => {
@@ -16786,6 +16848,168 @@ test("resume retries failed tasks reported inside a successful terminal workflow
     commands,
     /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
+});
+
+test("resume reopens a terminal failed workflow with only pending ready work", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "terminal-pending-ready-resume";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "workflow ended before ready work dispatched" },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    resumeInspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const stranded = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(stranded.status, "failed");
+  assert.equal(stranded.nodes["project-discovery"]?.status, "pending");
+  assert.equal(stranded.nodes["project-discovery"]?.wait_reason, "ready");
+  assert.equal(stranded.nodes["project-discovery"]?.next_eligible_action, "dispatch");
+  assert.equal(
+    Object.values(stranded.nodes).some((node) => node.status === "failed" || node.status === "timed-out"),
+    false
+  );
+  stranded.workflow_deadline_at = new Date(0).toISOString();
+  fs.writeFileSync(statePath, `${JSON.stringify(stranded, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const resumedAfter = Date.now();
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const reopened = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(reopened.status, "running");
+  assert.equal(reopened.finished_at, undefined);
+  assert.ok(Date.parse(reopened.workflow_deadline_at ?? "") > resumedAfter);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /^(?:timetravel|fork|replay) /mu);
+  assert.match(
+    commands,
+    /up .*ultrafuzz-terminal-pending-ready-resume\.tsx --resume ultrafuzz-terminal-pending-ready-resume --run-id ultrafuzz-terminal-pending-ready-resume --force --detach/u
+  );
+  const dispatched = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(dispatched.ok, true, JSON.stringify(dispatched.diagnostics));
+  const active = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(active.status, "running");
+  assert.equal(active.nodes["project-discovery"]?.status, "running");
+});
+
+test("forced retry resume renews a stale terminal deadline without duplicating an active workflow", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "active-terminal-deadline-resume";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const stale = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  stale.status = "failed";
+  stale.finished_at = "2000-01-01T00:00:00.000Z";
+  stale.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(statePath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const resumedAfter = Date.now();
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, false);
+  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(recovered.status, "running");
+  assert.equal(recovered.finished_at, undefined);
+  assert.ok(Date.parse(recovered.workflow_deadline_at ?? "") > resumedAfter);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /^cancel /mu, "pre-resume reconciliation must not enforce the stale deadline");
+  assert.doesNotMatch(commands, /^up /mu, "an active workflow must not receive a duplicate resume");
+});
+
+test("retry resume keeps its renewed deadline when a later lifecycle inspection fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "failed-after-deadline-renewal";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    failInspectOnInvocation: 2
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const stale = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  stale.status = "failed";
+  stale.finished_at = "2000-01-01T00:00:00.000Z";
+  stale.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(statePath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const resumedAfter = Date.now();
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.match(resumed.diagnostics[0]?.message ?? "", /workflow inspection failed before resume/u);
+  const afterFailure = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(afterFailure.status, "running");
+  assert.equal(afterFailure.finished_at, undefined);
+  assert.ok(Date.parse(afterFailure.workflow_deadline_at ?? "") > resumedAfter);
+
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "running");
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /^cancel /mu, "ordinary synchronization must retain the active backend");
 });
 
 test("resume renews a stale unfinished run without synthesizing a task reset", async () => {
