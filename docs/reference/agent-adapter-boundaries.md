@@ -36,22 +36,30 @@ declarations may include additional inherited or semantically reviewed
 responsibilities that the detector cannot infer. Type-only declarations,
 comments, strings outside argument arrays, and simple values or literal option
 arrays passed by a `create*Agent` factory into its returned `*Agent`
-constructor, named config-file reads, and empty diagnostic argv are deliberately excluded. Alongside line
-ceilings, the gate records a reviewed purpose, TypeScript syntax-node ceiling,
-and exact SHA-256 source fingerprint for every `.ts` and `.tsx` source under the
-adapter tree. The syntax count uses the workspace-pinned TypeScript parser; the
-fingerprint ensures that an equal-size or smaller behavior replacement still
-fails until the source policy and responsibility classification receive
-explicit review. This is an auditable source freeze, not a claim that CI can
-infer every semantic behavior.
+constructor, named config-file reads, and empty diagnostic argv are deliberately
+excluded.
+
+Every `.ts` and `.tsx` source under the adapter tree has two independent review
+records. Its structural policy records a reviewed purpose, TypeScript
+syntax-node ceiling, and exact SHA-256 source fingerprint. A separate central
+responsibility policy repeats the exact fingerprint beside the declared
+responsibilities and upstream links. Any byte change therefore invalidates both
+records: updating the ordinary source fingerprint and ceiling cannot reuse a
+stale responsibility review, even when the AST lower bound does not recognize
+the new semantic form. Refreshing the second literal attests that the central
+classification was reviewed; leaving the responsibility set unchanged is an
+explicit reviewed-unchanged decision. The syntax count uses the
+workspace-pinned TypeScript parser. This is an auditable two-stage source
+freeze, not a claim that CI can infer every semantic behavior.
 
 The inventory walk is recursive. A new helper, either `.ts` or `.tsx`, fails
-until it receives an explicit purpose and structural ceiling. Non-adapter
-helpers may not contain any of the lower-bound orchestration signals, so moving
-such code out of a registered adapter cannot hide it. A future shared inherent
-workaround must add explicit adapter ownership rather than weakening that
-default. Any policy update must classify a changed adapter responsibility in
-the same reviewed pull request.
+until it receives both an explicit structural policy and an independent
+responsibility review. Non-adapter helpers must attest an empty responsibility
+set and may not contain any of the lower-bound orchestration signals, so moving
+such code out of a registered adapter cannot bypass either review layer. A
+future shared inherent workaround must add explicit adapter ownership rather
+than weakening that default. Any policy update must classify a changed adapter
+responsibility in the same reviewed pull request.
 
 The gate is `packages/runtime/test/agent-adapter-boundaries.test.ts`. It scans
 every TypeScript source file in the adapter directory, derives shipped adapters

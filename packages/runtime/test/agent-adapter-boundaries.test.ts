@@ -10,7 +10,8 @@ import * as ts from "typescript";
 type OrchestratorResponsibility =
   "argv-construction" | "filesystem-walking" | "output-interpretation" | "session-handling" | "token-accounting";
 
-type AdapterPolicy = {
+type ResponsibilityPolicy = {
+  classifiedSourceSha256: string;
   responsibilities: readonly OrchestratorResponsibility[];
   upstreamIssues: readonly string[];
 };
@@ -81,20 +82,38 @@ const TOKEN_ACCOUNTING_SIGNALS = new Set([
   "total_tokens"
 ]);
 
-const adapterPolicies: Record<string, AdapterPolicy> = {
+// This deliberately duplicates each exact source fingerprint in a separate,
+// classification-owned policy. A source edit must update both the structural
+// policy below and this responsibility review, even when the reviewer decides
+// that the declared responsibility set remains unchanged.
+const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
   "claude.tsx": {
+    classifiedSourceSha256: "04c785868e9a6955d1f048fb1377b61dca6f3da0e4de6a305536a8b0979f73d9",
     responsibilities: [],
     upstreamIssues: []
   },
   "codex.tsx": {
+    classifiedSourceSha256: "614e45e4ecba581ca8e32f1ae0f69be223da25fb4d8ecdcc964b9d820265feda",
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
   "deepseek.tsx": {
+    classifiedSourceSha256: "dfb7c44c89e6c8a17555c1496f8ddf26dcbea8c6e3970ecd169f1d290bec64a4",
     responsibilities: ["output-interpretation", "token-accounting"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
+  "environment.tsx": {
+    classifiedSourceSha256: "067fbb00ac6418af8f52e8e48f8d30d69549611a6815f98cb9dbcb9bbee4ca71",
+    responsibilities: [],
+    upstreamIssues: []
+  },
+  "index.tsx": {
+    classifiedSourceSha256: "89dff9ebf9e542adac8465a6f1b13dfdf79e204cdfab0f0f320da1afc86aaf23",
+    responsibilities: [],
+    upstreamIssues: []
+  },
   "kimi.tsx": {
+    classifiedSourceSha256: "104e72c4fe049514a20112897c2740764629fa54e7115dfffcfd4c28e7077b07",
     responsibilities: [
       "argv-construction",
       "filesystem-walking",
@@ -108,11 +127,27 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
     ]
   },
   "openrouter.tsx": {
+    classifiedSourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling"],
     upstreamIssues: [
       "https://github.com/smithersai/smithers/issues/1622",
       "https://github.com/smithersai/smithers/issues/1625"
     ]
+  },
+  "provider-home.tsx": {
+    classifiedSourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744",
+    responsibilities: [],
+    upstreamIssues: []
+  },
+  "strict-json.tsx": {
+    classifiedSourceSha256: "16c909eb1f01c82e1174db61877a30028b58a49466714865f1243293f10b186b",
+    responsibilities: [],
+    upstreamIssues: []
+  },
+  "toml.tsx": {
+    classifiedSourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae",
+    responsibilities: [],
+    upstreamIssues: []
   }
 };
 
@@ -213,6 +248,18 @@ function assertSourceMatchesPolicy(relativePath: string, source: SourceUnit, pol
     sourceFingerprint(source.source),
     policy.sourceSha256,
     `${relativePath} changed from its reviewed source fingerprint; audit responsibilities and update the policy explicitly`
+  );
+}
+
+function assertResponsibilityReviewMatchesSource(
+  relativePath: string,
+  source: SourceUnit,
+  policy: ResponsibilityPolicy
+): void {
+  assert.equal(
+    sourceFingerprint(source.source),
+    policy.classifiedSourceSha256,
+    `${relativePath} changed from its responsibility-reviewed source fingerprint; audit its responsibility declaration and refresh the independent classification policy`
   );
 }
 
@@ -358,7 +405,7 @@ function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<O
 function assertDetectedResponsibilitiesDeclared(
   relativePath: string,
   source: SourceUnit,
-  policy: AdapterPolicy
+  policy: ResponsibilityPolicy
 ): readonly OrchestratorResponsibility[] {
   const detected = [...detectedOrchestratorResponsibilities(source)].sort();
   const undeclared = detected.filter((responsibility) => !policy.responsibilities.includes(responsibility));
@@ -826,6 +873,48 @@ test("syntax budgets ignore names and comments but catch structural orchestratio
   }
 });
 
+test("source-policy acknowledgment cannot reuse a stale responsibility review for opaque behavior", () => {
+  const baselineSource = "export function passThrough(payload: Uint8Array) { return payload; }\n";
+  const changedSource =
+    'import { decodeProviderEvent } from "./provider-parser";\n' +
+    "export function passThrough(payload: Uint8Array) { return decodeProviderEvent(payload); }\n";
+  const changed = parseSource("fixture.tsx", changedSource);
+  const acknowledgedSourcePolicy: SourcePolicy = {
+    maxLines: lineCount(changedSource),
+    maxSyntaxNodes: syntaxNodeCount(changed.ast),
+    purpose: "adapter",
+    sourceSha256: sourceFingerprint(changedSource)
+  };
+  const staleResponsibilityPolicy: ResponsibilityPolicy = {
+    classifiedSourceSha256: sourceFingerprint(baselineSource),
+    responsibilities: [],
+    upstreamIssues: []
+  };
+
+  assert.deepEqual(
+    [...detectedOrchestratorResponsibilities(changed)],
+    [],
+    "the fixture must exercise a semantic form outside the conservative static lower bound"
+  );
+  assert.doesNotThrow(() => assertSourceMatchesPolicy("fixture.tsx", changed, acknowledgedSourcePolicy));
+  assert.throws(
+    () => assertResponsibilityReviewMatchesSource("fixture.tsx", changed, staleResponsibilityPolicy),
+    /responsibility-reviewed source fingerprint/u
+  );
+
+  const refreshedResponsibilityPolicy: ResponsibilityPolicy = {
+    classifiedSourceSha256: sourceFingerprint(changedSource),
+    responsibilities: ["output-interpretation"],
+    upstreamIssues: ["https://example.invalid/upstream"]
+  };
+  assert.doesNotThrow(() =>
+    assertResponsibilityReviewMatchesSource("fixture.tsx", changed, refreshedResponsibilityPolicy)
+  );
+  assert.doesNotThrow(() =>
+    assertDetectedResponsibilitiesDeclared("fixture.tsx", changed, refreshedResponsibilityPolicy)
+  );
+});
+
 test("fingerprint and ceiling acknowledgment cannot retain stale responsibility classifications", () => {
   const changedSources: Array<[OrchestratorResponsibility, string]> = [
     [
@@ -863,7 +952,12 @@ test("fingerprint and ceiling acknowledgment cannot retain stale responsibility 
       () => assertSourceMatchesPolicy("fixture.tsx", parsed, acknowledgedSourcePolicy),
       `${responsibility} fixture must model an independently acknowledged fingerprint and ceiling`
     );
-    const staleCentralPolicy: AdapterPolicy = { responsibilities: [], upstreamIssues: [] };
+    const staleCentralPolicy: ResponsibilityPolicy = {
+      classifiedSourceSha256: sourceFingerprint(changedSource),
+      responsibilities: [],
+      upstreamIssues: []
+    };
+    assert.doesNotThrow(() => assertResponsibilityReviewMatchesSource("fixture.tsx", parsed, staleCentralPolicy));
     assert.throws(
       () => assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, staleCentralPolicy),
       /static signals for undeclared orchestrator responsibilities/u,
@@ -871,6 +965,7 @@ test("fingerprint and ceiling acknowledgment cannot retain stale responsibility 
     );
     assert.doesNotThrow(() =>
       assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, {
+        classifiedSourceSha256: sourceFingerprint(changedSource),
         responsibilities: [responsibility],
         upstreamIssues: ["https://example.invalid/upstream"]
       })
@@ -962,7 +1057,7 @@ test("non-adapter helpers cannot hide orchestrator responsibilities", () => {
 });
 
 test("OpenRouter retains the manually reviewed argv responsibility inherited from Codex", () => {
-  assert.equal(adapterPolicies["openrouter.tsx"]!.responsibilities.includes("argv-construction"), true);
+  assert.equal(responsibilityPolicies["openrouter.tsx"]!.responsibilities.includes("argv-construction"), true);
 });
 
 test("main agent registry and recursive sources stay inside reviewed adapter boundaries", (context) => {
@@ -977,6 +1072,11 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     [...sources.keys()].sort(),
     "every recursive .ts/.tsx adapter source must have an explicit structural policy"
   );
+  assert.deepEqual(
+    Object.keys(responsibilityPolicies).sort(),
+    [...sources.keys()].sort(),
+    "every recursive .ts/.tsx source must have an independent responsibility-review policy"
+  );
 
   const registered = registeredAdapterSources(sources);
   const registeredSourcePaths = [...new Set(registered.values())].sort();
@@ -988,25 +1088,33 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     registeredSourcePaths,
     "only adapter sources registered in agentFactories may carry the adapter purpose"
   );
-  assert.deepEqual(
-    Object.keys(adapterPolicies).sort(),
-    registeredSourcePaths,
-    "every adapter registered in agentFactories must have an explicit responsibility policy"
-  );
-
   for (const [relativePath, source] of sources) {
     const policy = sourcePolicies[relativePath]!;
+    const responsibilityPolicy = responsibilityPolicies[relativePath]!;
     const lines = lineCount(source.source);
     const syntaxNodes = syntaxNodeCount(source.ast);
     context.diagnostic(
       `${relativePath}: ${lines} lines; ${syntaxNodes} syntax nodes; reviewed purpose: ${policy.purpose}`
     );
     assertSourceMatchesPolicy(relativePath, source, policy);
-    if (policy.purpose !== "adapter") assertNonAdapterSourceHasNoOrchestrationSignals(relativePath, source);
+    assertResponsibilityReviewMatchesSource(relativePath, source, responsibilityPolicy);
+    if (policy.purpose !== "adapter") {
+      assert.deepEqual(
+        responsibilityPolicy.responsibilities,
+        [],
+        `${relativePath} is not a registered adapter and cannot own orchestrator responsibilities`
+      );
+      assert.deepEqual(
+        responsibilityPolicy.upstreamIssues,
+        [],
+        `${relativePath} is not a registered adapter and cannot own adapter debt`
+      );
+      assertNonAdapterSourceHasNoOrchestrationSignals(relativePath, source);
+    }
   }
 
   for (const adapterSource of registeredSourcePaths) {
-    const policy = adapterPolicies[adapterSource]!;
+    const policy = responsibilityPolicies[adapterSource]!;
     const detectedResponsibilities = assertDetectedResponsibilitiesDeclared(
       adapterSource,
       sources.get(adapterSource)!,
