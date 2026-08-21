@@ -77,7 +77,7 @@ describe("config loading and resolution", () => {
       model: "deepseek-v4-pro",
       reasoning: "max"
     });
-    expect(resolved.value.retry).toEqual({ sameAgentAttempts: 1, agents: [] });
+    expect(resolved.value.retry).toEqual({ sameAgentAttempts: 3, agents: [] });
     expect(resolved.value.run.defaultTimeoutSeconds).toBe(3600);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);

@@ -2405,7 +2405,11 @@ export async function runSmithersLifecycleCommand(input: {
       );
     }
     currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
-    if (smithersRunStateIsActive(currentInspection) && input.resetNode === undefined && input.force !== true) {
+    if (
+      smithersRunStateIsActive(currentInspection) &&
+      input.resetNode === undefined &&
+      (input.force !== true || input.retryFailed === true)
+    ) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,

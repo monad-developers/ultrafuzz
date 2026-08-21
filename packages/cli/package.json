@@ -26,6 +26,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
     "test": "pnpm --filter @ultrafuzz/cli... build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
+    "test:pr-smoke:prebuilt": "rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-pr-smoke-tests.mjs",
     "typecheck": "pnpm --filter @ultrafuzz/cli^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {

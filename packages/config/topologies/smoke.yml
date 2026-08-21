@@ -6,7 +6,6 @@ groups:
     label: Smoke context
     color: "#2563eb"
     defaults:
-      max_attempts: 2
       model_profiles:
         - default
   strategies:
@@ -14,14 +13,12 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 1
-      max_attempts: 2
       model_profiles:
         - default
   review:
     label: Bounded smoke review
     color: "#0f766e"
     defaults:
-      max_attempts: 2
       model_profiles:
         - default
 nodes:
@@ -48,7 +45,6 @@ nodes:
     kind: agentic
     prompt: smoke/json-validation-correction.md
     group: setup
-    max_attempts: 1
     depends_on:
       - __start__
     outputs:

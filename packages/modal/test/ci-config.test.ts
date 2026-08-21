@@ -740,6 +740,7 @@ describe("public Modal benchmark configuration", () => {
     expect(draftAndBuild?.name).toBe(
       "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
     );
+    expect(draftAndBuild?.["timeout-minutes"]).toBe(15);
     const steps = draftAndBuild?.steps ?? [];
     const bunSetup = steps.find((step) => step.name === "Set up Bun");
     expect(bunSetup?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
@@ -760,6 +761,9 @@ describe("public Modal benchmark configuration", () => {
     const runtimeSmoke = steps.find((step) => step.name === "Run PR runtime smoke tests");
     expect(runtimeSmoke?.if).toBe("github.event_name == 'pull_request'");
     expect(runtimeSmoke?.run).toBe("pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt");
+    const cliStatusSmoke = steps.find((step) => step.name === "Run PR CLI status contract smoke tests");
+    expect(cliStatusSmoke?.if).toBe("github.event_name == 'pull_request'");
+    expect(cliStatusSmoke?.run).toBe("pnpm --filter @ultrafuzz/cli test:pr-smoke:prebuilt");
 
     expect(workflow.jobs).not.toHaveProperty("pull-request-validation");
 
