@@ -85,15 +85,15 @@ Group defaults may include:
 Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
 profiles, the node uses the configured default model profile only.
-`max_attempts` defaults to `[retry].same_agent_attempts`, or `1` when the project
-does not override it. Values greater than one retry the same agent task for
-retryable provider or execution failures that occur before agent completion
-under Smithers' bounded policy. A node value overrides its group and the project
-retry count. `max_attempts` and the complete chain after optional project
-fallback profiles are added are capped at 100. Fallback profiles run only after this primary
-budget. These settings do not retry a completed agent session whose required
-output is missing or schema-invalid; that post-agent contract failure is
-terminal.
+`max_attempts` defaults to the resolved `[retry].same_agent_attempts` value,
+including the selected audit profile's budget. Values greater than one retry the
+same agent task for retryable provider or execution failures that occur before
+agent completion under Smithers' bounded policy. A node value overrides its
+group and the project retry count. `max_attempts` and the complete chain after
+optional project fallback profiles are added are capped at 100. Fallback
+profiles run only after this primary budget. These settings do not retry a
+completed agent session whose required output is missing or schema-invalid;
+that post-agent contract failure is terminal.
 
 ## Node Fields
 

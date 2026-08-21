@@ -3,11 +3,12 @@
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
-    "catalogDigest": "d3ccb85ac0cfe567ad9dc388b454358bc8e6cef4f611bdfeee6ff1bc6062f016",
+    "catalogDigest": "19ec301f3158597e9947c0398fb8a71b1c1ba0b2c52d6834d88aac5edb9e37c5",
     "settings": {},
     "effectiveSettings": {
       "strategy_loops": 1,
       "dynamic_strategies_enumerator": 3,
+      "same_agent_attempts": 3,
       "max_parallel_agents": 4,
       "max_parallel_nodes": 8,
       "default_timeout_seconds": 3600,
@@ -24,6 +25,7 @@
       "invariant_testing_smoke_timeout_seconds": "default",
       "max_parallel_agents": "default",
       "max_parallel_nodes": "default",
+      "same_agent_attempts": "default",
       "strategy_loops": "default",
       "triage_panel_size": "default",
       "triage_quorum": "default",
@@ -89,7 +91,7 @@
     }
   },
   "retry": {
-    "sameAgentAttempts": 1,
+    "sameAgentAttempts": 3,
     "agents": []
   },
   "agents": {

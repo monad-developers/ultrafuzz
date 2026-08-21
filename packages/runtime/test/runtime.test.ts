@@ -8162,7 +8162,10 @@ test("compileSmithersWorkflow exhausts same-profile retries before ordered fallb
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
@@ -8216,7 +8219,10 @@ test("compileSmithersWorkflow enforces the 100-rung retry cap before expanding t
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 99\nagents = ["primary", "fallback"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 99\nagents = ["primary", "fallback"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.primary]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
@@ -8256,7 +8262,10 @@ test("planRun rejects an oversized topology retry override before creating the r
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["primary", "fallback"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 1\nagents = ["primary", "fallback"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.primary]\nagent = "CodexAgent"\nmodel = "gpt-5.5"\nreasoning = "xhigh"\n\n' +
@@ -8292,7 +8301,7 @@ test("planRun rejects cloud retry chains before creating the run directory", asy
   const config = fs
     .readFileSync(configPath, "utf8")
     .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-    .replace("same_agent_attempts = 1", "same_agent_attempts = 2");
+    .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 2\n\n[agents.CodexAgent]");
   fs.writeFileSync(
     configPath,
     `${config}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
@@ -8320,7 +8329,10 @@ test("runtime model overrides apply to the retry policy's configured primary pro
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 2\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 2\nagents = ["sol-xhigh", "gpt55-xhigh"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
@@ -9784,7 +9796,10 @@ test("startRun rejects cross-agent API-key retry chains before submission", asyn
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["default", "deepseek"]'),
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 1\nagents = ["default", "deepseek"]\n\n[agents.CodexAgent]'
+      ),
     "utf8"
   );
   const credentialLog = path.join(project, "smithers-retry-credential-environment.log");
@@ -14535,7 +14550,9 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   const configPath = path.join(project, "ultrafuzz.toml");
   fs.writeFileSync(
     configPath,
-    fs.readFileSync(configPath, "utf8").replace("same_agent_attempts = 1", "same_agent_attempts = 2"),
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 2\n\n[agents.CodexAgent]"),
     "utf8"
   );
   const workflowRunId = "ultrafuzz-sync-failed-node";
@@ -14692,7 +14709,10 @@ test("syncRun records failed primaries and the actual fallback producer", async 
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 3\nagents = ["sol-xhigh", "gpt55-xhigh"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.sol-xhigh]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +
@@ -14773,7 +14793,10 @@ test("syncRun trusts non-ordinal Smithers selection when opaque profiles share a
     configPath,
     fs
       .readFileSync(configPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["shared-a", "shared-b", "shared-c"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 1\nagents = ["shared-a", "shared-b", "shared-c"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.shared-a]\nagent = "CodexAgent"\nmodel = "shared-model"\nreasoning = "xhigh"\n\n' +
@@ -15250,7 +15273,10 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     retryConfigPath,
     fs
       .readFileSync(retryConfigPath, "utf8")
-      .replace("same_agent_attempts = 1", 'same_agent_attempts = 1\nagents = ["default", "lifecycle-fallback"]')
+      .replace(
+        "[agents.CodexAgent]",
+        '[retry]\nsame_agent_attempts = 1\nagents = ["default", "lifecycle-fallback"]\n\n[agents.CodexAgent]'
+      )
       .replace(
         "[models.claude]",
         '[models.lifecycle-fallback]\nagent = "CodexAgent"\nmodel = "gpt-5.6-sol"\nreasoning = "xhigh"\n\n' +

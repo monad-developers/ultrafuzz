@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "fb0b51b6b28da314e59c50385bc320abeae16e637352771f8d212035ed2da60d";
-const EXPECTED_BUNDLE_SHA256 = "db5d6c16a8823adaf8446da570f638dc960e5c21dd4258251e7117c166c724d4";
+const EXPECTED_SCHEMA_SHA256 = "a51b6001c1b0d1299ad3d963bc65ac050f6b69c59001decd9b93255c6572a9ca";
+const EXPECTED_BUNDLE_SHA256 = "160238dbec50049c49502350e606f3909fd094d433fbc57d9f7262b50a1f50ca";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
