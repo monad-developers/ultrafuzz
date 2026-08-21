@@ -22,6 +22,7 @@ import {
   readRegularFileSnapshot,
   publishFileDurableExclusive
 } from "@ultrafuzz/artifacts";
+import { MODAL_NODE_LIFECYCLE_RESERVE_SECONDS, MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS } from "@ultrafuzz/config";
 import {
   parseRuntimeDocumentBytes,
   trustedGitExecutable,
@@ -51,7 +52,6 @@ const REMOTE_PROJECT_ARCHIVE = "/tmp/ultrafuzz-node-project.tgz";
 const REMOTE_REQUEST = "/tmp/ultrafuzz-node-request.json";
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
 const REMOTE_DATA_ROOT = "/data/ultrafuzz-nodes";
-const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const EXECUTION_DEPENDENCY_MANIFEST = "dependencies/manifest.json";
 const MAX_HANDOFF_SNAPSHOT_ENTRIES = 100_000;
@@ -61,6 +61,29 @@ const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
 const COMMAND_PROBE_TIMEOUT_MS = 60_000;
+
+/**
+ * Bounded allowance for controller handoff construction, Modal admission and
+ * upload, durable worker initialization, and result publication. The selected
+ * inner agent task keeps its configured timeout; only its enclosing cloud
+ * lifecycle receives this reserve.
+ */
+export { MODAL_NODE_LIFECYCLE_RESERVE_SECONDS };
+
+export function modalNodeLifecycleTimeoutSeconds(innerTimeoutSeconds: number): number {
+  if (
+    !Number.isSafeInteger(innerTimeoutSeconds) ||
+    innerTimeoutSeconds < 1 ||
+    innerTimeoutSeconds > MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS
+  ) {
+    throw new Error(`Modal node inner timeout must be between 1 and ${MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS} seconds`);
+  }
+  return innerTimeoutSeconds + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS;
+}
+
+export function modalNodeLifecycleTimeoutMs(innerTimeoutSeconds: number): number {
+  return modalNodeLifecycleTimeoutSeconds(innerTimeoutSeconds) * 1000;
+}
 
 const MODAL_COMMAND_PROBE_SOURCE = String.raw`
 const fs = require("node:fs");
@@ -259,6 +282,9 @@ async function runModalNodeSandbox(
   request: NodeSandboxProviderRequest
 ): Promise<NodeSandboxProviderResult> {
   const input = parseModalNodeSandboxInput(request.input);
+  const lifecycleTimeoutSeconds = modalNodeLifecycleTimeoutSeconds(input.resources.timeout_seconds);
+  const lifecycleTimeoutMs = lifecycleTimeoutSeconds * 1000;
+  const executionDeadline = Date.now() + lifecycleTimeoutMs;
   const env = options.env ?? process.env;
   const [tokenIdName, tokenSecretName] = options.credentialEnv;
   const tokenId = requiredCredential(env, tokenIdName);
@@ -266,7 +292,6 @@ async function runModalNodeSandbox(
   const archive = await createModalNodeHandoffArchive(request.rootDir, input);
   const workerInput = modalNodeWorkerInput(input, archive.sha256);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
-  const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
   try {
@@ -290,12 +315,12 @@ async function runModalNodeSandbox(
         Object.keys(credentialValues).length === 0 ? undefined : await client.secrets.fromObject(credentialValues);
       sandbox = await client.sandboxes.create(app, image, {
         name: modalNodeSandboxName(request.runId, request.sandboxId, input.execution_generation),
-        command: ["sleep", String(Math.max(60, input.resources.timeout_seconds + 300))],
+        command: ["sleep", String(lifecycleTimeoutSeconds)],
         cpu: input.resources.cpu,
         cpuLimit: input.resources.cpu,
         memoryMiB: input.resources.memory_mib,
         memoryLimitMiB: input.resources.memory_mib,
-        timeoutMs: Math.min(MAX_RESULT_WAIT_MS, (input.resources.timeout_seconds + 300) * 1000),
+        timeoutMs: lifecycleTimeoutMs,
         workdir: "/opt/ultrafuzz",
         ...(options.region === undefined ? {} : { regions: [options.region] }),
         ...(secret === undefined ? {} : { secrets: [secret] }),
