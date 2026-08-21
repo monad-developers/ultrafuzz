@@ -623,7 +623,7 @@ export async function runDurableWorkflow(
       ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
       ULTRAFUZZ_CONFIG_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/ultrafuzz.toml", "sealed cloud config"),
-      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: canonicalWorkflowPath
     };
     try {
       await runChecked(

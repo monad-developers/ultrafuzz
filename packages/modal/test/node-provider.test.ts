@@ -1362,8 +1362,11 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(commands[0]).toEqual(expect.arrayContaining(["--resume", "--force", "--run-id", "inner-run"]));
       expect(commands[1]).toEqual(expect.arrayContaining(["--run-id", "inner-run"]));
       expect(commands[1]).not.toContain("--resume");
-      const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
       const childVisibleRoot = `/proc/${process.pid}/fd/`;
+      expect(commands[0]![1]).toMatch(
+        new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
+      );
+      const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
       expect(environment.artifacts).toMatch(
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/artifacts/dist/index\\.js$`, "u")
       );
@@ -1371,9 +1374,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/runtime/dist/index\\.js$`, "u")
       );
       expect(environment.config).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/ultrafuzz\\.toml$`, "u"));
-      expect(environment.workflow).toMatch(
-        new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
-      );
+      expect(environment.workflow).toBe(path.join(fixture.root, fixture.input.workflow_path));
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
