@@ -42,6 +42,7 @@ import {
   CODEX_CLI_VERSION,
   KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
   MODAL_COLLECT_RESULT_FILES,
+  PI_CLI_VERSION,
   ModalTerminationError,
   assertPublicBenchmarkBundleDiagnosticsMatch,
   assertPublicBenchmarkBundleLineage,
@@ -466,6 +467,15 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain(expected);
     expect(commands).not.toContain("@openai/codex@0.144.3");
     expect(standaloneDockerfile).not.toContain("@openai/codex@0.144.3");
+  });
+
+  it("pins the documented Pi CLI in both Modal image definitions", () => {
+    const commands = modalSecurityToolchainCommands().join("\n");
+    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+    const expected = `@earendil-works/pi-coding-agent@${PI_CLI_VERSION}`;
+
+    expect(commands).toContain(expected);
+    expect(standaloneDockerfile).toContain(expected);
   });
 
   it("installs recon-fuzzer as the only fuzzing backend", () => {
