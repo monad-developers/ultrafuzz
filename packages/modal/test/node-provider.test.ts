@@ -1793,6 +1793,34 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("tolerates concurrent creation of shared durable volume ancestors", () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-mount-race-"));
+    const canonicalMount = path.join(fixture, "canonical-volume");
+    const mountAlias = path.join(fixture, "data");
+    fs.mkdirSync(canonicalMount);
+    fs.symlinkSync(canonicalMount, mountAlias, "dir");
+    const sharedAncestor = path.join(mountAlias, "ultrafuzz-nodes");
+    const originalMkdir = fs.mkdirSync.bind(fs);
+    let raced = false;
+    const mkdirSpy = vi.spyOn(fs, "mkdirSync").mockImplementation((directory, options) => {
+      if (!raced && path.resolve(String(directory)) === sharedAncestor) {
+        raced = true;
+        originalMkdir(directory, { mode: 0o700 });
+      }
+      return originalMkdir(directory, options);
+    });
+    try {
+      const lexicalAttempt = path.join(sharedAncestor, "run", "attempt");
+      expect(resolveDurableDataRoot(lexicalAttempt, mountAlias)).toBe(
+        path.join(canonicalMount, "ultrafuzz-nodes", "run", "attempt")
+      );
+      expect(raced).toBe(true);
+    } finally {
+      mkdirSpy.mockRestore();
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("binds durable recovery to the canonical execution snapshot", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);

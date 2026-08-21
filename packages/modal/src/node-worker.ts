@@ -1082,7 +1082,7 @@ export function resolveDurableDataRoot(dataRoot: string, trustedMountRoot = "/da
     for (const part of path.relative(mount, root).split(path.sep)) {
       lexical = path.join(lexical, part);
       canonical = path.join(canonical, part);
-      if (!fs.existsSync(lexical)) fs.mkdirSync(lexical, { mode: 0o700 });
+      fs.mkdirSync(lexical, { recursive: true, mode: 0o700 });
       const stat = fs.lstatSync(lexical);
       if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(lexical) !== canonical) {
         throw new Error("cloud durable data root is unsafe");
