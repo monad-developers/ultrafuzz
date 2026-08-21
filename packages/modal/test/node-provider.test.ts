@@ -1318,6 +1318,7 @@ describe("Modal node sandbox provider", () => {
       const inner = JSON.parse(args[args.indexOf("--input") + 1]!) as Record<string, unknown>;
       // Without this the worker never receives the handoff and every dynamic or deferred task
       // fails: the worker must not rematerialize controller-owned global state to recover it.
+      expect(inner.schema_version).toBe("ultrafuzz.smithers.workflow.v1");
       expect(inner.cloud_worker).toBe(true);
       expect(inner.task_id).toBe(fixture.input.task_id);
       expect(inner.attempt_id).toBe(fixture.input.attempt_id);

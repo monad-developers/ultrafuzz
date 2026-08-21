@@ -682,6 +682,7 @@ export function workflowCommandArguments(
     projectRoot,
     "--input",
     JSON.stringify({
+      schema_version: "ultrafuzz.smithers.workflow.v1",
       cloud_worker: true,
       task_id: input.task_id,
       attempt_id: input.attempt_id,
