@@ -26,12 +26,14 @@ const namedTests = new Map([
   ]
 ]);
 const bunTestFile = "test/runtime.test.ts";
+const bunTestNamePrefix = "Bun adapter contract: ";
 const bunTestNames = [
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
   "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
   "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
   "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry"
 ];
+const selectedBunTestNames = bunTestNames.map((name) => `${bunTestNamePrefix}${name}`);
 const smokeEnvironment = { ...process.env };
 delete smokeEnvironment.ULTRAFUZZ_RUNTIME_TEST_SHARD;
 const selectedTestNames = [...namedTests.values()].flat();
@@ -57,7 +59,7 @@ runNodeTests(
   selectedTestNames,
   selectedTestNames
 );
-runBunTests(`dist-test/${bunTestFile.replace(/\.ts$/u, ".js")}`, bunTestNames);
+runBunTests(`dist-test/${bunTestFile.replace(/\.ts$/u, ".js")}`, selectedBunTestNames);
 
 function runNodeTests(files, testNames, expectedTestNames) {
   const args = ["--test", "--test-reporter=tap"];

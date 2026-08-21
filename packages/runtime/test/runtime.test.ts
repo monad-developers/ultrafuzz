@@ -5203,9 +5203,9 @@ bunAdapterTest(
   }
 );
 
-test(
+bunAdapterTest(
   "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
