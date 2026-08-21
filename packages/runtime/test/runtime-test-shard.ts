@@ -44,10 +44,30 @@ export const test = ((name: string, ...args: unknown[]) => {
 
   const reason = `assigned to runtime test shard ${runtimeTestShardForName(name, selectedShard.total)}/${selectedShard.total}`;
   if (typeof args[0] === "function") {
-    return Reflect.apply(nodeTest, undefined, [name, { skip: reason }, args[0]]);
+    return Reflect.apply(nodeTest.skip, undefined, [name, { skip: reason }, args[0]]);
   }
   if (args[0] !== null && typeof args[0] === "object") {
-    return Reflect.apply(nodeTest, undefined, [name, { ...args[0], skip: reason }, args[1]]);
+    return Reflect.apply(nodeTest.skip, undefined, [name, { ...args[0], skip: reason }, args[1]]);
   }
   throw new Error(`runtime test ${JSON.stringify(name)} has an unsupported registration shape`);
 }) as typeof nodeTest;
+
+/**
+ * Selects a real or skipped test at registration time. Bun's `node:test` shim
+ * ignores the `skip` option but does honor `test.skip`, so callers shared by
+ * the Node and Bun lanes must select the registration function explicitly.
+ * Default options also provide a shared cold-cache-timeout fallback for
+ * generated-adapter contracts.
+ */
+export function testWhen(condition: boolean, defaultOptions: Record<string, unknown> = {}): typeof nodeTest {
+  const selected = condition ? test : nodeTest.skip;
+  return ((name: string, ...args: unknown[]) => {
+    if (typeof args[0] === "function") {
+      return Reflect.apply(selected, undefined, [name, defaultOptions, args[0]]);
+    }
+    if (args[0] !== null && typeof args[0] === "object") {
+      return Reflect.apply(selected, undefined, [name, { ...defaultOptions, ...args[0] }, args[1]]);
+    }
+    throw new Error(`runtime test ${JSON.stringify(name)} has an unsupported registration shape`);
+  }) as typeof nodeTest;
+}
