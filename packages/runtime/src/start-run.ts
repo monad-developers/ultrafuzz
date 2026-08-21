@@ -494,11 +494,18 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     // Reconcile Smithers before retrying so a stale local running state cannot
     // hide the failed run that this retry is recovering.
     if (action === "resume" && input.retryFailed === true) {
+      // Renew the durable deadline before any reconciliation that can reopen
+      // the local run. If a later preflight or lifecycle inspection fails, an
+      // already-active workflow must not be left paired with an expired local
+      // deadline that the next ordinary sync would enforce by cancelling it.
+      const deadlineRenewedAt = new Date().toISOString();
+      const stateBeforeSynchronization = readRunState(evidence.layout);
+      stateBeforeSynchronization.workflow_deadline_at = new Date(
+        Date.parse(deadlineRenewedAt) + sealedConfig.run.workflowDeadlineSeconds * 1_000
+      ).toISOString();
+      writeRunState(evidence.layout, stateBeforeSynchronization);
       const { syncRun } = await import("./workflow-sync.js");
-      const synchronization = await syncRun(
-        { projectRoot: input.projectRoot, runId: input.runId, env: input.env },
-        { deferWorkflowDeadlineEnforcement: true }
-      );
+      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
       if (!synchronization.ok) {
         return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
       }

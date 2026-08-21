@@ -1,6 +1,6 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
-import { getRunHealth, type RunHealthValue } from "@ultrafuzz/runtime";
+import { getRunHealth, isLiveWorkflowRunStatus, type RunHealthValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
@@ -17,13 +17,6 @@ import { formatStatusDuration } from "../status-rendering.js";
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
-const LIVE_WORKFLOW_RUN_STATUSES = new Set([
-  "running",
-  "waiting-approval",
-  "waiting-event",
-  "waiting-timer",
-  "waiting-quota"
-]);
 const STOP_WATCH_VERDICTS = new Set<RunHealthValue["verdict"]>([
   "done",
   "degraded",
@@ -132,7 +125,7 @@ function renderHealth(value: RunHealthValue): string {
 }
 
 function lifecycleDivergenceLines(value: RunHealthValue): string[] {
-  if (!TERMINAL_RUN_STATUSES.has(value.status) || !LIVE_WORKFLOW_RUN_STATUSES.has(value.workflow_status)) return [];
+  if (!TERMINAL_RUN_STATUSES.has(value.status) || !isLiveWorkflowRunStatus(value.workflow_status)) return [];
   return [
     `Lifecycle divergence: Ultrafuzz is terminal ${value.status}, but the workflow runner is ${value.workflow_status}; workflow work may still be active.`
   ];

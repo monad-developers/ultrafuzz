@@ -341,12 +341,6 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
-  /**
-   * A lifecycle resume reconciles task evidence before renewing the workflow
-   * deadline. Defer enforcement during that preparatory pass so a stale
-   * terminal deadline cannot cancel work the resume is about to re-authorize.
-   */
-  deferWorkflowDeadlineEnforcement?: boolean;
   /** Trusted transport seams for hermetic embedders and tests. */
   pricingFetch?: PricingCatalogFetch;
   pricingLookupHostname?: PricingHostnameLookup;
@@ -712,7 +706,7 @@ export async function synchronizeLinkedWorkflowRun(
   });
   let deadlineApplied = false;
   let exceededDeadlineAt: string | undefined;
-  if (workflowControl.deadlineExceeded && control.deferWorkflowDeadlineEnforcement !== true) {
+  if (workflowControl.deadlineExceeded) {
     exceededDeadlineAt = workflowControl.state.workflow_deadline_at;
     if (exceededDeadlineAt === undefined) {
       throw new Error("workflow control reported a deadline breach without a deadline timestamp");

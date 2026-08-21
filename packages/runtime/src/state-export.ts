@@ -41,13 +41,17 @@ import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
-const LIVE_WORKFLOW_RUN_STATUSES = new Set([
+const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "running",
   "waiting-approval",
   "waiting-event",
   "waiting-timer",
   "waiting-quota"
 ]);
+
+export function isLiveWorkflowRunStatus(status: string): boolean {
+  return LIVE_WORKFLOW_RUN_STATUSES.has(status);
+}
 
 export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -203,15 +207,7 @@ export async function getRunHealth(input: {
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
     const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-    syncDiagnostics.push(
-      ...sync.diagnostics.map((diagnostic) => ({
-        ...diagnostic,
-        // `status` is observational and still has a valid workflow health
-        // snapshot to return. Keep synchronization findings visible without
-        // producing an impossible successful CLI envelope containing errors.
-        severity: "warning" as const
-      }))
-    );
+    syncDiagnostics.push(...sync.diagnostics.map(statusObservationDiagnostic));
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",
@@ -286,12 +282,29 @@ export async function getRunHealth(input: {
   );
 }
 
+function statusObservationDiagnostic(diagnostic: RuntimeDiagnostic): RuntimeDiagnostic {
+  if (diagnostic.severity !== "error") return diagnostic;
+  return {
+    ...diagnostic,
+    // A successful status envelope cannot contain error-severity diagnostics,
+    // but status can still return an independent runner snapshot when state
+    // synchronization observes a failed run. Preserve the source severity so
+    // structured consumers can distinguish that condition from an ordinary
+    // warning without making the observational command itself fail.
+    severity: "warning",
+    details: {
+      ...diagnostic.details,
+      status_observed_severity: diagnostic.severity
+    }
+  };
+}
+
 function workflowLifecycleDivergenceDiagnostic(
   runStatus: RunState["status"],
   workflowStatus: string,
   statePath: string
 ): RuntimeDiagnostic | undefined {
-  if (!isTerminalRunStatus(runStatus) || !LIVE_WORKFLOW_RUN_STATUSES.has(workflowStatus)) return undefined;
+  if (!isTerminalRunStatus(runStatus) || !isLiveWorkflowRunStatus(workflowStatus)) return undefined;
   return {
     code: "RUN_WORKFLOW_STATUS_DIVERGED",
     message:
