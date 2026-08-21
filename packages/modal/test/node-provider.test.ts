@@ -29,6 +29,7 @@ import {
   copyPublishedEvidenceTree,
   copyVerifiedPublishedEvidenceTree,
   initializeDurableNodeWorkspace,
+  resolveDurableDataRoot,
   runDurableWorkflow,
   workerResultPublicationMode,
   workflowCommandArguments
@@ -1317,6 +1318,7 @@ describe("Modal node sandbox provider", () => {
       const inner = JSON.parse(args[args.indexOf("--input") + 1]!) as Record<string, unknown>;
       // Without this the worker never receives the handoff and every dynamic or deferred task
       // fails: the worker must not rematerialize controller-owned global state to recover it.
+      expect(inner.schema_version).toBe("ultrafuzz.smithers.workflow.v1");
       expect(inner.cloud_worker).toBe(true);
       expect(inner.task_id).toBe(fixture.input.task_id);
       expect(inner.attempt_id).toBe(fixture.input.attempt_id);
@@ -1361,8 +1363,11 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(commands[0]).toEqual(expect.arrayContaining(["--resume", "--force", "--run-id", "inner-run"]));
       expect(commands[1]).toEqual(expect.arrayContaining(["--run-id", "inner-run"]));
       expect(commands[1]).not.toContain("--resume");
-      const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
       const childVisibleRoot = `/proc/${process.pid}/fd/`;
+      expect(commands[0]![1]).toMatch(
+        new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
+      );
+      const environment = JSON.parse(fs.readFileSync(environmentPath, "utf8")) as Record<string, string>;
       expect(environment.artifacts).toMatch(
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/artifacts/dist/index\\.js$`, "u")
       );
@@ -1370,9 +1375,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         new RegExp(`^file://${childVisibleRoot}[0-9]+/modules/@ultrafuzz/runtime/dist/index\\.js$`, "u")
       );
       expect(environment.config).toMatch(new RegExp(`^${childVisibleRoot}[0-9]+/controls/ultrafuzz\\.toml$`, "u"));
-      expect(environment.workflow).toMatch(
-        new RegExp(`^${childVisibleRoot}[0-9]+/\\.smithers/workflows/ultrafuzz-run-one\\.tsx$`, "u")
-      );
+      expect(environment.workflow).toBe(path.join(fixture.root, fixture.input.workflow_path));
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
@@ -1762,6 +1765,59 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     } finally {
       archive.cleanup();
       fixture.cleanup();
+    }
+  });
+
+  it("canonicalizes a trusted Modal mount alias while rejecting aliases below it", () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-mount-alias-"));
+    const canonicalMount = path.join(fixture, "canonical-volume");
+    const mountAlias = path.join(fixture, "data");
+    const outside = path.join(fixture, "outside");
+    fs.mkdirSync(canonicalMount);
+    fs.mkdirSync(outside);
+    fs.symlinkSync(canonicalMount, mountAlias, "dir");
+    try {
+      const lexicalAttempt = path.join(mountAlias, "ultrafuzz-nodes", "run", "attempt");
+      expect(resolveDurableDataRoot(lexicalAttempt, mountAlias)).toBe(
+        path.join(canonicalMount, "ultrafuzz-nodes", "run", "attempt")
+      );
+      expect(fs.lstatSync(lexicalAttempt).isSymbolicLink()).toBe(false);
+
+      const poisonedRun = path.join(mountAlias, "ultrafuzz-nodes", "poisoned-run");
+      fs.symlinkSync(outside, poisonedRun, "dir");
+      expect(() => resolveDurableDataRoot(path.join(poisonedRun, "attempt"), mountAlias)).toThrow(
+        /cloud durable data root is unsafe/u
+      );
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("tolerates concurrent creation of shared durable volume ancestors", () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-mount-race-"));
+    const canonicalMount = path.join(fixture, "canonical-volume");
+    const mountAlias = path.join(fixture, "data");
+    fs.mkdirSync(canonicalMount);
+    fs.symlinkSync(canonicalMount, mountAlias, "dir");
+    const sharedAncestor = path.join(mountAlias, "ultrafuzz-nodes");
+    const originalMkdir = fs.mkdirSync.bind(fs);
+    let raced = false;
+    const mkdirSpy = vi.spyOn(fs, "mkdirSync").mockImplementation((directory, options) => {
+      if (!raced && path.resolve(String(directory)) === sharedAncestor) {
+        raced = true;
+        originalMkdir(directory, { mode: 0o700 });
+      }
+      return originalMkdir(directory, options);
+    });
+    try {
+      const lexicalAttempt = path.join(sharedAncestor, "run", "attempt");
+      expect(resolveDurableDataRoot(lexicalAttempt, mountAlias)).toBe(
+        path.join(canonicalMount, "ultrafuzz-nodes", "run", "attempt")
+      );
+      expect(raced).toBe(true);
+    } finally {
+      mkdirSpy.mockRestore();
+      fs.rmSync(fixture, { recursive: true, force: true });
     }
   });
 

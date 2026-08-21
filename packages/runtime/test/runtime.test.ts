@@ -6620,7 +6620,7 @@ test("startRun rejects controller-only paths as credential environment names", a
   assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
 });
 
-test("startRun forwards cloud provider credentials through the Smithers environment filter", async () => {
+test("startRun forwards Modal credentials and SDK selectors through the workflow environment filter", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -6645,7 +6645,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     [
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
-      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      '  printf \'%s|%s|%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" "$MODAL_ENVIRONMENT" "$MODAL_PROFILE" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
       "printf '%s\\n' '{\"ok\":true}'",
       ""
@@ -6659,13 +6659,18 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
     OPENAI_API_KEY: "configured-agent-key",
     UFZ_PROVIDER_ONE: "provider-one",
-    UFZ_PROVIDER_TWO: "provider-two"
+    UFZ_PROVIDER_TWO: "provider-two",
+    MODAL_ENVIRONMENT: "selected-environment",
+    MODAL_PROFILE: "selected-profile"
   };
 
   const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
+  assert.equal(
+    fs.readFileSync(cloudEnvironmentLog, "utf8"),
+    "provider-one|provider-two|selected-environment|selected-profile\n"
+  );
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     workflow?: { execution_snapshot_path?: string };
   };

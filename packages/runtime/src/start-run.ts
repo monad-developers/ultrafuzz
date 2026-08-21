@@ -1125,6 +1125,9 @@ function agentEnvironmentVariableNames(
     const provider = config.execution.providers[config.execution.provider];
     if (provider !== undefined) {
       pushEnvironmentVariableNames(names, provider.credentialEnv);
+      if (config.execution.provider === "modal") {
+        names.push("MODAL_ENVIRONMENT", "MODAL_PROFILE");
+      }
     }
   }
   const extra = env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;

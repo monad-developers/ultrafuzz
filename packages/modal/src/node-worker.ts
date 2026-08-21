@@ -623,7 +623,7 @@ export async function runDurableWorkflow(
       ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
       ULTRAFUZZ_CONFIG_PATH: regularSnapshotFile(snapshotAccessRoot, "controls/ultrafuzz.toml", "sealed cloud config"),
-      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: canonicalWorkflowPath
     };
     try {
       await runChecked(
@@ -682,6 +682,7 @@ export function workflowCommandArguments(
     projectRoot,
     "--input",
     JSON.stringify({
+      schema_version: "ultrafuzz.smithers.workflow.v1",
       cloud_worker: true,
       task_id: input.task_id,
       attempt_id: input.attempt_id,
@@ -1067,9 +1068,30 @@ function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof
   });
 }
 
-function resolveDurableDataRoot(dataRoot: string): string {
+export function resolveDurableDataRoot(dataRoot: string, trustedMountRoot = "/data"): string {
   const root = path.resolve(dataRoot);
   if (root === path.parse(root).root) throw new Error("cloud durable data root is unsafe");
+  const mount = path.resolve(trustedMountRoot);
+  if (root !== mount && root.startsWith(`${mount}${path.sep}`)) {
+    const canonicalMount = fs.realpathSync(mount);
+    if (!fs.statSync(canonicalMount).isDirectory() || canonicalMount === path.parse(canonicalMount).root) {
+      throw new Error("cloud durable data root is unsafe");
+    }
+    let lexical = mount;
+    let canonical = canonicalMount;
+    for (const part of path.relative(mount, root).split(path.sep)) {
+      lexical = path.join(lexical, part);
+      canonical = path.join(canonical, part);
+      fs.mkdirSync(lexical, { recursive: true, mode: 0o700 });
+      const stat = fs.lstatSync(lexical);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(lexical) !== canonical) {
+        throw new Error("cloud durable data root is unsafe");
+      }
+    }
+    return canonical;
+  }
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  assertDurableDirectory(root, "cloud durable data root");
   return root;
 }
 
