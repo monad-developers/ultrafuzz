@@ -1284,8 +1284,27 @@ function replaceInternalModuleFiles(files: Array<WorkflowExecutionControlFile & 
     byModule.set(match[1]!, entries);
   }
   for (const [moduleName, sealed] of byModule) {
-    const moduleRoot = workflowPackageRoot(fileURLToPath(import.meta.resolve(moduleName)));
-    const candidates = [path.join(moduleRoot, "package.json")];
+    const manifestSnapshotPath = path.posix.join("modules", moduleName, "package.json");
+    const sealedManifest = sealed.find((file) => file.snapshotPath === manifestSnapshotPath);
+    if (sealedManifest === undefined) {
+      throw new Error(`controller module ${moduleName} is missing its sealed package manifest`);
+    }
+    const moduleRoot = workflowPackageRoot(sealedManifest.sourcePath);
+    const packageJsonPath = path.join(moduleRoot, "package.json");
+    if (fs.realpathSync(packageJsonPath) !== fs.realpathSync(sealedManifest.sourcePath)) {
+      throw new Error(`controller module ${moduleName} has a mismatched sealed package manifest path`);
+    }
+    const manifest = readWorkflowPackageManifest(packageJsonPath);
+    if (manifest.name !== moduleName) {
+      throw new Error(`controller module package manifest name does not match ${moduleName}`);
+    }
+    const currentManifest = readRegularFileSnapshot(packageJsonPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    if (!currentManifest.equals(sealedManifest.contents)) {
+      throw new Error(
+        `controller module ${moduleName} changed its package manifest; controller refresh cannot change dependency or executable authority`
+      );
+    }
+    const candidates = [packageJsonPath];
     for (const directory of ["dist", "schema"]) {
       const root = path.join(moduleRoot, directory);
       if (fs.existsSync(root)) candidates.push(...walkExecutionFiles(root));

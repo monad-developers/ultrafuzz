@@ -15639,6 +15639,116 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
   assert.equal(stillPrepared.entries?.at(-1)?.phase, "prepared");
 });
 
+test("controller refresh resolves a synthetic sealed module from its authenticated package context", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-package-context";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+
+  const moduleName = "@ultrafuzz/synthetic-controller-fixture";
+  assert.throws(() => createRequire(import.meta.url).resolve(moduleName), { code: "MODULE_NOT_FOUND" });
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-controller-package-"));
+  const packageJsonPath = path.join(packageRoot, "package.json");
+  const modulePath = path.join(packageRoot, "dist", "index.js");
+  const packageJson = Buffer.from(`${JSON.stringify({ name: moduleName, version: "1.0.0" })}\n`, "utf8");
+  const currentModule = Buffer.from("export const controllerFixture = 'current';\n", "utf8");
+  fs.mkdirSync(path.dirname(modulePath), { recursive: true });
+  fs.writeFileSync(packageJsonPath, packageJson);
+  fs.writeFileSync(modulePath, currentModule);
+  const manifestSnapshotPath = `modules/${moduleName}/package.json`;
+  const moduleSnapshotPath = `modules/${moduleName}/dist/index.js`;
+  const syntheticSnapshot = {
+    ...evidence.verifiedControl,
+    executionFiles: [
+      ...evidence.verifiedControl.executionFiles,
+      {
+        sourcePath: packageJsonPath,
+        snapshotPath: manifestSnapshotPath,
+        contents: packageJson
+      },
+      {
+        sourcePath: modulePath,
+        snapshotPath: moduleSnapshotPath,
+        contents: Buffer.from("export const controllerFixture = 'sealed';\n", "utf8")
+      }
+    ]
+  };
+
+  const refreshed = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: syntheticSnapshot,
+    config
+  });
+
+  assert.deepEqual(
+    refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === moduleSnapshotPath)?.contents,
+    currentModule
+  );
+
+  fs.writeFileSync(
+    packageJsonPath,
+    `${JSON.stringify({ name: moduleName, version: "1.0.0", dependencies: { "synthetic-dependency": "1.0.0" } })}\n`,
+    "utf8"
+  );
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: syntheticSnapshot,
+        config
+      }),
+    /cannot change dependency or executable authority/u
+  );
+
+  const wrongManifest = Buffer.from(`${JSON.stringify({ name: "@ultrafuzz/wrong-controller" })}\n`, "utf8");
+  fs.writeFileSync(packageJsonPath, wrongManifest);
+  const wrongNameSnapshot = {
+    ...syntheticSnapshot,
+    executionFiles: syntheticSnapshot.executionFiles.map((file) =>
+      file.snapshotPath === manifestSnapshotPath ? { ...file, contents: wrongManifest } : file
+    )
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: wrongNameSnapshot,
+        config
+      }),
+    /package manifest name does not match/u
+  );
+  const wrongPathSnapshot = {
+    ...wrongNameSnapshot,
+    executionFiles: wrongNameSnapshot.executionFiles.map((file) =>
+      file.snapshotPath === manifestSnapshotPath ? { ...file, sourcePath: modulePath } : file
+    )
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: wrongPathSnapshot,
+        config
+      }),
+    /mismatched sealed package manifest path/u
+  );
+});
+
 test("controller refresh refuses an active workflow without publishing a generation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
