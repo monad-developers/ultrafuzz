@@ -79,7 +79,7 @@ import {
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
-import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import type { VerifiedWorkflowControlSnapshot, WorkflowExecutionControlFile } from "./workflow-integrity.js";
 import {
   acquireWorkflowExecutionSnapshotAnchor,
   hasWorkflowExecutionSnapshotCapability,
@@ -107,6 +107,7 @@ const MAX_PACKAGE_MANAGER_MANIFEST_BYTES = 1024 * 1024;
 const MAX_PACKAGE_MANAGER_MANIFEST_DEPTH = 32;
 const MAX_PACKAGE_MANAGER_MANIFEST_ITEMS = 10_000;
 const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
+const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
@@ -1170,6 +1171,175 @@ export interface CompiledSmithersWorkflow {
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
   dataGovernance?: RunDataGovernanceReference;
+}
+
+export interface RefreshedSmithersControllerSnapshot {
+  snapshot: VerifiedWorkflowControlSnapshot;
+  controllerSourceDigest: string;
+  semanticFingerprint: string;
+}
+
+/**
+ * Rebuild the controller-owned portion of an already sealed workflow from the
+ * currently installed, stock Ultrafuzz packages. Campaign inputs remain the
+ * exact bytes authenticated by the launch seal. A compatibility refresh is
+ * deliberately narrower than an upgrade: existing module paths cannot vanish
+ * and the sealed dependency map remains authoritative. New Ultrafuzz-owned
+ * module files are admitted only from the installed package root and become
+ * explicit members of the new generation manifest.
+ */
+export function refreshedSmithersControllerSnapshot(input: {
+  projectRoot: string;
+  layout: RunLayout;
+  original: VerifiedWorkflowControlSnapshot;
+  config: ResolvedConfig;
+}): RefreshedSmithersControllerSnapshot {
+  const projectRoot = path.resolve(input.projectRoot);
+  const taskDocument = parseSealedTaskDocument(input.original.contents.tasks);
+  if (taskDocument.run_id !== input.layout.runId) {
+    throw new Error("controller refresh task manifest does not match the run ID");
+  }
+  const source = inspectControllerSource(projectRoot);
+  const compiled: CompiledSmithersWorkflow = {
+    schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+    runId: input.layout.runId,
+    smithersRunId: taskDocument.smithers_run_id,
+    workflowName: taskDocument.workflow_name,
+    tasks: taskDocument.tasks,
+    projectRoot,
+    ...(taskDocument.source_revision === undefined ? {} : { sourceRevision: taskDocument.source_revision }),
+    ...(taskDocument.source_ref === undefined ? {} : { sourceRef: taskDocument.source_ref }),
+    workflowPath: input.original.paths.workflowPath,
+    evidenceWorkflowPath: input.original.paths.evidenceWorkflowPath,
+    expandedGraphPath: input.original.paths.expandedGraphPath,
+    configPath: input.original.paths.configPath,
+    resolvedConfigPath: executionFileSourcePath(input.original, "controls/resolved-config.json"),
+    executionConfigPath: executionFileSourcePath(input.original, "controls/ultrafuzz.toml"),
+    inputPath: input.original.paths.inputPath,
+    tasksPath: input.original.paths.tasksPath,
+    logsDir: path.join(input.layout.root, "smithers", "logs"),
+    productionSourceRoots: input.config.permissions.productionSourceRoots,
+    controllerSourceDigest: source.digest,
+    ...(taskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: taskDocument.pinned_submodules })
+  };
+
+  const executionFiles = input.original.executionFiles.map((file) => ({
+    ...file,
+    contents: Buffer.from(file.contents)
+  }));
+  replaceStockAgentFiles(projectRoot, executionFiles);
+  replaceInternalModuleFiles(executionFiles);
+  const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
+  const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
+  return {
+    snapshot: {
+      ...input.original,
+      contents: { ...input.original.contents, workflow },
+      executionFiles
+    },
+    controllerSourceDigest: source.digest,
+    semanticFingerprint
+  };
+}
+
+function parseSealedTaskDocument(contents: Buffer): SmithersTaskManifestDocument {
+  const value = parseStrictJsonBytes(contents);
+  assertValidSmithersTaskManifest(value);
+  return value;
+}
+
+function executionFileSourcePath(snapshot: VerifiedWorkflowControlSnapshot, snapshotPath: string): string {
+  const file = snapshot.executionFiles.find((candidate) => candidate.snapshotPath === snapshotPath);
+  if (file === undefined) throw new Error(`controller refresh is missing sealed ${snapshotPath}`);
+  return file.sourcePath;
+}
+
+function replaceStockAgentFiles(
+  projectRoot: string,
+  files: Array<WorkflowExecutionControlFile & { contents: Buffer }>
+): void {
+  const prefix = ".smithers/agents/";
+  const sealed = files.filter((file) => file.snapshotPath.startsWith(prefix));
+  const agentsRoot = path.join(projectRoot, ".smithers", "agents");
+  const current = walkExecutionFiles(agentsRoot).map((sourcePath) => ({
+    sourcePath,
+    snapshotPath: `${prefix}${relativeExecutionPath(agentsRoot, sourcePath)}`
+  }));
+  assertSameControllerPathSet(sealed, current, "stock controller adapters");
+  const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
+  for (const file of sealed) {
+    const sourcePath = byPath.get(file.snapshotPath)!;
+    file.sourcePath = sourcePath;
+    file.contents = readRegularFileSnapshot(sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+  }
+}
+
+function replaceInternalModuleFiles(files: Array<WorkflowExecutionControlFile & { contents: Buffer }>): void {
+  const byModule = new Map<string, Array<WorkflowExecutionControlFile & { contents: Buffer }>>();
+  for (const file of files) {
+    const match = /^modules\/(@ultrafuzz\/[^/]+)\/(.+)$/u.exec(file.snapshotPath);
+    if (match === null) continue;
+    const entries = byModule.get(match[1]!) ?? [];
+    entries.push(file);
+    byModule.set(match[1]!, entries);
+  }
+  for (const [moduleName, sealed] of byModule) {
+    const moduleRoot = workflowPackageRoot(fileURLToPath(import.meta.resolve(moduleName)));
+    const candidates = [path.join(moduleRoot, "package.json")];
+    for (const directory of ["dist", "schema"]) {
+      const root = path.join(moduleRoot, directory);
+      if (fs.existsSync(root)) candidates.push(...walkExecutionFiles(root));
+    }
+    const dockerfile = path.join(moduleRoot, "Dockerfile");
+    if (fs.existsSync(dockerfile)) candidates.push(dockerfile);
+    const current = candidates.map((sourcePath) => ({
+      sourcePath,
+      snapshotPath: path.posix.join("modules", moduleName, relativeExecutionPath(moduleRoot, sourcePath))
+    }));
+    const currentPaths = new Set(current.map((file) => file.snapshotPath));
+    if (sealed.some((file) => !currentPaths.has(file.snapshotPath))) {
+      throw new Error(`controller module ${moduleName} removed a sealed execution path`);
+    }
+    const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
+    for (const file of sealed) {
+      const sourcePath = byPath.get(file.snapshotPath)!;
+      file.sourcePath = sourcePath;
+      file.contents = readRegularFileSnapshot(sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    }
+    const sealedPaths = new Set(sealed.map((file) => file.snapshotPath));
+    for (const file of current.filter((candidate) => !sealedPaths.has(candidate.snapshotPath))) {
+      files.push({
+        ...file,
+        contents: readRegularFileSnapshot(file.sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES)
+      });
+    }
+  }
+}
+
+function assertSameControllerPathSet(
+  sealed: readonly { snapshotPath: string }[],
+  current: readonly { snapshotPath: string }[],
+  label: string
+): void {
+  const left = sealed.map((file) => file.snapshotPath).sort(compareWorkflowExecutionStrings);
+  const right = current.map((file) => file.snapshotPath).sort(compareWorkflowExecutionStrings);
+  if (JSON.stringify(left) !== JSON.stringify(right)) {
+    throw new Error(`${label} changed its execution closure; controller refresh requires an exact path set`);
+  }
+}
+
+function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
+  for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
+    const bytes = snapshot.contents[key];
+    hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
+  }
+  for (const file of snapshot.executionFiles
+    .filter((candidate) => candidate.snapshotPath.startsWith("controls/"))
+    .sort((left, right) => compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath))) {
+    hash.update(`${file.snapshotPath}\0${file.contents.byteLength}\0`).update(file.contents);
+  }
+  return hash.digest("hex");
 }
 
 export interface SubmitSmithersInput {
@@ -2659,6 +2829,27 @@ export async function runSmithersLifecycleCommand(input: {
     stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
     ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
+}
+
+export async function assertSmithersControllerRefreshable(input: {
+  smithersRunId: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  const inspection = await runSmithersInspectionCommand({
+    args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
+    projectRoot: input.projectRoot,
+    env: input.env
+  });
+  if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) return;
+  if (!inspection.ok) {
+    throw new Error(
+      `workflow inspection failed before controller refresh: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
+    );
+  }
+  if (smithersRunStateIsActive(parseCurrentSmithersInspect(inspection, input.smithersRunId))) {
+    throw new Error("controller refresh requires a stopped, terminal, or missing workflow run");
+  }
 }
 
 export async function runSmithersInspectionCommand(input: {

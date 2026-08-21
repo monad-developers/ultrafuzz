@@ -37,6 +37,7 @@ import {
 const WORKFLOW_CONTROL_INTEGRITY_FILE = "control-integrity.json";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_CONTROL_LOCK = ".workflow-control";
+const WORKFLOW_LIFECYCLE_LOCK = ".workflow-lifecycle";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const BUN_MODULE_CONFINEMENT_PATH = "controls/bun-module-confinement.js";
@@ -176,13 +177,22 @@ interface OpenedSnapshotPublicationDirectory {
 
 /** Serializes control sealing and immutable generation publication per run. */
 export async function acquireWorkflowControlLock(layout: RunLayout): Promise<() => Promise<void>> {
-  const root = path.resolve(layout.root);
+  return acquireRunLock(layout.root, WORKFLOW_CONTROL_LOCK, "workflow control");
+}
+
+/** Serializes lifecycle submissions so a controller refresh cannot race a resume. */
+export async function acquireWorkflowLifecycleLock(layout: RunLayout): Promise<() => Promise<void>> {
+  return acquireRunLock(path.join(layout.root, "smithers"), WORKFLOW_LIFECYCLE_LOCK, "workflow lifecycle");
+}
+
+async function acquireRunLock(rootPath: string, lockName: string, label: string): Promise<() => Promise<void>> {
+  const root = path.resolve(rootPath);
   const stat = fs.lstatSync(root);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error("workflow control lock requires a physical run root");
+    throw new Error(`${label} lock requires a physical run root`);
   }
   return lockfile.lock(root, {
-    lockfilePath: path.join(root, WORKFLOW_CONTROL_LOCK),
+    lockfilePath: path.join(root, lockName),
     realpath: false,
     stale: 300_000,
     update: 60_000,
@@ -630,6 +640,12 @@ export function materializeWorkflowExecutionSnapshot(input: {
   projectRoot: string;
   layout: RunLayout;
   snapshot: VerifiedWorkflowControlSnapshot;
+  /**
+   * Every immutable generation already authorized for this run. Controller
+   * refresh uses this to retain the launch generation and its append-only
+   * successors without making arbitrary directories executable.
+   */
+  authorizedGenerations?: readonly string[];
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
@@ -647,11 +663,18 @@ export function materializeWorkflowExecutionSnapshot(input: {
   const snapshotRoot = path.join(snapshotsRoot, input.snapshot.generation);
   let snapshotDescriptor: number | undefined;
   try {
+    const authorizedGenerations = sortedUniqueGenerations(
+      input.authorizedGenerations ?? [input.snapshot.generation],
+      input.snapshot.generation
+    );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
     const snapshotAccessPath = path.join(snapshots.accessPath, input.snapshot.generation);
     const snapshotAlreadyExists = pathEntryExists(snapshotAccessPath);
-    assertSnapshotRootEntries(snapshots, snapshotAlreadyExists ? [input.snapshot.generation] : []);
+    const existingAuthorizedGenerations = authorizedGenerations.filter((generation) =>
+      pathEntryExists(path.join(snapshots.accessPath, generation))
+    );
+    assertSnapshotRootEntries(snapshots, existingAuthorizedGenerations);
     if (!snapshotAlreadyExists) {
       publishWorkflowExecutionSnapshot(
         snapshots,
@@ -661,7 +684,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
         dependencyMap.executable_paths
       );
     }
-    assertSnapshotRootEntries(snapshots, [input.snapshot.generation]);
+    assertSnapshotRootEntries(snapshots, authorizedGenerations);
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     const lexicalStat = fs.lstatSync(snapshotRoot);
     if (lexicalStat.isSymbolicLink() || !lexicalStat.isDirectory()) {
@@ -714,6 +737,17 @@ export function materializeWorkflowExecutionSnapshot(input: {
     if (snapshotDescriptor !== undefined) fs.closeSync(snapshotDescriptor);
     if (snapshots.descriptor !== undefined) fs.closeSync(snapshots.descriptor);
   }
+}
+
+function sortedUniqueGenerations(values: readonly string[], required: string): string[] {
+  const generations = [...new Set(values)].sort(compareCanonicalStrings);
+  if (!generations.includes(required)) {
+    throw new Error("authorized workflow execution snapshots omit the selected generation");
+  }
+  if (generations.some((generation) => !SHA256_PATTERN.test(generation))) {
+    throw new Error("authorized workflow execution snapshot generation is invalid");
+  }
+  return generations;
 }
 
 function publishWorkflowExecutionSnapshot(

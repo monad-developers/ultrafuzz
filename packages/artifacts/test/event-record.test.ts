@@ -125,6 +125,16 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
       workflow_run_id: "workflow-1",
       control_generation: SHA256
     }),
+    event("workflow-controller-generation-recorded", "failed", {
+      workflow_run_id: "workflow-1",
+      workflow_link_id: LINK_ID,
+      control_generation: SHA256,
+      controller_generation: "b".repeat(64),
+      previous_controller_generation: SHA256,
+      manifest_sha256: "c".repeat(64),
+      semantic_fingerprint: "d".repeat(64),
+      sequence: 1
+    }),
     event("workflow-cancel-confirmed", "canceled", {
       action: "cancel",
       workflow_run_id: "workflow-1",
@@ -214,7 +224,7 @@ function assertParity(value: unknown, expected: boolean, label: string): void {
 }
 
 test("event-record v2 enumerates every production event as a closed Ajv/Zod union", () => {
-  assert.equal(EVENT_RECORD_TYPES.length, 24);
+  assert.equal(EVENT_RECORD_TYPES.length, 25);
   assert.deepEqual(Object.keys(validVariantFixtures).sort(), [...EVENT_RECORD_TYPES].sort());
 
   for (const eventType of EVENT_RECORD_TYPES) {

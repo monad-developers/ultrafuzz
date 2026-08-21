@@ -22,6 +22,7 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  appendEvent,
   createEventRecord,
   layoutForRunRoot,
   replayEvents,
@@ -59,6 +60,7 @@ import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
 import {
   forkRun as runtimeForkRun,
+  commitControllerGeneration,
   diagnoseRun,
   getRunHealth,
   getRunStatus,
@@ -66,6 +68,7 @@ import {
   listRuns,
   planRun,
   pauseRun,
+  prepareControllerGeneration,
   readLinkedWorkflowEvidence,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
@@ -75,7 +78,11 @@ import {
   validateProject
 } from "../src/index.js";
 import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
-import { inspectSmithersInstallation, runSmithersInspectionCommand } from "../src/smithers.js";
+import {
+  inspectSmithersInstallation,
+  refreshedSmithersControllerSnapshot,
+  runSmithersInspectionCommand
+} from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
@@ -1835,6 +1842,17 @@ function workflowInspect(input: {
       duration: "1ms"
     }
   };
+}
+
+function controllerRefreshTerminalEnv(project: string, runId: string): Record<string, string | undefined> {
+  return fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
 }
 
 function workflowEvents(
@@ -15402,6 +15420,464 @@ test("syncRun records model fan-out attempts independently", async () => {
     "project-discovery__model_0__attempt_0",
     "project-discovery__model_1__attempt_1"
   ]);
+});
+
+test("controller refresh preserves run authority and retains both immutable generations", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-success";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+  if (!before.ok) return;
+  const originalSnapshotRoot = before.executionSnapshot.root;
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.workflow_run_id, before.smithersRunId);
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
+  if (!after.ok) return;
+  assert.equal(after.layout.runId, runId);
+  assert.equal(after.smithersRunId, before.smithersRunId);
+  assert.equal(after.workflowLinkId, before.workflowLinkId);
+  assert.equal(after.controlGeneration, before.controlGeneration);
+  assert.notEqual(after.controllerGeneration, before.controlGeneration);
+  assert.equal(fs.existsSync(originalSnapshotRoot), true);
+  assert.equal(fs.existsSync(after.executionSnapshot.root), true);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(originalSnapshotRoot)).sort(),
+    [before.controlGeneration, after.controllerGeneration].sort()
+  );
+  const metadata = JSON.parse(fs.readFileSync(path.join(after.layout.root, "run.json"), "utf8")) as {
+    run_id?: string;
+    workflow?: {
+      run_id?: string;
+      control_generation?: string;
+      controller_generation?: string;
+      controller_execution_snapshot_path?: string;
+    };
+  };
+  const state = JSON.parse(fs.readFileSync(path.join(after.layout.root, "state.json"), "utf8")) as {
+    run_id?: string;
+    provenance?: {
+      workflow?: {
+        runId?: string;
+        controlGeneration?: string;
+        controllerGeneration?: string;
+        controllerExecutionSnapshot?: string;
+      };
+    };
+  };
+  assert.equal(metadata.run_id, runId);
+  assert.equal(metadata.workflow?.run_id, before.smithersRunId);
+  assert.equal(metadata.workflow?.control_generation, before.controlGeneration);
+  assert.equal(metadata.workflow?.controller_generation, after.controllerGeneration);
+  assert.equal(
+    metadata.workflow?.controller_execution_snapshot_path,
+    `smithers/execution-snapshots/${after.controllerGeneration}`
+  );
+  assert.equal(state.run_id, runId);
+  assert.equal(state.provenance?.workflow?.runId, before.smithersRunId);
+  assert.equal(state.provenance?.workflow?.controlGeneration, before.controlGeneration);
+  assert.equal(state.provenance?.workflow?.controllerGeneration, after.controllerGeneration);
+  assert.equal(
+    state.provenance?.workflow?.controllerExecutionSnapshot,
+    `smithers/execution-snapshots/${after.controllerGeneration}`
+  );
+  assert.equal(
+    replayEvents(after.layout, Number.MAX_SAFE_INTEGER).records.filter(
+      (event) => event.event_type === "workflow-controller-generation-recorded"
+    ).length,
+    1
+  );
+
+  const ordinary = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  const retained = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(retained.ok, true, "diagnostics" in retained ? JSON.stringify(retained.diagnostics) : "");
+  if (retained.ok) {
+    assert.equal(retained.controllerGeneration, after.controllerGeneration);
+    assert.equal(retained.controlGeneration, before.controlGeneration);
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(originalSnapshotRoot)).sort(),
+      [before.controlGeneration, after.controllerGeneration].sort()
+    );
+  }
+});
+
+test("controller refresh admits a new stock bootstrap module but rejects semantic drift", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-semantics";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+  const bootstrapPath = "modules/@ultrafuzz/runtime/dist/workflow-controller-generation.js";
+  assert.equal(
+    evidence.verifiedControl.executionFiles.some((file) => file.snapshotPath === bootstrapPath),
+    true
+  );
+  const syntheticPreFix = {
+    ...evidence.verifiedControl,
+    executionFiles: evidence.verifiedControl.executionFiles.filter((file) => file.snapshotPath !== bootstrapPath)
+  };
+  const rebuilt = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: syntheticPreFix,
+    config
+  });
+  assert.equal(
+    rebuilt.snapshot.executionFiles.some((file) => file.snapshotPath === bootstrapPath),
+    true
+  );
+  assert.deepEqual(rebuilt.snapshot.contents.graph, evidence.verifiedControl.contents.graph);
+  assert.deepEqual(rebuilt.snapshot.contents.tasks, evidence.verifiedControl.contents.tasks);
+  assert.deepEqual(rebuilt.snapshot.contents.input, evidence.verifiedControl.contents.input);
+
+  const current = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: evidence.verifiedControl,
+    config
+  });
+  assert.throws(
+    () =>
+      prepareControllerGeneration(
+        evidence.layout,
+        evidence.verifiedControl,
+        { ...current, semanticFingerprint: "0".repeat(64) },
+        { workflowRunId: evidence.smithersRunId, workflowLinkId: evidence.workflowLinkId }
+      ),
+    /changed sealed campaign semantics/u
+  );
+  assert.equal(fs.existsSync(path.join(evidence.layout.root, "smithers", "controller-generation-journal.json")), false);
+
+  const prepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, current, {
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId
+  });
+  const journalPath = path.join(evidence.layout.root, "smithers", "controller-generation-journal.json");
+  const originalJournalBytes = fs.readFileSync(journalPath);
+  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{
+      phase?: string;
+      manifest_path?: string;
+      manifest_sha256?: string;
+      previous_controller_generation?: string;
+      sequence?: number;
+    }>;
+  };
+  const pending = journal.entries?.at(-1);
+  assert.equal(pending?.phase, "prepared");
+  assert.ok(pending?.manifest_path);
+  const manifestPath = path.join(evidence.layout.root, ...(pending.manifest_path ?? "").split("/"));
+  const originalManifestBytes = fs.readFileSync(manifestPath);
+  const malformedManifest = JSON.parse(originalManifestBytes.toString("utf8")) as Record<string, unknown>;
+  malformedManifest.unexpected = true;
+  const malformedManifestBytes = Buffer.from(`${JSON.stringify(malformedManifest, null, 2)}\n`, "utf8");
+  fs.writeFileSync(manifestPath, malformedManifestBytes);
+  pending!.manifest_sha256 = crypto.createHash("sha256").update(malformedManifestBytes).digest("hex");
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  assert.throws(
+    () => commitControllerGeneration(evidence.layout, evidence.verifiedControl, prepared.controllerGeneration),
+    /controller generation manifest is invalid/u
+  );
+  fs.writeFileSync(manifestPath, originalManifestBytes);
+  fs.writeFileSync(journalPath, originalJournalBytes);
+
+  materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: prepared.snapshot,
+    authorizedGenerations: prepared.authorizedGenerations
+  });
+  const restoredJournal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{
+      phase?: string;
+      manifest_sha256?: string;
+      previous_controller_generation?: string;
+      sequence?: number;
+    }>;
+  };
+  const restoredPending = restoredJournal.entries?.at(-1);
+  appendEvent(evidence.layout, {
+    eventType: "workflow-controller-generation-recorded",
+    status: "running",
+    payload: {
+      workflow_run_id: evidence.smithersRunId,
+      workflow_link_id: evidence.workflowLinkId,
+      control_generation: evidence.controlGeneration,
+      controller_generation: prepared.controllerGeneration,
+      previous_controller_generation: restoredPending?.previous_controller_generation ?? evidence.controlGeneration,
+      manifest_sha256: restoredPending?.manifest_sha256 ?? "0".repeat(64),
+      semantic_fingerprint: "f".repeat(64),
+      sequence: restoredPending?.sequence ?? 1
+    }
+  });
+  assert.throws(
+    () => commitControllerGeneration(evidence.layout, evidence.verifiedControl, prepared.controllerGeneration),
+    /does not authenticate.*journal entry/u
+  );
+  const stillPrepared = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+    entries?: Array<{ phase?: string }>;
+  };
+  assert.equal(stillPrepared.entries?.at(-1)?.phase, "prepared");
+});
+
+test("controller refresh refuses an active workflow without publishing a generation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-active";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    })
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, false);
+  assert.match(JSON.stringify(refreshed.diagnostics), /requires a stopped, terminal, or missing workflow run/u);
+  assert.equal(
+    fs.existsSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json")),
+    false
+  );
+  assert.equal(fs.readdirSync(path.join(launched.value!.run_root, "smithers", "execution-snapshots")).length, 1);
+});
+
+test(
+  "controller refresh adopts an exact orphan manifest after a publication crash",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-orphan-manifest";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const journalPath = path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let crashed = false;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (!crashed && path.resolve(String(args[1])) === journalPath) {
+          crashed = true;
+          throw new Error("injected journal publication crash");
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+      assert.equal(interrupted.ok, false);
+      assert.equal(crashed, true);
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+    assert.equal(fs.existsSync(journalPath), false);
+    const manifests = fs.readdirSync(path.join(launched.value!.run_root, "smithers", "controller-generations"));
+    assert.equal(manifests.length, 1);
+    const retainedManifest = fs.readFileSync(
+      path.join(launched.value!.run_root, "smithers", "controller-generations", manifests[0]!)
+    );
+
+    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.deepEqual(
+      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generations", manifests[0]!)),
+      retainedManifest
+    );
+    assert.equal(fs.readdirSync(path.join(launched.value!.run_root, "smithers", "controller-generations")).length, 1);
+  }
+);
+
+test(
+  "controller refresh resumes a prepared journal after snapshot publication fails",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-prepared";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const snapshotsRoot = path.join(launched.value!.run_root, "smithers", "execution-snapshots");
+    const originalGeneration = fs.readdirSync(snapshotsRoot)[0]!;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let crashed = false;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const destinationName = path.basename(String(args[1]));
+        if (!crashed && /^[0-9a-f]{64}$/u.test(destinationName) && destinationName !== originalGeneration) {
+          crashed = true;
+          throw new Error("injected snapshot publication crash");
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+      assert.equal(interrupted.ok, false);
+      assert.equal(crashed, true);
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+    const prepared = JSON.parse(
+      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
+    ) as { entries?: Array<{ phase?: string; controller_generation?: string }> };
+    assert.equal(prepared.entries?.at(-1)?.phase, "prepared");
+    assert.deepEqual(fs.readdirSync(snapshotsRoot), [originalGeneration]);
+
+    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(fs.existsSync(path.join(snapshotsRoot, prepared.entries?.at(-1)?.controller_generation ?? "")), true);
+    const committed = JSON.parse(
+      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
+    ) as { entries?: Array<{ phase?: string }> };
+    assert.equal(committed.entries?.at(-1)?.phase, "committed");
+  }
+);
+
+test(
+  "controller refresh reconciles a committed journal before metadata projection",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-projection";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const metadataPath = path.join(launched.value!.run_root, "run.json");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let crashed = false;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (!crashed && path.resolve(String(args[1])) === metadataPath) {
+          crashed = true;
+          throw new Error("injected metadata projection crash");
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+      assert.equal(interrupted.ok, false);
+      assert.equal(crashed, true);
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+    const journal = JSON.parse(
+      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
+    ) as { entries?: Array<{ phase?: string; controller_generation?: string }> };
+    assert.equal(journal.entries?.at(-1)?.phase, "committed");
+    const metadataBefore = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+      workflow?: { controller_generation?: string };
+    };
+    assert.equal(metadataBefore.workflow?.controller_generation, undefined);
+
+    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(project, runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (evidence.ok) {
+      assert.equal(evidence.controllerGeneration, journal.entries?.at(-1)?.controller_generation);
+      const metadataAfter = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+        workflow?: { controller_generation?: string };
+      };
+      assert.equal(metadataAfter.workflow?.controller_generation, evidence.controllerGeneration);
+    }
+  }
+);
+
+test("controller refresh rejects unknown journal keys and conflicting projections", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-tamper";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const journalPath = path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json");
+  const journalBytes = fs.readFileSync(journalPath);
+  const journal = JSON.parse(journalBytes.toString("utf8")) as Record<string, unknown>;
+  journal.unexpected = true;
+  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  const malformed = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(malformed.ok, false);
+  assert.match(JSON.stringify(malformed.ok ? [] : malformed.diagnostics), /controller generation journal is invalid/u);
+
+  const noncanonicalTimestamp = JSON.parse(journalBytes.toString("utf8")) as {
+    entries?: Array<{ prepared_at?: string }>;
+  };
+  noncanonicalTimestamp.entries![0]!.prepared_at = "2026-08-21T12:00:00Z";
+  fs.writeFileSync(journalPath, `${JSON.stringify(noncanonicalTimestamp, null, 2)}\n`, "utf8");
+  const invalidTimestamp = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(invalidTimestamp.ok, false);
+  assert.match(
+    JSON.stringify(invalidTimestamp.ok ? [] : invalidTimestamp.diagnostics),
+    /controller generation journal chain is invalid/u
+  );
+
+  const truncatedJournal = JSON.parse(journalBytes.toString("utf8")) as { entries?: unknown[] };
+  truncatedJournal.entries = [];
+  fs.writeFileSync(journalPath, `${JSON.stringify(truncatedJournal, null, 2)}\n`, "utf8");
+  const truncated = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(truncated.ok, false);
+  assert.match(
+    JSON.stringify(truncated.ok ? [] : truncated.diagnostics),
+    /controller generation event is absent from its journal ancestry/u
+  );
+
+  fs.writeFileSync(journalPath, journalBytes);
+  const metadataPath = path.join(launched.value!.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow?: { controller_generation?: string };
+  };
+  assert.ok(metadata.workflow);
+  metadata.workflow!.controller_generation = "f".repeat(64);
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  const conflicting = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(conflicting.ok, false);
+  assert.match(
+    JSON.stringify(conflicting.ok ? [] : conflicting.diagnostics),
+    /controller generation projection conflicts/u
+  );
 });
 
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {
