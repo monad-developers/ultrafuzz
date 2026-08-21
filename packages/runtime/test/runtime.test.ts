@@ -16136,6 +16136,187 @@ test(
   }
 );
 
+test(
+  "controller refresh advances a linear second generation across a projection crash",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-second-projection";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(project, runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+      (file) => file.snapshotPath === "controls/resolved-config.json"
+    );
+    assert.ok(resolvedConfig);
+    const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+    const firstRefresh = refreshedSmithersControllerSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      original: evidence.verifiedControl,
+      config
+    });
+    const firstPrepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, firstRefresh, {
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId
+    });
+    materializeWorkflowExecutionSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      snapshot: firstPrepared.snapshot,
+      authorizedGenerations: firstPrepared.authorizedGenerations
+    });
+    const firstCommitted = commitControllerGeneration(
+      evidence.layout,
+      evidence.verifiedControl,
+      firstPrepared.controllerGeneration
+    );
+    assert.equal(firstCommitted.controllerGeneration, firstPrepared.controllerGeneration);
+
+    const moduleIndex = firstPrepared.snapshot.executionFiles.findIndex((file) =>
+      file.snapshotPath.startsWith("modules/@ultrafuzz/runtime/dist/")
+    );
+    assert.notEqual(moduleIndex, -1);
+    const secondExecutionFiles = firstPrepared.snapshot.executionFiles.map((file, index) =>
+      index === moduleIndex
+        ? { ...file, contents: Buffer.concat([file.contents, Buffer.from("\n// synthetic second generation\n")]) }
+        : file
+    );
+    const secondRefresh = {
+      ...firstRefresh,
+      snapshot: { ...firstPrepared.snapshot, executionFiles: secondExecutionFiles },
+      controllerSourceDigest: crypto
+        .createHash("sha256")
+        .update(firstRefresh.controllerSourceDigest)
+        .update("synthetic-second-controller-generation")
+        .digest("hex")
+    };
+    const secondPrepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, secondRefresh, {
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId
+    });
+    assert.notEqual(secondPrepared.controllerGeneration, firstPrepared.controllerGeneration);
+    materializeWorkflowExecutionSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      snapshot: secondPrepared.snapshot,
+      authorizedGenerations: secondPrepared.authorizedGenerations
+    });
+
+    const metadataPath = path.join(launched.value!.run_root, "run.json");
+    const statePath = path.join(launched.value!.run_root, "state.json");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let crashed = false;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        if (!crashed && path.resolve(String(args[1])) === metadataPath) {
+          crashed = true;
+          throw new Error("injected second-generation metadata projection crash");
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      assert.throws(
+        () =>
+          commitControllerGeneration(evidence.layout, evidence.verifiedControl, secondPrepared.controllerGeneration),
+        /injected second-generation metadata projection crash/u
+      );
+      assert.equal(crashed, true);
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+
+    const journal = JSON.parse(
+      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
+    ) as {
+      entries?: Array<{
+        phase?: string;
+        controller_generation?: string;
+        previous_controller_generation?: string;
+      }>;
+    };
+    assert.equal(journal.entries?.length, 2);
+    assert.deepEqual(
+      journal.entries?.map((entry) => entry.phase),
+      ["committed", "committed"]
+    );
+    assert.equal(journal.entries?.[1]?.controller_generation, secondPrepared.controllerGeneration);
+    assert.equal(journal.entries?.[1]?.previous_controller_generation, firstPrepared.controllerGeneration);
+    const metadataBefore = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+      workflow?: {
+        controller_generation?: string;
+        controller_generation_journal_path?: string;
+        controller_execution_snapshot_path?: string;
+      };
+    };
+    const stateBefore = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      provenance?: {
+        workflow?: {
+          controllerGeneration?: string;
+          controllerGenerationJournal?: string;
+          controllerExecutionSnapshot?: string;
+        };
+      };
+    };
+    assert.equal(metadataBefore.workflow?.controller_generation, firstPrepared.controllerGeneration);
+    assert.equal(
+      metadataBefore.workflow?.controller_execution_snapshot_path,
+      `smithers/execution-snapshots/${firstPrepared.controllerGeneration}`
+    );
+    assert.equal(stateBefore.provenance?.workflow?.controllerGeneration, firstPrepared.controllerGeneration);
+    assert.equal(
+      stateBefore.provenance?.workflow?.controllerExecutionSnapshot,
+      `smithers/execution-snapshots/${firstPrepared.controllerGeneration}`
+    );
+
+    const reconciled = commitControllerGeneration(
+      evidence.layout,
+      evidence.verifiedControl,
+      secondPrepared.controllerGeneration
+    );
+    assert.equal(reconciled.controllerGeneration, secondPrepared.controllerGeneration);
+    const metadataAfterBytes = fs.readFileSync(metadataPath);
+    const metadataAfter = JSON.parse(metadataAfterBytes.toString("utf8")) as typeof metadataBefore;
+    const stateAfter = JSON.parse(fs.readFileSync(statePath, "utf8")) as typeof stateBefore;
+    assert.equal(metadataAfter.workflow?.controller_generation, secondPrepared.controllerGeneration);
+    assert.equal(
+      metadataAfter.workflow?.controller_execution_snapshot_path,
+      `smithers/execution-snapshots/${secondPrepared.controllerGeneration}`
+    );
+    assert.equal(stateAfter.provenance?.workflow?.controllerGeneration, secondPrepared.controllerGeneration);
+    assert.equal(
+      stateAfter.provenance?.workflow?.controllerExecutionSnapshot,
+      `smithers/execution-snapshots/${secondPrepared.controllerGeneration}`
+    );
+
+    const unrelatedGeneration = "f".repeat(64);
+    for (const [field, value] of [
+      ["controller_generation", unrelatedGeneration],
+      ["controller_generation_journal_path", "smithers/unrelated-controller-journal.json"],
+      ["controller_execution_snapshot_path", `smithers/execution-snapshots/${unrelatedGeneration}`]
+    ] as const) {
+      const tampered = JSON.parse(metadataAfterBytes.toString("utf8")) as typeof metadataBefore;
+      assert.ok(tampered.workflow);
+      tampered.workflow[field] = value;
+      fs.writeFileSync(metadataPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+      assert.throws(
+        () =>
+          commitControllerGeneration(evidence.layout, evidence.verifiedControl, secondPrepared.controllerGeneration),
+        /controller generation projection conflicts/u
+      );
+      fs.writeFileSync(metadataPath, metadataAfterBytes);
+    }
+  }
+);
+
 test("controller refresh rejects unknown journal keys and conflicting projections", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

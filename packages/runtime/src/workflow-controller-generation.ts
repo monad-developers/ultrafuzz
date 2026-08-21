@@ -517,18 +517,50 @@ function reconcileControllerGenerationProjection(
     throw new Error("controller generation is not rooted in the active workflow link");
   }
   const snapshotPath = `smithers/execution-snapshots/${entry.controller_generation}`;
+  const previousSnapshotPath = `smithers/execution-snapshots/${entry.previous_controller_generation}`;
   const journalPath = `smithers/${JOURNAL_FILE}`;
-  for (const [actual, expected] of [
-    [metadataWorkflow.controller_generation, entry.controller_generation],
-    [metadataWorkflow.controller_generation_journal_path, journalPath],
-    [metadataWorkflow.controller_execution_snapshot_path, snapshotPath],
-    [stateWorkflow.controllerGeneration, entry.controller_generation],
-    [stateWorkflow.controllerGenerationJournal, journalPath],
-    [stateWorkflow.controllerExecutionSnapshot, snapshotPath]
-  ] as const) {
-    if (actual !== undefined && actual !== expected) {
-      throw new Error("controller generation projection conflicts with its authenticated journal head");
+  const projectionPhase = (
+    generation: string | undefined,
+    projectedJournalPath: string | undefined,
+    projectedSnapshotPath: string | undefined
+  ): "unprojected" | "previous" | "current" | "conflict" => {
+    if (generation === undefined && projectedJournalPath === undefined && projectedSnapshotPath === undefined) {
+      return "unprojected";
     }
+    if (
+      generation === entry.controller_generation &&
+      projectedJournalPath === journalPath &&
+      projectedSnapshotPath === snapshotPath
+    ) {
+      return "current";
+    }
+    if (
+      generation === entry.previous_controller_generation &&
+      projectedJournalPath === journalPath &&
+      projectedSnapshotPath === previousSnapshotPath
+    ) {
+      return "previous";
+    }
+    return "conflict";
+  };
+  const metadataProjection = projectionPhase(
+    metadataWorkflow.controller_generation,
+    metadataWorkflow.controller_generation_journal_path,
+    metadataWorkflow.controller_execution_snapshot_path
+  );
+  const stateProjection = projectionPhase(
+    stateWorkflow.controllerGeneration,
+    stateWorkflow.controllerGenerationJournal,
+    stateWorkflow.controllerExecutionSnapshot
+  );
+  const initialProjection = entry.sequence === 1 && entry.previous_controller_generation === journal.control_generation;
+  const validProjection = initialProjection
+    ? (metadataProjection === "unprojected" && stateProjection === "unprojected") ||
+      (metadataProjection === "current" && (stateProjection === "unprojected" || stateProjection === "current"))
+    : (metadataProjection === "previous" && stateProjection === "previous") ||
+      (metadataProjection === "current" && (stateProjection === "previous" || stateProjection === "current"));
+  if (!validProjection) {
+    throw new Error("controller generation projection conflicts with its authenticated journal head");
   }
   writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadata,
