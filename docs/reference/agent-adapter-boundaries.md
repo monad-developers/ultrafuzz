@@ -7,10 +7,14 @@ Ultrafuzz credential and data-governance policy, but it must not silently grow
 a second orchestration layer.
 
 The release-hardening audit in [#700](https://github.com/monad-developers/ultrafuzz/issues/700)
-classified the adapters shipped from `main`. Line counts below are the measured
-baseline at `fe0922ea`; the automated gate reports the live count on every test
-run and rejects an unclassified adapter, a newly assumed responsibility, or
-growth beyond the recorded review ceiling.
+originally measured `release/v0.1.0`. This policy deliberately targets `main`,
+whose inventory at the reviewed `fe0922ea` baseline differs from that release
+branch: `main` registers OpenRouter, while the current release branch registers
+OpenCode and Pi instead. This page does not classify the release-branch
+inventory. For this main-target gate, the checked-out registry is authoritative,
+and the gate requires an explicit policy for every adapter actually registered
+in `agentFactories`, including a factory imported under an alias or registered
+without a matching re-export.
 
 | Adapter          | Baseline | Classification                                                                                                                                                                                                                                        | Existing option or missing surface                                                                                                                                   | Upstream dependency                                                                                                                      |
 | ---------------- | -------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -20,11 +24,22 @@ growth beyond the recorded review ceiling.
 | `kimi.tsx`       |    1,520 | Inherent with the current dependency except for Ultrafuzz-specific bounded-I/O and credential-governance checks. Usage discovery, actual-session recovery, argv compatibility, and runtime-home isolation cannot be expressed by constructor options. | `model`, `extraArgs`, `env`, `configDir`, and `session` exist; invocation-local usage, actual-session resolution, and separate credential/runtime homes are missing. | [smithers#1623](https://github.com/smithersai/smithers/issues/1623)                                                                      |
 | `openrouter.tsx` |    1,234 | Inherent with the current dependency except for local credential/config materialization. Provider-output quarantine and exact-session retry are orchestration responsibilities; the inherited Codex argv workaround is separately avoidable.          | `config`, `configDir`, `env`, `model`, and `addDir` cover the route; a bounded provider-recovery policy is missing.                                                  | [smithers#1622](https://github.com/smithersai/smithers/issues/1622), [smithers#1625](https://github.com/smithersai/smithers/issues/1625) |
 
-The ceilings deliberately allow only a small formatting margin: Claude 100,
-Codex 175, DeepSeek 350, Kimi 1,525, and OpenRouter 1,250 lines. Moving code to
-a helper does not make the responsibility disappear; a change that does so must
-update this classification and the gate in the same reviewed pull request.
+The line ceilings deliberately allow only a small formatting margin: Claude
+100, Codex 175, DeepSeek 350, Kimi 1,525, and OpenRouter 1,250 lines. The listed
+responsibilities are explicit review declarations, not conclusions inferred
+from identifier names. Alongside line ceilings, the gate records an exact
+TypeScript syntax-node ceiling and reviewed purpose for every `.ts` and `.tsx`
+source under the adapter tree. The count uses the workspace-pinned TypeScript
+parser and ignores comments, string contents, and identifier spelling, but
+structural code growth requires a policy update. This is an auditable
+structural freeze, not a claim of complete semantic classification.
+
+The inventory walk is recursive. A new helper, either `.ts` or `.tsx`, fails
+until it receives an explicit purpose and structural ceiling; moving code into
+an existing helper consumes that helper's syntax budget. Any policy update must
+classify a changed adapter responsibility in the same reviewed pull request.
 
 The gate is `packages/runtime/test/agent-adapter-boundaries.test.ts`. It scans
-every source file in the adapter directory and is included in the runtime
-supporting-test shard.
+every TypeScript source file in the adapter directory, derives shipped adapters
+from `agentFactories`, and runs in both the required pull-request runtime smoke
+path and the full runtime supporting-test shard.

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const supportingTestFiles = [
+  "dist-test/test/agent-adapter-boundaries.test.js",
   "dist-test/test/runtime-test-shard.test.js",
   "dist-test/test/source-revision.test.js",
   "dist-test/test/workflow-control.test.js"
