@@ -112,6 +112,7 @@ const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
+const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
@@ -2504,6 +2505,10 @@ export async function runSmithersLifecycleCommand(input: {
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
+  controllerRefreshAuthority?: {
+    controllerGeneration: string;
+    executionSnapshotRoot: string;
+  };
 }): Promise<{
   stdout: string;
   stderr: string;
@@ -2536,6 +2541,19 @@ export async function runSmithersLifecycleCommand(input: {
     }
     assertRegularFileInside(paths.runRoot, paths.inputPath, "persisted workflow input");
     return fs.readFileSync(paths.inputPath, "utf8");
+  };
+  const workflowChangeAcceptanceArgs = (): readonly string[] => {
+    const authority = input.controllerRefreshAuthority;
+    if (authority === undefined) return [];
+    if (!SHA256_DIGEST.test(authority.controllerGeneration)) {
+      throw new Error("controller refresh authority has an invalid generation");
+    }
+    const snapshotRoot = path.resolve(authority.executionSnapshotRoot);
+    if (path.basename(snapshotRoot) !== authority.controllerGeneration) {
+      throw new Error("controller refresh authority does not match its execution snapshot");
+    }
+    assertRegularFileInside(snapshotRoot, input.workflowPath, "refreshed controller workflow");
+    return ["--accept-workflow-change"];
   };
 
   let preResumeStderr = "";
@@ -2723,6 +2741,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--force",
           "--detach",
+          ...workflowChangeAcceptanceArgs(),
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           ...workflowLogDirArgs(),
           "--format",
@@ -2818,6 +2837,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           ...(input.force === true ? ["--force"] : []),
           "--detach",
+          ...workflowChangeAcceptanceArgs(),
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           ...workflowLogDirArgs(),
           "--format",

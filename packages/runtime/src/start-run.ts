@@ -515,6 +515,18 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     if (!lockedEvidence.ok) return runtimeFailure<WorkflowLifecycleValue>(lockedEvidence.diagnostics);
     evidence = lockedEvidence;
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
+    const controllerRefreshAuthorityFor = (current: {
+      controlGeneration: string;
+      controllerGeneration: string;
+      executionSnapshot: { root: string };
+    }) =>
+      current.controllerGeneration === current.controlGeneration
+        ? undefined
+        : {
+            controllerGeneration: current.controllerGeneration,
+            executionSnapshotRoot: current.executionSnapshot.root
+          };
+    let controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
     if (input.refreshController === true) {
       const releaseControlLock = await acquireWorkflowControlLock(evidence.layout);
       try {
@@ -560,6 +572,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           controllerSnapshot: committed.snapshot,
           executionSnapshot: published
         };
+        controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
       } finally {
         await releaseControlLock();
       }
@@ -740,7 +753,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
-      )
+      ),
+      controllerRefreshAuthority
     });
     const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
     const lifecycleResultEvent = appendEvent(evidence.layout, {

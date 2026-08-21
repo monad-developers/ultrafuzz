@@ -81,7 +81,8 @@ import { effectiveRouteEnvironment, modelDestination } from "../src/data-governa
 import {
   inspectSmithersInstallation,
   refreshedSmithersControllerSnapshot,
-  runSmithersInspectionCommand
+  runSmithersInspectionCommand,
+  runSmithersLifecycleCommand
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -1563,6 +1564,8 @@ function fakeLifecycleSmithersEnv(
     status?: unknown;
     why?: unknown;
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
+    enforceWorkflowChangeAcceptance?: boolean;
+    failWorkflowChangeAdmissionOnce?: boolean;
   }
 ): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
@@ -1577,6 +1580,8 @@ function fakeLifecycleSmithersEnv(
   const statusEventsPath = path.join(project, "fake-smithers-status-events.json");
   const statusPath = path.join(project, "fake-smithers-status.json");
   const whyPath = path.join(project, "fake-smithers-why.json");
+  const workflowChangeAcceptedMarkerPath = path.join(project, "fake-smithers-workflow-change-accepted");
+  const workflowChangeFailureMarkerPath = path.join(project, "fake-smithers-workflow-change-failed");
   const nodeDetailsDirectory = path.join(project, "fake-smithers-node-details");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   if (input.resumeInspect !== undefined) {
@@ -1718,6 +1723,31 @@ function fakeLifecycleSmithersEnv(
       "    fi",
       "    ;;",
       "  up)",
+      ...(input.enforceWorkflowChangeAcceptance === true
+        ? [
+            `    if [ ! -f ${shellQuote(workflowChangeAcceptedMarkerPath)} ]; then`,
+            '      case " $* " in',
+            '        *" --resume "*)',
+            '        case " $* " in',
+            ...(input.failWorkflowChangeAdmissionOnce === true
+              ? [
+                  '          *" --accept-workflow-change "*)',
+                  `            if [ ! -f ${shellQuote(workflowChangeFailureMarkerPath)} ]; then`,
+                  `              : > ${shellQuote(workflowChangeFailureMarkerPath)}`,
+                  "              printf '%s\\n' 'injected admission failure after workflow-change authorization' >&2",
+                  "              exit 1",
+                  "            fi",
+                  `            : > ${shellQuote(workflowChangeAcceptedMarkerPath)}`,
+                  "            ;;"
+                ]
+              : [`          *" --accept-workflow-change "*) : > ${shellQuote(workflowChangeAcceptedMarkerPath)} ;;`]),
+            "          *) printf '%s\\n' 'RESUME_METADATA_MISMATCH' >&2; exit 1 ;;",
+            "        esac",
+            "        ;;",
+            "      esac",
+            "    fi"
+          ]
+        : []),
       '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
       "      printf '%s\\n' 'fake up failure' >&2",
       "      exit 1",
@@ -1844,14 +1874,20 @@ function workflowInspect(input: {
   };
 }
 
-function controllerRefreshTerminalEnv(project: string, runId: string): Record<string, string | undefined> {
+function controllerRefreshTerminalEnv(
+  project: string,
+  runId: string,
+  options: { enforceWorkflowChangeAcceptance?: boolean; failWorkflowChangeAdmissionOnce?: boolean } = {}
+): Record<string, string | undefined> {
   return fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId: `ultrafuzz-${runId}`,
       status: "failed",
       state: "failed",
       steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    })
+    }),
+    enforceWorkflowChangeAcceptance: options.enforceWorkflowChangeAcceptance,
+    failWorkflowChangeAdmissionOnce: options.failWorkflowChangeAdmissionOnce
   });
 }
 
@@ -15427,7 +15463,10 @@ test("controller refresh preserves run authority and retains both immutable gene
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const runId = "controller-refresh-success";
-  const env = controllerRefreshTerminalEnv(project, runId);
+  const env = controllerRefreshTerminalEnv(project, runId, {
+    enforceWorkflowChangeAcceptance: true,
+    failWorkflowChangeAdmissionOnce: true
+  });
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
   const before = await readLinkedWorkflowEvidence(project, runId);
@@ -15435,10 +15474,27 @@ test("controller refresh preserves run authority and retains both immutable gene
   if (!before.ok) return;
   const originalSnapshotRoot = before.executionSnapshot.root;
 
-  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+  const interrupted = await resumeRun({
+    projectRoot: project,
+    runId,
+    refreshController: true,
+    resetNode: "node:project-discovery",
+    env
+  });
 
-  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-  assert.equal(refreshed.value?.workflow_run_id, before.smithersRunId);
+  assert.equal(interrupted.ok, false);
+  assert.match(
+    JSON.stringify(interrupted.diagnostics),
+    /injected admission failure after workflow-change authorization/u
+  );
+  let upCommands = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .trim()
+    .split("\n")
+    .filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 2);
+  assert.doesNotMatch(upCommands[0]!, /(?:^| )--accept-workflow-change(?: |$)/u);
+  assert.match(upCommands[1]!, /(?:^| )--accept-workflow-change(?: |$)/u);
   const after = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
   if (!after.ok) return;
@@ -15496,8 +15552,19 @@ test("controller refresh preserves run authority and retains both immutable gene
     1
   );
 
+  const recovered = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.equal(recovered.value?.workflow_run_id, before.smithersRunId);
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  upCommands = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .trim()
+    .split("\n")
+    .filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 4);
+  assert.match(upCommands[2]!, /(?:^| )--accept-workflow-change(?: |$)/u);
+  assert.match(upCommands[3]!, /(?:^| )--accept-workflow-change(?: |$)/u);
   const retained = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(retained.ok, true, "diagnostics" in retained ? JSON.stringify(retained.diagnostics) : "");
   if (retained.ok) {
@@ -15508,6 +15575,46 @@ test("controller refresh preserves run authority and retains both immutable gene
       [before.controlGeneration, after.controllerGeneration].sort()
     );
   }
+});
+
+test("ordinary lifecycle calls cannot invent controller workflow-change authority", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-authority-absent";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const upCommands = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .trim()
+    .split("\n")
+    .filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 2);
+  assert.equal(
+    upCommands.some((command) => /(?:^| )--accept-workflow-change(?: |$)/u.test(command)),
+    false
+  );
+  await assert.rejects(
+    runSmithersLifecycleCommand({
+      action: "resume",
+      smithersRunId: `ultrafuzz-${runId}`,
+      workflowPath: path.join(project, ".smithers", "workflows", "workflow.tsx"),
+      projectRoot: project,
+      keepWorkspaces: false,
+      controllerLeaseSeconds: 60,
+      env,
+      controllerRefreshAuthority: {
+        controllerGeneration: "not-an-authenticated-generation",
+        executionSnapshotRoot: path.join(project, "forged-controller-snapshot")
+      }
+    }),
+    /controller refresh authority has an invalid generation/u
+  );
 });
 
 test("controller refresh admits a new stock bootstrap module but rejects semantic drift", async () => {
