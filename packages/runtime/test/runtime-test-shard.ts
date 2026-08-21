@@ -44,10 +44,10 @@ export const test = ((name: string, ...args: unknown[]) => {
 
   const reason = `assigned to runtime test shard ${runtimeTestShardForName(name, selectedShard.total)}/${selectedShard.total}`;
   if (typeof args[0] === "function") {
-    return Reflect.apply(nodeTest, undefined, [name, { skip: reason }, args[0]]);
+    return Reflect.apply(nodeTest.skip, undefined, [name, { skip: reason }, args[0]]);
   }
   if (args[0] !== null && typeof args[0] === "object") {
-    return Reflect.apply(nodeTest, undefined, [name, { ...args[0], skip: reason }, args[1]]);
+    return Reflect.apply(nodeTest.skip, undefined, [name, { ...args[0], skip: reason }, args[1]]);
   }
   throw new Error(`runtime test ${JSON.stringify(name)} has an unsupported registration shape`);
 }) as typeof nodeTest;

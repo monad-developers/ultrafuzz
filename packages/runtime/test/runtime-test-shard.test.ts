@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { parseRuntimeTestShard, runtimeTestShardForName } from "./runtime-test-shard.js";
 
@@ -29,6 +32,45 @@ test("every runtime test name belongs to exactly one deterministic shard", () =>
       [first],
       name
     );
+  }
+});
+
+test("Bun does not execute off-shard runtime test bodies", () => {
+  const testNames = ["off-shard Bun callback failure sentinel", "off-shard Bun options failure sentinel"];
+  const assignedShards = new Set(testNames.map((name) => runtimeTestShardForName(name, 3)));
+  const selectedShard = [1, 2, 3].find((candidate) => !assignedShards.has(candidate));
+  assert.notEqual(selectedShard, undefined);
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-bun-runtime-shard-"));
+  const fixturePath = path.join(fixtureRoot, "off-shard.test.mjs");
+  const shardModuleUrl = pathToFileURL(path.resolve("dist-test/test/runtime-test-shard.js")).href;
+
+  try {
+    fs.writeFileSync(
+      fixturePath,
+      [
+        `import { test } from ${JSON.stringify(shardModuleUrl)};`,
+        `test(${JSON.stringify(testNames[0])}, () => {`,
+        '  throw new Error("off-shard Bun callback body executed");',
+        "});",
+        `test(${JSON.stringify(testNames[1])}, { timeout: 1_000 }, () => {`,
+        '  throw new Error("off-shard Bun options body executed");',
+        "});",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const result = spawnSync("bun", ["test", fixturePath], {
+      encoding: "utf8",
+      env: { ...process.env, ULTRAFUZZ_RUNTIME_TEST_SHARD: `${selectedShard}/3` },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    if (result.error !== undefined) throw result.error;
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /2 skip/u, output);
+    assert.doesNotMatch(output, /off-shard Bun (?:callback|options) body executed/u, output);
+  } finally {
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
 
