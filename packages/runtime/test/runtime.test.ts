@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import { test } from "./runtime-test-shard.js";
+import { test, testWhen } from "./runtime-test-shard.js";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
@@ -84,6 +84,8 @@ import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
+const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
+const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_000 }), BUN_ADAPTER_TEST_PREFIX);
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
@@ -114,6 +116,16 @@ process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(),
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
 }
+
+function prefixTestNames(register: typeof test, prefix: string): typeof test {
+  return ((name: string, ...args: unknown[]) =>
+    Reflect.apply(register, undefined, [`${prefix}${name}`, ...args])) as typeof test;
+}
+
+prefixTestNames(testWhen(false, { timeout: 30_000 }), BUN_ADAPTER_TEST_PREFIX)(
+  "conditional registration keeps unavailable contracts skipped",
+  () => assert.fail("testWhen(false) must register this contract through test.skip")
+);
 
 function validatorPreflightResponse(): Record<string, unknown> {
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
@@ -2359,9 +2371,9 @@ const V0_0_2_STOCK_CODEX_ADAPTER = [
   ""
 ].join("\n");
 
-test(
+testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
   "init supports Modal-style directory and child device splits without weakening file identity checks",
-  { concurrency: false, skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  { concurrency: false },
   () => {
     const fstatDescriptor = Object.getOwnPropertyDescriptor(fs, "fstatSync")!;
     const lstatDescriptor = Object.getOwnPropertyDescriptor(fs, "lstatSync")!;
@@ -2820,9 +2832,9 @@ test("init does not modify a regular file swapped after the anchored open", { co
   assert.equal(fs.readFileSync(`${environmentPath}.old`, "utf8"), originalContents);
 });
 
-test(
+bunAdapterTest(
   "generated Codex commands accept a sealed ambient proxy and reject drift",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -2883,7 +2895,7 @@ test(
   }
 );
 
-test("planned routes equal final generated-adapter validation", { skip: !runningUnderBun }, async () => {
+bunAdapterTest("planned routes equal final generated-adapter validation", { timeout: 30_000 }, async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-route-equivalence-")),
@@ -2965,35 +2977,39 @@ test("planned routes equal final generated-adapter validation", { skip: !running
   }
 });
 
-test("generated Claude route validation ignores Azure CLI extension plumbing", { skip: !runningUnderBun }, async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const snapshot = path.join(project, "route-snapshot");
-  const authority = path.join(snapshot, "controls", "data-governance.json");
-  const claudeHome = path.join(project, "claude-home");
-  fs.mkdirSync(path.dirname(authority), { recursive: true });
-  fs.mkdirSync(claudeHome);
-  fs.writeFileSync(
-    path.join(claudeHome, "settings.json"),
-    '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
-    "utf8"
-  );
-  fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
-  const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
-  const child = workflowControlChildEnvironment(
-    { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
-    {
-      AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
-      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
-      ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
-      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
-    },
-    { agent: "ClaudeAgent", configDir: claudeHome }
-  );
-  assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
-});
+bunAdapterTest(
+  "generated Claude route validation ignores Azure CLI extension plumbing",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const snapshot = path.join(project, "route-snapshot");
+    const authority = path.join(snapshot, "controls", "data-governance.json");
+    const claudeHome = path.join(project, "claude-home");
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    fs.mkdirSync(claudeHome);
+    fs.writeFileSync(
+      path.join(claudeHome, "settings.json"),
+      '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
+      "utf8"
+    );
+    fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
+    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const child = workflowControlChildEnvironment(
+      { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
+      {
+        AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
+        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+      },
+      { agent: "ClaudeAgent", configDir: claudeHome }
+    );
+    assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
+  }
+);
 
-test("quoted TOML provider routes are bound and drift fails closed", { skip: !runningUnderBun }, async () => {
+bunAdapterTest("quoted TOML provider routes are bound and drift fails closed", { timeout: 30_000 }, async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-quoted-route-")),
@@ -3054,9 +3070,9 @@ test("quoted TOML provider routes are bound and drift fails closed", { skip: !ru
   }
 });
 
-test(
+bunAdapterTest(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project });
@@ -3108,9 +3124,9 @@ test("linked workflow classifies sensitive allowlist values from the ambient env
   }
 });
 
-test(
+bunAdapterTest(
   "generated CodexAgent subscription auth routes the credential preflight at the CLI's configured provider",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3209,9 +3225,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3310,77 +3326,80 @@ test(
   }
 );
 
-test("generated OpenRouter adapter bounds its 429 recovery policy independently from caller timeout", async () => {
-  if (!runningUnderBun) return;
-  const project = tempProject();
-  const init = initProject({ projectRoot: project, force: true });
-  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  const { decideOpenRouter429Recovery } = await loadGeneratedOpenRouterAgent(project);
+bunAdapterTest(
+  "generated OpenRouter adapter bounds its 429 recovery policy independently from caller timeout",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { decideOpenRouter429Recovery } = await loadGeneratedOpenRouterAgent(project);
 
-  const baseDelays = [0, 1, 2, 3, 4, 5, 6].map((retryAttempt) =>
-    decideOpenRouter429Recovery({
-      retryAttempt,
-      nowMs: 0,
-      retryDeadlineMs: 120_000,
-      random: 0
-    })
-  );
-  assert.deepEqual(
-    baseDelays.map((decision) => (decision.kind === "backoff" ? decision.delayMs : decision.kind)),
-    [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
-  );
-  assert.deepEqual(
-    decideOpenRouter429Recovery({
-      retryAttempt: 5,
-      nowMs: 0,
-      retryDeadlineMs: 120_000,
-      random: 1
-    }),
-    { kind: "backoff", delayMs: 37_499, afterDelay: "retry" }
-  );
-  assert.deepEqual(
-    decideOpenRouter429Recovery({
-      retryAttempt: 8,
-      nowMs: 119_500,
-      retryDeadlineMs: 120_000,
-      random: 0
-    }),
-    { kind: "rate-limit-exhausted" }
-  );
-  assert.deepEqual(
-    decideOpenRouter429Recovery({
-      retryAttempt: 0,
-      nowMs: 0,
-      retryDeadlineMs: 500,
-      totalDeadlineMs: 500,
-      random: 0
-    }),
-    { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
-  );
-  assert.deepEqual(
-    decideOpenRouter429Recovery({
-      retryAttempt: 0,
-      nowMs: 120_000,
-      retryDeadlineMs: 120_000,
-      random: 0
-    }),
-    { kind: "rate-limit-exhausted" }
-  );
-  assert.deepEqual(
-    decideOpenRouter429Recovery({
-      retryAttempt: 0,
-      nowMs: 1,
-      retryDeadlineMs: 120_000,
-      totalDeadlineMs: 1,
-      random: 0
-    }),
-    { kind: "total-timeout" }
-  );
-});
+    const baseDelays = [0, 1, 2, 3, 4, 5, 6].map((retryAttempt) =>
+      decideOpenRouter429Recovery({
+        retryAttempt,
+        nowMs: 0,
+        retryDeadlineMs: 120_000,
+        random: 0
+      })
+    );
+    assert.deepEqual(
+      baseDelays.map((decision) => (decision.kind === "backoff" ? decision.delayMs : decision.kind)),
+      [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
+    );
+    assert.deepEqual(
+      decideOpenRouter429Recovery({
+        retryAttempt: 5,
+        nowMs: 0,
+        retryDeadlineMs: 120_000,
+        random: 1
+      }),
+      { kind: "backoff", delayMs: 37_499, afterDelay: "retry" }
+    );
+    assert.deepEqual(
+      decideOpenRouter429Recovery({
+        retryAttempt: 8,
+        nowMs: 119_500,
+        retryDeadlineMs: 120_000,
+        random: 0
+      }),
+      { kind: "rate-limit-exhausted" }
+    );
+    assert.deepEqual(
+      decideOpenRouter429Recovery({
+        retryAttempt: 0,
+        nowMs: 0,
+        retryDeadlineMs: 500,
+        totalDeadlineMs: 500,
+        random: 0
+      }),
+      { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
+    );
+    assert.deepEqual(
+      decideOpenRouter429Recovery({
+        retryAttempt: 0,
+        nowMs: 120_000,
+        retryDeadlineMs: 120_000,
+        random: 0
+      }),
+      { kind: "rate-limit-exhausted" }
+    );
+    assert.deepEqual(
+      decideOpenRouter429Recovery({
+        retryAttempt: 0,
+        nowMs: 1,
+        retryDeadlineMs: 120_000,
+        totalDeadlineMs: 1,
+        random: 0
+      }),
+      { kind: "total-timeout" }
+    );
+  }
+);
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter decreases one caller timeout across exact-session recovery",
-  { skip: !runningUnderBun, timeout: 10_000 },
+  { timeout: 10_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3443,9 +3462,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter does not start a request after event-loop delay crosses its recovery deadline",
-  { skip: !runningUnderBun, timeout: 5_000 },
+  { timeout: 5_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3492,9 +3511,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter checks recovery and caller deadlines after asynchronous command construction",
-  { skip: !runningUnderBun, timeout: 5_000 },
+  { timeout: 5_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3620,9 +3639,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter bounds provisional callbacks and exact replay snapshots",
-  { skip: !runningUnderBun, timeout: 10_000 },
+  { timeout: 10_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -3749,9 +3768,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter retries before output and resumes exact sessions after substantive work",
-  { skip: !runningUnderBun, timeout: 20_000 },
+  { timeout: 20_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -4458,9 +4477,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter resumes generate and stream through seven same-session 429s",
-  { skip: !runningUnderBun, timeout: 20_000 },
+  { timeout: 20_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -4566,9 +4585,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter rethrows the last 429 without starting an attempt at its retry deadline",
-  { skip: !runningUnderBun, timeout: 20_000 },
+  { timeout: 20_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -4747,9 +4766,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated OpenRouter adapter retains the last real 429 when a replacement build crosses the retry deadline",
-  { skip: !runningUnderBun, timeout: 20_000 },
+  { timeout: 20_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -4829,30 +4848,33 @@ test(
   }
 );
 
-test("generated OpenRouter adapter fails before materializing config when its dedicated key is missing", async () => {
-  if (!runningUnderBun) return;
-  const project = tempProject();
-  const init = initProject({ projectRoot: project, force: true });
-  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  const configPath = path.join(project, "ultrafuzz.toml");
-  const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
-  const previousConfig = process.env.ULTRAFUZZ_CONFIG_PATH;
-  const previousKey = process.env.OPENROUTER_API_KEY;
-  process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-  delete process.env.OPENROUTER_API_KEY;
-  try {
-    assert.throws(() => createOpenRouterAgent(), /OPENROUTER_API_KEY is not set/u);
-  } finally {
-    if (previousConfig === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
-    else process.env.ULTRAFUZZ_CONFIG_PATH = previousConfig;
-    if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = previousKey;
+bunAdapterTest(
+  "generated OpenRouter adapter fails before materializing config when its dedicated key is missing",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const previousConfig = process.env.ULTRAFUZZ_CONFIG_PATH;
+    const previousKey = process.env.OPENROUTER_API_KEY;
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      assert.throws(() => createOpenRouterAgent(), /OPENROUTER_API_KEY is not set/u);
+    } finally {
+      if (previousConfig === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previousConfig;
+      if (previousKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previousKey;
+    }
   }
-});
+);
 
-test(
+bunAdapterTest(
   "generated agents cannot relabel an aliased execution-snapshot path as a credential",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -5036,9 +5058,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -5144,9 +5166,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -5219,9 +5241,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -5315,9 +5337,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter narrows the pinned Smithers command to Kimi Code 0.29.1",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -5759,6 +5781,10 @@ default_effort = "high"
 const localKimiCode =
   process.env.ULTRAFUZZ_KIMI_BIN ??
   path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs");
+const realKimiAdapterTest = prefixTestNames(
+  testWhen(runningUnderBun && fs.existsSync(localKimiCode), { timeout: 60_000 }),
+  BUN_ADAPTER_TEST_PREFIX
+);
 
 type Utf8SpawnSync = (
   command: string,
@@ -5799,83 +5825,79 @@ test("Kimi surface probes retry one transient spawn failure", () => {
   assert.equal(result.status, 2);
 });
 
-test(
-  "generated Kimi API config and argv match the real Kimi Code 0.29.1 surface",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
-  async () => {
-    assert.equal(execFileSync(localKimiCode, ["--version"], { encoding: "utf8" }).trim(), "0.29.1");
-    const help = execFileSync(localKimiCode, ["--help"], { encoding: "utf8" });
-    for (const option of ["--session", "--continue", "--model", "--prompt", "--output-format", "--add-dir", "--yolo"]) {
-      assert.match(help, new RegExp(option, "u"));
-    }
-    assert.doesNotMatch(help, /--final-message-only/u);
-    assert.doesNotMatch(help, /--print/u);
-    assert.doesNotMatch(help, /--work-dir/u);
-    assert.doesNotMatch(help, /--thinking/u);
-
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const previousBaseUrl = process.env.KIMI_BASE_URL;
-    process.env.KIMI_BASE_URL = "https://127.0.0.1:9/v1";
-    let command: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>>;
-    try {
-      command = await new KimiCode029Agent({
-        model: "kimi-k3",
-        ultrafuzzAuthMode: "api-key",
-        ultrafuzzReasoningEffort: "max",
-        apiKey: "contract-test-key"
-      }).buildCommand({
-        prompt: "Contract only",
-        cwd: project,
-        options: {}
-      });
-    } finally {
-      if (previousBaseUrl === undefined) delete process.env.KIMI_BASE_URL;
-      else process.env.KIMI_BASE_URL = previousBaseUrl;
-    }
-    assert.ok(command.env?.KIMI_CODE_HOME);
-    assert.equal(command.env?.KIMI_API_KEY, "contract-test-key");
-    const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
-    assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /api_key|contract-test-key/u);
-    execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
-      encoding: "utf8",
-      env: { ...process.env, ...command.env }
-    });
-    const parserArgs = [...command.args];
-    const modelIndex = parserArgs.indexOf("--model");
-    assert.notEqual(modelIndex, -1);
-    parserArgs[modelIndex + 1] = "missing-model-for-contract";
-    const parsed = spawnKimiSurfaceProbe(localKimiCode, parserArgs, {
-      cwd: project,
-      env: {
-        ...process.env,
-        ...command.env,
-        NO_PROXY: "127.0.0.1,localhost"
-      },
-      encoding: "utf8",
-      timeout: 15_000
-    });
-    assert.equal(
-      parsed.error,
-      undefined,
-      `Kimi Code surface probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
-    );
-    assert.notEqual(parsed.status, 0);
-    assert.match(`${parsed.stdout}\n${parsed.stderr}`, /not configured|config\.invalid/u);
-    assert.doesNotMatch(
-      `${parsed.stdout}\n${parsed.stderr}`,
-      /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
-    );
-    const runtimeHome = command.env.KIMI_CODE_HOME;
-    await command.cleanup?.();
-    assert.equal(fs.existsSync(runtimeHome), false);
+realKimiAdapterTest("generated Kimi API config and argv match the real Kimi Code 0.29.1 surface", async () => {
+  assert.equal(execFileSync(localKimiCode, ["--version"], { encoding: "utf8" }).trim(), "0.29.1");
+  const help = execFileSync(localKimiCode, ["--help"], { encoding: "utf8" });
+  for (const option of ["--session", "--continue", "--model", "--prompt", "--output-format", "--add-dir", "--yolo"]) {
+    assert.match(help, new RegExp(option, "u"));
   }
-);
+  assert.doesNotMatch(help, /--final-message-only/u);
+  assert.doesNotMatch(help, /--print/u);
+  assert.doesNotMatch(help, /--work-dir/u);
+  assert.doesNotMatch(help, /--thinking/u);
 
-test(
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+  const previousBaseUrl = process.env.KIMI_BASE_URL;
+  process.env.KIMI_BASE_URL = "https://127.0.0.1:9/v1";
+  let command: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>>;
+  try {
+    command = await new KimiCode029Agent({
+      model: "kimi-k3",
+      ultrafuzzAuthMode: "api-key",
+      ultrafuzzReasoningEffort: "max",
+      apiKey: "contract-test-key"
+    }).buildCommand({
+      prompt: "Contract only",
+      cwd: project,
+      options: {}
+    });
+  } finally {
+    if (previousBaseUrl === undefined) delete process.env.KIMI_BASE_URL;
+    else process.env.KIMI_BASE_URL = previousBaseUrl;
+  }
+  assert.ok(command.env?.KIMI_CODE_HOME);
+  assert.equal(command.env?.KIMI_API_KEY, "contract-test-key");
+  const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
+  assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /api_key|contract-test-key/u);
+  execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
+    encoding: "utf8",
+    env: { ...process.env, ...command.env }
+  });
+  const parserArgs = [...command.args];
+  const modelIndex = parserArgs.indexOf("--model");
+  assert.notEqual(modelIndex, -1);
+  parserArgs[modelIndex + 1] = "missing-model-for-contract";
+  const parsed = spawnKimiSurfaceProbe(localKimiCode, parserArgs, {
+    cwd: project,
+    env: {
+      ...process.env,
+      ...command.env,
+      NO_PROXY: "127.0.0.1,localhost"
+    },
+    encoding: "utf8",
+    timeout: 15_000
+  });
+  assert.equal(
+    parsed.error,
+    undefined,
+    `Kimi Code surface probe did not start after one transient retry: ${(parsed.error as NodeJS.ErrnoException | undefined)?.code ?? parsed.error?.message}`
+  );
+  assert.notEqual(parsed.status, 0);
+  assert.match(`${parsed.stdout}\n${parsed.stderr}`, /not configured|config\.invalid/u);
+  assert.doesNotMatch(
+    `${parsed.stdout}\n${parsed.stderr}`,
+    /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
+  );
+  const runtimeHome = command.env.KIMI_CODE_HOME;
+  await command.cleanup?.();
+  assert.equal(fs.existsSync(runtimeHome), false);
+});
+
+realKimiAdapterTest(
   "generated Kimi subscription config infers managed K3 reasoning efforts",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  { timeout: 15_000 },
   async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-managed-k3-"));
     try {
@@ -5943,9 +5965,8 @@ display_name = "K3"
   }
 );
 
-test(
+realKimiAdapterTest(
   "generated Kimi subscription path reflects real Kimi Code 0.29.1 rejecting near-refresh access-only credentials",
-  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 60_000 },
   () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-frozen-auth-"));
     try {
@@ -6122,9 +6143,9 @@ function kimiCompletedEvent(events: unknown): KimiInterpreterEvent {
   return completed;
 }
 
-test(
+bunAdapterTest(
   "generated Kimi adapter strictly parses credentials and resume hints without normalization",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -6258,9 +6279,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter strictly parses session indexes and state snapshots",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -6374,9 +6395,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter reports one invocation's wire usage across every agent wire",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6425,9 +6446,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter reports only the resumed invocation's own tokens",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6501,9 +6522,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter reports failed-attempt usage and excludes it from a resumed retry",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6603,9 +6624,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter rejects malformed wire records instead of fabricating tokens",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6661,9 +6682,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter rejects ambiguous, invalidly encoded, oversized, or deep wire JSON",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -6713,9 +6734,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter reads wire usage only from inside the isolated runtime home",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6756,9 +6777,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi adapter fails telemetry closed on unsafe wire bounds and replacement",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6861,9 +6882,9 @@ test(
   }
 );
 
-test(
+bunAdapterTest(
   "generated Kimi completed-event usage is what pinned Smithers 0.34.0 consumes",
-  { skip: !runningUnderBun },
+  { timeout: 30_000 },
   async () => {
     const smithersEntry = fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"));
     const resolved = createRequire(smithersEntry).resolve("@smthrs/agents/BaseCliAgent");
@@ -8554,9 +8575,8 @@ test(
   }
 );
 
-test(
+testWhen(process.platform !== "win32")(
   "post-init registry inspection rejects symlinks, FIFOs, and oversized files without reading them",
-  { skip: process.platform === "win32" },
   () => {
     const cases = ["symlink", "fifo", "oversized"] as const;
     for (const kind of cases) {
@@ -9467,9 +9487,9 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
-test(
+bunAdapterTest(
   "two active API-key providers reach generated children with only their own credential",
-  { skip: !runningUnderBun, timeout: 120_000 },
+  { timeout: 120_000 },
   async () => {
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
@@ -10813,9 +10833,8 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
-test(
+testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
   "the patched runner admits engine and supervisor process-owned execution snapshot descriptors",
-  { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
   async () => {
     const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
     const descriptorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
@@ -11065,9 +11084,8 @@ if (phase === "engine" || phase === "supervisor") {
   }
 );
 
-test(
+testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
   "fixed fd transfer survives parent exit and fd reuse across Bun engine, supervisor, and resume",
-  { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
   async () => {
     const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
     const descriptorPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
@@ -17087,9 +17105,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   assert.equal(state.status, "running");
 });
 
-test(
+testWhen(realSmithersGraphUnavailable() === false)(
   "compiled Smithers workflow passes a real non-executing graph smoke",
-  { skip: realSmithersGraphUnavailable() },
   async () => {
     const project = tempProject();
     initProject({ projectRoot: project, force: true });

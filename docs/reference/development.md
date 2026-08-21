@@ -8,6 +8,13 @@ the exact Kimi Code 0.29.1 CLI used by the adapter contract tests. Smithers'
 executable and those contract tests run with Bun 1.3+. The Modal image uses
 Node.js 22.23.
 
+Generated-adapter contracts are registered under the `Bun adapter contract:`
+test-name prefix and declare a 30-second cold-cache timeout (real Kimi CLI
+probes declare 60 seconds). Bun's `node:test` shim ignores the `{ skip: ... }`
+option even though it honors `timeout`; use the shared `testWhen` selector,
+which calls `test.skip`, for any conditional test in the runtime suite. A
+supporting test rejects option-based skips in that Bun-loaded file.
+
 Workflow execution is supported on Linux with procfs mounted at `/proc`.
 Sealed workflow controls are opened through directory descriptors, and the
 Smithers child receives the held generation as

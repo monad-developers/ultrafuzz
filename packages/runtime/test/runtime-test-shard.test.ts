@@ -34,6 +34,24 @@ test("every runtime test name belongs to exactly one deterministic shard", () =>
 
 test("the monolithic runtime suite registers exclusively through the shard wrapper", () => {
   const source = fs.readFileSync(path.resolve("test/runtime.test.ts"), "utf8");
-  assert.match(source, /import \{ test \} from "\.\/runtime-test-shard\.js";/u);
+  assert.match(source, /import \{ test, testWhen \} from "\.\/runtime-test-shard\.js";/u);
   assert.doesNotMatch(source, /from ["']node:test["']/u);
+  assert.doesNotMatch(
+    source,
+    /\bskip\s*:/u,
+    "the Bun adapter lane must select test.skip instead of relying on its ignored skip option"
+  );
+});
+
+test("the Bun lane selects every explicitly registered adapter contract", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+  for (const script of ["test", "test:release:supporting"]) {
+    assert.match(manifest.scripts?.[script] ?? "", /--test-name-pattern '\^Bun adapter contract:'/u, script);
+  }
+  assert.match(
+    manifest.scripts?.["test:kimi-contract"] ?? "",
+    /--test-name-pattern '\^Bun adapter contract: generated Kimi'/u
+  );
 });
