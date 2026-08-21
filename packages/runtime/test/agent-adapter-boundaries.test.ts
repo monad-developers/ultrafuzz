@@ -32,6 +32,38 @@ type ImportBinding = {
   namespace: boolean;
 };
 
+const FILESYSTEM_MODULES = new Set(["fs", "fs/promises", "node:fs", "node:fs/promises"]);
+const FILESYSTEM_WALKING_APIS = new Set(["glob", "globSync", "opendir", "opendirSync", "readdir", "readdirSync"]);
+const OUTPUT_INTERPRETATION_SIGNALS = new Set(["createOutputInterpreter", "onStderrLine", "onStdoutLine"]);
+const SESSION_HANDLING_SIGNALS = new Set(["resumeSession", "sessionId", "session_id"]);
+const TOKEN_ACCOUNTING_SIGNALS = new Set([
+  "cacheHitTokens",
+  "cacheMissTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+  "cachedInputTokens",
+  "cached_input_tokens",
+  "completionTokens",
+  "completion_tokens",
+  "inputTokens",
+  "input_tokens",
+  "outputTokens",
+  "output_tokens",
+  "promptCacheHitTokens",
+  "promptCacheMissTokens",
+  "promptTokens",
+  "prompt_cache_hit_tokens",
+  "prompt_cache_miss_tokens",
+  "prompt_tokens",
+  "reasoningTokens",
+  "reasoning_tokens",
+  "textTokens",
+  "totalTokens",
+  "total_tokens"
+]);
+
 const adapterPolicies: Record<string, AdapterPolicy> = {
   "claude.tsx": {
     responsibilities: [],
@@ -56,7 +88,7 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1623"]
   },
   "openrouter.tsx": {
-    responsibilities: ["output-interpretation", "session-handling"],
+    responsibilities: ["argv-construction", "output-interpretation", "session-handling"],
     upstreamIssues: [
       "https://github.com/smithersai/smithers/issues/1622",
       "https://github.com/smithersai/smithers/issues/1625"
@@ -64,10 +96,10 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
   }
 };
 
-// Syntax-node ceilings and exact source fingerprints are the reviewed
-// main@fe0922ea shape. The fingerprint makes every replacement visible even
-// when it preserves or reduces aggregate structure; line ceilings retain a
-// small formatting/documentation margin.
+// Syntax-node ceilings and exact source fingerprints are the reviewed PR shape
+// rooted at main@fe0922ea. The fingerprint makes every replacement visible
+// even when it preserves or reduces aggregate structure; line ceilings retain
+// a small formatting/documentation margin.
 const sourcePolicies: Record<string, SourcePolicy> = {
   "claude.tsx": {
     maxLines: 100,
@@ -83,9 +115,9 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   },
   "deepseek.tsx": {
     maxLines: 350,
-    maxSyntaxNodes: 1_596,
+    maxSyntaxNodes: 1_609,
     purpose: "adapter",
-    sourceSha256: "c0c8cacff536100b8fb8af2fdec51e382c79e54c5700059f7ff1d3f9cb947818"
+    sourceSha256: "dfb7c44c89e6c8a17555c1496f8ddf26dcbea8c6e3970ecd169f1d290bec64a4"
   },
   "environment.tsx": {
     maxLines: 425,
@@ -147,6 +179,209 @@ function syntaxNodeCount(sourceFile: ts.SourceFile): number {
 
 function sourceFingerprint(source: string): string {
   return crypto.createHash("sha256").update(source, "utf8").digest("hex");
+}
+
+function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<OrchestratorResponsibility> {
+  const detected = new Set<OrchestratorResponsibility>();
+  const filesystemWalkingBindings = new Set<string>();
+  const filesystemNamespaces = new Set<string>();
+  for (const statement of source.ast.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      !FILESYSTEM_MODULES.has(statement.moduleSpecifier.text)
+    ) {
+      continue;
+    }
+    const importClause = statement.importClause;
+    if (importClause?.name !== undefined) filesystemNamespaces.add(importClause.name.text);
+    const bindings = importClause?.namedBindings;
+    if (bindings === undefined) continue;
+    if (ts.isNamespaceImport(bindings)) {
+      filesystemNamespaces.add(bindings.name.text);
+      continue;
+    }
+    for (const element of bindings.elements) {
+      const importedName = element.propertyName?.text ?? element.name.text;
+      if (FILESYSTEM_WALKING_APIS.has(importedName)) filesystemWalkingBindings.add(element.name.text);
+    }
+  }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const expression = unwrapExpression(node.expression);
+      if (
+        (ts.isIdentifier(expression) && filesystemWalkingBindings.has(expression.text)) ||
+        (ts.isPropertyAccessExpression(expression) &&
+          ts.isIdentifier(expression.expression) &&
+          filesystemNamespaces.has(expression.expression.text) &&
+          FILESYSTEM_WALKING_APIS.has(expression.name.text)) ||
+        (ts.isElementAccessExpression(expression) &&
+          ts.isIdentifier(expression.expression) &&
+          filesystemNamespaces.has(expression.expression.text) &&
+          FILESYSTEM_WALKING_APIS.has(elementAccessName(expression) ?? ""))
+      ) {
+        detected.add("filesystem-walking");
+      }
+    }
+    const accessedName = ts.isPropertyAccessExpression(node)
+      ? node.name.text
+      : ts.isElementAccessExpression(node)
+        ? elementAccessName(node)
+        : undefined;
+    if (accessedName === "args") {
+      detected.add("argv-construction");
+    }
+    if (
+      ts.isPropertyAssignment(node) &&
+      propertyNameText(node.name) === "args" &&
+      !isEmptyArrayLiteral(node.initializer) &&
+      !isDirectConstructorOptionForwarding(node)
+    ) {
+      detected.add("argv-construction");
+    }
+    if (
+      ((ts.isMethodDeclaration(node) || ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node)) &&
+        OUTPUT_INTERPRETATION_SIGNALS.has(propertyNameText(node.name) ?? "")) ||
+      (accessedName !== undefined &&
+        OUTPUT_INTERPRETATION_SIGNALS.has(accessedName) &&
+        !isDirectConstructorOptionForwarding(node))
+    ) {
+      detected.add("output-interpretation");
+    }
+    if (ts.isIdentifier(node) && !isInsideNonExecutableSyntax(node) && !isDirectConstructorOptionForwarding(node)) {
+      if (SESSION_HANDLING_SIGNALS.has(node.text)) detected.add("session-handling");
+      if (TOKEN_ACCOUNTING_SIGNALS.has(node.text)) detected.add("token-accounting");
+    }
+    if (
+      accessedName !== undefined &&
+      !isDirectConstructorOptionForwarding(node) &&
+      SESSION_HANDLING_SIGNALS.has(accessedName)
+    ) {
+      detected.add("session-handling");
+    }
+    if (
+      accessedName !== undefined &&
+      !isDirectConstructorOptionForwarding(node) &&
+      TOKEN_ACCOUNTING_SIGNALS.has(accessedName)
+    ) {
+      detected.add("token-accounting");
+    }
+    if (
+      (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) || ts.isBindingElement(node)) &&
+      !isDirectConstructorOptionForwarding(node)
+    ) {
+      const declaredName = ts.isBindingElement(node)
+        ? node.propertyName !== undefined
+          ? propertyNameText(node.propertyName)
+          : ts.isIdentifier(node.name)
+            ? node.name.text
+            : undefined
+        : propertyNameText(node.name);
+      if (declaredName !== undefined && SESSION_HANDLING_SIGNALS.has(declaredName)) detected.add("session-handling");
+      if (declaredName !== undefined && TOKEN_ACCOUNTING_SIGNALS.has(declaredName)) detected.add("token-accounting");
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source.ast);
+  return detected;
+}
+
+function assertDetectedResponsibilitiesDeclared(
+  relativePath: string,
+  source: SourceUnit,
+  policy: AdapterPolicy
+): readonly OrchestratorResponsibility[] {
+  const detected = [...detectedOrchestratorResponsibilities(source)].sort();
+  const undeclared = detected.filter((responsibility) => !policy.responsibilities.includes(responsibility));
+  assert.deepEqual(
+    undeclared,
+    [],
+    `${relativePath} has static signals for undeclared orchestrator responsibilities; update its central classification`
+  );
+  return detected;
+}
+
+function assertNonAdapterSourceHasNoOrchestrationSignals(relativePath: string, source: SourceUnit): void {
+  assert.deepEqual(
+    [...detectedOrchestratorResponsibilities(source)].sort(),
+    [],
+    `${relativePath} is a non-adapter helper with orchestrator-responsibility signals; keep the logic in an owned adapter or add explicit helper ownership`
+  );
+}
+
+function propertyNameText(name: ts.PropertyName | undefined): string | undefined {
+  if (name === undefined) return undefined;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
+  if (ts.isComputedPropertyName(name)) {
+    const expression = unwrapExpression(name.expression);
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return expression.text;
+  }
+  return undefined;
+}
+
+function elementAccessName(node: ts.ElementAccessExpression): string | undefined {
+  const argument = node.argumentExpression === undefined ? undefined : unwrapExpression(node.argumentExpression);
+  return argument !== undefined && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+    ? argument.text
+    : undefined;
+}
+
+function isEmptyArrayLiteral(expression: ts.Expression): boolean {
+  const current = unwrapExpression(expression);
+  return ts.isArrayLiteralExpression(current) && current.elements.length === 0;
+}
+
+function isInsideNonExecutableSyntax(node: ts.Node): boolean {
+  for (let current: ts.Node | undefined = node; current !== undefined; current = current.parent) {
+    if (
+      ts.isTypeNode(current) ||
+      ts.isInterfaceDeclaration(current) ||
+      ts.isTypeAliasDeclaration(current) ||
+      ts.isImportDeclaration(current) ||
+      ts.isExportDeclaration(current)
+    ) {
+      return true;
+    }
+    if (ts.isSourceFile(current)) return false;
+  }
+  return false;
+}
+
+function isDirectConstructorOptionForwarding(node: ts.Node): boolean {
+  let element: ts.Node | undefined = node;
+  while (
+    element !== undefined &&
+    !ts.isPropertyAssignment(element) &&
+    !ts.isShorthandPropertyAssignment(element) &&
+    !ts.isSpreadAssignment(element) &&
+    !ts.isObjectLiteralExpression(element) &&
+    !ts.isStatement(element)
+  ) {
+    element = element.parent;
+  }
+  if (
+    element === undefined ||
+    ts.isObjectLiteralExpression(element) ||
+    ts.isStatement(element) ||
+    !ts.isObjectLiteralExpression(element.parent)
+  ) {
+    return false;
+  }
+  const objectLiteral = element.parent;
+  if (!ts.isNewExpression(objectLiteral.parent) || !objectLiteral.parent.arguments?.includes(objectLiteral))
+    return false;
+  if (ts.isShorthandPropertyAssignment(element)) return true;
+  const value = ts.isSpreadAssignment(element) ? element.expression : element.initializer;
+  return isSimpleForwardedValue(value);
+}
+
+function isSimpleForwardedValue(expression: ts.Expression): boolean {
+  const current = unwrapExpression(expression);
+  if (ts.isIdentifier(current)) return true;
+  if (ts.isPropertyAccessExpression(current)) return isSimpleForwardedValue(current.expression);
+  if (ts.isElementAccessExpression(current)) return isSimpleForwardedValue(current.expression);
+  return false;
 }
 
 function parseSource(relativePath: string, source: string): SourceUnit {
@@ -446,6 +681,116 @@ test("syntax budgets ignore names and comments but catch structural orchestratio
   }
 });
 
+test("adapter source changes cannot retain a stale responsibility classification", () => {
+  const changedSource =
+    'import { readdirSync } from "node:fs"; export function createAgent() { return readdirSync(process.cwd()); }\n';
+  const structurallyAcknowledgedSourceSha256 = sourceFingerprint(changedSource);
+  assert.equal(
+    sourceFingerprint(changedSource),
+    structurallyAcknowledgedSourceSha256,
+    "the structural source policy can independently acknowledge the mutation"
+  );
+  const staleCentralPolicy: AdapterPolicy = {
+    responsibilities: [],
+    upstreamIssues: []
+  };
+  assert.throws(
+    () =>
+      assertDetectedResponsibilitiesDeclared(
+        "fixture.tsx",
+        parseSource("fixture.tsx", changedSource),
+        staleCentralPolicy
+      ),
+    /static signals for undeclared orchestrator responsibilities/u
+  );
+  assert.doesNotThrow(() =>
+    assertDetectedResponsibilitiesDeclared("fixture.tsx", parseSource("fixture.tsx", changedSource), {
+      ...staleCentralPolicy,
+      responsibilities: ["filesystem-walking"],
+      upstreamIssues: ["https://example.invalid/upstream"]
+    })
+  );
+});
+
+test("static lower-bound signals catch newly implemented orchestrator responsibilities", () => {
+  const fixtures: Array<[OrchestratorResponsibility, string]> = [
+    [
+      "argv-construction",
+      'export function rewrite(command: { args: string[] }) { return { ...command, args: ["--resume", ...command["args"]] }; }\n'
+    ],
+    [
+      "filesystem-walking",
+      'import { readdirSync } from "node:fs"; export function walk() { return readdirSync(process.cwd()); }\n'
+    ],
+    [
+      "filesystem-walking",
+      'import { readdir as list } from "fs/promises"; export async function walk() { return list(process.cwd()); }\n'
+    ],
+    [
+      "filesystem-walking",
+      'import * as fs from "node:fs"; export function walk() { return fs["readdirSync"](process.cwd()); }\n'
+    ],
+    [
+      "output-interpretation",
+      "export class Adapter { createOutputInterpreter() { return { onStdoutLine: () => [] }; } }\n"
+    ],
+    ["output-interpretation", "export class Adapter { onStderrLine = (line: string) => JSON.parse(line); }\n"],
+    [
+      "session-handling",
+      'export function resume(options: { resumeSession?: string }) { return options["resumeSession"]; }\n'
+    ],
+    [
+      "token-accounting",
+      "export function usage(value: { prompt_tokens: number; completion_tokens: number }) { return value.prompt_tokens + value.completion_tokens; }\n"
+    ]
+  ];
+  for (const [responsibility, fixture] of fixtures) {
+    assert.equal(
+      detectedOrchestratorResponsibilities(parseSource("fixture.ts", fixture)).has(responsibility),
+      true,
+      responsibility
+    );
+  }
+});
+
+test("static lower-bound signals ignore types, prose, thin constructor mappings, and empty error argv", () => {
+  const fixtures = [
+    "// resumeSession, session_id, and total_tokens are prose only.\n" +
+      "type Contract = { resumeSession?: string; sessionId?: string; inputTokens: number };\n" +
+      'export const labels = ["session_id", "total_tokens"];\n',
+    'import { readFileSync } from "node:fs";\n' +
+      "type Options = { resumeSession?: string; sessionId?: string; inputTokens: number };\n" +
+      "export function create(Agent: new (options: unknown) => unknown, options: Options) {\n" +
+      "  return new Agent({\n" +
+      "    resume: options.resumeSession,\n" +
+      "    sessionId: options.sessionId,\n" +
+      "    tokenBudget: options.inputTokens,\n" +
+      '    extraArgs: ["--flag"],\n' +
+      '    env: { CONFIG: readFileSync("config", "utf8") }\n' +
+      "  });\n" +
+      "}\n",
+    'export const diagnostic = { command: "codex", args: [], cwd: process.cwd() };\n'
+  ];
+  for (const fixture of fixtures) {
+    assert.deepEqual([...detectedOrchestratorResponsibilities(parseSource("fixture.ts", fixture))], []);
+  }
+});
+
+test("non-adapter helpers cannot hide orchestrator responsibilities", () => {
+  const helper = parseSource(
+    "helper.ts",
+    'import { readdirSync } from "node:fs"; export function discover() { return readdirSync(process.cwd()); }\n'
+  );
+  assert.throws(
+    () => assertNonAdapterSourceHasNoOrchestrationSignals("helper.ts", helper),
+    /non-adapter helper with orchestrator-responsibility signals/u
+  );
+});
+
+test("OpenRouter retains the manually reviewed argv responsibility inherited from Codex", () => {
+  assert.equal(adapterPolicies["openrouter.tsx"]!.responsibilities.includes("argv-construction"), true);
+});
+
 test("main agent registry and recursive sources stay inside reviewed adapter boundaries", (context) => {
   const packageRoot = [process.cwd(), path.resolve("packages/runtime")].find((candidate) =>
     existsSync(path.join(candidate, "src/templates/smithers/agents/index.tsx"))
@@ -492,10 +837,16 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
       policy.sourceSha256,
       `${relativePath} changed from its reviewed source fingerprint; audit responsibilities and update the policy explicitly`
     );
+    if (policy.purpose !== "adapter") assertNonAdapterSourceHasNoOrchestrationSignals(relativePath, source);
   }
 
   for (const adapterSource of registeredSourcePaths) {
     const policy = adapterPolicies[adapterSource]!;
+    const detectedResponsibilities = assertDetectedResponsibilitiesDeclared(
+      adapterSource,
+      sources.get(adapterSource)!,
+      policy
+    );
     const registrations = [...registered]
       .filter(([, sourcePath]) => sourcePath === adapterSource)
       .map(([agentRef]) => agentRef)
@@ -503,7 +854,7 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     context.diagnostic(
       `${adapterSource}: registered as ${registrations.join(", ")}; declared orchestrator responsibilities: ${
         policy.responsibilities.join(", ") || "none"
-      }`
+      }; statically detected lower bound: ${detectedResponsibilities.join(", ") || "none"}`
     );
     assert.equal(sourcePolicies[adapterSource]?.purpose, "adapter");
     if (policy.responsibilities.length > 0) {

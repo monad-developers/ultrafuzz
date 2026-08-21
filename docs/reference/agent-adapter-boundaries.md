@@ -20,26 +20,35 @@ without a matching re-export.
 | ---------------- | -------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude.tsx`     |       86 | Thin mapping. Its override applies Ultrafuzz's child-environment policy but does not rebuild an orchestrator responsibility.                                                                                                                          | Uses `model`, `extraArgs`, `addDir`, `permissionMode`, `settingSources`, `apiKey`, `configDir`, and `env`.                                                           | None.                                                                                                                                    |
 | `codex.tsx`      |      162 | Partly avoidable. The local argv rewrite and resume awareness exist because a working constructor option is serialized incorrectly upstream. Provider-home inspection and child-environment filtering are local policy.                               | `addDir` exists, but multiple values become one `--add-dir` occurrence.                                                                                              | [smithers#1622](https://github.com/smithersai/smithers/issues/1622)                                                                      |
-| `deepseek.tsx`   |      336 | Inherent with the current dependency. Route and auth are already a thin mapping; result parsing and token normalization have no typed upstream surface.                                                                                               | Uses `model`, `extraArgs`, `addDir`, `permissionMode`, `settingSources`, `env`, and `configDir`; a custom-provider usage normalizer is missing.                      | [smithers#1624](https://github.com/smithersai/smithers/issues/1624)                                                                      |
+| `deepseek.tsx`   |      341 | Inherent after removing its avoidable reasoning-effort argv mapping. Route, auth, and effort are now thin mappings; result parsing and token normalization have no typed upstream surface.                                                            | Uses `model`, first-class `effort`, `addDir`, `permissionMode`, `settingSources`, `env`, and `configDir`; a custom-provider usage normalizer is missing.             | [smithers#1624](https://github.com/smithersai/smithers/issues/1624)                                                                      |
 | `kimi.tsx`       |    1,520 | Inherent with the current dependency except for Ultrafuzz-specific bounded-I/O and credential-governance checks. Usage discovery, actual-session recovery, argv compatibility, and runtime-home isolation cannot be expressed by constructor options. | `model`, `extraArgs`, `env`, `configDir`, and `session` exist; invocation-local usage, actual-session resolution, and separate credential/runtime homes are missing. | [smithers#1623](https://github.com/smithersai/smithers/issues/1623)                                                                      |
 | `openrouter.tsx` |    1,234 | Inherent with the current dependency except for local credential/config materialization. Provider-output quarantine and exact-session retry are orchestration responsibilities; the inherited Codex argv workaround is separately avoidable.          | `config`, `configDir`, `env`, `model`, and `addDir` cover the route; a bounded provider-recovery policy is missing.                                                  | [smithers#1622](https://github.com/smithersai/smithers/issues/1622), [smithers#1625](https://github.com/smithersai/smithers/issues/1625) |
 
 The line ceilings deliberately allow only a small formatting margin: Claude
 100, Codex 175, DeepSeek 350, Kimi 1,525, and OpenRouter 1,250 lines. The listed
 responsibilities are explicit review declarations, not conclusions inferred
-from identifier names. Alongside line ceilings, the gate records a reviewed
-purpose, TypeScript syntax-node ceiling, and exact SHA-256 source fingerprint
-for every `.ts` and `.tsx` source under the adapter tree. The syntax count uses
-the workspace-pinned TypeScript parser; the fingerprint ensures that an
+from comments or prose. The gate supplements them with a conservative AST
+lower bound over executable source: called filesystem-walking imports, command
+`args` construction, output-interpreter hooks, session-continuation fields, and
+token-usage fields. Every detected category must be declared; declarations may
+include additional inherited or semantically reviewed responsibilities that
+the detector cannot infer. Type-only declarations, comments, strings, direct
+constructor-option forwarding, named config-file reads, and empty diagnostic
+argv are deliberately excluded. Alongside line ceilings, the gate records a
+reviewed purpose, TypeScript syntax-node ceiling, and exact SHA-256 source
+fingerprint for every `.ts` and `.tsx` source under the adapter tree. The syntax
+count uses the workspace-pinned TypeScript parser; the fingerprint ensures that an
 equal-size or smaller behavior replacement still fails until the source policy
 and responsibility classification receive explicit review. This is an
-auditable source freeze, not a claim that CI can infer semantics.
+auditable source freeze, not a claim that CI can infer every semantic behavior.
 
 The inventory walk is recursive. A new helper, either `.ts` or `.tsx`, fails
-until it receives an explicit purpose and structural ceiling; moving code into
-an existing helper changes that helper's reviewed fingerprint. Any policy
-update must classify a changed adapter responsibility in the same reviewed
-pull request.
+until it receives an explicit purpose and structural ceiling. Non-adapter
+helpers may not contain any of the lower-bound orchestration signals, so moving
+such code out of a registered adapter cannot hide it. A future shared inherent
+workaround must add explicit adapter ownership rather than weakening that
+default. Any policy update must classify a changed adapter responsibility in
+the same reviewed pull request.
 
 The gate is `packages/runtime/test/agent-adapter-boundaries.test.ts`. It scans
 every TypeScript source file in the adapter directory, derives shipped adapters

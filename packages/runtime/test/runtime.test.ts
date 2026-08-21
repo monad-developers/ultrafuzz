@@ -1143,6 +1143,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
       args: string[];
       env?: Record<string, string>;
       outputFormat?: string;
+      cleanup?: () => void | Promise<void>;
     }>;
     createOutputInterpreter(): {
       onStdoutLine?: (line: string) => unknown;
@@ -1217,6 +1218,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
         args: string[];
         env?: Record<string, string>;
         outputFormat?: string;
+        cleanup?: () => void | Promise<void>;
       }>;
       createOutputInterpreter(): {
         onStdoutLine?: (line: string) => unknown;
@@ -2546,6 +2548,8 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(deepSeekAgentText, /ANTHROPIC_AUTH_TOKEN/);
   assert.match(deepSeekAgentText, /DEEPSEEK_API_KEY/);
   assert.match(deepSeekAgentText, /settingSources:\s*""/);
+  assert.match(deepSeekAgentText, /effort:\s*reasoningEffort/);
+  assert.doesNotMatch(deepSeekAgentText, /extraArgs:\s*\["--effort"/);
   assert.match(deepSeekAgentText, /cacheReadTokens/);
   assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
   assert.match(deepSeekAgentText, /import \{ parseStrictJson \} from "\.\/strict-json";/u);
@@ -5052,95 +5056,149 @@ test(
     fs.writeFileSync(path.join(project, ".claude", "settings.local.json"), '{"permissions":{"allow":["Bash(*)"]}}');
     const agent = new DeepSeekClaudeCodeAgent({
       model: "deepseek-v4-pro",
-      extraArgs: ["--effort", "max"],
+      effort: "max",
       permissionMode: "bypassPermissions",
       ultrafuzzApiKey: "deepseek-test-key",
       configDir: path.join(project, ".ultrafuzz", "deepseek-claude")
     });
 
     const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
-    assert.equal(command.command, "claude");
-    assert.equal(command.args.includes("deepseek-v4-pro"), true);
-    const claude = new CompatibleClaudeCodeAgent({ permissionMode: "bypassPermissions", settingSources: "project" });
-    const claudeCommand = await claude.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
-    assert.deepEqual(
-      command.args.flatMap((value, index) =>
-        value === "--setting-sources" ? command.args.slice(index, index + 2) : []
-      ),
-      ["--setting-sources", ""]
-    );
-    assert.deepEqual(
-      claudeCommand.args.flatMap((value, index) =>
-        value === "--setting-sources" ? claudeCommand.args.slice(index, index + 2) : []
-      ),
-      ["--setting-sources", "user"]
-    );
-    for (const args of [command.args, claudeCommand.args]) {
-      assert.equal(args.includes("--dangerously-skip-permissions"), true);
-    }
-    assert.deepEqual(command.args.slice(command.args.indexOf("--effort"), command.args.indexOf("--effort") + 2), [
-      "--effort",
-      "max"
-    ]);
-    assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
-    assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "deepseek-test-key");
-    assert.equal(command.env?.ANTHROPIC_API_KEY, "");
-    assert.equal(command.env?.CLAUDE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
-    assert.equal(command.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
-    for (const name of [
-      "ANTHROPIC_CONFIG_DIR",
-      "ANTHROPIC_CUSTOM_HEADERS",
-      "ANTHROPIC_FEDERATION_RULE_ID",
-      "ANTHROPIC_IDENTITY_TOKEN",
-      "ANTHROPIC_IDENTITY_TOKEN_FILE",
-      "ANTHROPIC_ORGANIZATION_ID",
-      "ANTHROPIC_PROFILE",
-      "ANTHROPIC_UNIX_SOCKET",
-      "CCR_OAUTH_TOKEN_FILE",
-      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-      "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
-      "CLAUDE_CODE_HOST_CREDS_FILE",
-      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-      "CLAUDE_CODE_OAUTH_TOKEN",
-      "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
-      "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
-      "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-      "CLAUDE_CODE_USE_BEDROCK",
-      "CLAUDE_CODE_USE_FOUNDRY",
-      "CLAUDE_CODE_USE_GATEWAY",
-      "CLAUDE_CODE_USE_MANTLE",
-      "CLAUDE_CODE_USE_VERTEX"
-    ]) {
-      assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
-    }
-
-    const resultLine = JSON.stringify({
-      type: "result",
-      subtype: "success",
-      is_error: false,
-      result: "done",
-      usage: {
-        prompt_cache_miss_tokens: 120,
-        output_tokens: 30,
-        prompt_cache_hit_tokens: 400,
-        cache_creation_input_tokens: 999,
-        reasoning_tokens: 20
+    try {
+      assert.equal(command.command, "claude");
+      assert.equal(command.args.includes("deepseek-v4-pro"), true);
+      const claude = new CompatibleClaudeCodeAgent({ permissionMode: "bypassPermissions", settingSources: "project" });
+      const claudeCommand = await claude.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+      assert.deepEqual(
+        command.args.flatMap((value, index) =>
+          value === "--setting-sources" ? command.args.slice(index, index + 2) : []
+        ),
+        ["--setting-sources", ""]
+      );
+      assert.deepEqual(
+        claudeCommand.args.flatMap((value, index) =>
+          value === "--setting-sources" ? claudeCommand.args.slice(index, index + 2) : []
+        ),
+        ["--setting-sources", "user"]
+      );
+      for (const args of [command.args, claudeCommand.args]) {
+        assert.equal(args.includes("--dangerously-skip-permissions"), true);
       }
-    });
-    const events = agent.createOutputInterpreter().onStdoutLine?.(resultLine) as Array<{
-      type?: string;
-      usage?: Record<string, number>;
+      assert.equal(command.args.includes("--effort"), false);
+      const settingsIndex = command.args.indexOf("--settings");
+      assert.ok(settingsIndex >= 0);
+      const settings = JSON.parse(fs.readFileSync(command.args[settingsIndex + 1]!, "utf8")) as {
+        effortLevel?: string;
+      };
+      assert.equal(settings.effortLevel, "max");
+      assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
+      assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "deepseek-test-key");
+      assert.equal(command.env?.ANTHROPIC_API_KEY, "");
+      assert.equal(command.env?.CLAUDE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+      assert.equal(command.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+      for (const name of [
+        "ANTHROPIC_CONFIG_DIR",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_IDENTITY_TOKEN",
+        "ANTHROPIC_IDENTITY_TOKEN_FILE",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_PROFILE",
+        "ANTHROPIC_UNIX_SOCKET",
+        "CCR_OAUTH_TOKEN_FILE",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+        "CLAUDE_CODE_HOST_CREDS_FILE",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+        "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_VERTEX"
+      ]) {
+        assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
+      }
+
+      const resultLine = JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        usage: {
+          prompt_cache_miss_tokens: 120,
+          output_tokens: 30,
+          prompt_cache_hit_tokens: 400,
+          cache_creation_input_tokens: 999,
+          reasoning_tokens: 20
+        }
+      });
+      const events = agent.createOutputInterpreter().onStdoutLine?.(resultLine) as Array<{
+        type?: string;
+        usage?: Record<string, number>;
+      }>;
+      const completed = events.find((event) => event.type === "completed");
+      assert.deepEqual(completed?.usage, {
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 400,
+        cache_creation_input_tokens: 0,
+        total_tokens: 550
+      });
+    } finally {
+      await command.cleanup?.();
+    }
+  }
+);
+
+test(
+  "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    type ParentBuildCommand = (params: unknown) => Promise<{
+      command: string;
+      args: string[];
+      cleanup?: () => void | Promise<void>;
     }>;
-    const completed = events.find((event) => event.type === "completed");
-    assert.deepEqual(completed?.usage, {
-      input_tokens: 120,
-      output_tokens: 30,
-      cache_read_input_tokens: 400,
-      cache_creation_input_tokens: 0,
-      total_tokens: 550
-    });
+    const parentPrototype = Object.getPrototypeOf(DeepSeekClaudeCodeAgent.prototype) as {
+      buildCommand: ParentBuildCommand;
+    };
+    const originalParentBuildCommand = parentPrototype.buildCommand;
+    const previousAllowlist = process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
+    let cleanupCalls = 0;
+    try {
+      parentPrototype.buildCommand = async () => ({
+        command: "claude",
+        args: [],
+        cleanup: () => {
+          cleanupCalls += 1;
+        }
+      });
+      process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = "invalid-name!";
+      const agent = new DeepSeekClaudeCodeAgent({
+        effort: "max",
+        permissionMode: "bypassPermissions",
+        ultrafuzzApiKey: "deepseek-test-key",
+        configDir: path.join(project, ".ultrafuzz", "deepseek-claude")
+      });
+      await assert.rejects(
+        agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} }),
+        /controller agent environment allowlist is invalid/u
+      );
+      assert.equal(cleanupCalls, 1);
+    } finally {
+      parentPrototype.buildCommand = originalParentBuildCommand;
+      if (previousAllowlist === undefined) delete process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
+      else process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = previousAllowlist;
+    }
   }
 );
 
