@@ -79,7 +79,7 @@ const auditProfileResolutionSchema = z
     declaredTopologyPath: packagedTopologyPathSchema.optional(),
     settings: auditProfileSettingsSchema,
     effectiveSettings: auditProfileSettingsSchema,
-    settingOrigins: z.record(auditProfileSettingNameSchema, auditProfileSettingOriginSchema),
+    settingOrigins: z.partialRecord(auditProfileSettingNameSchema, auditProfileSettingOriginSchema),
     overriddenSettings: z.array(auditProfileSettingNameSchema).refine((names) => new Set(names).size === names.length)
   })
   .strict();

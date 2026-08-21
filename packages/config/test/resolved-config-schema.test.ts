@@ -69,6 +69,18 @@ describe("resolved config JSON contract", () => {
     if (zod.success) expect(zod.data).toEqual(parsed);
   });
 
+  it("keeps both validators aligned for the exact pre-PR v3 fixture", () => {
+    const fixtureBytes = readFixture("resolved-config.valid.pre-same-agent-attempts.json");
+    const parsed = parseResolvedConfigJsonBytes(fixtureBytes);
+
+    expect(parsed.auditProfileResolution.settingOrigins).not.toHaveProperty("same_agent_attempts");
+    expect(validateResolvedConfigJson(parsed)).toEqual({ ok: true, issues: [], truncated: false });
+    const zod = resolvedConfigZodSchema.safeParse(parsed);
+    expect(zod.success).toBe(true);
+    if (zod.success) expect(zod.data).toEqual(parsed);
+    expect(resolvedConfigValidatorsAgree(parsed)).toBe(true);
+  });
+
   it("rejects the checked-in historical-version fixture without aliasing or conversion", () => {
     const fixtureBytes = readFixture("resolved-config.invalid-version.json");
     const value = JSON.parse(fixtureBytes.toString("utf8")) as unknown;
@@ -83,6 +95,10 @@ describe("resolved config JSON contract", () => {
     const mutations: Array<{ label: string; mutate: (value: Record<string, unknown>) => void }> = [
       { label: "unknown root field", mutate: (value) => void (value.legacy = true) },
       { label: "unknown nested field", mutate: (value) => void (record(value.run).legacy = true) },
+      {
+        label: "unknown audit profile setting origin",
+        mutate: (value) => void (record(record(value.auditProfileResolution).settingOrigins).legacy_setting = "default")
+      },
       { label: "missing required boolean", mutate: (value) => void delete record(value.run).keepWorkspaces },
       { label: "nullable optional", mutate: (value) => void (record(value.project).name = null) },
       { label: "bad project path", mutate: (value) => void (record(value.project).repo = "../target") },
