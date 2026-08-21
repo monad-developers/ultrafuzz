@@ -11024,6 +11024,102 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
+test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const resolveFromPinnedRunner = createRequire(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  );
+  const pinnedEngineSource = resolveFromPinnedRunner.resolve("@smthrs/engine/engine");
+  const pinnedEngineRoot = path.dirname(path.dirname(pinnedEngineSource));
+  const isolatedEngineRoot = path.join(tempProject(), "node_modules", "@smthrs", "engine");
+  fs.mkdirSync(path.dirname(isolatedEngineRoot), { recursive: true });
+  fs.cpSync(pinnedEngineRoot, isolatedEngineRoot, { recursive: true });
+  fs.rmSync(path.join(isolatedEngineRoot, "node_modules"), { recursive: true, force: true });
+  fs.symlinkSync(path.dirname(path.dirname(pinnedEngineRoot)), path.join(isolatedEngineRoot, "node_modules"), "dir");
+
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (candidate) => candidate.packageName === "@smthrs/engine"
+  )) {
+    const sourcePath = path.join(isolatedEngineRoot, ...patch.sourceRelativePath.split("/"));
+    const source = fs.readFileSync(sourcePath, "utf8");
+    assert.equal(
+      source.split(patch.patchable).length,
+      2,
+      `${patch.id} does not uniquely anchor in the isolated pinned engine`
+    );
+    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched), "utf8");
+  }
+
+  const patchedEngine = (await import(pathToFileURL(path.join(isolatedEngineRoot, "src", "engine.js")).href)) as {
+    __engineInternals: {
+      assertResumeDurabilityMetadata: (
+        existingRun: Record<string, unknown>,
+        existingConfig: Record<string, unknown>,
+        current: Record<string, unknown>,
+        workflowPath: string,
+        options?: { acceptWorkflowChange?: boolean }
+      ) => string[];
+    };
+  };
+  const admit = patchedEngine.__engineInternals.assertResumeDurabilityMetadata;
+  const generationZero = "0".repeat(64);
+  const generationOne = "1".repeat(64);
+  const snapshotParent = path.join(tempProject(), "execution-snapshots");
+  const originalWorkflow = path.join(snapshotParent, generationZero, ".smithers", "workflows", "workflow.tsx");
+  const refreshedWorkflow = path.join(snapshotParent, generationOne, ".smithers", "workflows", "workflow.tsx");
+  const existingRun = {
+    workflowPath: originalWorkflow,
+    workflowHash: "graph-v1",
+    vcsType: "git",
+    vcsRoot: "/synthetic/repository",
+    vcsRevision: "revision-one"
+  };
+  const existingConfig = {
+    __smithersDurability: { version: 2, entryWorkflowHash: "entry-v1" }
+  };
+  const refreshedMetadata = {
+    workflowHash: "graph-v2",
+    entryWorkflowHash: "entry-v2",
+    vcsType: "git",
+    vcsRoot: "/synthetic/repository",
+    vcsRevision: "revision-one"
+  };
+
+  assert.throws(
+    () => admit(existingRun, existingConfig, refreshedMetadata, refreshedWorkflow),
+    (error: unknown) => {
+      const mismatch = error as { code?: unknown; details?: { mismatches?: unknown } };
+      assert.equal(mismatch.code, "RESUME_METADATA_MISMATCH");
+      assert.deepEqual(mismatch.details?.mismatches, [
+        "workflow path changed",
+        "workflow module graph changed",
+        "workflow entry file changed"
+      ]);
+      return true;
+    }
+  );
+  assert.deepEqual(
+    admit(existingRun, existingConfig, refreshedMetadata, refreshedWorkflow, { acceptWorkflowChange: true }),
+    ["workflow path changed", "workflow module graph changed", "workflow entry file changed"]
+  );
+  assert.throws(
+    () =>
+      admit(
+        existingRun,
+        existingConfig,
+        { ...refreshedMetadata, vcsRoot: "/synthetic/other-repository" },
+        refreshedWorkflow,
+        { acceptWorkflowChange: true }
+      ),
+    (error: unknown) => {
+      const mismatch = error as { code?: unknown; details?: { mismatches?: unknown } };
+      assert.equal(mismatch.code, "RESUME_METADATA_MISMATCH");
+      assert.deepEqual(mismatch.details?.mismatches, ["VCS root changed"]);
+      return true;
+    }
+  );
+});
+
 testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
   "the patched runner admits engine and supervisor process-owned execution snapshot descriptors",
   async () => {

@@ -584,6 +584,17 @@ const SMITHERS_ENGINE_RESUME_IDENTITY_PATCH = `          runMetadata,
           persistedWorkflowPath,
           {
             acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE = `  const acceptedWorkflowMismatches =
+    options.acceptWorkflowChange === true
+      ? mismatches.filter((mismatch) => workflowHashMismatchLabels.includes(mismatch))
+      : [];`;
+const SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH = `  const acceptedWorkflowMismatches =
+    options.acceptWorkflowChange === true
+      ? mismatches.filter(
+          (mismatch) =>
+            mismatch === "workflow path changed" || workflowHashMismatchLabels.includes(mismatch),
+        )
+      : [];`;
 const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "workflow",
           workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
           workflowHash: runMetadata.workflowHash,`;
@@ -720,6 +731,7 @@ export type SmithersCompatibilityPatchId =
   | "engine_durability_metadata"
   | "engine_run_metadata"
   | "engine_resume_identity"
+  | "engine_refresh_path_acceptance"
   | "engine_insert_workflow_path"
   | "engine_activate_workflow_path"
   | "engine_update_workflow_path"
@@ -908,6 +920,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE,
     patched: SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_refresh_path_acceptance",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE,
+    patched: SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH,
     upstreamAbsent: []
   },
   {
@@ -4000,6 +4020,11 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     ],
     [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
     [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
+    [
+      SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE,
+      SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH,
+      "authenticated controller workflow path acceptance"
+    ],
     [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
     [
       SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
