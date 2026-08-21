@@ -29,6 +29,7 @@ import {
   copyPublishedEvidenceTree,
   copyVerifiedPublishedEvidenceTree,
   initializeDurableNodeWorkspace,
+  resolveDurableDataRoot,
   runDurableWorkflow,
   workerResultPublicationMode,
   workflowCommandArguments
@@ -1762,6 +1763,31 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     } finally {
       archive.cleanup();
       fixture.cleanup();
+    }
+  });
+
+  it("canonicalizes a trusted Modal mount alias while rejecting aliases below it", () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-mount-alias-"));
+    const canonicalMount = path.join(fixture, "canonical-volume");
+    const mountAlias = path.join(fixture, "data");
+    const outside = path.join(fixture, "outside");
+    fs.mkdirSync(canonicalMount);
+    fs.mkdirSync(outside);
+    fs.symlinkSync(canonicalMount, mountAlias, "dir");
+    try {
+      const lexicalAttempt = path.join(mountAlias, "ultrafuzz-nodes", "run", "attempt");
+      expect(resolveDurableDataRoot(lexicalAttempt, mountAlias)).toBe(
+        path.join(canonicalMount, "ultrafuzz-nodes", "run", "attempt")
+      );
+      expect(fs.lstatSync(lexicalAttempt).isSymbolicLink()).toBe(false);
+
+      const poisonedRun = path.join(mountAlias, "ultrafuzz-nodes", "poisoned-run");
+      fs.symlinkSync(outside, poisonedRun, "dir");
+      expect(() => resolveDurableDataRoot(path.join(poisonedRun, "attempt"), mountAlias)).toThrow(
+        /cloud durable data root is unsafe/u
+      );
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
     }
   });
 
