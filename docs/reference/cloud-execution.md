@@ -58,9 +58,11 @@ Each expanded agentic attempt maps to one Smithers sandbox node. Cloud execution
 currently accepts only a one-rung model chain (`same_agent_attempts = 1` with no
 applicable fallback). Planning rejects longer chains before creating run state;
 this avoids running nominally isolated retry rungs in one VM or sharing sibling
-agent credentials. The task and its artifact-contract verifier run in the same
-VM; the controller independently verifies the published artifacts before
-dependent nodes can start.
+agent credentials. The shipped default is three attempts, so a cloud project
+must explicitly select a one-attempt profile such as `smoke` or set
+`[retry].same_agent_attempts = 1`. The task and its artifact-contract verifier
+run in the same VM; the controller independently verifies the published
+artifacts before dependent nodes can start.
 
 The image installs a root-owned, non-writable `/usr/local/bin/ultrafuzz`
 launcher for the same source build under `/opt/ultrafuzz`. Before model work,

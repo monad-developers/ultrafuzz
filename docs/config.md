@@ -44,11 +44,14 @@ reasoning = "xhigh"
 `same_agent_attempts` includes the first attempt. `agents[0]` becomes the
 default primary profile, and each later profile receives one attempt after the
 primary budget is exhausted. A node or group `max_attempts` overrides the
-project primary count. The complete primary-plus-fallback chain may contain at
-most 100 attempts. Omitting `agents`, or leaving it empty, keeps model fallback
-disabled. Retries use bounded exponential backoff, a fresh session, and the
-same effective task prompt, including Smithers' safety contracts; Ultrafuzz does
-not inspect provider error text. The
+project primary count. The shipped `default` profile uses three attempts;
+`smoke` and `low-cost` use one, the maximum-effort `exhaustive` profile uses
+five, and `invariant-only` inherits three. An explicit project `[retry]` value overrides
+the profile. The complete primary-plus-fallback chain may contain at most 100
+attempts. Omitting `agents`, or leaving it empty, keeps model fallback disabled.
+Retries use bounded exponential backoff, a fresh session, and the same effective
+task prompt, including Smithers' safety contracts; Ultrafuzz does not inspect
+provider error text. The
 planned chain and actual producer are recorded in the task manifest, attempt
 ledger, and final report.
 

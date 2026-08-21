@@ -472,6 +472,7 @@
       "enum": [
         "strategy_loops",
         "dynamic_strategies_enumerator",
+        "same_agent_attempts",
         "max_parallel_agents",
         "max_parallel_nodes",
         "default_timeout_seconds",
@@ -495,6 +496,11 @@
         },
         "dynamic_strategies_enumerator": {
           "$ref": "#/$defs/dynamicStrategiesEnumerator"
+        },
+        "same_agent_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
         },
         "max_parallel_agents": {
           "$ref": "#/$defs/positiveInteger"

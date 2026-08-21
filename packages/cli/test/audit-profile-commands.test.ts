@@ -61,7 +61,7 @@ test("profile list and detail expose the catalog and effective project policy", 
   assert.match(listData.catalog_digest, /^[0-9a-f]{64}$/u);
   assert.deepEqual(
     listData.profiles.map((profile) => profile.id),
-    ["default", "exhaustive", "invariant-only", "low-cost", "smoke", "thorough"]
+    ["default", "exhaustive", "invariant-only", "low-cost", "smoke"]
   );
 
   const detailed = await cli(project, ["config", "audit-profile", "smoke", "--json"]);
