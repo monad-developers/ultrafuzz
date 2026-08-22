@@ -791,6 +791,7 @@ export async function createModalNodeHandoffArchive(
   for (const referenceArtifactDir of referenceArtifactDirs) {
     assertChildPath(runRoot, referenceArtifactDir, "reference artifact directory");
   }
+  assertDependencyReferenceOverlapsAreExact(dependencyArtifactDirs, referenceArtifactDirs);
   if (vulnerabilityDatabaseCatalog !== undefined) {
     assertChildPath(runRoot, vulnerabilityDatabaseCatalog, "vulnerability database catalog");
     const actual = crypto.createHash("sha256").update(fs.readFileSync(vulnerabilityDatabaseCatalog)).digest("hex");
@@ -847,7 +848,11 @@ export async function createModalNodeHandoffArchive(
     // Reference trees and the run-root planner catalog are explicit cloud inputs: the threat-model
     // and goal-plan postprocessors verify both against the pinned database, and neither is an
     // agentic dependency artifact directory.
+    const materializedDependencyArtifactDirs = new Set(dependencyArtifactDirs);
     for (const referenceArtifactDir of referenceArtifactDirs) {
+      // One canonical tree may have both semantic roles. Its bytes are staged once, while the
+      // dispatch DTO and both fingerprints retain the dependency and reference declarations.
+      if (materializedDependencyArtifactDirs.has(referenceArtifactDir)) continue;
       copyTreeChecked(referenceArtifactDir, path.join(staging, path.relative(root, referenceArtifactDir)));
     }
     if (vulnerabilityDatabaseCatalog !== undefined) {
@@ -881,6 +886,23 @@ export async function createModalNodeHandoffArchive(
   } catch (error) {
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
+  }
+}
+
+function assertDependencyReferenceOverlapsAreExact(
+  dependencyArtifactDirs: readonly string[],
+  referenceArtifactDirs: readonly string[]
+): void {
+  for (const dependencyArtifactDir of dependencyArtifactDirs) {
+    for (const referenceArtifactDir of referenceArtifactDirs) {
+      if (dependencyArtifactDir === referenceArtifactDir) continue;
+      if (
+        dependencyArtifactDir.startsWith(`${referenceArtifactDir}${path.sep}`) ||
+        referenceArtifactDir.startsWith(`${dependencyArtifactDir}${path.sep}`)
+      ) {
+        throw new Error("cloud handoff dependency and reference artifact trees overlap without being identical");
+      }
+    }
   }
 }
 
