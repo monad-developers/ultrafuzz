@@ -645,17 +645,48 @@ export function writeVerifiedFinalReport(input: {
     coverageEvidence === undefined
       ? undefined
       : ([verifiedCoverageEvidenceOutput()] satisfies ArtifactManifestOutputContract[]);
+  const reportRows = [
+    ...(projection.report.issues as Array<Record<string, unknown>>),
+    ...(projection.report.non_production_outcomes as Array<Record<string, unknown>>)
+  ];
+  const rawOutputs = reportRows.length === 0 ? undefined : verifiedRawFindingsOutputs();
+  const dedupeOutputs = reportRows.length === 0 ? undefined : verifiedDedupeOutputs();
   const graph = currentPlannedGraph(
-    coverageOutputs === undefined ? ["final-report"] : ["coverage", "final-report"],
+    [
+      ...(rawOutputs === undefined ? [] : ["raw-findings"]),
+      ...(dedupeOutputs === undefined ? [] : ["dedupe-findings"]),
+      ...(coverageOutputs === undefined ? [] : ["coverage"]),
+      "final-report"
+    ],
     "final-report"
   );
   const reportNode = graph.nodes.find((node) => node.id === "final-report")!;
   reportNode.outputs = outputs;
-  reportNode.depends_on = coverageOutputs === undefined ? [] : ["coverage"];
+  reportNode.depends_on = [
+    ...(dedupeOutputs === undefined ? [] : ["dedupe-findings"]),
+    ...(coverageOutputs === undefined ? [] : ["coverage"])
+  ];
   reportNode.workflow = {
     node_id: "node:final-report",
     task_node_ids: ["node:final-report"]
   };
+  const rawNode = graph.nodes.find((node) => node.id === "raw-findings");
+  if (rawNode !== undefined && rawOutputs !== undefined) {
+    rawNode.outputs = rawOutputs;
+    rawNode.workflow = {
+      node_id: "node:raw-findings",
+      task_node_ids: ["node:raw-findings"]
+    };
+  }
+  const dedupeNode = graph.nodes.find((node) => node.id === "dedupe-findings");
+  if (dedupeNode !== undefined && dedupeOutputs !== undefined) {
+    dedupeNode.outputs = dedupeOutputs;
+    dedupeNode.depends_on = ["raw-findings"];
+    dedupeNode.workflow = {
+      node_id: "node:dedupe-findings",
+      task_node_ids: ["node:dedupe-findings"]
+    };
+  }
   const coverageNode = graph.nodes.find((node) => node.id === "coverage");
   if (coverageNode !== undefined && coverageOutputs !== undefined) {
     coverageNode.outputs = coverageOutputs;
@@ -668,6 +699,45 @@ export function writeVerifiedFinalReport(input: {
 
   const layout = layoutForRunRoot(input.runRoot, runId);
   const nodeStates: Record<string, Partial<NodeState>> = {};
+  const dedupedFindings = reportRows.map(boundedDedupeFindingFromReportRow);
+  if (rawNode !== undefined && rawOutputs !== undefined) {
+    const rawBytes = new Map<string, Buffer>([
+      ["findings.json", Buffer.from(`${JSON.stringify(dedupedFindings, null, 2)}\n`, "utf8")]
+    ]);
+    writeFileDurable(path.join(layout.artifactsDir, rawNode.id, rawOutputs[0]!.path), rawBytes.get("findings.json")!);
+    writeArtifactManifest({
+      layout,
+      nodeId: rawNode.id,
+      include: rawOutputs.map((output) => output.path),
+      outputs: rawOutputs,
+      provenance: verifiedOutputProvenance(rawNode.id, workflowRunId)
+    });
+    writeVerificationMarker(layout, rawNode.id, rawOutputs, rawBytes);
+    nodeStates[rawNode.id] = verifiedNodeState(layout, rawNode.id, rawOutputs, workflowRunId);
+  }
+  if (dedupeNode !== undefined && dedupeOutputs !== undefined) {
+    const lifecycleLedger = {
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: reportRows.map(boundedDedupeLifecycleFromReportRow)
+    };
+    const dedupeBytes = new Map<string, Buffer>([
+      ["deduped-findings.json", Buffer.from(`${JSON.stringify(dedupedFindings, null, 2)}\n`, "utf8")],
+      ["finding-lifecycle-ledger.json", Buffer.from(`${JSON.stringify(lifecycleLedger, null, 2)}\n`, "utf8")]
+    ]);
+    for (const output of dedupeOutputs) {
+      writeFileDurable(path.join(layout.artifactsDir, dedupeNode.id, output.path), dedupeBytes.get(output.path)!);
+    }
+    writeArtifactManifest({
+      layout,
+      nodeId: dedupeNode.id,
+      include: dedupeOutputs.map((output) => output.path),
+      outputs: dedupeOutputs,
+      prerequisiteNodeIds: dedupeNode.depends_on,
+      provenance: verifiedOutputProvenance(dedupeNode.id, workflowRunId)
+    });
+    writeVerificationMarker(layout, dedupeNode.id, dedupeOutputs, dedupeBytes);
+    nodeStates[dedupeNode.id] = verifiedNodeState(layout, dedupeNode.id, dedupeOutputs, workflowRunId);
+  }
   if (coverageNode !== undefined && coverageOutputs !== undefined) {
     const coverageBytes = Buffer.from(`${JSON.stringify(coverageEvidence, null, 2)}\n`, "utf8");
     const coveragePath = path.join(layout.artifactsDir, coverageNode.id, coverageOutputs[0]!.path);
@@ -945,6 +1015,100 @@ function verifiedCoverageEvidenceOutput(): ArtifactManifestOutputContract {
     ...binding,
     primary: true
   };
+}
+
+function boundedDedupeFindingFromReportRow(row: Record<string, unknown>): Record<string, unknown> {
+  const lifecycle = row.lifecycle as
+    | {
+        dedupe_key?: unknown;
+        source_artifacts?: Array<{
+          finding_id?: unknown;
+          title?: unknown;
+          relationship?: unknown;
+        }>;
+      }
+    | undefined;
+  const primarySources = (lifecycle?.source_artifacts ?? []).filter((source) => source.relationship === "primary");
+  const primary = primarySources[0];
+  if (
+    primarySources.length !== 1 ||
+    typeof primary?.finding_id !== "string" ||
+    typeof primary.title !== "string" ||
+    typeof lifecycle?.dedupe_key !== "string"
+  ) {
+    throw new Error("non-empty verified report fixtures require one exact source-backed deduped finding per row");
+  }
+  return {
+    schema_version: row.schema_version,
+    id: primary.finding_id,
+    title: primary.title,
+    status: row.status,
+    severity_guess: row.severity_guess,
+    confidence: row.confidence,
+    summary: row.summary,
+    dedupe_key: lifecycle.dedupe_key
+  };
+}
+
+function boundedDedupeLifecycleFromReportRow(row: Record<string, unknown>): Record<string, unknown> {
+  const lifecycle = row.lifecycle as Record<string, unknown> | undefined;
+  if (lifecycle === undefined) {
+    throw new Error("non-empty verified report fixtures require a dedupe lifecycle source");
+  }
+  return Object.fromEntries(
+    Object.entries(lifecycle).filter(
+      ([field]) =>
+        ![
+          "triage_classification",
+          "triage_reason",
+          "demotion_reason",
+          "canonical_severity",
+          "final_disposition",
+          "comparison_disposition"
+        ].includes(field)
+    )
+  );
+}
+
+function verifiedRawFindingsOutputs(): ArtifactManifestOutputContract[] {
+  const contract = "ultrafuzz/findings@2";
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) throw new Error("missing current raw findings schema binding");
+  return [
+    {
+      path: "findings.json",
+      contract,
+      contract_digest: artifactContractDefinition(contract).digest,
+      ...binding,
+      primary: true
+    }
+  ];
+}
+
+function verifiedDedupeOutputs(): ArtifactManifestOutputContract[] {
+  const findingsContract = "ultrafuzz/findings@2";
+  const findingsBinding = artifactContractSchemaBinding(findingsContract);
+  const lifecycleContract = "ultrafuzz/finding-lifecycle-ledger@1";
+  const lifecycleBinding = artifactContractSchemaBinding(lifecycleContract);
+  if (findingsBinding === undefined || lifecycleBinding === undefined) {
+    throw new Error("missing current deduped finding authority schema bindings");
+  }
+  return [
+    {
+      path: "deduped-findings.json",
+      contract: findingsContract,
+      contract_digest: artifactContractDefinition(findingsContract).digest,
+      ...findingsBinding,
+      primary: true
+    },
+    {
+      path: "finding-lifecycle-ledger.json",
+      contract: lifecycleContract,
+      contract_digest: artifactContractDefinition(lifecycleContract).digest,
+      ...lifecycleBinding,
+      primary: false
+    }
+  ];
 }
 
 function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): ArtifactManifestOutputContract[] {

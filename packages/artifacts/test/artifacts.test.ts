@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   ArtifactPathError,
   ArtifactSecretGateError,
+  ARTIFACT_MANIFEST_FILE,
   GENERATED_TESTS_SCHEMA_VERSION,
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
@@ -32,6 +33,7 @@ import {
   replayEvents,
   replayUsageEvents,
   safeResolveInside,
+  sha256File,
   summarizeNodeAttempts,
   updateNodeState,
   validateArtifactManifest,
@@ -559,6 +561,7 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
       agent_ref: "CodexAgent",
       workflow_run_id: "workflow-run-1",
       workflow_task_id: "node:node-a",
+      verification_marker_sha256: "e".repeat(64),
       attempt_index: 0
     }
   });
@@ -571,6 +574,8 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
+  assert.equal(manifest.files[0]!.provenance.verification_marker_sha256, "e".repeat(64));
+  assert.equal(manifest.provenance.verification_marker_sha256, "e".repeat(64));
   assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/coverage-goal@2");
   assert.equal(manifest.output_contracts[0]!.schema_id, "urn:ultrafuzz:schema:test:example:1");
   assert.equal(manifest.output_contracts[0]!.schema_sha256, "b".repeat(64));
@@ -692,6 +697,37 @@ test("artifact manifests preserve causal prerequisite digests for safe reuse", (
     changed: ["ancestor"],
     missing: []
   });
+});
+
+test("artifact manifests accept exact captured prerequisite authorities without rereading mutable paths", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-captured-causal-authority" });
+  writeArtifact(layout, "ancestor", "result.md", "original\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  const ancestorManifestPath = path.join(layout.artifactsDir, "ancestor", ARTIFACT_MANIFEST_FILE);
+  const capturedSha256 = sha256File(ancestorManifestPath);
+
+  writeArtifact(layout, "ancestor", "result.md", "replacement\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:01.000Z" });
+  assert.notEqual(sha256File(ancestorManifestPath), capturedSha256);
+  writeArtifact(layout, "descendant", "result.md", "derived\n");
+  const descendant = writeArtifactManifest({
+    layout,
+    nodeId: "descendant",
+    prerequisiteManifestDigests: [{ node_id: "ancestor", sha256: capturedSha256 }],
+    createdAt: "2026-07-18T00:00:02.000Z"
+  });
+
+  assert.deepEqual(descendant.prerequisite_manifests, [{ node_id: "ancestor", sha256: capturedSha256 }]);
+  assert.throws(
+    () =>
+      writeArtifactManifest({
+        layout,
+        nodeId: "descendant",
+        prerequisiteNodeIds: ["ancestor"],
+        prerequisiteManifestDigests: [{ node_id: "ancestor", sha256: capturedSha256 }]
+      }),
+    /prerequisite authority is ambiguous/u
+  );
 });
 
 test("artifact manifest reuse checks the complete prerequisite chain", () => {

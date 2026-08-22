@@ -8,13 +8,13 @@ describe("artifact handoff validation", () => {
     expect(() =>
       validateTopology(validTopology(), {
         promptTexts: {
-          "review/review.md": "Read {{artifact_handoff:strategy}} and {{ancestor_artifacts:strategy}}."
+          "review/review.md": "Read {{artifact_handoff:strategy}}."
         }
       })
     ).not.toThrow();
   });
 
-  it("requires an ancestor generated-test manifest for the contract-derived handoff", () => {
+  it("accepts compact generated-test authority with matching, findings-only, or no ancestors", () => {
     const topology = validTopology();
     topology.nodes[2] = {
       ...topology.nodes[2]!,
@@ -23,33 +23,88 @@ describe("artifact handoff validation", () => {
         { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3", primary: false }
       ]
     };
+    topology.nodes.splice(3, 0, {
+      id: "findings-only-strategy",
+      prompt: "strategies/findings-only.md",
+      group: "strategies",
+      depends_on: ["setup"],
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true }]
+    });
+    topology.nodes[4] = {
+      ...topology.nodes[4]!,
+      depends_on: ["strategy", "findings-only-strategy"]
+    };
     expect(() =>
       validateTopology(topology, {
-        promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
-      })
-    ).not.toThrow();
-    expect(() =>
-      validateTopology(validTopology(), {
-        promptTexts: { "review/review.md": "Read {{ancestor_generated_test_manifests}}." }
-      })
-    ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
-  });
-
-  it("accepts optional ancestor handoffs filtered by exact output path", () => {
-    expect(() =>
-      validateTopology(validTopology(), {
         promptTexts: {
-          "review/review.md":
-            "Read {{ancestor_artifacts_by_path:findings.json,setup/project-discovery.md,optional.json}}."
+          "review/review.md": "Read {{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}."
         }
       })
     ).not.toThrow();
 
     expect(() =>
       validateTopology(validTopology(), {
-        promptTexts: { "review/review.md": "Read {{ancestor_artifacts_by_path:../secret}}." }
+        promptTexts: {
+          "review/review.md": "Read {{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}."
+        }
+      })
+    ).not.toThrow();
+
+    const rootConsumer = validTopology();
+    rootConsumer.nodes.splice(1, 0, {
+      id: "orphan-review",
+      prompt: "review/orphan-review.md",
+      group: "review",
+      depends_on: ["__start__"],
+      outputs: [{ path: "orphan.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
+    });
+    const finish = rootConsumer.nodes.find((node) => node.id === "__finish__")!;
+    finish.depends_on = [...finish.depends_on, "orphan-review"];
+    expect(() =>
+      validateTopology(rootConsumer, {
+        promptTexts: {
+          "review/orphan-review.md": "Read {{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}."
+        }
+      })
+    ).not.toThrow();
+  });
+
+  it("accepts compact exact-path authority and rejects unsafe paths", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: {
+          "review/review.md":
+            "Read {{ancestor_artifact_path_authority:findings.json,setup/project-discovery.md,optional.json}}."
+        }
+      })
+    ).not.toThrow();
+
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "review/review.md": "Read {{ancestor_artifact_path_authority:../secret}}." }
       })
     ).toThrow(expect.objectContaining({ code: "INVALID_PROMPT_ARTIFACT_REFERENCE" }));
+  });
+
+  it("rejects legacy ancestor collections with migration diagnostics", () => {
+    for (const variable of [
+      "ancestor_artifacts",
+      "ancestor_artifacts:strategy",
+      "ancestor_artifacts_by_path:findings.json",
+      "ancestor_generated_test_manifests",
+      "ancestor_generated_test_manifest_authorities"
+    ]) {
+      expect(() =>
+        validateTopology(validTopology(), {
+          promptTexts: { "review/review.md": `Read {{${variable}}}.` }
+        })
+      ).toThrow(
+        expect.objectContaining({
+          code: "INVALID_PROMPT_ARTIFACT_REFERENCE",
+          message: expect.stringContaining("is no longer supported; migrate to")
+        })
+      );
+    }
   });
 
   it("prefers an explicit prompt path over a colliding node-id catalog entry", () => {

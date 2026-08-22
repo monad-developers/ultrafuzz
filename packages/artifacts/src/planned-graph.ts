@@ -96,6 +96,7 @@ export const plannedGraphJsonSchema = {
           logical_id: { $ref: "#/$defs/safeId" },
           display_name: { type: "string", minLength: 1 },
           kind: { enum: ["agentic", "reference"] },
+          group: { $ref: "#/$defs/safeId" },
           depends_on: { type: "array", uniqueItems: true, items: { $ref: "#/$defs/safeId" } },
           artifact_dir: { type: "string", pattern: "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
           timeout_seconds: { type: "integer", minimum: 1 },
@@ -203,7 +204,8 @@ export const plannedGraphJsonSchema = {
             loops: { type: "integer", minimum: 1 },
             timeout_seconds: { type: "integer", minimum: 1 },
             max_attempts: { type: "integer", minimum: 1, maximum: MAX_RETRY_CHAIN_ATTEMPTS },
-            model_profiles: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
+            model_profiles: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } },
+            failure_policy: { enum: ["halt", "continue"] }
           }
         }
       }
@@ -219,6 +221,7 @@ export interface PlannedGraphGroup {
     timeout_seconds?: number;
     max_attempts?: number;
     model_profiles?: string[];
+    failure_policy?: "halt" | "continue";
   };
 }
 
@@ -239,6 +242,7 @@ export interface PlannedGraphNodeDocument {
   logical_id: string;
   display_name: string;
   kind: "agentic" | "reference";
+  group?: string;
   depends_on: string[];
   artifact_dir: string;
   timeout_seconds?: number;

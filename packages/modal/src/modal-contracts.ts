@@ -7,7 +7,7 @@ export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:re
 export const MODAL_RECOVERY_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-state:1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-lineage:1" as const;
 export const MODAL_WORKER_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-result:2" as const;
-export const MODAL_NODE_INPUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-input:1" as const;
+export const MODAL_NODE_INPUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-input:2" as const;
 export const MODAL_NODE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-result:2" as const;
 export const MODAL_NODE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint:1" as const;
 export const MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint-index:1" as const;
@@ -367,8 +367,14 @@ export interface StrictModalWorkerResultDocument {
   diagnostic_code: StrictModalWorkerDiagnosticCode;
 }
 
+export interface StrictModalDependencyVerificationAuthorityDocument {
+  attempt_id: string;
+  marker_sha256: string;
+  size_bytes: number;
+}
+
 export interface StrictModalNodeInputDocument {
-  schema_version: "ultrafuzz.modal.node.v1";
+  schema_version: "ultrafuzz.modal.node.v2";
   run_id: string;
   task_id: string;
   attempt_id: string;
@@ -382,6 +388,8 @@ export interface StrictModalNodeInputDocument {
   artifact_dir: string;
   workspace_dir: string;
   dependency_artifact_dirs: string[];
+  optional_dependency_artifact_dirs?: string[];
+  dependency_verification_authorities: StrictModalDependencyVerificationAuthorityDocument[];
   project_archive_sha256?: string;
   resources: {
     cpu: number;

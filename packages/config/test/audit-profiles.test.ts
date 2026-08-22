@@ -18,7 +18,14 @@ describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
     const catalog = loadAuditProfileCatalog();
     expect(catalog.defaultProfile).toBe("default");
-    expect(Object.keys(catalog.profiles)).toEqual(["default", "exhaustive", "invariant-only", "low-cost", "smoke"]);
+    expect(Object.keys(catalog.profiles)).toEqual([
+      "default",
+      "exhaustive",
+      "full",
+      "invariant-only",
+      "low-cost",
+      "smoke"
+    ]);
     expect(catalog.digest).toMatch(/^[0-9a-f]{64}$/u);
 
     const smoke = auditProfile("smoke", catalog);
@@ -37,6 +44,9 @@ describe("audit profile catalog", () => {
       "id: stateful-invariant-campaign"
     );
     expect(packagedTopologyPath(auditProfile("default", catalog), catalog)).toBeUndefined();
+    const full = auditProfile("full", catalog);
+    expect(full.topologyPath).toBe("topologies/full.yml");
+    expect(fs.readFileSync(packagedTopologyPath(full, catalog)!, "utf8")).toContain("id: differential-oracle-planner");
     expect(auditProfile("low-cost", catalog).settings.same_agent_attempts).toBe(1);
     expect(auditProfile("exhaustive", catalog).settings).toMatchObject({
       dynamic_strategies_enumerator: "unlimited",
@@ -198,7 +208,7 @@ profiles:
   it.each(["balanced", "fuzz-only", "thorough"])(
     "rejects removed profile %s with the available profile vocabulary",
     (profile) => {
-      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, invariant-only/u);
+      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
     }
   );
 

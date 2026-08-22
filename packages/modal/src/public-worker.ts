@@ -24,7 +24,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
-import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
+import { loadVerifiedFinalReportSnapshot, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -34,6 +34,7 @@ import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
+  capturePublicBenchmarkBundleSource,
   createPublicBenchmarkBundle,
   parsePublicBenchmarkBundle,
   readPublicBenchmarkBundle,
@@ -49,7 +50,7 @@ import {
   type PublicEvalDiagnostics,
   writePublicEvalDiagnosticsAtomic
 } from "./public-eval-diagnostics.js";
-import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
+import { modalTargetToml } from "./workspace-config.js";
 import {
   describeWorkerTermination,
   sanitizeWorkerDiagnosticMessage,
@@ -83,7 +84,10 @@ export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
 // its 1,800-second attempts, so retain ten minutes beyond the four-hour
 // topology bound for workflow transitions and final synchronization.
 export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
-export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 60 * 60;
+// A manual full row retains the packaged specialist timeouts, including the
+// 7,200-second invariant campaign. This is a bounded row execution budget, not
+// a guarantee that every topology node can consume its worst-case timeout.
+export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 15_000;
 
 export class PublicEvalDiagnosticsBuildError extends Error {
   override readonly name = "PublicEvalDiagnosticsBuildError";
@@ -772,15 +776,9 @@ async function preparePublicBenchmark(
     await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
-      modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "default"),
+      modalTargetToml(model, config.node_timeout_seconds, scope.lane),
       { mode: 0o600 }
     );
-    if (scope.lane !== "smoke") {
-      capModalTargetTopologyTimeouts(
-        path.join(destination, ".ultrafuzz", "topology.yml"),
-        Math.min(config.node_timeout_seconds, scope.max_runtime_seconds)
-      );
-    }
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
       cwd: controlRoot,
       logPath,
@@ -1127,9 +1125,22 @@ export function publicBundleSources(
     if (path.resolve(record.report_json_path) !== path.resolve(report.artifacts.json_path)) {
       throw new Error(`public benchmark row record names a different terminal report: ${row.id}`);
     }
+    // The verified report remains the immutable internal scoring/lifecycle
+    // authority. Only this separately validated, privacy-safe projection crosses
+    // the public bundle boundary, with Markdown rendered from those exact JSON
+    // values so the published pair cannot diverge.
+    const publicReport = projectPublicCanonicalFinalReport(report.json);
     const candidates = [
-      { name: "report.json", source: report.artifacts.json_path, immutableContents: report.json_bytes },
-      { name: "report.md", source: report.artifacts.markdown_path, immutableContents: report.markdown_bytes }
+      {
+        name: "report.json",
+        source: report.artifacts.json_path,
+        immutableContents: Buffer.from(`${JSON.stringify(publicReport.report, null, 2)}\n`, "utf8")
+      },
+      {
+        name: "report.md",
+        source: report.artifacts.markdown_path,
+        immutableContents: Buffer.from(publicReport.markdown, "utf8")
+      }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
@@ -1179,7 +1190,10 @@ function parsePublicSourceJsonLines(contents: Buffer, label: string): unknown[] 
 /**
  * Every `PUBLIC_OPTIONAL_ROW_ARTIFACTS` file the run actually wrote, in a
  * deterministic order, or an empty list. Absence is never an error: these
- * artifacts exist only for topologies that build them.
+ * artifacts exist only for topologies that build them. A candidate that cannot
+ * be captured as a bounded, singly linked regular file is treated as absent;
+ * once captured, bundle creation revalidates its bytes and identity and fails
+ * closed if either changed.
  */
 export function optionalRowArtifactSources(runRoot: string, rowId: string): PublicBenchmarkBundleSource[] {
   const artifactsRoot = path.join(runRoot, "artifacts");
@@ -1197,8 +1211,18 @@ export function optionalRowArtifactSources(runRoot: string, rowId: string): Publ
   for (const nodeId of nodeIds) {
     for (const name of PUBLIC_OPTIONAL_ROW_ARTIFACTS) {
       const source = path.join(artifactsRoot, nodeId, name);
-      if (!publishableOptionalRowArtifact(source)) continue;
-      sources.push({ path: `reports/${rowId}/artifacts/${nodeId}/${name}`, root: runRoot, source });
+      let captured: PublicBenchmarkBundleSource;
+      try {
+        captured = capturePublicBenchmarkBundleSource({
+          path: `reports/${rowId}/artifacts/${nodeId}/${name}`,
+          root: runRoot,
+          source
+        });
+      } catch {
+        continue;
+      }
+      if (captured.immutableContents?.byteLength === 0) continue;
+      sources.push(captured);
     }
   }
   if (sources.length > MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES) {
@@ -1207,22 +1231,6 @@ export function optionalRowArtifactSources(runRoot: string, rowId: string): Publ
     );
   }
   return sources;
-}
-
-/**
- * A candidate is published only if it is a real, non-empty regular file within
- * the bundle's per-file ceiling. Symlinks are refused rather than followed, and
- * an oversized artifact is skipped instead of failing the whole publication for
- * an optional file.
- */
-function publishableOptionalRowArtifact(source: string): boolean {
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(source);
-  } catch {
-    return false;
-  }
-  return stat.isFile() && stat.size > 0 && stat.size <= MAX_PUBLIC_BENCHMARK_FILE_BYTES;
 }
 
 async function mapLimitStable<T>(

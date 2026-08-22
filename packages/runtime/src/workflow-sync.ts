@@ -63,6 +63,7 @@ import {
   type NodeProvenance,
   type NodeState,
   type NodeStatus,
+  type PrerequisiteManifestDigest,
   type RunLayout,
   type RunMetadataAccounting,
   type RunMetadataDocument,
@@ -76,6 +77,10 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import {
+  admittedDirectDependencyAttemptIds,
+  authenticatedDependencyAdmissionAttemptIds
+} from "./dependency-admission.js";
 import {
   modelPricingSnapshot,
   pricingForContext,
@@ -94,6 +99,7 @@ import {
   type SyncRunValue
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
+import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
 import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
@@ -389,6 +395,7 @@ interface VerifierPublicationAuthoritySnapshot {
   markerBytes: Buffer;
   artifactDir: string;
   publications: ReadonlyMap<string, VerifierPublicationSnapshot>;
+  admittedDependencyAttemptIds: readonly string[];
 }
 
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
@@ -582,6 +589,7 @@ export async function synchronizeLinkedWorkflowRun(
     controlGeneration: evidence.controlGeneration
   });
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
+  const nonBlockingNodeIds = nonBlockingRuntimeNodeIds(loaded.graph);
   const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
     layout,
     state: recoveryState,
@@ -591,7 +599,9 @@ export async function synchronizeLinkedWorkflowRun(
     evidenceComplete,
     workflowRunId: evidence.smithersRunId,
     workflowLinkId: evidence.workflowLinkId,
-    controlGeneration: evidence.controlGeneration
+    controlGeneration: evidence.controlGeneration,
+    nonBlockingNodeIds,
+    tasks: loaded.tasks
   });
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
@@ -644,7 +654,8 @@ export async function synchronizeLinkedWorkflowRun(
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete,
     recoveredAggregateAuthorized,
-    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false
+    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false,
+    nonBlockingNodeIds
   });
   const stateBeforeStatusUpdate = readRunState(layout);
   const previousRunStatus = stateBeforeStatusUpdate.status;
@@ -828,9 +839,13 @@ function recoveryAuthorizesTerminalAggregate(input: {
   workflowRunId: string;
   workflowLinkId: string;
   controlGeneration: string;
+  nonBlockingNodeIds: ReadonlySet<string>;
+  tasks: readonly StoredWorkflowTask[];
 }): boolean {
   const recovery = input.state.provenance?.recovery;
-  const statuses = [...input.nodeStatuses.values()];
+  const statuses = [...input.nodeStatuses]
+    .filter(([nodeId]) => !input.nonBlockingNodeIds.has(nodeId))
+    .map(([, status]) => status);
   if (
     (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
     recovery === undefined ||
@@ -850,6 +865,7 @@ function recoveryAuthorizesTerminalAggregate(input: {
   }
 
   for (const [nodeId, observed] of input.observedTaskEvidence) {
+    if (input.nonBlockingNodeIds.has(nodeId)) continue;
     const node = input.state.nodes[nodeId];
     const workflow = recordField(node?.provenance, "workflow");
     if (
@@ -869,14 +885,23 @@ function recoveryAuthorizesTerminalAggregate(input: {
   for (const failedNode of recovery.failed_nodes) {
     const node = input.state.nodes[failedNode.node_id];
     const workflow = recordField(node?.provenance, "workflow");
+    const matchingTasks = input.tasks.filter((task) => task.attemptId === failedNode.node_id);
+    const sealedTask = matchingTasks.length === 1 ? matchingTasks[0] : undefined;
     const failedTask = input.inspect.steps.find((step) => step.id === failedNode.workflow_task_id);
     if (
       node === undefined ||
+      sealedTask === undefined ||
+      failedNode.failed_attempt < 1 ||
+      ![sealedTask.preparationSmithersNodeId, sealedTask.smithersNodeId, sealedTask.verifierSmithersNodeId].includes(
+        failedNode.workflow_task_id
+      ) ||
       failedTask === undefined ||
       failedTask.state !== "finished" ||
       failedTask.attempt <= failedNode.failed_attempt ||
       (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
       stringField(workflow, "run_id") !== recovery.workflow_run_id ||
+      stringField(workflow, "agent_task_id") !== sealedTask.smithersNodeId ||
+      stringField(workflow, "verifier_task_id") !== sealedTask.verifierSmithersNodeId ||
       (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt
     ) {
       return false;
@@ -3014,13 +3039,15 @@ async function finalizeTerminalTask(input: {
       wrapperFailure &&
       !preparationFailure &&
       input.evidence.status === "failed" &&
-      input.evidence.timedOut !== true
+      input.evidence.timedOut !== true &&
+      (input.task.optionalDependencyArtifactDirs?.length ?? 0) === 0
     ) {
       try {
         assertSynchronizationBudget(input.control);
         const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId, {
           task: input.task,
-          tasks: [...input.tasksByAttempt.values()]
+          tasks: [...input.tasksByAttempt.values()],
+          admittedDependencyAttemptIds: authenticatedDependencyAdmissionAttemptIds(input.task, undefined)
         });
         if (!gate.ok) verifierOutputGate = gate;
       } catch (error) {
@@ -3091,8 +3118,21 @@ async function finalizeTerminalTask(input: {
   assertSynchronizationBudget(input.control);
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
   let verifierAuthority: VerifierPublicationAuthoritySnapshot | undefined;
+  let prerequisiteManifestAuthority: PrerequisiteManifestAuthoritySnapshot | undefined;
   try {
     verifierAuthority = captureVerifierPublicationAuthority(input.layout, input.node, input.task);
+    assertOptionalDependencyAuthoritiesCurrent(
+      input.layout,
+      input.task,
+      verifierAuthority.admittedDependencyAttemptIds,
+      input.tasksByAttempt
+    );
+    prerequisiteManifestAuthority = capturePrerequisiteManifestAuthority(
+      input.layout,
+      input.task,
+      verifierAuthority.admittedDependencyAttemptIds,
+      input.tasksByAttempt
+    );
   } catch (error) {
     if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
     diagnostics.push({
@@ -3109,7 +3149,8 @@ async function finalizeTerminalTask(input: {
           input.task.attemptId,
           {
             task: input.task,
-            tasks: [...input.tasksByAttempt.values()]
+            tasks: [...input.tasksByAttempt.values()],
+            admittedDependencyAttemptIds: verifierAuthority.admittedDependencyAttemptIds
           },
           authenticatedGateSnapshots(input.node, verifierAuthority)
         );
@@ -3226,14 +3267,20 @@ async function finalizeTerminalTask(input: {
       if (verifierAuthority === undefined) {
         throw new Error(`verifier publication authority is unavailable for ${input.task.attemptId}`);
       }
+      if (prerequisiteManifestAuthority === undefined) {
+        throw new Error(`prerequisite manifest authority is unavailable for ${input.task.attemptId}`);
+      }
       const manifest = writeArtifactManifest({
         layout: input.layout,
         nodeId: input.task.attemptId,
         include: [...verifierAuthority.publications.keys()],
         outputs: input.node.outputs,
-        prerequisiteNodeIds: input.task.dependencies,
-        provenance: artifactProvenance(input.task, input.workflowRunId)
+        prerequisiteManifestDigests: prerequisiteManifestAuthority.digests,
+        provenance: artifactProvenance(input.task, input.workflowRunId, sha256Bytes(verifierAuthority.markerBytes))
       });
+      if (!isDeepStrictEqual(manifest.prerequisite_manifests, prerequisiteManifestAuthority.digests)) {
+        throw new Error(`controller artifact manifest lost its prerequisite authority for ${input.task.attemptId}`);
+      }
       const manifestPath = safeResolveInside(artifactDir, ARTIFACT_MANIFEST_FILE, "controller artifact manifest");
       const manifestBytes = readControllerManifestSnapshot(
         input.layout,
@@ -3243,6 +3290,21 @@ async function finalizeTerminalTask(input: {
         verifierAuthority
       );
       assertVerifierPublicationAuthorityCurrent(input.layout, verifierAuthority);
+      assertOptionalDependencyAuthoritiesCurrent(
+        input.layout,
+        input.task,
+        verifierAuthority.admittedDependencyAttemptIds,
+        input.tasksByAttempt
+      );
+      const currentPrerequisiteManifestAuthority = capturePrerequisiteManifestAuthority(
+        input.layout,
+        input.task,
+        verifierAuthority.admittedDependencyAttemptIds,
+        input.tasksByAttempt
+      );
+      if (!isDeepStrictEqual(currentPrerequisiteManifestAuthority, prerequisiteManifestAuthority)) {
+        throw new Error(`prerequisite manifest authority changed during finalization for ${input.task.attemptId}`);
+      }
       const secondManifestRead = readAuthorityFileSnapshot(
         input.layout.root,
         manifestPath,
@@ -3320,6 +3382,154 @@ async function finalizeTerminalTask(input: {
   };
 }
 
+function admittedManifestPrerequisiteAttemptIds(
+  task: StoredWorkflowTask,
+  admittedDependencyAttemptIds: readonly string[]
+): string[] {
+  return admittedDirectDependencyAttemptIds(
+    task,
+    authenticatedDependencyAdmissionAttemptIds(task, admittedDependencyAttemptIds)
+  );
+}
+
+interface PrerequisiteManifestAuthoritySnapshot {
+  digests: readonly PrerequisiteManifestDigest[];
+}
+
+function capturePrerequisiteManifestAuthority(
+  layout: RunLayout,
+  task: StoredWorkflowTask,
+  admittedDependencyAttemptIds: readonly string[],
+  tasksByAttempt: ReadonlyMap<string, StoredWorkflowTask>
+): PrerequisiteManifestAuthoritySnapshot {
+  const digests = admittedManifestPrerequisiteAttemptIds(task, admittedDependencyAttemptIds)
+    .map((attemptId): PrerequisiteManifestDigest => {
+      const dependencyTask = tasksByAttempt.get(attemptId);
+      if (dependencyTask !== undefined) {
+        return captureFinalizedTaskManifestDigest(layout, dependencyTask);
+      }
+      return captureReferenceManifestDigest(layout, task, attemptId);
+    })
+    .sort((left, right) => left.node_id.localeCompare(right.node_id));
+  return Object.freeze({ digests: Object.freeze(digests) });
+}
+
+function captureFinalizedTaskManifestDigest(
+  layout: RunLayout,
+  dependencyTask: StoredWorkflowTask
+): PrerequisiteManifestDigest {
+  loadFinalizedNodeOutputSnapshot({
+    runRoot: layout.root,
+    logicalNodeId: dependencyTask.logicalNodeId,
+    attemptId: dependencyTask.attemptId
+  });
+  const stateBefore = readRunState(layout);
+  const nodeBefore = stateBefore.nodes[dependencyTask.attemptId];
+  const expectedDigest = finalizedTaskManifestDigest(nodeBefore);
+  if (nodeBefore?.status !== "succeeded" || expectedDigest === undefined) {
+    throw new Error(`finalized prerequisite manifest authority is unavailable for ${dependencyTask.attemptId}`);
+  }
+  const artifactDir = getNodeArtifactDir(layout, dependencyTask.attemptId);
+  if (path.resolve(dependencyTask.artifactDir) !== path.resolve(artifactDir)) {
+    throw new Error(`sealed prerequisite artifact directory changed for ${dependencyTask.attemptId}`);
+  }
+  const manifestPath = safeResolveInside(artifactDir, ARTIFACT_MANIFEST_FILE, "prerequisite artifact manifest");
+  const manifestBytes = readAuthorityFileSnapshot(layout.root, manifestPath, "prerequisite artifact manifest");
+  if (sha256Bytes(manifestBytes) !== expectedDigest) {
+    throw new Error(`finalized prerequisite manifest changed for ${dependencyTask.attemptId}`);
+  }
+  const nodeAfter = readRunState(layout).nodes[dependencyTask.attemptId];
+  if (nodeAfter?.status !== nodeBefore.status || finalizedTaskManifestDigest(nodeAfter) !== expectedDigest) {
+    throw new Error(`finalized prerequisite state changed for ${dependencyTask.attemptId}`);
+  }
+  return { node_id: dependencyTask.attemptId, sha256: expectedDigest };
+}
+
+function finalizedTaskManifestDigest(node: NodeState | undefined): string | undefined {
+  const provenance = node?.provenance;
+  if (provenance === undefined || !("output_contracts" in provenance)) return undefined;
+  return provenance.output_contracts?.artifact_manifest_sha256;
+}
+
+function captureReferenceManifestDigest(
+  layout: RunLayout,
+  task: StoredWorkflowTask,
+  attemptId: string
+): PrerequisiteManifestDigest {
+  const authorities = (task.referenceArtifactManifestAuthorities ?? []).filter(
+    (authority) => authority.attemptId === attemptId
+  );
+  if (authorities.length !== 1) {
+    throw new Error(`sealed reference prerequisite manifest authority is unavailable for ${attemptId}`);
+  }
+  const authority = authorities[0]!;
+  const artifactDir = getNodeArtifactDir(layout, attemptId);
+  if (path.resolve(authority.artifactDir) !== path.resolve(artifactDir)) {
+    throw new Error(`sealed reference prerequisite artifact directory changed for ${attemptId}`);
+  }
+  const manifestPath = safeResolveInside(artifactDir, ARTIFACT_MANIFEST_FILE, "reference artifact manifest");
+  const manifestBytes = readAuthorityFileSnapshot(layout.root, manifestPath, "reference artifact manifest");
+  if (manifestBytes.byteLength !== authority.sizeBytes || sha256Bytes(manifestBytes) !== authority.sha256) {
+    throw new Error(`sealed reference prerequisite manifest changed for ${attemptId}`);
+  }
+  return { node_id: attemptId, sha256: authority.sha256 };
+}
+
+/**
+ * A continue-on-failure producer may be omitted only when it did not publish a
+ * successful finalized output. Once the controller has finalized that producer,
+ * its marker/manifest authority must remain current and the consumer verifier
+ * must persist it in the admitted closure. This prevents a deleted, dangling,
+ * or malformed optional marker from turning a previously admitted success into
+ * an unauthenticated omission during a later synchronization pass.
+ */
+function assertOptionalDependencyAuthoritiesCurrent(
+  layout: RunLayout,
+  task: StoredWorkflowTask,
+  admittedDependencyAttemptIds: readonly string[],
+  tasksByAttempt: ReadonlyMap<string, StoredWorkflowTask>
+): void {
+  const optionalArtifactDirs = task.optionalDependencyArtifactDirs ?? [];
+  if (optionalArtifactDirs.length === 0) return;
+
+  const admitted = new Set(admittedDependencyAttemptIds);
+  const seen = new Set<string>();
+  const state = readRunState(layout);
+  for (const artifactDir of optionalArtifactDirs) {
+    const attemptId = path.basename(artifactDir);
+    if (seen.has(attemptId)) {
+      throw new Error(`sealed optional dependency authority repeats attempt ${attemptId}`);
+    }
+    seen.add(attemptId);
+    const dependencyTask = tasksByAttempt.get(attemptId);
+    if (dependencyTask === undefined || path.resolve(dependencyTask.artifactDir) !== path.resolve(artifactDir)) {
+      throw new Error(`sealed optional dependency authority is undeclared for ${attemptId}`);
+    }
+
+    const dependencyStatus = state.nodes[attemptId]?.status;
+    const finalizedSuccess = dependencyStatus !== undefined && NODE_RECOVERED_STATUSES.has(dependencyStatus);
+    if (finalizedSuccess !== admitted.has(attemptId)) {
+      throw new Error(
+        finalizedSuccess
+          ? `finalized optional dependency is missing from verifier admission ${attemptId}`
+          : `unfinalized optional dependency is present in verifier admission ${attemptId}`
+      );
+    }
+    if (!finalizedSuccess) {
+      if (dependencyStatus === undefined || !terminalStatus(dependencyStatus)) {
+        throw new Error(`optional dependency is not terminal for verifier admission ${attemptId}`);
+      }
+      continue;
+    }
+
+    loadFinalizedNodeOutputSnapshot({
+      runRoot: layout.root,
+      logicalNodeId: dependencyTask.logicalNodeId,
+      attemptId
+    });
+  }
+}
+
 function captureVerifierPublicationAuthority(
   layout: RunLayout,
   node: PlannedGraphNode,
@@ -3383,6 +3593,10 @@ function captureVerifierPublicationAuthority(
   if (!verificationArtifactsMatchPlanned(marker.artifacts, node.outputs)) {
     throw new Error(`artifact verification marker outputs do not exactly match planned attempt ${task.attemptId}`);
   }
+  const admittedDependencyAttemptIds = authenticatedDependencyAdmissionAttemptIds(
+    task,
+    marker.admitted_dependency_attempt_ids
+  );
 
   const publications = new Map<string, VerifierPublicationSnapshot>();
   for (const publication of marker.publications) {
@@ -3409,7 +3623,7 @@ function captureVerifierPublicationAuthority(
       throw new Error(`planned output is not bound to one verified publication: ${output.path}`);
     }
   }
-  return { marker, markerPath, markerBytes, artifactDir, publications };
+  return { marker, markerPath, markerBytes, artifactDir, publications, admittedDependencyAttemptIds };
 }
 
 function verificationArtifactsMatchPlanned(
@@ -4174,9 +4388,12 @@ function finalRunStatus(
     evidenceComplete: boolean;
     recoveredAggregateAuthorized?: boolean;
     recoveryRequiresAuthorization?: boolean;
+    nonBlockingNodeIds?: ReadonlySet<string>;
   } = { evidenceComplete: true }
 ): RunStatus {
-  const statuses = [...nodeStatuses.values()];
+  const statuses = [...nodeStatuses]
+    .filter(([nodeId]) => options.nonBlockingNodeIds?.has(nodeId) !== true)
+    .map(([, status]) => status);
   const workflowStatus = inspect.runState;
   if (workflowStatus === "cancelled" || workflowStatus === "cancel-pending") {
     return currentStatus === "timed-out" ? "timed-out" : "canceled";
@@ -4223,6 +4440,23 @@ function finalRunStatus(
   }
   if (workflowStatus === "failed" && options.recoveredAggregateAuthorized === true) return "succeeded";
   return currentStatus;
+}
+
+function nonBlockingRuntimeNodeIds(graph: PlannedGraph): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const node of graph.nodes) {
+    if (node.group === undefined || graph.groups[node.group]?.defaults?.failure_policy !== "continue") continue;
+    ids.add(node.id);
+    for (const model of node.model_fanout) {
+      ids.add(
+        model.attempt_id ??
+          (node.model_fanout.length <= 1
+            ? node.id
+            : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`)
+      );
+    }
+  }
+  return ids;
 }
 
 // A workflow that ends terminally failed while every durable node is still
@@ -4621,7 +4855,11 @@ async function checkedRunLayout(
   }
 }
 
-function artifactProvenance(task: StoredWorkflowTask, workflowRunId: string): Partial<ArtifactProvenance> {
+function artifactProvenance(
+  task: StoredWorkflowTask,
+  workflowRunId: string,
+  verificationMarkerSha256: string
+): Partial<ArtifactProvenance> {
   const model = task.metadata.model;
   return {
     producer_node_id: task.attemptId,
@@ -4634,6 +4872,7 @@ function artifactProvenance(task: StoredWorkflowTask, workflowRunId: string): Pa
     agent_ref: task.agentRef,
     workflow_run_id: workflowRunId,
     workflow_task_id: task.smithersNodeId,
+    verification_marker_sha256: verificationMarkerSha256,
     origin: "workflow",
     metadata: {
       concrete_node_id: task.concreteNodeId

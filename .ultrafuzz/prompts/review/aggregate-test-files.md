@@ -20,7 +20,7 @@ generated tests are later materialized.
 
 Use these review handoffs:
 
-Prefer the Read tool for the exact manifest files listed below. If you use
+Prefer the Read tool for the exact manifest files selected below. If you use
 Bash to inspect artifact directories or copied files, run one command at a
 time and inspect the output as-is. Do not use shell pipelines or chained
 commands. Wrong: `ls {{artifact_path}} | sort`. Use `ls {{artifact_path}}` by
@@ -40,20 +40,26 @@ Project discovery:
 Base test setup (when rendered):
 {{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
-Strategy generated-test manifests declared by ancestor nodes in the effective
-topology:
+Use this sealed JSON authority to select every generated-test manifest declared
+by ancestor nodes in the effective topology without expanding an unbounded path
+list or source-authority table into this prompt:
 
-{{ancestor_generated_test_manifests}}
+{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}
+
+When that exact selector yields no outputs, no generated-test manifest is
+declared by any ancestor: copy nothing and write the schema-defined empty
+`aggregation.json` with zero source bundles. That is a successful aggregation
+for a findings-only topology, not an error.
 
 Use only files reported by strategy-owned generated-test manifests. Read every
-manifest listed above, including empty manifests. Validate each one against the
+selected manifest, including empty manifests. Validate each one against the
 exact pinned `{{schema_path}}/generated-tests.schema.json`; that schema alone
 defines its JSON version, fields, types, enums, required members, and empty
 bundle. Treat the schema-defined runnable and support entries together as one
-atomic source bundle. Bind its one framework to the checked-in native framework
-for the whole bundle. Do not rely on the current working tree, a non-canonical
-file list, or a strategy workspace scan as a substitute for a missing manifest
-entry.
+atomic source bundle. Bind its one framework to the checked-in native
+framework for the whole bundle. Do not rely on the current working tree, a
+non-canonical file list, or a strategy workspace scan as a substitute for a
+missing manifest entry.
 
 For every schema-defined entry, accept the exact byte-for-byte companion only
 when it resolves to a non-empty strict UTF-8 text regular file inside the source
@@ -92,6 +98,24 @@ collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.
+The sealed selector above is binding: for each selected manifest, write its
+producer's exact `logical_node_id` as `source node_id` into every
+corresponding `source_bundles`, copied-entry, and skipped-entry row. Then
+confirm it is byte-for-byte equal to that manifest's root-level `node_id`. For
+each source-bundle and entry row, write `source_manifest_relative_path`
+byte-for-byte from the selected output's declared `path` (for this contract,
+normally `generated-tests.json`) and write `source_manifest_path` as its exact
+producer `artifact_dir` joined with that declared path. The latter is the
+manifest's absolute location; it is not a valid relative path. Never insert an
+artifact directory prefix such as `artifacts/<source-node>/` into
+`source_manifest_relative_path`. Only an entry's `source_artifact_path` names
+its absolute companion location below the source artifact directory, while its
+`source_relative_path` comes byte-for-byte from the source manifest entry.
+Do not use a destination directory segment, an ordinal, a strategy attempt, or
+this aggregating node's own id as an identity. In particular, a directory
+segment such as `attempt-<n>` is never a `node_id`. Read `source_run_id` and
+`framework` from the source manifest's root fields. Never abbreviate,
+normalize, or reorder any source identity.
 Preserve the manifest's one `framework` only on its `source_bundles` record.
 Preserve every entry's `language`, `description`, and `provenance` fields without
 rewriting them; copied and skipped entry rows must not repeat `framework`. Do

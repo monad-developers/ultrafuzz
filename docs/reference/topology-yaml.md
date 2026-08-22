@@ -75,12 +75,13 @@ colors such as `#7c3aed`.
 
 Group defaults may include:
 
-| Field             | Meaning                                             |
-| ----------------- | --------------------------------------------------- |
-| `loops`           | Default loop count for nodes in the group.          |
-| `timeout_seconds` | Default timeout for nodes in the group.             |
-| `max_attempts`    | Maximum attempts for an agent task.                 |
-| `model_profiles`  | Explicit model profile list for nodes in the group. |
+| Field             | Meaning                                               |
+| ----------------- | ----------------------------------------------------- |
+| `loops`           | Default loop count for nodes in the group.            |
+| `timeout_seconds` | Default timeout for nodes in the group.               |
+| `max_attempts`    | Maximum attempts for an agent task.                   |
+| `model_profiles`  | Explicit model profile list for nodes in the group.   |
+| `failure_policy`  | `halt` (default) or `continue` for optional branches. |
 
 Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
@@ -94,6 +95,12 @@ optional project fallback profiles are added are capped at 100. Fallback
 profiles run only after this primary budget. These settings do not retry a
 completed agent session whose required output is missing or schema-invalid;
 that post-agent contract failure is terminal.
+
+`failure_policy: continue` marks every node in that group as nonblocking. The
+generated workflow waits for such a node to settle, consumes its artifacts only
+when its verifier succeeded, and lets unrelated or downstream reconciliation
+continue when it failed or was skipped. Use this only for optional specialist
+lanes; ordinary groups retain fail-closed `halt` semantics.
 
 ## Node Fields
 

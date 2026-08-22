@@ -43,6 +43,27 @@ export interface CanonicalFinalReportProjection {
 }
 
 /**
+ * Project a verified internal report across the public privacy boundary.
+ *
+ * Internal report.json remains the immutable agent/controller authority used by
+ * scoring and lifecycle consumers. Public publication instead receives a deep
+ * copy with private filesystem paths redacted, then re-validates and renders
+ * that copy as an exact canonical JSON/Markdown pair.
+ */
+export function projectPublicCanonicalFinalReport(report: unknown): CanonicalFinalReportProjection {
+  const internal = projectCanonicalFinalReport(report);
+  const publicReport = redactPrivatePathsInValue(internal.report);
+  if (!isRecord(publicReport)) {
+    throw new Error("public final-report projection did not produce an object");
+  }
+  const projection = projectCanonicalFinalReport(publicReport);
+  if (containsPrivatePathInValue(projection.report)) {
+    throw new Error("public final-report projection contains a private filesystem path");
+  }
+  return projection;
+}
+
+/**
  * Return whether a schema-valid final report carries enough final-review
  * evidence to project the public Markdown contract without inventing content.
  */
@@ -894,6 +915,19 @@ function containsPrivatePath(value: string): boolean {
   return privatePathPatterns().some((pattern) => pattern.test(value));
 }
 
+function containsPrivatePathInValue(value: unknown): boolean {
+  if (typeof value === "string") return containsPrivatePath(value);
+  if (Array.isArray(value)) return value.some(containsPrivatePathInValue);
+  return isRecord(value) && Object.values(value).some(containsPrivatePathInValue);
+}
+
+function redactPrivatePathsInValue(value: unknown): unknown {
+  if (typeof value === "string") return redactPrivatePaths(value);
+  if (Array.isArray(value)) return value.map(redactPrivatePathsInValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactPrivatePathsInValue(entry)]));
+}
+
 function redactPrivatePaths(value: string): string {
   return privatePathPatterns().reduce(
     (current, pattern) => current.replace(pattern, (_match, prefix: string) => `${prefix}[redacted-path]`),
@@ -903,9 +937,11 @@ function redactPrivatePaths(value: string): string {
 
 function privatePathPatterns(): RegExp[] {
   return [
-    /(^|[\s("'`])\/(?:home|Users|tmp|var|private|root|opt|mnt|workspace|workspaces)(?:\/[^\s"'`()[\]{}<>]*)?/gmu,
-    /(^|[\s("'`])(?:\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]*/gmu,
-    /(^|[\s("'`])[A-Za-z]:\\(?:Users|Temp|Windows|workspace|workspaces)\\[^\s"'`()[\]{}<>]*/gmu
+    /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3})[^\s"'`()[\]{}<>]*/gimu,
+    /(^|[\s("'`=,:;[])(?<!&lt;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:[])[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu
   ];
 }
 

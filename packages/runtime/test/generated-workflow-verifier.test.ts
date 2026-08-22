@@ -9,10 +9,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
+import { z } from "zod/v4";
 
 import {
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
+  assertRunMetadataDocument,
   executeSchemaSemanticGates,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
@@ -20,21 +24,37 @@ import {
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseStrictJsonBytes,
+  promptArtifactAuthorityPathSelectorId,
+  prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
   validatePropertiesSchema,
   writeFileDurable,
+  type ArtifactContractId,
   type InvariantLedgerArtifact,
-  type PropertiesArtifact
+  type PropertiesArtifact,
+  type SmithersTaskManifestDocument,
+  type SmithersTaskManifestOutput,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
+import {
+  derivePromptArtifactAuthority,
+  parsePromptArtifactAuthorityBytes,
+  serializePromptArtifactAuthority,
+  type DerivePromptArtifactAuthorityInput,
+  type PromptArtifactAuthorityDocument,
+  type PromptArtifactAuthoritySelector
+} from "../src/prompt-artifact-authority.js";
 import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -127,12 +147,13 @@ test("the workflow runner can project the generated workflow input into its inpu
 });
 
 function loadArtifactAwareAgent(
-  options: { onReset?: () => void; onSourceVerify?: () => void } = {}
+  options: { onAuthorityCheck?: () => void; onReset?: () => void; onSourceVerify?: () => void } = {}
 ): (
   task: unknown,
   chainIndex: number,
   originalPrompt: string,
-  agent: { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> }
+  agent: { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> },
+  admittedAgent?: () => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> }
 ) => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function artifactAwareAgent");
@@ -145,18 +166,26 @@ function loadArtifactAwareAgent(
   return new Function(
     "assertWorkspaceSourceRevision",
     "resetTaskArtifactsForRetry",
-    "authoritativeFinalReportCoverageArgs",
-    "authoritativeFinalReportAgentExecutionArgs",
+    "authoritativeFinalReportCoverage",
+    "materializeFinalReportPromptAuthority",
+    "authoritativeFinalReportRunMetadataArgs",
+    "authoritativeFinalReportPromptAuthorityArgs",
     "rememberFinalReportAgentExecutionAuthority",
     "finalReportAgentExecution",
     "declaredFinalReportOutputPair",
     "smithersTaskAgentId",
     "normalizeNodeAttemptFailureMessage",
     "sensitiveEnvironmentValues",
+    "assertDependencyArtifactAdmissionCurrent",
+    "assertPromptArtifactAuthorityUnchanged",
+    "assertFinalReportRunMetadataAuthorityUnchanged",
+    "assertFinalReportPromptAuthorityUnchanged",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
     () => options.onReset?.(),
+    () => undefined,
+    () => undefined,
     (_task: unknown, args: unknown) => args,
     (_task: unknown, args: unknown) => args,
     () => undefined,
@@ -164,7 +193,11 @@ function loadArtifactAwareAgent(
     () => undefined,
     () => "ultrafuzz-agent:test",
     normalizeNodeAttemptFailureMessage,
-    sensitiveEnvironmentValues
+    sensitiveEnvironmentValues,
+    () => undefined,
+    () => options.onAuthorityCheck?.(),
+    () => undefined,
+    () => undefined
   ) as ReturnType<typeof loadArtifactAwareAgent>;
 }
 
@@ -211,7 +244,7 @@ function loadFinalReportAgentExecution(): (
 ) => unknown {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function finalReportAgentExecution");
-  const helperEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportAgentExecution", helperStart);
+  const helperEnd = source.indexOf("\n\ntype FinalReportPromptAuthorityProjection", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -222,14 +255,14 @@ function loadFinalReportAgentExecution(): (
   >;
 }
 
-function loadPromptWithAuthoritativeFinalReportAgentExecution(): (
+function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
   prompt: string,
-  execution: unknown,
+  authorityPath: string,
   reportPath: string
 ) => string {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportAgentExecution");
-  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportAgentExecutionArgs", helperStart);
+  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportPromptAuthority");
+  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportPromptAuthorityArgs", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -237,8 +270,8 @@ function loadPromptWithAuthoritativeFinalReportAgentExecution(): (
   }).outputText;
   return new Function(
     "untrustedContentBoundary",
-    `${helper}; return promptWithAuthoritativeFinalReportAgentExecution;`
-  )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportAgentExecution>;
+    `${helper}; return promptWithAuthoritativeFinalReportPromptAuthority;`
+  )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportPromptAuthority>;
 }
 
 function loadFinalReportAgentExecutionAuthority(
@@ -288,22 +321,194 @@ function loadFinalReportAgentExecutionAuthority(
   return { ...loaded, smithersReads: () => reads };
 }
 
-function loadPromptWithAuthoritativeFinalReportCoverage(): (
-  prompt: string,
-  coverage: unknown,
-  reportPath: string
-) => string {
+function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
+  materialize(task: unknown, coverage: unknown, execution: unknown): void;
+  assertUnchanged(task: unknown): void;
+  relativePath(task: unknown): string;
+  prompt(prompt: string, authorityPath: string, reportPath: string): string;
+} {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportCoverage");
-  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportCoverageArgs", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
+  const helperStart = source.indexOf("type FinalReportPromptAuthorityProjection");
+  const helperEnd = source.indexOf("\n\nconst finalReportAgentExecutionAuthority", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  return new Function("untrustedContentBoundary", `${helper}; return promptWithAuthoritativeFinalReportCoverage;`)(
+  const readSnapshot = (root: string, filePath: string, _label: string, maxBytes: number, nonEmpty = false) => {
+    assert.ok(path.resolve(filePath).startsWith(`${path.resolve(root)}${path.sep}`));
+    const resolvedPath = fs.realpathSync(filePath);
+    const stat = fs.statSync(resolvedPath, { bigint: true });
+    const bytes = fs.readFileSync(resolvedPath);
+    assert.ok(bytes.length <= maxBytes);
+    if (nonEmpty) assert.ok(bytes.length > 0);
+    return {
+      path: resolvedPath,
+      bytes,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        size: stat.size,
+        mtimeNs: stat.mtimeNs,
+        ctimeNs: stat.ctimeNs
+      }
+    };
+  };
+  const sameIdentity = (
+    left: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint },
+    right: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+  ) =>
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+  return new Function(
+    "path",
+    "realpathSync",
+    "declaredFinalReportOutputPair",
+    "prepareTaskLocalAuthorityPath",
+    "writeFileDurable",
+    "readBoundedRegularArtifactSnapshot",
+    "parseStrictJsonSnapshot",
+    "isDeepStrictEqual",
+    "sameImmutableFileIdentity",
+    "Buffer",
+    "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
+    "MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES",
+    "untrustedContentBoundary",
+    `${helper}; return {
+      materialize: materializeFinalReportPromptAuthority,
+      assertUnchanged: assertFinalReportPromptAuthorityUnchanged,
+      relativePath: finalReportPromptAuthorityRelativePath,
+      prompt: promptWithAuthoritativeFinalReportPromptAuthority
+    };`
+  )(
+    path,
+    fs.realpathSync,
+    () => ({}),
+    (workspaceRoot: string, relativePath: string) => {
+      const authorityPath = prepareSafeFilePath(workspaceRoot, relativePath);
+      try {
+        if (fs.lstatSync(authorityPath).isDirectory()) {
+          fs.rmSync(authorityPath, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      return authorityPath;
+    },
+    writeFileDurable,
+    readSnapshot,
+    (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    isDeepStrictEqual,
+    sameIdentity,
+    Buffer,
+    ".ultrafuzz/authorities",
+    maxAuthorityBytes,
     "UNTRUSTED CONTENT BOUNDARY"
-  ) as ReturnType<typeof loadPromptWithAuthoritativeFinalReportCoverage>;
+  ) as ReturnType<typeof loadFinalReportPromptAuthorityHarness>;
+}
+
+function loadFinalReportRunMetadataAuthorityHarness(
+  remote = "https://github.com/example/project.git?session=private-id\n"
+): {
+  normalize(remoteValue: string): string;
+  derive(task: unknown): unknown;
+  materialize(task: unknown): void;
+  assertUnchanged(task: unknown): void;
+  authoritative(task: unknown): unknown;
+  relativePath(task: unknown): string;
+  prompt(prompt: string, authorityPath: string, reportPath: string): string;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function declaredFinalReportOutputPair");
+  const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const readSnapshot = (root: string, filePath: string, _label: string, maxBytes: number, nonEmpty = false) => {
+    assert.ok(path.resolve(filePath).startsWith(`${path.resolve(root)}${path.sep}`));
+    const resolvedPath = fs.realpathSync(filePath);
+    const stat = fs.statSync(resolvedPath, { bigint: true });
+    const bytes = fs.readFileSync(resolvedPath);
+    assert.ok(bytes.length <= maxBytes);
+    if (nonEmpty) assert.ok(bytes.length > 0);
+    return {
+      path: resolvedPath,
+      bytes,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        size: stat.size,
+        mtimeNs: stat.mtimeNs,
+        ctimeNs: stat.ctimeNs
+      }
+    };
+  };
+  const sameIdentity = (
+    left: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint },
+    right: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+  ) =>
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+  return new Function(
+    "path",
+    "realpathSync",
+    "execFileSync",
+    "readBoundedRegularArtifactSnapshot",
+    "assertRunMetadataDocument",
+    "parseStrictJsonSnapshot",
+    "MAX_FINAL_REPORT_RUN_METADATA_BYTES",
+    "MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES",
+    "prepareSafeFilePath",
+    "prepareTaskLocalAuthorityPath",
+    "writeFileDurable",
+    "isDeepStrictEqual",
+    "sameImmutableFileIdentity",
+    "Buffer",
+    "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
+    "untrustedContentBoundary",
+    `${helper}; return {
+      normalize: normalizeFinalReportGitHubRemote,
+      derive: deriveAuthoritativeFinalReportRunMetadata,
+      materialize: materializeFinalReportRunMetadataAuthority,
+      assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
+      authoritative: authoritativeFinalReportRunMetadata,
+      relativePath: finalReportRunMetadataAuthorityRelativePath,
+      prompt: promptWithAuthoritativeFinalReportRunMetadata
+    };`
+  )(
+    path,
+    fs.realpathSync,
+    () => remote,
+    readSnapshot,
+    assertRunMetadataDocument,
+    (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    64 * 1024 * 1024,
+    1024 * 1024,
+    prepareSafeFilePath,
+    (workspaceRoot: string, relativePath: string) => {
+      const authorityPath = prepareSafeFilePath(workspaceRoot, relativePath);
+      try {
+        if (fs.lstatSync(authorityPath).isDirectory()) {
+          fs.rmSync(authorityPath, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      return authorityPath;
+    },
+    writeFileDurable,
+    isDeepStrictEqual,
+    sameIdentity,
+    Buffer,
+    ".ultrafuzz/authorities",
+    "UNTRUSTED CONTENT BOUNDARY"
+  ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
 function loadTaskPromptPathForArtifactReset(): (
@@ -418,6 +623,305 @@ function loadWorkflowControlPathResolvers(): {
     "realpathSync",
     `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath };`
   )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
+}
+
+type GeneratedDependencyVerificationProducer = {
+  attemptId: string;
+  verifierId: string;
+  optional: boolean;
+};
+
+type GeneratedVerificationAuthorityOutput = {
+  verification_marker_sha256: string;
+  verification_marker_size_bytes: number;
+};
+
+function loadDependencyVerificationAuthoritiesForTask(): (
+  task: { dependencyVerificationProducers: readonly GeneratedDependencyVerificationProducer[] },
+  outputForProducer: (
+    producer: GeneratedDependencyVerificationProducer
+  ) => GeneratedVerificationAuthorityOutput | undefined
+) => Array<{ attempt_id: string; marker_sha256: string; size_bytes: number }> | undefined {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("type DependencyVerificationProducer");
+  const helperEnd = source.indexOf("\nconst usesCloudExecution", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(`${emitted}; return dependencyVerificationAuthoritiesForTask;`)() as ReturnType<
+    typeof loadDependencyVerificationAuthoritiesForTask
+  >;
+}
+
+type GeneratedPromptArtifactAuthorityTask = {
+  attemptId: string;
+  runRoot: string;
+  taskManifestPath: string;
+  workspacePath: string;
+  promptArtifactAuthoritySelectors?: readonly PromptArtifactAuthoritySelector[];
+};
+
+function loadGeneratedPromptArtifactAuthorityHarness(initialAdmittedDependencyArtifactDirs: readonly string[]): {
+  assertUnchanged(task: GeneratedPromptArtifactAuthorityTask): void;
+  derivationInputs: DerivePromptArtifactAuthorityInput[];
+  materialize(task: GeneratedPromptArtifactAuthorityTask): void;
+  path(task: GeneratedPromptArtifactAuthorityTask, workspaceRoot: string): string;
+  relativePath(task: GeneratedPromptArtifactAuthorityTask): string;
+  setAdmittedDependencyArtifactDirs(directories: readonly string[]): void;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const authorityStart = source.indexOf("const promptArtifactAuthoritySnapshotsByTask");
+  const authorityEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", authorityStart);
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const resolverEnd = source.indexOf("\n\nfunction resolveNonEmptyRegularArtifactFile", resolverStart);
+  const snapshotStart = source.indexOf("type ImmutableFileSnapshot", resolverEnd);
+  const snapshotEnd = source.indexOf("\n\nfunction decodeStrictUtf8Snapshot", snapshotStart);
+  assert.ok(authorityStart >= 0 && authorityEnd > authorityStart, source);
+  assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, source);
+  assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart, source);
+  const emitted = ts.transpileModule(
+    [
+      source.slice(authorityStart, authorityEnd),
+      source.slice(resolverStart, resolverEnd),
+      source.slice(snapshotStart, snapshotEnd)
+    ].join("\n\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+
+  let admittedDependencyArtifactDirs = [...initialAdmittedDependencyArtifactDirs];
+  const derivationInputs: DerivePromptArtifactAuthorityInput[] = [];
+  const loaded = new Function(
+    "path",
+    "realpathSync",
+    "statSync",
+    "assertRegularFileInside",
+    "isStrictlyInsideDirectory",
+    "readRegularFileSnapshot",
+    "derivePromptArtifactAuthority",
+    "admittedDependencyArtifactDirs",
+    "serializePromptArtifactAuthority",
+    "assertDependencyArtifactAdmissionCurrent",
+    "prepareSafeFilePath",
+    "writeFileDurable",
+    "parsePromptArtifactAuthorityBytes",
+    "lstatSync",
+    "rmSync",
+    "isMissingPathError",
+    "MAX_SEALED_TASK_MANIFEST_BYTES",
+    "MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES",
+    "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
+    `${emitted}; return {
+      assertUnchanged: assertPromptArtifactAuthorityUnchanged,
+      materialize: materializePromptArtifactAuthority,
+      path: promptArtifactAuthorityPath,
+      relativePath: promptArtifactAuthorityRelativePath
+    };`
+  )(
+    path,
+    fs.realpathSync,
+    fs.statSync,
+    assertRegularFileInside,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    readRegularFileSnapshot,
+    (input: DerivePromptArtifactAuthorityInput) => {
+      derivationInputs.push(input);
+      return derivePromptArtifactAuthority(input);
+    },
+    () => admittedDependencyArtifactDirs,
+    serializePromptArtifactAuthority,
+    () => ({ directories: admittedDependencyArtifactDirs }),
+    prepareSafeFilePath,
+    writeFileDurable,
+    parsePromptArtifactAuthorityBytes,
+    fs.lstatSync,
+    fs.rmSync,
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    64 * 1024 * 1024,
+    32 * 1024 * 1024,
+    ".ultrafuzz/authorities"
+  ) as Pick<
+    ReturnType<typeof loadGeneratedPromptArtifactAuthorityHarness>,
+    "assertUnchanged" | "materialize" | "path" | "relativePath"
+  >;
+
+  return {
+    ...loaded,
+    derivationInputs,
+    setAdmittedDependencyArtifactDirs(directories) {
+      admittedDependencyArtifactDirs = [...directories];
+    }
+  };
+}
+
+function promptAuthorityDeclaredOutput(
+  outputPath: string,
+  contract: ArtifactContractId,
+  primary = false
+): SmithersTaskManifestOutput {
+  const binding = artifactContractSchemaBinding(contract);
+  return {
+    path: outputPath,
+    contract,
+    contractDigest: artifactContractDefinition(contract).digest,
+    ...(binding === undefined
+      ? {}
+      : {
+          schemaFile: binding.schema_file,
+          schemaId: binding.schema_id,
+          schemaSha256: binding.schema_sha256,
+          schemaBundleSha256: binding.schema_bundle_sha256,
+          validatorBuild: binding.validator_build
+        }),
+    primary
+  };
+}
+
+function promptAuthoritySealedTask(input: {
+  attemptId: string;
+  controllerRunRoot: string;
+  dependencies?: readonly SmithersTaskManifestTask[];
+  logicalNodeId?: string;
+  optionalDependencyAttemptIds?: readonly string[];
+  outputs: SmithersTaskManifestOutput[];
+  selectors?: PromptArtifactAuthoritySelector[];
+}): SmithersTaskManifestTask {
+  const dependencies = input.dependencies ?? [];
+  const dependencyAttemptIds = dependencies.map((dependency) => dependency.attemptId);
+  const dependencySmithersNodeIds = dependencies.map((dependency) => dependency.verifierSmithersNodeId);
+  const dependencyArtifactDirs = dependencies.map((dependency) => dependency.artifactDir);
+  const optionalDependencyAttemptIds = new Set(input.optionalDependencyAttemptIds ?? []);
+  const optionalDependencyArtifactDirs = dependencies
+    .filter((dependency) => optionalDependencyAttemptIds.has(dependency.attemptId))
+    .map((dependency) => dependency.artifactDir);
+  const logicalNodeId = input.logicalNodeId ?? input.attemptId;
+  const workspacePath = path.join(input.controllerRunRoot, "workspaces", input.attemptId);
+  const artifactDir = path.join(input.controllerRunRoot, "artifacts", input.attemptId);
+  const sourceRevision = "a".repeat(40);
+  const sourceRef = "refs/ultrafuzz/runs/run-1/source";
+  const resources = { cpu: 1, memoryMiB: 1_024, timeoutSeconds: 60 };
+  const agentChain = [
+    {
+      profileId: "private-profile",
+      agentRef: "CodexAgent",
+      modelName: "controller-model-private",
+      reasoningEffort: "controller-reasoning-private",
+      role: "primary" as const
+    }
+  ];
+  return {
+    attemptId: input.attemptId,
+    concreteNodeId: input.attemptId,
+    logicalNodeId,
+    preparationSmithersNodeId: `prepare:${input.attemptId}`,
+    smithersNodeId: `node:${input.attemptId}`,
+    verifierSmithersNodeId: `verify:${input.attemptId}`,
+    agentRef: "CodexAgent",
+    agentChain,
+    modelName: "controller-model-private",
+    reasoningEffort: "controller-reasoning-private",
+    sourceRevision,
+    sourceRef,
+    dependencies: dependencyAttemptIds,
+    dependencySmithersNodeIds,
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs,
+    ...(optionalDependencyArtifactDirs.length === 0 ? {} : { optionalDependencyArtifactDirs }),
+    ...(input.selectors === undefined ? {} : { promptArtifactAuthoritySelectors: input.selectors }),
+    execution: { mode: "local", resources, agentCredentialEnv: [] },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: "run-1",
+        smithersWorkflowName: "workflow-run-1",
+        graphVersion: "4",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: input.attemptId,
+        logicalNodeId,
+        attemptId: input.attemptId,
+        label: logicalNodeId,
+        kind: "agentic"
+      },
+      dependencies: {
+        concreteNodeIds: [...dependencyAttemptIds],
+        attemptIds: [...dependencyAttemptIds],
+        smithersNodeIds: [...dependencySmithersNodeIds]
+      },
+      loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+      model: {
+        profileId: "private-profile",
+        agentRef: "CodexAgent",
+        modelName: "controller-model-private",
+        reasoningEffort: "controller-reasoning-private",
+        modelIndex: 0,
+        attemptIndex: 0,
+        agentChain
+      },
+      workspace: {
+        primitive: "worktree",
+        path: workspacePath,
+        repoPath: path.dirname(input.controllerRunRoot),
+        trustModel: "skip-permissions",
+        sourceRevision,
+        sourceRef
+      },
+      artifacts: {
+        dir: artifactDir,
+        outputs: input.outputs,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "local", resources }
+    }
+  };
+}
+
+function promptAuthorityManifestFixture(
+  controllerRunRoot: string,
+  selectors: PromptArtifactAuthoritySelector[]
+): SmithersTaskManifestDocument {
+  const required = promptAuthoritySealedTask({
+    attemptId: "required-producer",
+    controllerRunRoot,
+    logicalNodeId: "required-strategy",
+    outputs: [
+      promptAuthorityDeclaredOutput("findings.json", "ultrafuzz/findings@2", true),
+      promptAuthorityDeclaredOutput("generated-tests/manifest.json", "ultrafuzz/generated-tests@3"),
+      promptAuthorityDeclaredOutput("controller-notes.txt", "ultrafuzz/text@1")
+    ]
+  });
+  const optional = promptAuthoritySealedTask({
+    attemptId: "optional-producer",
+    controllerRunRoot,
+    logicalNodeId: "optional-strategy",
+    outputs: [promptAuthorityDeclaredOutput("findings.json", "ultrafuzz/findings@2", true)]
+  });
+  const consumer = promptAuthoritySealedTask({
+    attemptId: "consumer",
+    controllerRunRoot,
+    dependencies: [required, optional],
+    optionalDependencyAttemptIds: [optional.attemptId],
+    outputs: [promptAuthorityDeclaredOutput("report.md", "ultrafuzz/nonempty-markdown@1", true)],
+    selectors
+  });
+  return {
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: "run-1",
+    smithers_run_id: "ultrafuzz-run-1",
+    workflow_name: "workflow-run-1",
+    source_revision: "a".repeat(40),
+    source_ref: "refs/ultrafuzz/runs/run-1/source",
+    pinned_submodules: null,
+    tasks: [required, optional, consumer]
+  };
 }
 
 function loadRestoreInvariantSuiteWorkspaceSnapshot(
@@ -1151,7 +1655,12 @@ function loadVerifyArtifactsHarness(
       artifactRoot: string;
       file: { path: string; bytes: Buffer };
     }>
-  ) => { artifacts: Array<{ sha256: string }>; primary_artifact: string };
+  ) => {
+    artifacts: Array<{ sha256: string }>;
+    primary_artifact: string;
+    verification_marker_sha256: string;
+    verification_marker_size_bytes: number;
+  };
   publications: Map<string, Buffer>;
   markerWrites: unknown[];
   authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }>;
@@ -1185,6 +1694,113 @@ function loadVerifyArtifactsHarness(
     if (previous !== undefined && !previous.equals(bytes)) throw new Error(`conflicting ${relativePath}`);
     values.set(relativePath, bytes);
   };
+  const authenticateDependency = (task: VerifyArtifactsTask, dependency: string) => {
+    const resolved = fs.realpathSync(dependency);
+    if (!authenticatedDependencies.has(resolved)) {
+      throw new Error(`artifact-contract failure: dependency is not authenticated ${resolved}`);
+    }
+    authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
+    const producer = harnessTaskSpecs.find(
+      (candidate) =>
+        candidate.attemptId === path.basename(resolved) && fs.realpathSync(candidate.artifactDir) === resolved
+    );
+    if (producer === undefined) {
+      throw new Error(`artifact-contract failure: dependency producer is unavailable ${resolved}`);
+    }
+    const artifacts = new Map(
+      producer.outputs.map((output) => {
+        const artifactPath = path.join(resolved, output.path);
+        const bytes = fs.readFileSync(artifactPath);
+        const validation = validateArtifactContractBytes(
+          output.contract as Parameters<typeof validateArtifactContractBytes>[0],
+          bytes,
+          artifactPath
+        );
+        if (!validation.ok) throw new Error(`artifact-contract failure: invalid harness dependency ${output.path}`);
+        const stat = fs.statSync(artifactPath, { bigint: true });
+        return [
+          output.path,
+          Object.freeze({
+            path: artifactPath,
+            relativePath: output.path,
+            contract: output.contract,
+            bytes: Buffer.from(bytes),
+            identity: {
+              dev: stat.dev,
+              ino: stat.ino,
+              size: stat.size,
+              mtimeNs: stat.mtimeNs,
+              ctimeNs: stat.ctimeNs
+            },
+            value: validation.value
+          })
+        ] as const;
+      })
+    );
+    const publications = new Map(
+      [...artifacts].map(([relativePath, artifact]) => [
+        relativePath,
+        createHash("sha256").update(artifact.bytes).digest("hex")
+      ])
+    );
+    const markerBytes = Buffer.from(
+      JSON.stringify([...publications].sort(([left], [right]) => left.localeCompare(right))),
+      "utf8"
+    );
+    return Object.freeze({
+      attemptId: producer.attemptId,
+      artifactDir: resolved,
+      marker: {
+        path: `${resolved}.marker.json`,
+        bytes: markerBytes,
+        identity: { dev: 1n, ino: 1n, size: BigInt(markerBytes.length), mtimeNs: 1n, ctimeNs: 1n }
+      },
+      artifacts,
+      publications,
+      generatedTestBundles: Object.freeze([])
+    });
+  };
+  const dependencyAdmissions = new Map<string, unknown>();
+  const dependencyAdmissionFor = (task: VerifyArtifactsTask) => {
+    const existing = dependencyAdmissions.get(task.attemptId);
+    if (existing !== undefined) return existing;
+    const directories = task.dependencyArtifactDirs.filter((dependency) =>
+      authenticatedDependencies.has(fs.realpathSync(dependency))
+    );
+    const snapshotsByProducerAttempt = new Map(
+      directories.map((dependency) => {
+        const snapshot = authenticateDependency(task, dependency);
+        return [snapshot.attemptId, snapshot] as const;
+      })
+    );
+    const admission = { task, directories, snapshotsByProducerAttempt };
+    dependencyAdmissions.set(task.attemptId, admission);
+    return admission;
+  };
+  const assertDependencyAdmissionCurrentFor = (task: VerifyArtifactsTask) => {
+    const existing = dependencyAdmissions.get(task.attemptId) as
+      | {
+          task: VerifyArtifactsTask;
+          directories: string[];
+          snapshotsByProducerAttempt: Map<string, ReturnType<typeof authenticateDependency>>;
+        }
+      | undefined;
+    if (existing === undefined) return dependencyAdmissionFor(task);
+    for (const [attemptId, admitted] of existing.snapshotsByProducerAttempt) {
+      const current = authenticateDependency(task, admitted.artifactDir);
+      const changed =
+        current.attemptId !== attemptId ||
+        !current.marker.bytes.equals(admitted.marker.bytes) ||
+        [...admitted.artifacts].some(([relativePath, artifact]) => {
+          const candidate = current.artifacts.get(relativePath);
+          return candidate === undefined || !candidate.bytes.equals(artifact.bytes);
+        });
+      if (changed) {
+        throw new Error(`artifact-contract failure: dependency authority changed after admission ${attemptId}`);
+      }
+    }
+    return existing;
+  };
   const factory = new Function(
     "path",
     "realpathSync",
@@ -1204,6 +1820,8 @@ function loadVerifyArtifactsHarness(
     "parseStrictJsonSnapshot",
     "validateArtifactContractBytes",
     "formatSchemaValidationIssues",
+    "dependencyArtifactAdmission",
+    "assertDependencyArtifactAdmissionCurrent",
     "assertVerifiedDependency",
     "executeSchemaSemanticGates",
     "normalizeNodeAttemptFailureMessage",
@@ -1322,58 +1940,9 @@ function loadVerifyArtifactsHarness(
       );
       return parserIssue?.message ?? "invalid";
     },
-    (task: VerifyArtifactsTask, dependency: string) => {
-      const resolved = fs.realpathSync(dependency);
-      if (!authenticatedDependencies.has(resolved)) {
-        throw new Error(`artifact-contract failure: dependency is not authenticated ${resolved}`);
-      }
-      authenticatedDependencyChecks.push({ consumerAttemptId: task.attemptId, dependency: resolved });
-      const producer = harnessTaskSpecs.find(
-        (candidate) =>
-          candidate.attemptId === path.basename(resolved) && fs.realpathSync(candidate.artifactDir) === resolved
-      );
-      if (producer === undefined)
-        throw new Error(`artifact-contract failure: dependency producer is unavailable ${resolved}`);
-      const artifacts = new Map(
-        producer.outputs.map((output) => {
-          const artifactPath = path.join(resolved, output.path);
-          const bytes = fs.readFileSync(artifactPath);
-          const validation = validateArtifactContractBytes(
-            output.contract as Parameters<typeof validateArtifactContractBytes>[0],
-            bytes,
-            artifactPath
-          );
-          if (!validation.ok) throw new Error(`artifact-contract failure: invalid harness dependency ${output.path}`);
-          return [
-            output.path,
-            Object.freeze({
-              path: artifactPath,
-              relativePath: output.path,
-              contract: output.contract,
-              bytes: Buffer.from(bytes),
-              value: validation.value
-            })
-          ] as const;
-        })
-      );
-      const publications = new Map(
-        [...artifacts].map(([relativePath, artifact]) => [
-          relativePath,
-          createHash("sha256").update(artifact.bytes).digest("hex")
-        ])
-      );
-      return Object.freeze({
-        attemptId: producer.attemptId,
-        artifactDir: resolved,
-        markerBytes: Buffer.from(
-          JSON.stringify([...publications].sort(([left], [right]) => left.localeCompare(right))),
-          "utf8"
-        ),
-        artifacts,
-        publications,
-        generatedTestBundles: Object.freeze([])
-      });
-    },
+    dependencyAdmissionFor,
+    assertDependencyAdmissionCurrentFor,
+    authenticateDependency,
     (...args: Parameters<typeof executeSchemaSemanticGates>) => {
       options.onSemanticGate?.();
       return executeSchemaSemanticGates(...args);
@@ -1392,7 +1961,10 @@ function loadVerifyArtifactsHarness(
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
     },
-    (...args: unknown[]) => markerWrites.push(args),
+    (...args: unknown[]) => {
+      markerWrites.push(args);
+      return { marker_sha256: "f".repeat(64), size_bytes: 123 };
+    },
     (task: VerifyArtifactsTask) =>
       task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
       task.outputs.some(
@@ -1418,6 +1990,55 @@ function loadVerifyArtifactsHarness(
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
   };
   return { ...factory, publications, markerWrites, authenticatedDependencyChecks };
+}
+
+function loadArtifactVerificationMarkerWriter(
+  root: string
+): (
+  task: { attemptId: string; runRoot: string; metadata: { node: { logicalNodeId: string } } },
+  artifacts: readonly Record<string, unknown>[],
+  publications: ReadonlyMap<string, Buffer>
+) => { marker_sha256: string; size_bytes: number } {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const writerStart = source.indexOf("function writeArtifactVerificationMarker");
+  const writerEnd = source.indexOf("\n\nfunction verifyGeneratedTestFiles", writerStart);
+  assert.ok(writerStart >= 0 && writerEnd > writerStart, source);
+  const emitted = ts.transpileModule(source.slice(writerStart, writerEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "artifactVerificationMarkerLocation",
+    "assertSafeVerifiedPublicationPath",
+    "createHash",
+    "validateArtifactVerificationMarker",
+    "assertArtifactVerificationMarkerSemantics",
+    "Buffer",
+    "publishFileDurableExclusive",
+    "ARTIFACT_VERIFICATION_SCHEMA_VERSION",
+    "MAX_ARTIFACT_VERIFICATION_MARKER_BYTES",
+    "admittedDependencyArtifactDirs",
+    "path",
+    `${emitted}; return writeArtifactVerificationMarker;`
+  )(
+    (_runRoot: string, attemptId: string) => ({
+      root,
+      path: path.join(root, `${attemptId}.json`),
+      relativePath: `${attemptId}.json`
+    }),
+    (relativePath: string) => {
+      assert.equal(path.posix.normalize(relativePath), relativePath);
+      assert.equal(path.posix.isAbsolute(relativePath), false);
+    },
+    createHash,
+    () => ({ ok: true, issues: [] }),
+    () => undefined,
+    Buffer,
+    publishFileDurableExclusive,
+    "ultrafuzz.artifact-verification.v2",
+    64 * 1024 * 1024,
+    () => [path.join(root, "artifacts", "required-ancestor")],
+    path
+  ) as ReturnType<typeof loadArtifactVerificationMarkerWriter>;
 }
 
 function singleOutputVerificationTask(root: string, contract: string): VerifyArtifactsTask {
@@ -1766,7 +2387,60 @@ test("generated Smithers hashes and publishes the captured output after its path
     const result = harness.verifyArtifacts(task, captured);
 
     assert.equal(result.artifacts[0]?.sha256, createHash("sha256").update(original).digest("hex"));
+    assert.equal(result.verification_marker_sha256, "f".repeat(64));
+    assert.equal(result.verification_marker_size_bytes, 123);
     assert.equal(harness.publications.get("result.json")?.equals(original), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated verifier returns the exact durable verification-marker byte authority", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-marker-authority-")));
+  try {
+    const writeMarker = loadArtifactVerificationMarkerWriter(root);
+    const alpha = Buffer.from("alpha publication\n", "utf8");
+    const zeta = Buffer.from("zeta publication\n", "utf8");
+    const artifacts = [
+      {
+        path: "alpha.txt",
+        contract: "ultrafuzz/text@1",
+        contract_digest: "a".repeat(64),
+        sha256: createHash("sha256").update(alpha).digest("hex"),
+        primary: true
+      }
+    ];
+    const authority = writeMarker(
+      {
+        attemptId: "attempt-one",
+        runRoot: root,
+        metadata: { node: { logicalNodeId: "node-one" } }
+      },
+      artifacts,
+      new Map([
+        ["zeta.txt", zeta],
+        ["alpha.txt", alpha]
+      ])
+    );
+    const markerBytes = fs.readFileSync(path.join(root, "attempt-one.json"));
+    const marker = JSON.parse(markerBytes.toString("utf8")) as {
+      admitted_dependency_attempt_ids: string[];
+      publications: Array<{ path: string; sha256: string }>;
+    };
+
+    assert.equal(authority.size_bytes, markerBytes.byteLength);
+    assert.equal(authority.marker_sha256, createHash("sha256").update(markerBytes).digest("hex"));
+    assert.deepEqual(marker.admitted_dependency_attempt_ids, ["required-ancestor"]);
+    assert.deepEqual(marker.publications, [
+      { path: "alpha.txt", sha256: createHash("sha256").update(alpha).digest("hex") },
+      { path: "zeta.txt", sha256: createHash("sha256").update(zeta).digest("hex") }
+    ]);
+
+    const rewritten = Buffer.from(markerBytes);
+    const digestOffset = rewritten.indexOf(Buffer.from(marker.publications[0]!.sha256, "utf8"));
+    assert.ok(digestOffset >= 0);
+    rewritten[digestOffset] = rewritten[digestOffset]! ^ 1;
+    assert.notEqual(createHash("sha256").update(rewritten).digest("hex"), authority.marker_sha256);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -2029,6 +2703,49 @@ test("generated Smithers requires exactly one declaration for every current camp
   }
 });
 
+test("generated Smithers fails closed on missing or duplicate selected-strategies declarations", () => {
+  const tupleContracts = [
+    "ultrafuzz/dynamic-strategy-plan@1",
+    "ultrafuzz/dynamic-enumerator-outputs@1",
+    "ultrafuzz/selected-strategies@1",
+    "ultrafuzz/generated-tests@3",
+    "ultrafuzz/findings@2",
+    "ultrafuzz/dynamic-strategy-provenance@1"
+  ] as const;
+  for (const count of [0, 2] as const) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-dynamic-selected-tuple-${count}-`)));
+    try {
+      const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+      task.outputs = tupleContracts
+        .filter((contract) => contract !== "ultrafuzz/selected-strategies@1" || count !== 0)
+        .map((contract, index) => ({
+          path: `dynamic/output-${index}.json`,
+          contract,
+          contractDigest: String(index + 1).repeat(64),
+          primary: index === 0
+        }));
+      if (count === 2) {
+        task.outputs.push({
+          path: "dynamic/selected-duplicate.json",
+          contract: "ultrafuzz/selected-strategies@1",
+          contractDigest: "f".repeat(64),
+          primary: false
+        });
+      }
+      const harness = loadVerifyArtifactsHarness({ taskSpecs: [task] });
+
+      assert.throws(
+        () => harness.verifyArtifacts(task),
+        new RegExp(`exactly one complete dynamic-strategy output tuple.*ultrafuzz/selected-strategies@1=${count}`, "u")
+      );
+      assert.equal(harness.publications.size, 0);
+      assert.equal(harness.markerWrites.length, 0);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("generated Smithers rejects schema-valid forged timeout evidence before publication", () => {
   const record = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
   const cases: Array<{
@@ -2261,7 +2978,7 @@ test("generated Smithers rejects a dependency epoch swap after publication const
 
     assert.throws(
       () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
-      /verified dependency authority changed during semantic verification attempt-implemented-properties/u
+      /verified dependency authority changed during semantic verification: artifact-contract failure: dependency authority changed after admission attempt-implemented-properties/u
     );
     assert.equal(publicationConstructed, true);
     assert.ok(harness.publications.size > 0, "publication construction completed before the dependency swap");
@@ -3096,7 +3813,7 @@ function loadProducerFreeSemanticContextHarness(): (
     },
     () => ({}),
     () => undefined,
-    () => ({ severityClassifiedFindings: null }),
+    () => ({ severityClassifiedFindings: null, dedupedFindings: null, findingLifecycleLedger: null }),
     () => undefined
   ) as ReturnType<typeof loadProducerFreeSemanticContextHarness>;
 }
@@ -3117,7 +3834,9 @@ test("generated semantic contexts match host semantics when property producers a
       selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
       properties: []
     },
-    severityClassifiedFindings: null
+    severityClassifiedFindings: null,
+    dedupedFindings: null,
+    findingLifecycleLedger: null
   });
 
   const implementation = contextFor(
@@ -3351,7 +4070,7 @@ test("generated Smithers selects property and discovery inputs by their declared
   assert.doesNotMatch(singleton, /properties\.json|implemented-properties\.json/u);
 
   const coverageStart = source.indexOf("function authoritativeFinalReportCoverage");
-  const coverageEnd = source.indexOf("\n\nfunction promptWithAuthoritativeFinalReportCoverage", coverageStart);
+  const coverageEnd = source.indexOf("\n\ntype FinalReportAgentAttempt", coverageStart);
   assert.ok(coverageStart >= 0 && coverageEnd > coverageStart, source);
   const coverage = source.slice(coverageStart, coverageEnd);
   assert.match(coverage, /verifiedCanonicalPropertyCatalog/u);
@@ -3501,6 +4220,7 @@ test("generated semantic context projects every required review authority field"
 type ReviewAuthorityHarnessOutput = { path: string; contract: string };
 type ReviewAuthorityHarnessTask = {
   attemptId: string;
+  runRoot: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
   metadata: {
@@ -3537,7 +4257,8 @@ function loadGeneratedReviewAuthorityHarness(
   };
   finalSeverity: (task: ReviewAuthorityHarnessTask) => {
     severityClassifiedFindings: unknown | null;
-    findingLifecycleLedger?: unknown;
+    dedupedFindings?: unknown | null;
+    findingLifecycleLedger?: unknown | null;
   };
   authenticatedReads: Array<{ producer: string; path: string; contract: string }>;
 } {
@@ -3548,13 +4269,17 @@ function loadGeneratedReviewAuthorityHarness(
   const siblingEnd = source.indexOf("\n\nfunction siblingDynamicStrategySemanticArtifacts", siblingStart);
   const reviewStart = source.indexOf("type ReviewStageSemanticContext");
   const reviewEnd = source.indexOf("\n\ntype DifferentialSemanticArtifactBinding", reviewStart);
+  const declaredPathStart = source.indexOf("function declaredDifferentialArtifactPath");
+  const declaredPathEnd = source.indexOf("\n\nfunction siblingDifferentialBindings", declaredPathStart);
   assert.ok(singletonStart >= 0 && singletonEnd > singletonStart, source);
   assert.ok(siblingStart >= 0 && siblingEnd > siblingStart, source);
   assert.ok(reviewStart >= 0 && reviewEnd > reviewStart, source);
+  assert.ok(declaredPathStart >= 0 && declaredPathEnd > declaredPathStart, source);
   const emitted = ts.transpileModule(
     [
       source.slice(singletonStart, singletonEnd),
       source.slice(siblingStart, siblingEnd),
+      source.slice(declaredPathStart, declaredPathEnd),
       source.slice(reviewStart, reviewEnd)
     ].join("\n\n"),
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
@@ -3597,8 +4322,9 @@ function loadGeneratedReviewAuthorityHarness(
     "taskSpecs",
     "declaredAncestorContractOutputs",
     "verifiedDependencyJsonArtifact",
+    "path",
     `${emitted}; return { reviewStage: reviewStageSemanticContext, finalSeverity: verifiedFinalSeverityReviewAuthority };`
-  )(taskSpecs, declaredAncestorContractOutputs, verifiedDependencyJsonArtifact) as {
+  )(taskSpecs, declaredAncestorContractOutputs, verifiedDependencyJsonArtifact, path) as {
     reviewStage: ReturnType<typeof loadGeneratedReviewAuthorityHarness>["reviewStage"];
     finalSeverity: ReturnType<typeof loadGeneratedReviewAuthorityHarness>["finalSeverity"];
   };
@@ -3613,6 +4339,7 @@ test("generated review authority uses declared relative identity across snapshot
     outputs: ReviewAuthorityHarnessOutput[]
   ): ReviewAuthorityHarnessTask => ({
     attemptId,
+    runRoot: "/run",
     artifactDir: path.join("/run/artifacts", attemptId),
     dependencyArtifactDirs: ancestorClosure.map((ancestor) => ancestor.artifactDir),
     metadata: {
@@ -3621,10 +4348,11 @@ test("generated review authority uses declared relative identity across snapshot
     },
     outputs
   });
+  const raw = task("attempt-raw", [], [], [{ path: "custom/raw.json", contract: "ultrafuzz/findings@2" }]);
   const dedupe = task(
     "attempt-dedupe",
-    [],
-    [],
+    [raw],
+    [raw],
     [
       { path: "custom/deduped.json", contract: "ultrafuzz/findings@2" },
       { path: "custom/detections.json", contract: "ultrafuzz/strategy-detections@1" },
@@ -3666,15 +4394,25 @@ test("generated review authority uses declared relative identity across snapshot
   const remember = (producer: ReviewAuthorityHarnessTask, outputPath: string, contract: string, value: unknown) => {
     documents.set(reviewAuthorityDocumentKey(producer, outputPath, contract), value);
   };
-  const dedupedFindings = [{ id: "finding-dedupe", dedupe_key: "key-one" }];
+  const dedupedFindings = [{ id: "finding-dedupe", title: "Raw finding", dedupe_key: "key-one" }];
+  const rawFindings = [{ id: "finding-dedupe", title: "Raw finding" }];
+  const rawFindingPath = "artifacts/attempt-raw/custom/raw.json";
   const dedupeLedger = {
     records: [
       {
         dedupe_key: "key-one",
-        source_artifacts: [{ path: "custom/raw.json", finding_id: "raw-finding" }],
+        source_artifacts: [
+          {
+            path: rawFindingPath,
+            node_id: "renamed-attempt-raw",
+            finding_id: "finding-dedupe",
+            title: "Raw finding",
+            relationship: "primary"
+          }
+        ],
         strategy_hits: [],
         stages: [
-          { stage: "raw", artifact_path: "custom/raw.json", finding_id: "raw-finding" },
+          { stage: "raw", artifact_path: rawFindingPath, finding_id: "finding-dedupe" },
           { stage: "deduped", artifact_path: "custom/deduped.json", finding_id: "finding-dedupe" }
         ]
       }
@@ -3686,13 +4424,17 @@ test("generated review authority uses declared relative identity across snapshot
   const severityFindings = [{ id: "finding-severity", severity: "High" }];
   const severityLedger = { records: [{ dedupe_key: "key-one", final_disposition: "promoted" }] };
   const severityDetections = [{ finding_id: "finding-dedupe" }];
+  remember(raw, "custom/raw.json", "ultrafuzz/findings@2", rawFindings);
   remember(dedupe, "custom/dedupe-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", dedupeLedger);
   remember(dedupe, "custom/detections.json", "ultrafuzz/strategy-detections@1", dedupeDetections);
   remember(triage, "custom/triage-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", triageLedger);
   remember(severity, "custom/severity.json", "ultrafuzz/severity-classified-findings@1", severityFindings);
   remember(severity, "custom/severity-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", severityLedger);
   remember(unrelatedLedger, "other/ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", { records: [] });
-  const harness = loadGeneratedReviewAuthorityHarness([dedupe, triage, severity, unrelatedLedger, report], documents);
+  const harness = loadGeneratedReviewAuthorityHarness(
+    [raw, dedupe, triage, severity, unrelatedLedger, report],
+    documents
+  );
   const snapshots = (...entries: Array<[string, string, unknown]>) =>
     new Map(entries.map(([outputPath, artifactPath, value]) => [outputPath, { file: { path: artifactPath }, value }]));
 
@@ -3709,7 +4451,14 @@ test("generated review authority uses declared relative identity across snapshot
     findingsArtifactPath: "custom/deduped.json",
     findings: dedupedFindings,
     lifecycleLedger: dedupeLedger,
-    strategyDetections: dedupeDetections
+    strategyDetections: dedupeDetections,
+    rawFindingArtifacts: [
+      {
+        nodeId: "renamed-attempt-raw",
+        path: rawFindingPath,
+        findings: rawFindings
+      }
+    ]
   });
   const publishedDedupeContext = harness.reviewStage(
     dedupe,
@@ -3840,6 +4589,85 @@ test("generated review authority uses declared relative identity across snapshot
   );
 });
 
+test("generated bounded final-report authority authenticates one direct dedupe producer and its paired ledger", () => {
+  const task = (
+    attemptId: string,
+    directDependencies: readonly ReviewAuthorityHarnessTask[],
+    ancestorClosure: readonly ReviewAuthorityHarnessTask[],
+    outputs: ReviewAuthorityHarnessOutput[]
+  ): ReviewAuthorityHarnessTask => ({
+    attemptId,
+    runRoot: "/run",
+    artifactDir: path.join("/run/artifacts", attemptId),
+    dependencyArtifactDirs: ancestorClosure.map((ancestor) => ancestor.artifactDir),
+    metadata: {
+      node: { logicalNodeId: `renamed-${attemptId}` },
+      dependencies: { attemptIds: directDependencies.map((dependency) => dependency.attemptId) }
+    },
+    outputs
+  });
+  const transitive = task(
+    "attempt-transitive",
+    [],
+    [],
+    [{ path: "custom/transitive.json", contract: "ultrafuzz/findings@2" }]
+  );
+  const dedupe = task(
+    "attempt-dedupe",
+    [transitive],
+    [transitive],
+    [
+      { path: "custom/deduped.json", contract: "ultrafuzz/findings@2" },
+      { path: "custom/dedupe-ledger.json", contract: "ultrafuzz/finding-lifecycle-ledger@1" }
+    ]
+  );
+  const report = task(
+    "attempt-report",
+    [dedupe],
+    [transitive, dedupe],
+    [{ path: "custom/report.json", contract: "ultrafuzz/report@3" }]
+  );
+  const dedupedFindings = [{ id: "finding-one", dedupe_key: "root-one" }];
+  const lifecycle = { records: [{ dedupe_key: "root-one" }] };
+  const harness = loadGeneratedReviewAuthorityHarness(
+    [transitive, dedupe, report],
+    new Map<string, unknown>([
+      [reviewAuthorityDocumentKey(dedupe, "custom/deduped.json", "ultrafuzz/findings@2"), dedupedFindings],
+      [
+        reviewAuthorityDocumentKey(dedupe, "custom/dedupe-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1"),
+        lifecycle
+      ]
+    ])
+  );
+
+  assert.deepEqual(harness.finalSeverity(report), {
+    severityClassifiedFindings: null,
+    dedupedFindings,
+    findingLifecycleLedger: lifecycle
+  });
+  assert.deepEqual(harness.authenticatedReads, [
+    { producer: "attempt-dedupe", path: "custom/deduped.json", contract: "ultrafuzz/findings@2" },
+    {
+      producer: "attempt-dedupe",
+      path: "custom/dedupe-ledger.json",
+      contract: "ultrafuzz/finding-lifecycle-ledger@1"
+    }
+  ]);
+
+  const producerFreeReport = task(
+    "attempt-producer-free-report",
+    [],
+    [],
+    [{ path: "custom/report.json", contract: "ultrafuzz/report@3" }]
+  );
+  const producerFree = loadGeneratedReviewAuthorityHarness([producerFreeReport], new Map());
+  assert.deepEqual(producerFree.finalSeverity(producerFreeReport), {
+    severityClassifiedFindings: null,
+    dedupedFindings: null,
+    findingLifecycleLedger: null
+  });
+});
+
 test("generated final-severity gates share one producer epoch and reject a cross-gate authority swap", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const dependencyStart = source.indexOf("function verifiedDependencyJsonArtifact");
@@ -3854,6 +4682,7 @@ test("generated final-severity gates share one producer epoch and reject a cross
   ).outputText;
   const producer: ReviewAuthorityHarnessTask = {
     attemptId: "attempt-severity",
+    runRoot: "/run",
     artifactDir: "/run/artifacts/attempt-severity",
     dependencyArtifactDirs: [],
     metadata: { node: { logicalNodeId: "severity" }, dependencies: { attemptIds: [] } },
@@ -3865,6 +4694,7 @@ test("generated final-severity gates share one producer epoch and reject a cross
   };
   const consumer: ReviewAuthorityHarnessTask = {
     attemptId: "attempt-report",
+    runRoot: "/run",
     artifactDir: "/run/artifacts/attempt-report",
     dependencyArtifactDirs: [producer.artifactDir],
     metadata: { node: { logicalNodeId: "report" }, dependencies: { attemptIds: [producer.attemptId] } },
@@ -3903,12 +4733,28 @@ test("generated final-severity gates share one producer epoch and reject a cross
     return Object.freeze({
       attemptId: producer.attemptId,
       artifactDir: producer.artifactDir,
-      markerBytes: Buffer.from(`marker-generation-${authorityGeneration}\n`, "utf8"),
+      marker: {
+        path: "/run/.ultrafuzz-verification/attempt-severity.json",
+        bytes: Buffer.from(`marker-generation-${authorityGeneration}\n`, "utf8"),
+        identity: {
+          dev: 1n,
+          ino: BigInt(authorityGeneration),
+          size: 1n,
+          mtimeNs: 1n,
+          ctimeNs: 1n
+        }
+      },
       artifacts,
       publications,
       generatedTestBundles: Object.freeze([])
     });
   };
+  const admittedAuthority = authority();
+  const admission = Object.freeze({
+    task: consumer,
+    directories: Object.freeze([producer.artifactDir]),
+    snapshotsByProducerAttempt: new Map([[producer.attemptId, admittedAuthority]])
+  });
   const declaredAncestorContractOutputs = (_task: ReviewAuthorityHarnessTask, contract: string) =>
     producer.outputs
       .filter((output) => output.contract === contract)
@@ -3922,7 +4768,8 @@ test("generated final-severity gates share one producer epoch and reject a cross
   const harness = new Function(
     "path",
     "taskSpecs",
-    "assertVerifiedDependency",
+    "dependencyArtifactAdmission",
+    "assertDependencyArtifactAdmissionCurrent",
     "declaredAncestorContractOutputs",
     `${emitted}; return {
       begin: beginVerifiedDependencySnapshotEpoch,
@@ -3933,16 +4780,23 @@ test("generated final-severity gates share one producer epoch and reject a cross
   )(
     path,
     [producer, consumer],
+    () => admission,
     () => {
       authenticationCount += 1;
-      return authority();
+      const current = authority();
+      if (!current.marker.bytes.equals(admittedAuthority.marker.bytes)) {
+        throw new Error(
+          `artifact-contract failure: dependency authority changed after admission ${producer.attemptId}`
+        );
+      }
+      return admission;
     },
     declaredAncestorContractOutputs
   ) as {
     begin: (task: ReviewAuthorityHarnessTask) => {
       snapshotsByProducerAttempt: Map<
         string,
-        { artifacts: ReadonlyMap<string, { bytes: Buffer }>; markerBytes: Buffer }
+        { artifacts: ReadonlyMap<string, { bytes: Buffer }>; marker: { bytes: Buffer } }
       >;
     };
     recheck: (task: ReviewAuthorityHarnessTask, epoch: unknown) => void;
@@ -3970,7 +4824,7 @@ test("generated final-severity gates share one producer epoch and reject a cross
     assert.equal(authenticationCount, 1);
     assert.throws(
       () => harness.recheck(consumer, epoch),
-      /verified dependency authority changed during semantic verification attempt-severity/u
+      /verified dependency authority changed during semantic verification:[\s\S]*attempt-severity/u
     );
     assert.equal(authenticationCount, 2);
   } finally {
@@ -4006,6 +4860,162 @@ test("generated review verification uses declared immutable review-stage authori
   assert.match(context, /reviewStageSemanticContext\(task, verifiedOutputs\)/u);
   assert.match(context, /verifiedFinalSeverityReviewAuthority\(task\)/u);
   assert.match(context, /\.\.\.finalSeverityAuthority/u);
+});
+
+test("generated dynamic verification passes the resolved policy and exact declared recipe and finding ancestors", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function siblingDynamicStrategySemanticArtifacts");
+  const helperEnd = source.indexOf("\n\ntype ReviewStageSemanticContext", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+
+  const boundaryProducer = {
+    attemptId: "attempt-boundary",
+    logicalNodeId: "renamed-boundary-producer",
+    artifactDir: "/run/artifacts/attempt-boundary"
+  };
+  const findingProducer = {
+    attemptId: "attempt-findings",
+    logicalNodeId: "renamed-finding-producer",
+    artifactDir: "/run/artifacts/attempt-findings"
+  };
+  const consumer = {
+    attemptId: "attempt-dynamic",
+    logicalNodeId: "renamed-dynamic-consumer",
+    agentRef: "CodexAgent",
+    modelName: "gpt-current",
+    artifactDir: "/run/artifacts/attempt-dynamic",
+    runRoot: "/run",
+    dynamicStrategiesEnumeratorPolicy: 0,
+    outputs: [
+      { path: "custom/plan.json", contract: "ultrafuzz/dynamic-strategy-plan@1" },
+      { path: "custom/enumerators.json", contract: "ultrafuzz/dynamic-enumerator-outputs@1" },
+      { path: "custom/generated-manifest.json", contract: "ultrafuzz/generated-tests@3" },
+      { path: "custom/findings.json", contract: "ultrafuzz/findings@2" },
+      { path: "custom/provenance.json", contract: "ultrafuzz/dynamic-strategy-provenance@1" }
+    ]
+  };
+  const taskSpecs = [boundaryProducer, findingProducer, consumer];
+  const boundaryDocument = {
+    schema_version: "ultrafuzz.boundary-recipes.v1",
+    recipes: [{ id: "alpha", expected_classification_if_red: "production-bug" }]
+  };
+  const ancestorFindings = [{ id: "finding-alpha" }];
+  const generatedTests = {
+    generated_tests: [{ path: "generated-tests/StrategyA.t.sol" }],
+    support_files: []
+  };
+  const declared = {
+    "ultrafuzz/boundary-recipes@1": [
+      {
+        ...boundaryProducer,
+        path: "declared/recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1"
+      }
+    ],
+    "ultrafuzz/findings@2": [
+      {
+        ...findingProducer,
+        path: "declared/findings.json",
+        contract: "ultrafuzz/findings@2"
+      }
+    ]
+  } as const;
+  const authenticatedValues = new Map<string, unknown>([
+    ["attempt-boundary\u0000declared/recipes.json", boundaryDocument],
+    ["attempt-findings\u0000declared/findings.json", ancestorFindings]
+  ]);
+  const authenticationCalls: string[] = [];
+  const dependencyAdmission = {
+    snapshotsByProducerAttempt: new Map([
+      [
+        boundaryProducer.attemptId,
+        {
+          artifactDir: boundaryProducer.artifactDir,
+          publications: new Map([
+            ["declared/recipes.json", "a".repeat(64)],
+            ["generated-tests/BoundaryCompanion.t.sol", "b".repeat(64)]
+          ])
+        }
+      ],
+      [
+        findingProducer.attemptId,
+        {
+          artifactDir: findingProducer.artifactDir,
+          publications: new Map([["declared/findings.json", "c".repeat(64)]])
+        }
+      ]
+    ])
+  };
+  const helper = new Function(
+    "taskSpecs",
+    "declaredAncestorContractOutputs",
+    "verifiedDependencyJsonArtifact",
+    "dependencyArtifactAdmission",
+    "path",
+    `${emitted}; return siblingDynamicStrategySemanticArtifacts;`
+  )(
+    taskSpecs,
+    (_task: unknown, contract: keyof typeof declared) => declared[contract] ?? [],
+    (_task: unknown, _artifactDir: string, producer: { attemptId: string }, outputPath: string, contract: string) => {
+      const key = `${producer.attemptId}\u0000${outputPath}`;
+      authenticationCalls.push(`${key}\u0000${contract}`);
+      assert.ok(authenticatedValues.has(key), key);
+      return { value: authenticatedValues.get(key) };
+    },
+    () => dependencyAdmission,
+    path
+  ) as (task: typeof consumer, verifiedOutputs: ReadonlyMap<string, { value: unknown }>) => Record<string, unknown>;
+
+  const siblings = new Map<string, { value: unknown }>([
+    ["custom/plan.json", { value: { dynamic_strategies_enumerator: 0 } }],
+    ["custom/enumerators.json", { value: { enumerators: [] } }],
+    ["custom/generated-manifest.json", { value: generatedTests }],
+    ["generated-tests.json", { value: { generated_tests: [], support_files: [] } }],
+    ["custom/findings.json", { value: [] }],
+    ["custom/provenance.json", { value: { generated_files: [{ source_path: "generated-tests/StrategyA.t.sol" }] } }]
+  ]);
+  const result = helper(consumer, siblings);
+  assert.equal(result.dynamicStrategiesEnumeratorPolicy, 0);
+  assert.equal(result.generatedTests, generatedTests);
+  assert.deepEqual(result.currentAttempt, {
+    attemptId: "attempt-dynamic",
+    logicalNodeId: "renamed-dynamic-consumer",
+    agentRef: "CodexAgent",
+    modelName: "gpt-current"
+  });
+  assert.deepEqual(result.authenticatedCurrentRunArtifactPaths, [
+    "artifacts/attempt-boundary/declared/recipes.json",
+    "artifacts/attempt-boundary/generated-tests/BoundaryCompanion.t.sol",
+    "artifacts/attempt-findings/declared/findings.json"
+  ]);
+  assert.deepEqual(result.boundaryRecipeArtifacts, [
+    {
+      attemptId: "attempt-boundary",
+      logicalNodeId: "renamed-boundary-producer",
+      path: "artifacts/attempt-boundary/declared/recipes.json",
+      contract: "ultrafuzz/boundary-recipes@1",
+      document: boundaryDocument
+    }
+  ]);
+  assert.deepEqual(result.ancestorFindingArtifacts, [
+    {
+      attemptId: "attempt-findings",
+      logicalNodeId: "renamed-finding-producer",
+      path: "artifacts/attempt-findings/declared/findings.json",
+      contract: "ultrafuzz/findings@2",
+      document: ancestorFindings
+    }
+  ]);
+  assert.deepEqual(authenticationCalls, [
+    "attempt-boundary\u0000declared/recipes.json\u0000ultrafuzz/boundary-recipes@1",
+    "attempt-findings\u0000declared/findings.json\u0000ultrafuzz/findings@2"
+  ]);
+
+  const compilerSource = fs.readFileSync(path.join(runtimePackageRoot, "src", "smithers.ts"), "utf8");
+  assert.match(compilerSource, /dynamicStrategiesEnumeratorPolicy:\s*config\.dynamicStrategiesEnumerator/u);
 });
 
 test("generated differential verification uses exact declared siblings and ancestors", () => {
@@ -4054,6 +5064,614 @@ test("generated Smithers workflow prepares output directories without creating a
   assert.doesNotMatch(preparation, /canonicalEmptyArtifact|validEmptyExample|writeFileDurable\(artifactPath/u);
   assert.match(source, /id=\{task\.preparationId\}/u);
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
+});
+
+test("generated cloud handoff derives durable marker authorities on pre-sync and restart rerenders", () => {
+  const derive = loadDependencyVerificationAuthoritiesForTask();
+  const producers = [
+    {
+      attemptId: "required-root__model_0__attempt_0",
+      verifierId: "verify:required-root__model_0__attempt_0",
+      optional: false
+    },
+    { attemptId: "optional-branch", verifierId: "verify:optional-branch", optional: true },
+    {
+      attemptId: "required-root__model_1__attempt_1",
+      verifierId: "verify:required-root__model_1__attempt_1",
+      optional: false
+    }
+  ] as const;
+  const task = { dependencyVerificationProducers: producers };
+  const first = {
+    verification_marker_sha256: "a".repeat(64),
+    verification_marker_size_bytes: 1_024
+  };
+  const second = {
+    verification_marker_sha256: "b".repeat(64),
+    verification_marker_size_bytes: 2_048
+  };
+  const optional = {
+    verification_marker_sha256: "c".repeat(64),
+    verification_marker_size_bytes: 4_096
+  };
+  const durableRows = new Map<string, GeneratedVerificationAuthorityOutput>();
+  const reads: string[] = [];
+  const outputForProducer = (producer: GeneratedDependencyVerificationProducer) => {
+    reads.push(producer.verifierId);
+    return durableRows.get(producer.verifierId);
+  };
+
+  assert.equal(derive(task, outputForProducer), undefined, "the pre-sync frame must wait for required output");
+  assert.deepEqual(reads, [producers[0].verifierId]);
+
+  durableRows.set(producers[0].verifierId, first);
+  durableRows.set(producers[2].verifierId, second);
+  reads.length = 0;
+  const preSyncHandoff = derive(task, outputForProducer);
+  assert.deepEqual(preSyncHandoff, [
+    { attempt_id: producers[0].attemptId, marker_sha256: first.verification_marker_sha256, size_bytes: 1_024 },
+    { attempt_id: producers[2].attemptId, marker_sha256: second.verification_marker_sha256, size_bytes: 2_048 }
+  ]);
+  assert.deepEqual(
+    reads,
+    producers.map((producer) => producer.verifierId)
+  );
+
+  durableRows.set(producers[1].verifierId, optional);
+  const completeHandoff = derive(task, outputForProducer);
+  assert.deepEqual(completeHandoff, [
+    { attempt_id: producers[0].attemptId, marker_sha256: first.verification_marker_sha256, size_bytes: 1_024 },
+    { attempt_id: producers[1].attemptId, marker_sha256: optional.verification_marker_sha256, size_bytes: 4_096 },
+    { attempt_id: producers[2].attemptId, marker_sha256: second.verification_marker_sha256, size_bytes: 2_048 }
+  ]);
+
+  const restartedRows = new Map([...durableRows].map(([nodeId, output]) => [nodeId, structuredClone(output)] as const));
+  assert.deepEqual(
+    derive(task, (producer) => restartedRows.get(producer.verifierId)),
+    completeHandoff,
+    "a fresh render process must reproduce the authority array from durable outputs"
+  );
+
+  restartedRows.delete(producers[2].verifierId);
+  assert.equal(
+    derive(task, (producer) => restartedRows.get(producer.verifierId)),
+    undefined,
+    "an absent required fanout verifier must suppress the cloud handoff"
+  );
+
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /ctx\.outputMaybe\(outputs\.verification, \{ nodeId: producer\.verifierId \}\)/u);
+  assert.match(source, /if \(dependencyVerificationAuthorities === undefined\) return null/u);
+  assert.match(source, /dependency_verification_authorities: dependencyVerificationAuthorities/u);
+  assert.match(source, /schema_version: "ultrafuzz\.modal\.node\.v2"/u);
+});
+
+test("Smithers rerenders a cloud Sandbox only after its required verifier output is persisted", async () => {
+  type ModalAuthorityInput = {
+    schema_version: "ultrafuzz.modal.node.v2";
+    dependency_verification_authorities: Array<{
+      attempt_id: string;
+      marker_sha256: string;
+      size_bytes: number;
+    }>;
+  };
+  type EngineTask = { nodeId: string; meta?: Record<string, unknown> };
+  type EngineTestWorkflow = { tasks: EngineTask[] };
+  type EngineSimulation = {
+    run(): Promise<unknown>;
+    status: string;
+    executed: string[];
+    outputs: Record<string, unknown[]>;
+  };
+  const derive = loadDependencyVerificationAuthoritiesForTask();
+  const producer = {
+    attemptId: "required-producer__model_0__attempt_0",
+    verifierId: "verify:required-producer__model_0__attempt_0",
+    optional: false
+  } as const;
+  const marker = {
+    verification_marker_sha256: "d".repeat(64),
+    verification_marker_size_bytes: 12_345
+  } as const;
+  const expectedSandboxInput: ModalAuthorityInput = {
+    schema_version: "ultrafuzz.modal.node.v2",
+    dependency_verification_authorities: [
+      {
+        attempt_id: producer.attemptId,
+        marker_sha256: marker.verification_marker_sha256,
+        size_bytes: marker.verification_marker_size_bytes
+      }
+    ]
+  };
+
+  const require = createRequire(import.meta.url);
+  const testing = (await import(pathToFileURL(require.resolve("smthrs/testing")).href)) as {
+    renderWorkflow(
+      workflow: unknown,
+      options?: { runId?: string; outputs?: Record<string, unknown[]> }
+    ): Promise<EngineTestWorkflow>;
+    simulate(workflow: unknown, options?: { mocks?: Record<string, unknown> }): EngineSimulation;
+  };
+  const smithersRoot = packageRootForEntry(require.resolve("smthrs"));
+  const smithersRequire = createRequire(path.join(smithersRoot, "package.json"));
+  const React = smithersRequire("react") as {
+    createElement(type: unknown, props: Record<string, unknown> | null, ...children: unknown[]): unknown;
+  };
+  const components = (await import(pathToFileURL(smithersRequire.resolve("@smthrs/components")).href)) as {
+    Workflow: unknown;
+    Task: unknown;
+    Sandbox: unknown;
+  };
+  const verificationSchema = z.strictObject({
+    verification_marker_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    verification_marker_size_bytes: z.number().int().positive()
+  });
+  const sandboxResultSchema = z.strictObject({ summary: z.string() });
+  const renderedSandboxInputs: Array<ModalAuthorityInput | undefined> = [];
+  const workflow = {
+    opts: {},
+    schemaRegistry: new Map([
+      ["verification", { table: { name: "verification" }, zodSchema: verificationSchema }],
+      ["sandbox_result", { table: { name: "sandbox_result" }, zodSchema: sandboxResultSchema }]
+    ]),
+    build: (ctx: {
+      outputMaybe(output: string, key: { nodeId: string }): GeneratedVerificationAuthorityOutput | undefined;
+    }) => {
+      const authorities = derive({ dependencyVerificationProducers: [producer] }, (candidate) =>
+        ctx.outputMaybe("verification", { nodeId: candidate.verifierId })
+      );
+      const sandboxInput =
+        authorities === undefined
+          ? undefined
+          : {
+              schema_version: "ultrafuzz.modal.node.v2" as const,
+              dependency_verification_authorities: authorities
+            };
+      renderedSandboxInputs.push(sandboxInput === undefined ? undefined : structuredClone(sandboxInput));
+      return React.createElement(
+        components.Workflow,
+        { name: "verification-authority-rerender" },
+        React.createElement(components.Task, { id: producer.verifierId, output: "verification" }, marker),
+        sandboxInput === undefined
+          ? null
+          : React.createElement(components.Sandbox, {
+              id: "cloud-consumer",
+              output: "sandbox_result",
+              provider: { id: "modal-test-provider" },
+              input: sandboxInput,
+              meta: { executionMode: "cloud" }
+            })
+      );
+    }
+  };
+
+  const beforeVerification = await testing.renderWorkflow(workflow, { runId: "authority-rerender" });
+  assert.deepEqual(
+    beforeVerification.tasks.map((task) => task.nodeId),
+    [producer.verifierId],
+    "the cloud Sandbox must not exist before its required verifier row"
+  );
+
+  renderedSandboxInputs.length = 0;
+  const simulation = testing.simulate(workflow, {
+    mocks: { "cloud-consumer": { summary: "cloud handoff accepted" } }
+  });
+  await simulation.run();
+  assert.equal(simulation.status, "finished");
+  assert.deepEqual(simulation.executed, [producer.verifierId, "cloud-consumer"]);
+  assert.deepEqual(simulation.outputs.verification, [marker]);
+  assert.equal(renderedSandboxInputs[0], undefined, "the scheduler's initial frame must omit the Sandbox");
+  assert.ok(renderedSandboxInputs.length > 1, "persisting verifier output must trigger a rerender");
+  for (const input of renderedSandboxInputs.slice(1)) {
+    assert.deepEqual(input, expectedSandboxInput);
+  }
+
+  const persistedOutputs = {
+    verification: [
+      {
+        runId: "authority-rerender",
+        nodeId: producer.verifierId,
+        iteration: 0,
+        ...marker
+      }
+    ]
+  };
+  const afterVerification = await testing.renderWorkflow(workflow, {
+    runId: "authority-rerender",
+    outputs: persistedOutputs
+  });
+  const cloudTask = afterVerification.tasks.find((task) => task.nodeId === "cloud-consumer");
+  assert.ok(cloudTask, "the persisted verifier row must mount the cloud Sandbox without workflow sync");
+  assert.deepEqual(cloudTask.meta?.__sandboxInput, expectedSandboxInput);
+
+  const restarted = await testing.renderWorkflow(workflow, {
+    runId: "authority-rerender",
+    outputs: structuredClone(persistedOutputs)
+  });
+  const restartedCloudTask = restarted.tasks.find((task) => task.nodeId === "cloud-consumer");
+  assert.ok(restartedCloudTask, "a fresh renderer must recover the Sandbox solely from durable verifier rows");
+  assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, expectedSandboxInput);
+  assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, cloudTask.meta?.__sandboxInput);
+});
+
+test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const taskProjectionStart = source.indexOf("const taskSpecs = serializedTaskSpecs.map");
+  const taskProjectionEnd = source.indexOf("\n\ntype AuthenticatedAggregationSourceEntry", taskProjectionStart);
+  const baseAgentStart = source.indexOf("function baseAgentForProfile");
+  const baseAgentEnd = source.indexOf("\n\nfunction agentForTask", baseAgentStart);
+  const ancestorStart = source.indexOf("function declaredAncestorContractOutputs");
+  const ancestorEnd = source.indexOf("\n\nfunction verifiedSingletonAncestorJsonArtifact", ancestorStart);
+  const optionalStart = source.indexOf("function optionalDependencyIsUnavailable");
+  const optionalEnd = source.indexOf("\n\nfunction assertVerifiedDependency", optionalStart);
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(taskProjectionStart >= 0 && taskProjectionEnd > taskProjectionStart, source);
+  assert.ok(baseAgentStart >= 0 && baseAgentEnd > baseAgentStart, source);
+  assert.ok(ancestorStart >= 0 && ancestorEnd > ancestorStart, source);
+  assert.ok(optionalStart >= 0 && optionalEnd > optionalStart, source);
+  const taskProjection = source.slice(taskProjectionStart, taskProjectionEnd);
+  const baseAgent = source.slice(baseAgentStart, baseAgentEnd);
+  const ancestor = source.slice(ancestorStart, ancestorEnd);
+  const optional = source.slice(optionalStart, optionalEnd);
+  const workflow = source.slice(workflowStart);
+
+  assert.match(ancestor, /admittedDependencyArtifactDirs\(task\)/u);
+  assert.match(ancestor, /admittedDirectories\.has\(path\.resolve\(output\.artifactDir\)\)/u);
+  assert.match(optional, /optionalDependencyArtifactDirs/u);
+  assert.match(optional, /artifactVerificationMarkerLocation/u);
+  assert.match(optional, /pathEntryExists\(marker\.path\)/u);
+  assert.match(optional, /const dependencyArtifactAdmissionsByTask/u);
+  assert.match(optional, /function selectDependencyArtifactDirs/u);
+  assert.match(optional, /function dependencyArtifactAdmission/u);
+  assert.match(optional, /function admittedDependencyArtifactDirs/u);
+  assert.match(optional, /function assertDependencyArtifactAdmissionCurrent/u);
+  assert.match(optional, /task\.dependencyArtifactDirs\.filter/u);
+  assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
+  assert.match(source, /preflightJsonValidator\(schemaDirectory\);\s*assertTaskInputs\(task, workspaceRoot\)/u);
+  assert.match(
+    source,
+    /materializeWorkspacePatchDependencies[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\)/u
+  );
+  assert.match(
+    source,
+    /assertDependencyArtifactAdmissionCurrent\(task\);\s*const admitted = baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u
+  );
+  assert.match(taskProjection, /const dependencyArtifactRelativeDirs = \[\.\.\.task\.dependencyArtifactDirs\]/u);
+  assert.match(
+    taskProjection,
+    /dependencyArtifactDirs: task\.dependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
+  );
+  assert.match(
+    taskProjection,
+    /const optionalDependencyArtifactRelativeDirs = \[\.\.\.task\.optionalDependencyArtifactDirs\]/u
+  );
+  assert.match(
+    taskProjection,
+    /optionalDependencyArtifactDirs: task\.optionalDependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
+  );
+  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/u);
+  assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
+  assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
+  assert.match(workflow, /dependency_artifact_dirs: task\.dependencyArtifactRelativeDirs/u);
+  assert.match(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactRelativeDirs/u);
+  assert.doesNotMatch(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactDirs/u);
+  assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+});
+
+test("generated optional admission rejects a present malformed marker before publishing agent access", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const admissionStart = source.indexOf("function assertTaskInputs");
+  const admissionEnd = source.indexOf("\n\nfunction assertVerifiedDependency", admissionStart);
+  const baseAgentStart = source.indexOf("function baseAgentForProfile");
+  const baseAgentEnd = source.indexOf("\n\nfunction agentForTask", baseAgentStart);
+  assert.ok(admissionStart >= 0 && admissionEnd > admissionStart, source);
+  assert.ok(baseAgentStart >= 0 && baseAgentEnd > baseAgentStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(admissionStart, admissionEnd)}\n${source.slice(baseAgentStart, baseAgentEnd)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+
+  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-optional-admission-")));
+  try {
+    const producerAttemptId = "optional-producer";
+    const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
+    const markerPath = path.join(runRoot, ".ultrafuzz-verification", `${producerAttemptId}.json`);
+    fs.mkdirSync(producerDir, { recursive: true });
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(markerPath, "{malformed-json\n", "utf8");
+    const producer = { attemptId: producerAttemptId, artifactDir: producerDir };
+    const consumer = {
+      attemptId: "optional-consumer",
+      runRoot,
+      artifactDir: path.join(runRoot, "artifacts", "optional-consumer"),
+      dependencyArtifactDirs: [producerDir],
+      optionalDependencyArtifactDirs: [producerDir]
+    };
+    let dependencyAuthenticationCount = 0;
+    const factoryAddDirs: string[][] = [];
+    const harness = new Function(
+      "path",
+      "assertRegularFileInside",
+      "authenticatedAggregationSourcesByTask",
+      "artifactVerificationMarkerLocation",
+      "pathEntryExists",
+      "taskSpecs",
+      "lstatSync",
+      "realpathSync",
+      "isStrictlyInsideDirectory",
+      "assertVerifiedDependency",
+      "sameImmutableFileIdentity",
+      "agentFactories",
+      `${emitted}; return {
+        prepareAndBuild(task, workspaceRoot, profile) {
+          assertTaskInputs(task, workspaceRoot);
+          assertDependencyArtifactAdmissionCurrent(task);
+          return baseAgentForProfile(task, profile, admittedDependencyArtifactDirs(task));
+        },
+        buildFromPublishedAdmission(task, profile) {
+          return baseAgentForProfile(task, profile, admittedDependencyArtifactDirs(task));
+        },
+        hasAdmission(attemptId) {
+          return dependencyArtifactAdmissionsByTask.has(attemptId);
+        }
+      };`
+    )(
+      path,
+      () => undefined,
+      new Map(),
+      (_runRoot: string, attemptId: string) => ({
+        path: path.join(runRoot, ".ultrafuzz-verification", `${attemptId}.json`)
+      }),
+      (candidate: string) => fs.existsSync(candidate),
+      [producer, consumer],
+      fs.lstatSync,
+      fs.realpathSync,
+      (root: string, candidate: string) => {
+        const relative = path.relative(root, candidate);
+        return (
+          relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+        );
+      },
+      () => {
+        dependencyAuthenticationCount += 1;
+        assert.equal(fs.readFileSync(markerPath, "utf8"), "{malformed-json\n");
+        throw new Error(`artifact-contract failure: verification marker is schema-invalid ${producerAttemptId}`);
+      },
+      () => true,
+      {
+        codex: (options: { addDir?: string[] }) => {
+          factoryAddDirs.push([...(options.addDir ?? [])]);
+          return { generate: async () => ({}) };
+        }
+      }
+    ) as {
+      prepareAndBuild(task: typeof consumer, workspaceRoot: string, profile: { agentRef: string }): unknown;
+      buildFromPublishedAdmission(task: typeof consumer, profile: { agentRef: string }): unknown;
+      hasAdmission(attemptId: string): boolean;
+    };
+
+    assert.throws(
+      () => harness.prepareAndBuild(consumer, runRoot, { agentRef: "codex" }),
+      /verification marker is schema-invalid optional-producer/u
+    );
+    assert.equal(dependencyAuthenticationCount, 1, "a present optional marker must be authenticated");
+    assert.equal(harness.hasAdmission(consumer.attemptId), false, "failed authentication must not publish admission");
+    assert.throws(
+      () => harness.buildFromPublishedAdmission(consumer, { agentRef: "codex" }),
+      /dependency admission is unavailable optional-consumer/u
+    );
+    assert.deepEqual(factoryAddDirs, [], "the malformed optional directory must never reach addDir");
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+
+  assert.match(
+    source,
+    /admitted_dependency_attempt_ids:\s*admittedDependencyArtifactDirs\(task\)\.map\(\(directory\) => path\.basename\(directory\)\)/u
+  );
+});
+
+test("generated verifiers require a successful upstream task output before publishing artifacts", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
+  const finalizerEnd = source.indexOf("\n\nfunction verifyArtifacts", finalizerStart);
+  const workflow = source.slice(source.indexOf("export default smithers"));
+  assert.ok(finalizerStart >= 0 && finalizerEnd > finalizerStart, source);
+  const finalizer = source.slice(finalizerStart, finalizerEnd);
+
+  assert.match(finalizer, /agentTaskOutput: z\.infer<typeof taskOutput> \| undefined/u);
+  assert.match(finalizer, /taskOutput\.safeParse\(agentTaskOutput\)\.success/u);
+  assert.ok(finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("taskOutput.safeParse"));
+  assert.ok(finalizer.indexOf("taskOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
+  assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 2);
+  assert.equal(workflow.match(/deps=\{\{ agent: outputs\.task \}\}/gu)?.length, 2);
+  assert.equal(workflow.match(/depsOptional/gu)?.length, 2);
+  assert.equal(workflow.match(/\{\(deps\) => finalizeAndVerifyArtifacts\(task, deps\.agent\)\}/gu)?.length, 2);
+  assert.doesNotMatch(workflow, /\{\(\) => finalizeAndVerifyArtifacts\(task\)\}/u);
+});
+
+test("generated dependency admission retains one exact snapshot epoch and never hydrates a replacement patch pair", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const admissionStart = source.indexOf("type DependencyArtifactAdmission");
+  const admissionEnd = source.indexOf("\n\nfunction assertVerifiedDependency", admissionStart);
+  const hydrationStart = source.indexOf("function materializeWorkspacePatchDependencies");
+  const hydrationEnd = source.indexOf("\n\nfunction workspacePatchBaselinePath", hydrationStart);
+  assert.ok(admissionStart >= 0 && admissionEnd > admissionStart, source);
+  assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(admissionStart, admissionEnd)}\n${source.slice(hydrationStart, hydrationEnd)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+
+  const producerDir = "/run/artifacts/patch-producer";
+  const producer = { attemptId: "patch-producer", artifactDir: producerDir };
+  const consumer = {
+    attemptId: "patch-consumer",
+    dependencyArtifactDirs: [producerDir],
+    optionalDependencyArtifactDirs: [],
+    productionSourceRoots: ["src"]
+  };
+  const identity = (inode: bigint) => ({
+    dev: 9_007_199_254_740_992n,
+    ino: inode,
+    size: 64n,
+    mtimeNs: inode + 10n,
+    ctimeNs: inode + 20n
+  });
+  const snapshot = (generation: "A" | "B", inode: bigint) => {
+    const patchBytes = Buffer.from(`valid-patch-${generation}\n`, "utf8");
+    const manifestValue = { base_tree: `${generation}0`, result_tree: `${generation}1` };
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifestValue)}\n`, "utf8");
+    return {
+      attemptId: producer.attemptId,
+      artifactDir: producerDir,
+      marker: {
+        path: "/run/.ultrafuzz-verification/patch-producer.json",
+        bytes: Buffer.from(`valid-marker-${generation}\n`, "utf8"),
+        identity: identity(inode)
+      },
+      artifacts: new Map([
+        [
+          "workspace.patch",
+          {
+            path: `${producerDir}/workspace.patch`,
+            relativePath: "workspace.patch",
+            contract: "ultrafuzz/text@1",
+            bytes: patchBytes,
+            identity: identity(inode + 1n),
+            value: patchBytes.toString("utf8")
+          }
+        ],
+        [
+          "workspace-patch.json",
+          {
+            path: `${producerDir}/workspace-patch.json`,
+            relativePath: "workspace-patch.json",
+            contract: "ultrafuzz/workspace-patch@1",
+            bytes: manifestBytes,
+            identity: identity(inode + 2n),
+            value: manifestValue
+          }
+        ]
+      ]),
+      publications: new Map([
+        ["workspace.patch", createHash("sha256").update(patchBytes).digest("hex")],
+        ["workspace-patch.json", createHash("sha256").update(manifestBytes).digest("hex")]
+      ]),
+      generatedTestBundles: []
+    };
+  };
+  const admittedA = snapshot("A", 9_007_199_254_740_993n);
+  let current = admittedA;
+  const applied: string[] = [];
+  const validated: string[] = [];
+  const preparationTrees = new Map<string, string>();
+  const harness = new Function(
+    "path",
+    "taskSpecs",
+    "artifactVerificationMarkerLocation",
+    "pathEntryExists",
+    "assertVerifiedDependency",
+    "sameImmutableFileIdentity",
+    "readWorkspacePatchPreparation",
+    "workspacePatchPreparationTrees",
+    "validateWorkspacePatchCapture",
+    "captureWorkspaceTree",
+    "firstDependencyRequiringReplay",
+    "applyWorkspacePatch",
+    "taskPublishesWorkspacePatch",
+    "readWorkspacePatchBaseline",
+    "workspacePatchBaselineTrees",
+    "writeWorkspacePatchPreparation",
+    "writeWorkspacePatchBaseline",
+    `${emitted}; return {
+      admit(task, directories, snapshotsByProducerAttempt) {
+        dependencyArtifactAdmissionsByTask.set(task.attemptId, Object.freeze({
+          task,
+          directories: Object.freeze([...directories]),
+          snapshotsByProducerAttempt
+        }));
+      },
+      current: assertDependencyArtifactAdmissionCurrent,
+      directories: admittedDependencyArtifactDirs,
+      hydrate: materializeWorkspacePatchDependencies
+    };`
+  )(
+    path,
+    [producer, consumer],
+    () => undefined,
+    () => false,
+    () => current,
+    (left: Record<string, bigint>, right: Record<string, bigint>) =>
+      left.dev === right.dev &&
+      left.ino === right.ino &&
+      left.size === right.size &&
+      left.mtimeNs === right.mtimeNs &&
+      left.ctimeNs === right.ctimeNs,
+    (task: { attemptId: string }) => preparationTrees.get(task.attemptId),
+    preparationTrees,
+    (_root: string, capture: { patch: string }) => validated.push(capture.patch),
+    () => "workspace-tree",
+    () => 0,
+    (_root: string, capture: { patch: string }) => applied.push(capture.patch),
+    () => false,
+    () => undefined,
+    new Map(),
+    () => undefined,
+    () => undefined
+  ) as {
+    admit(task: typeof consumer, directories: string[], snapshots: Map<string, typeof admittedA>): void;
+    current(task: typeof consumer): unknown;
+    directories(task: typeof consumer): readonly string[];
+    hydrate(task: typeof consumer, workspaceRoot: string, replay: boolean, evidence: "create" | "require"): void;
+  };
+
+  harness.admit(consumer, [producerDir], new Map([[producer.attemptId, admittedA]]));
+  assert.deepEqual(harness.directories(consumer), [producerDir]);
+  harness.hydrate(consumer, "/workspace", true, "create");
+  assert.deepEqual(validated, ["valid-patch-A\n"]);
+  assert.deepEqual(applied, ["valid-patch-A\n"]);
+
+  current = snapshot("B", 9_007_199_254_741_100n);
+  validated.length = 0;
+  applied.length = 0;
+  assert.throws(
+    () => harness.hydrate(consumer, "/workspace", true, "create"),
+    /dependency authority changed after admission patch-producer/u
+  );
+  assert.deepEqual(validated, [], "replacement B must fail before patch validation or hydration");
+  assert.deepEqual(applied, [], "replacement B must never be applied");
+
+  current = {
+    ...admittedA,
+    marker: { ...admittedA.marker, identity: identity(9_007_199_254_741_200n) }
+  };
+  assert.throws(
+    () => harness.current(consumer),
+    /dependency authority changed after admission patch-producer/u,
+    "an identical-byte marker replacement must not inherit the admitted identity"
+  );
+
+  current = {
+    ...admittedA,
+    artifacts: new Map(admittedA.artifacts).set("workspace.patch", {
+      ...admittedA.artifacts.get("workspace.patch")!,
+      identity: identity(9_007_199_254_741_300n)
+    })
+  };
+  assert.throws(
+    () => harness.current(consumer),
+    /dependency artifact changed after admission patch-producer\/workspace\.patch/u,
+    "an identical-byte selected-output replacement must fail before model access"
+  );
+
+  const hydration = source.slice(hydrationStart, hydrationEnd);
+  assert.match(hydration, /const admission = assertDependencyArtifactAdmissionCurrent\(task\)/u);
+  assert.match(hydration, /authority\.artifacts\.get\("workspace\.patch"\)/u);
+  assert.match(hydration, /patch: patch\.value/u);
+  assert.doesNotMatch(hydration, /readBoundedRegularArtifactSnapshot|readFileSync|resolveRegularArtifactFile/u);
 });
 
 test("generated Smithers restores sealed submodules before inputs and verifies them only in the finalizer", () => {
@@ -4255,12 +5873,20 @@ test("generated Smithers workflow prefers its relocatable task prompt path", () 
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
 });
 
-test("generated local and cloud prompt relocation preserves quoted validation-command paths", () => {
+test("generated local and cloud prompt relocation rebases task-local authority paths without exposing controls", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const promptStart = source.indexOf("function promptForTask");
   const helperStart = source.indexOf("function relocatePromptPath");
-  const helperEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", helperStart);
+  const helperEnd = source.indexOf("\n\nconst promptArtifactAuthoritySnapshotsByTask", helperStart);
+  assert.ok(promptStart >= 0 && promptStart < helperStart, source);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
+  const promptForTask = source.slice(promptStart, helperStart);
+  assert.ok(
+    promptForTask.indexOf("task.sourceProjectRoot, process.cwd()") <
+      promptForTask.indexOf("task.artifactDir, mirroredArtifactDir(task)"),
+    promptForTask
+  );
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
@@ -4270,44 +5896,366 @@ test("generated local and cloud prompt relocation preserves quoted validation-co
     destinationPath: string
   ) => string;
 
-  const controllerRoot = "/tmp/owner's-project";
-  const cloudRoot = "/workspace/cloud's-project";
-  const controllerArtifactDir = `${controllerRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
-  const encodedControllerRoot = controllerRoot.replaceAll("'", `'"'"'`);
+  const sourceRoot = "/tmp/controller-a's-project";
+  const localRoot = "/tmp/local-b's-project";
+  const cloudRoot = "/workspace/cloud-b's-project";
+  const sourceArtifactDir = `${sourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+  const sourceWorkspace = `${sourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`;
+  const sourceAuthority = `${sourceWorkspace}/.ultrafuzz/authorities/task-0.json`;
+  const sourceSchema = `${sourceWorkspace}/.ultrafuzz/schemas/findings.schema.json`;
+  const encodedSourceRoot = sourceRoot.replaceAll("'", `'"'"'`);
   const rendered = [
-    `- Path: \`${controllerArtifactDir}/findings.json\``,
-    `  Validate against: \`${controllerRoot}/.ultrafuzz/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json\``,
-    `  Validation command: \`ultrafuzz json validate --schema '${encodedControllerRoot}/.ultrafuzz/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedControllerRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``
+    `- Path: \`${sourceArtifactDir}/findings.json\``,
+    `- Artifact authority: \`${sourceAuthority}\``,
+    `  Validate against: \`${sourceSchema}\``,
+    `  Validation command: \`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``,
+    `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``
   ].join("\n");
+  assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
 
-  for (const [label, taskArtifactDir, mirroredTaskArtifactDir, destinationRoot, expectedArtifactDir] of [
-    [
-      "local",
-      controllerArtifactDir,
-      `${controllerRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`,
-      controllerRoot,
-      `${controllerRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`
-    ],
-    [
-      "cloud",
-      ".ultrafuzz/runs/run-1/artifacts/task-0",
-      ".ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0",
-      cloudRoot,
-      `${cloudRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`
-    ]
+  for (const [label, destinationRoot] of [
+    ["local", localRoot],
+    ["cloud", cloudRoot]
   ] as const) {
-    let relocated = relocatePromptPath(rendered, taskArtifactDir, mirroredTaskArtifactDir);
-    relocated = relocatePromptPath(relocated, controllerRoot, destinationRoot);
+    const destinationArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+    const mirroredTaskArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`;
+    const expectedAuthority = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/authorities/task-0.json`;
+    let relocated = relocatePromptPath(rendered, sourceRoot, destinationRoot);
+    relocated = relocatePromptPath(relocated, destinationArtifactDir, mirroredTaskArtifactDir);
     const encodedDestinationRoot = destinationRoot.replaceAll("'", `'"'"'`);
-    const encodedExpectedArtifactDir = expectedArtifactDir.replaceAll("'", `'"'"'`);
+    const encodedExpectedArtifactDir = mirroredTaskArtifactDir.replaceAll("'", `'"'"'`);
 
-    assert.ok(relocated.includes(expectedArtifactDir), `${label}: ${relocated}`);
+    assert.ok(relocated.includes(mirroredTaskArtifactDir), `${label}: ${relocated}`);
+    assert.ok(relocated.includes(expectedAuthority), `${label}: ${relocated}`);
+    assert.equal(relocated.includes(sourceRoot), false, label);
+    assert.doesNotMatch(relocated, /tasks\.json|execution-snapshots|\/controls\//u);
     assert.ok(
-      relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/workspaces/task-0`),
+      relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`),
       `${label}: ${relocated}`
     );
     assert.ok(relocated.includes(`--file '${encodedExpectedArtifactDir}/findings.json'`), `${label}: ${relocated}`);
-    assert.equal(relocated.includes(`--file '${encodedControllerRoot}/.ultrafuzz/runs/run-1/artifacts`), false, label);
+    assert.ok(
+      relocated.includes(
+        `ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedExpectedArtifactDir}/findings.json'`
+      ),
+      `${label}: ${relocated}`
+    );
+    assert.equal(relocated.includes(encodedSourceRoot), false, `${label}: stale encoded controller root`);
+    assert.equal(
+      relocated.includes(`'${encodedDestinationRoot}/.ultrafuzz/runs/run-1/artifacts`),
+      false,
+      `${label}: stale canonical artifact root`
+    );
+  }
+});
+
+test("generated prompt authority is derived from sealed controls immediately before each first generation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const runtimeImportStart = source.indexOf("const {", source.indexOf("await import(artifactsModule)"));
+  const runtimeImportEnd = source.indexOf("} = await import(runtimeModule);", runtimeImportStart);
+  const authorityStart = source.indexOf("const promptArtifactAuthoritySnapshotsByTask");
+  const authorityEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", authorityStart);
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
+  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const resetEnd = source.indexOf("\n\nfunction resetTaskArtifactContents", resetStart);
+  assert.ok(runtimeImportStart >= 0 && runtimeImportEnd > runtimeImportStart, source);
+  assert.ok(authorityStart >= 0 && authorityEnd > authorityStart, source);
+  assert.ok(agentStart >= 0 && agentEnd > agentStart, source);
+  assert.ok(resetStart >= 0 && resetEnd > resetStart, source);
+  const runtimeImport = source.slice(runtimeImportStart, runtimeImportEnd);
+  const authority = source.slice(authorityStart, authorityEnd);
+  const agent = source.slice(agentStart, agentEnd);
+  const reset = source.slice(resetStart, resetEnd);
+
+  for (const runtimeHelper of [
+    "derivePromptArtifactAuthority",
+    "parsePromptArtifactAuthorityBytes",
+    "serializePromptArtifactAuthority"
+  ]) {
+    assert.match(runtimeImport, new RegExp(`\\b${runtimeHelper}\\b`, "u"));
+  }
+  assert.match(authority, /PROMPT_ARTIFACT_AUTHORITY_DIRECTORY, `\$\{task\.attemptId\}\.json`/u);
+  assert.match(authority, /const manifestPath = path\.resolve\(task\.taskManifestPath\)/u);
+  assert.match(
+    authority,
+    /readBoundedRegularArtifactSnapshot\([\s\S]*?manifestPath[\s\S]*?MAX_SEALED_TASK_MANIFEST_BYTES[\s\S]*?true/u
+  );
+  assert.match(
+    authority,
+    /const admission = assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?derivePromptArtifactAuthority\(\{[\s\S]*?sealedTaskManifestBytes: manifest\.bytes,[\s\S]*?currentAttemptId: task\.attemptId,[\s\S]*?relocatedRunRoot: realpathSync\(task\.runRoot\),[\s\S]*?admittedDependencyArtifactDirs: admission\.directories,[\s\S]*?selectors[\s\S]*?\}\)/u
+  );
+  assert.match(
+    authority,
+    /const expected = serializePromptArtifactAuthority\(authority\);[\s\S]*?prepareTaskLocalAuthorityPath\(workspaceRoot, promptArtifactAuthorityRelativePath\(task\)\)[\s\S]*?writeFileDurable\(authorityPath, expected\)/u
+  );
+  assert.match(authority, /writeFileDurable\(authorityPath, expected\)/u);
+  assert.match(authority, /parsePromptArtifactAuthorityBytes\(captured\.bytes\)/u);
+  assert.match(authority, /captured\.bytes\.equals\(expected\)/u);
+  assert.match(authority, /sameImmutableFileIdentity\(captured\.identity, expected\.identity\)/u);
+  assert.match(authority, /captured\.bytes\.equals\(expected\.bytes\)/u);
+  assert.doesNotMatch(authority, /task\.metadata|task\.modelName|task\.workspacePath\s*[,}]/u);
+
+  assert.match(
+    reset,
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
+  );
+  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(attemptArgs)"));
+  assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)/u);
+  assert.match(
+    agent,
+    /else \{\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*\}/u
+  );
+  assert.match(
+    agent,
+    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+  );
+  assert.match(
+    agent,
+    /catch \(error\) \{\s*try \{\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\)/u
+  );
+  assert.equal(source.match(/materializePromptArtifactAuthority\(task\);/gu)?.length, 1);
+});
+
+test("generated immutable file identities preserve bigint device, inode, size, and nanosecond precision", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const identityStart = source.indexOf("type ImmutableFileIdentity");
+  const comparatorStart = source.indexOf("function sameImmutableFileIdentity", identityStart);
+  const comparatorEnd = source.indexOf("\n\nfunction decodeStrictUtf8Snapshot", comparatorStart);
+  assert.ok(identityStart >= 0 && comparatorStart > identityStart && comparatorEnd > comparatorStart, source);
+  const emitted = ts.transpileModule(source.slice(comparatorStart, comparatorEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const sameIdentity = new Function(`${emitted}; return sameImmutableFileIdentity;`)() as (
+    left: Record<string, bigint>,
+    right: Record<string, bigint>
+  ) => boolean;
+  const base = {
+    dev: 9_007_199_254_740_992n,
+    ino: 9_007_199_254_740_993n,
+    size: 9_007_199_254_740_994n,
+    mtimeNs: 9_007_199_254_740_995n,
+    ctimeNs: 9_007_199_254_740_996n
+  };
+
+  assert.equal(sameIdentity(base, { ...base }), true);
+  assert.equal(
+    sameIdentity(base, { ...base, ino: 9_007_199_254_740_992n }),
+    false,
+    "values that collapse to the same IEEE-754 number must remain distinguishable"
+  );
+  assert.match(source.slice(identityStart, comparatorEnd), /dev: bigint[\s\S]*ino: bigint[\s\S]*size: bigint/u);
+  assert.match(source, /statSync\(resolvedPath, \{ bigint: true \}\)/u);
+  assert.match(source, /before\.mtimeNs !== after\.mtimeNs/u);
+  assert.match(source, /before\.ctimeNs !== after\.ctimeNs/u);
+  assert.match(source, /BigInt\(bytes\.length\) !== after\.size/u);
+});
+
+test("generated task-local prompt authority is minimized, tamper-evident, and restored for retries", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-prompt-authority-"));
+  try {
+    const controllerRunRoot = path.join(root, "controller-host-private", ".ultrafuzz", "runs", "run-1");
+    const relocatedRunRoot = path.join(root, "execution-b", ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(relocatedRunRoot, "workspaces", "consumer");
+    const requiredDir = path.join(relocatedRunRoot, "artifacts", "required-producer");
+    const optionalDir = path.join(relocatedRunRoot, "artifacts", "optional-producer");
+    const controlsDir = path.join(root, "sealed-snapshot", "controls");
+    const taskManifestPath = path.join(controlsDir, "tasks.json");
+    for (const directory of [workspacePath, requiredDir, optionalDir, controlsDir]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+
+    const selectors: PromptArtifactAuthoritySelector[] = [
+      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
+      {
+        kind: "path",
+        id: promptArtifactAuthorityPathSelectorId(["findings.json"]),
+        paths: ["findings.json"]
+      }
+    ];
+    const manifest = promptAuthorityManifestFixture(controllerRunRoot, selectors);
+    const sealedManifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    writeFileDurable(taskManifestPath, sealedManifestBytes);
+    const task: GeneratedPromptArtifactAuthorityTask & { agentChain: [Record<string, never>] } = {
+      attemptId: "consumer",
+      runRoot: relocatedRunRoot,
+      taskManifestPath,
+      workspacePath,
+      promptArtifactAuthoritySelectors: selectors,
+      agentChain: [{}]
+    };
+    const harness = loadGeneratedPromptArtifactAuthorityHarness([requiredDir]);
+    const authorityPath = path.join(workspacePath, ".ultrafuzz", "authorities", "consumer.json");
+
+    harness.materialize(task);
+    assert.equal(harness.relativePath(task), ".ultrafuzz/authorities/consumer.json");
+    assert.equal(harness.path(task, fs.realpathSync(workspacePath)), authorityPath);
+    assert.equal(harness.derivationInputs.length, 1);
+    assert.equal(harness.derivationInputs[0]!.selectors, selectors);
+    assert.deepEqual(harness.derivationInputs[0]!.admittedDependencyArtifactDirs, [requiredDir]);
+    assert.deepEqual(Buffer.from(harness.derivationInputs[0]!.sealedTaskManifestBytes), sealedManifestBytes);
+
+    const originalBytes = fs.readFileSync(authorityPath);
+    const original = parsePromptArtifactAuthorityBytes(originalBytes);
+    assert.deepEqual(original.selectors, selectors);
+    assert.equal(original.artifact_path_base, fs.realpathSync(relocatedRunRoot));
+    assert.deepEqual(
+      original.producers.map((producer) => producer.attempt_id),
+      ["required-producer"]
+    );
+    assert.deepEqual(original.producers[0]?.outputs, [
+      { path: "findings.json", contract: "ultrafuzz/findings@2" },
+      { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }
+    ]);
+    const exposedJson = originalBytes.toString("utf8");
+    assert.equal(exposedJson.includes(controllerRunRoot), false);
+    assert.equal(exposedJson.includes(taskManifestPath), false);
+    assert.doesNotMatch(
+      exposedJson,
+      /controller-(?:host|model|reasoning)|private-profile|source_revision|source_ref|workspacePath|workspace_path|dependencyArtifactDirs|tasks\.json/u
+    );
+
+    harness.setAdmittedDependencyArtifactDirs([requiredDir, optionalDir]);
+    harness.materialize(task);
+    assert.deepEqual(
+      parsePromptArtifactAuthorityBytes(fs.readFileSync(authorityPath)).producers.map(
+        (producer) => producer.attempt_id
+      ),
+      ["optional-producer", "required-producer"]
+    );
+    harness.setAdmittedDependencyArtifactDirs([requiredDir]);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+
+    fs.writeFileSync(taskManifestPath, "{}\n", "utf8");
+    assert.throws(() => harness.materialize(task), /Smithers task manifest violates its registered schema/u);
+    assert.ok(harness.derivationInputs.length >= 4);
+    writeFileDurable(taskManifestPath, sealedManifestBytes);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+
+    const lifecycle: string[] = [];
+    let generation = 0;
+    const wrapped = loadArtifactAwareAgent({
+      onAuthorityCheck: () => {
+        lifecycle.push("check");
+        harness.assertUnchanged(task);
+      },
+      onReset: () => {
+        lifecycle.push("materialize");
+        harness.materialize(task);
+      },
+      onSourceVerify: () => lifecycle.push("source")
+    })(task, 0, "prompt", {
+      async generate(): Promise<unknown> {
+        generation += 1;
+        lifecycle.push(`generate-${generation}`);
+        assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+        if (generation === 3) throw new Error("provider failed after reading exact authority");
+        return { summary: `generation-${generation}` };
+      }
+    });
+    assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), { summary: "generation-1" });
+    assert.deepEqual(
+      await wrapped.generate({
+        messages: [{ role: "user", content: "correct the schema" }],
+        taskContext: { attempt: 1 }
+      }),
+      { summary: "generation-2" }
+    );
+    await assert.rejects(
+      () => wrapped.generate({ taskContext: { attempt: 2 } }),
+      /provider failed after reading exact authority/u
+    );
+    assert.deepEqual(lifecycle, [
+      "source",
+      "materialize",
+      "generate-1",
+      "check",
+      "check",
+      "generate-2",
+      "check",
+      "source",
+      "materialize",
+      "generate-3",
+      "check"
+    ]);
+
+    const tamperedDocument = structuredClone(original) as PromptArtifactAuthorityDocument;
+    tamperedDocument.run_id = "tampered-run";
+    const tamperedBytes = serializePromptArtifactAuthority(tamperedDocument);
+    for (const outcome of ["success", "failure", "schema-correction"] as const) {
+      let calls = 0;
+      const tamperAware = loadArtifactAwareAgent({
+        onAuthorityCheck: () => harness.assertUnchanged(task),
+        onReset: () => harness.materialize(task)
+      })(task, 0, "prompt", {
+        async generate(): Promise<unknown> {
+          calls += 1;
+          const shouldTamper = outcome !== "schema-correction" || calls === 2;
+          if (shouldTamper) fs.writeFileSync(authorityPath, tamperedBytes);
+          if (outcome === "failure") throw new Error("provider failure must not hide authority tampering");
+          return { summary: "candidate" };
+        }
+      });
+      if (outcome === "schema-correction") {
+        assert.deepEqual(await tamperAware.generate({ taskContext: { attempt: 1 } }), { summary: "candidate" });
+      }
+      await assert.rejects(
+        () =>
+          tamperAware.generate({
+            ...(outcome === "schema-correction" ? { messages: [{ role: "user", content: "schema correction" }] } : {}),
+            taskContext: { attempt: 1 }
+          }),
+        /prompt artifact authority was modified consumer/u,
+        outcome
+      );
+    }
+
+    harness.materialize(task);
+    fs.writeFileSync(authorityPath, tamperedBytes);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority was modified consumer/u);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes, "retry rematerialization restores exact bytes");
+
+    const identicalReplacementPath = path.join(workspacePath, ".ultrafuzz", "identical-authority.json");
+    fs.writeFileSync(identicalReplacementPath, originalBytes);
+    fs.renameSync(identicalReplacementPath, authorityPath);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    assert.throws(
+      () => harness.assertUnchanged(task),
+      /prompt artifact authority was modified consumer/u,
+      "an identical-byte inode replacement must not preserve authority"
+    );
+    harness.materialize(task);
+
+    fs.rmSync(authorityPath);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
+    harness.materialize(task);
+    const linkedAuthorityTarget = path.join(workspacePath, ".ultrafuzz", "linked-authority.json");
+    fs.writeFileSync(linkedAuthorityTarget, originalBytes);
+    fs.rmSync(authorityPath);
+    fs.symlinkSync(linkedAuthorityTarget, authorityPath);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    assert.equal(fs.lstatSync(authorityPath).isSymbolicLink(), false);
+
+    for (const directoryContents of [undefined, "hostile/retained.txt"] as const) {
+      fs.rmSync(authorityPath);
+      fs.mkdirSync(authorityPath);
+      if (directoryContents !== undefined) {
+        const retainedPath = path.join(authorityPath, ...directoryContents.split("/"));
+        fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
+        fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
+      }
+      harness.materialize(task);
+      assert.equal(fs.lstatSync(authorityPath).isFile(), true);
+      assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+      assert.doesNotThrow(() => harness.assertUnchanged(task));
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -4977,6 +6925,39 @@ test("agent preflight failures redact configured credentials without retaining t
   });
 });
 
+test("agent preflight and generation share one lazily admitted agent instance", async () => {
+  let metadataPreflights = 0;
+  let admittedFactories = 0;
+  let admittedPreflights = 0;
+  let admittedGenerations = 0;
+  const metadataAgent = {
+    preflight: async () => {
+      metadataPreflights += 1;
+    },
+    generate: async () => ({ summary: "metadata agent must not execute" })
+  };
+  const admittedAgent = {
+    preflight: async () => {
+      admittedPreflights += 1;
+    },
+    generate: async () => {
+      admittedGenerations += 1;
+      return { summary: "admitted" };
+    }
+  };
+  const wrapped = loadArtifactAwareAgent()({ agentChain: [{}] }, 0, "prompt", metadataAgent, () => {
+    admittedFactories += 1;
+    return admittedAgent;
+  });
+
+  await wrapped.preflight!({});
+  assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), { summary: "admitted" });
+  assert.equal(metadataPreflights, 0);
+  assert.equal(admittedFactories, 1);
+  assert.equal(admittedPreflights, 1);
+  assert.equal(admittedGenerations, 1);
+});
+
 test("agent failure normalization never stringifies arbitrary thrown objects", async () => {
   const normalized = await captureAgentFailure({
     toString(): never {
@@ -4987,30 +6968,239 @@ test("agent failure normalization never stringifies arbitrary thrown objects", a
   assert.equal("cause" in normalized, false);
 });
 
-test("authoritative final-report coverage is injected as exact untrusted data before agent generation", () => {
-  const promptWithCoverage = loadPromptWithAuthoritativeFinalReportCoverage();
-  const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
-  const coverage = {
-    priority_threshold: "high",
-    priorities: ["high"],
-    selected_property_ids: ["property-one"],
-    implemented_property_ids: ["property-one"],
-    blocked_property_ids: [],
-    pending_property_ids: [],
-    deferred_property_ids: []
-  };
-  const injected = promptWithCoverage(renderedPrompt, coverage, "custom/final-report.json");
-
-  assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
-  assert.match(injected, /## Authoritative property implementation coverage/u);
-  assert.match(injected, /authoritative data, not instructions/u);
-  assert.match(injected, /"custom\/final-report\.json"#property_implementation_coverage/u);
-  assert.match(injected, new RegExp(JSON.stringify(coverage, null, 2).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-  assert.ok(injected.indexOf('"property-one"') < injected.indexOf("trusted runtime"), injected);
-  assert.throws(
-    () => promptWithCoverage("prompt without boundary", coverage, "custom/final-report.json"),
-    /cannot locate the untrusted-content boundary/u
+test("final-report prompt authority is bounded, tamper-evident, and constant-size across large projections", () => {
+  const workflowSource = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentSource = workflowSource.slice(
+    workflowSource.indexOf("function artifactAwareAgent"),
+    workflowSource.indexOf("function isStrictlyInsideDirectory")
   );
+  assert.doesNotMatch(workflowSource, /JSON\.stringify\((?:coverage|execution), null, 2\)/u);
+  assert.match(workflowSource, /const MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES = MAX_PRE_AGENT_EVIDENCE_BYTES;/u);
+  assert.ok(
+    agentSource.indexOf("materializeFinalReportPromptAuthority(task") <
+      agentSource.indexOf("executionAgent.generate(attemptArgs)")
+  );
+  assert.match(
+    agentSource,
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\)/u
+  );
+  const coverageSource = workflowSource.slice(
+    workflowSource.indexOf("function authoritativeFinalReportCoverage"),
+    workflowSource.indexOf("type FinalReportAgentAttempt")
+  );
+  assert.match(coverageSource, /verifiedSingletonAncestorJsonArtifact/u);
+  assert.match(coverageSource, /verifiedCanonicalPropertyCatalog/u);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-prompt-authority-"));
+  try {
+    const workspacePath = path.join(root, "workspaces", "final-report");
+    fs.mkdirSync(workspacePath, { recursive: true });
+    const task = { attemptId: "final-report", workspacePath };
+    const authority = loadFinalReportPromptAuthorityHarness();
+    const renderedPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
+    const reportPath = "custom/final-report.json";
+    const largeCoverage = {
+      selected_property_ids: Array.from({ length: 10_000 }, (_, index) => `property-${index}`),
+      blocker_summaries: Array.from({ length: 1_000 }, (_, index) => `property-${index}: blocked`)
+    };
+    const attempts = Array.from({ length: 100 }, (_, index) => ({
+      attempt: index + 1,
+      profile_id: `profile-${index}`,
+      agent_ref: "CodexAgent",
+      model_name: "gpt-test",
+      role: index === 0 ? "primary" : "fallback"
+    }));
+    const largeExecution = {
+      planned_chain: attempts,
+      failed_attempts: attempts.slice(0, -1),
+      producer: attempts.at(-1)
+    };
+
+    authority.materialize(task, largeCoverage, largeExecution);
+    const relativePath = authority.relativePath(task);
+    assert.equal(relativePath, ".ultrafuzz/authorities/final-report.final-report-prompt.json");
+    const authorityPath = path.join(workspacePath, ...relativePath.split("/"));
+    assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), {
+      schema_version: "ultrafuzz.final-report-prompt-authority.v1",
+      property_implementation_coverage: largeCoverage,
+      agent_execution: largeExecution
+    });
+
+    const injected = authority.prompt(renderedPrompt, relativePath, reportPath);
+    assert.ok(injected.startsWith("trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\n"), injected);
+    assert.match(injected, /## Authoritative final-report data/u);
+    assert.match(injected, /bounded host-generated JSON object/u);
+    assert.match(injected, /final-report\.final-report-prompt\.json/u);
+    assert.match(injected, /property_implementation_coverage/u);
+    assert.match(injected, /run_metadata\.agent_execution/u);
+    assert.doesNotMatch(injected, /property-9999|profile-99/u);
+    assert.ok(Buffer.byteLength(injected) - Buffer.byteLength(renderedPrompt) < 1_500, injected);
+    assert.equal(authority.prompt(renderedPrompt, relativePath, reportPath), injected);
+    authority.assertUnchanged(task);
+
+    fs.writeFileSync(authorityPath, '{"forged":true}\n', "utf8");
+    assert.throws(() => authority.assertUnchanged(task), /final-report prompt authority was modified/u);
+    authority.materialize(task, largeCoverage, largeExecution);
+    authority.assertUnchanged(task);
+
+    const tinyBudgetAuthority = loadFinalReportPromptAuthorityHarness(1_024);
+    assert.throws(
+      () => tinyBudgetAuthority.materialize(task, { oversized: "x".repeat(1_024) }, largeExecution),
+      /final-report prompt authority exceeds its byte budget/u
+    );
+    assert.throws(
+      () => authority.prompt("prompt without boundary", relativePath, reportPath),
+      /cannot locate the untrusted-content boundary/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("final-report repository normalization strips private URL suffixes and rejects ambiguous remotes", () => {
+  const normalize = loadFinalReportRunMetadataAuthorityHarness().normalize;
+  const canonical = "https://github.com/example/project";
+  for (const remote of [
+    "https://github.com/example/project.git?session=private-id",
+    "https://github.com/example/project.git#private-fragment",
+    "https://github.com/example/project?session=private-id#private-fragment",
+    "ssh://git@github.com/example/project.git#private-fragment",
+    "git@github.com:example/project.git?session=private-id"
+  ]) {
+    const normalized = normalize(remote);
+    assert.equal(normalized, canonical, remote);
+    assert.equal(normalized.includes("private-id"), false, remote);
+    assert.equal(normalized.includes("private-fragment"), false, remote);
+  }
+
+  for (const remote of [
+    "https://credential@github.com/example/project.git?session=private-id",
+    "https://credential:secret@github.com/example/project.git",
+    "ssh://other-user@github.com/example/project.git",
+    "https://github.com:443/example/project.git",
+    "https://github.com/example/project.git/private-id",
+    "https://github.com/example%2fprivate/project.git",
+    "https://github.com/example/project%2fprivate.git",
+    "https://github.com.evil/example/project.git",
+    "https://github.com/example/../private.git",
+    "github.com/example/project.git"
+  ]) {
+    assert.equal(normalize(remote), "unavailable", remote);
+  }
+});
+
+test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-run-summary-"));
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(runRoot, "workspaces", "final-report");
+    fs.mkdirSync(workspacePath, { recursive: true });
+    const metadata = {
+      schema_version: "ultrafuzz.run-metadata.v2",
+      run_id: "run-1",
+      source_run_id: "source-run",
+      created_at: "2026-08-20T00:00:00.000Z",
+      mode: "run",
+      workflow_ids: [],
+      redacted_config_fingerprint: "1".repeat(64),
+      prompt_digest: "2".repeat(64),
+      forge_guard: {
+        enabled: true,
+        active: true,
+        virtual_memory_limit_kb: 1_048_576,
+        rayon_threads: 4
+      },
+      audit_profile: {
+        requested: "full",
+        effective: "full",
+        catalog_schema_version: 1,
+        settings: { controller_private_setting: "must-not-project" },
+        catalog_digest: "3".repeat(64),
+        effective_topology_path: "private/controller/topology.yml",
+        topology_path_origin: "audit-profile",
+        topology_digest: "4".repeat(64),
+        prompt_digest: "5".repeat(64),
+        expanded_graph_fingerprint: "6".repeat(64),
+        effective_settings: { strategy_loops: 3, private_model_chain: ["must-not-project"] },
+        setting_origins: { strategy_loops: "audit-profile" },
+        overridden_settings: [],
+        topology_overridden: false
+      }
+    };
+    fs.writeFileSync(path.join(runRoot, "run.json"), `${JSON.stringify(metadata)}\n`, "utf8");
+    const task = {
+      attemptId: "final-report",
+      runRoot,
+      workspacePath,
+      metadata: { run: { ultrafuzzRunId: "run-1" } },
+      outputs: [
+        { path: "custom/report.json", contract: "ultrafuzz/report@3" },
+        { path: "custom/report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+      ]
+    };
+    const authority = loadFinalReportRunMetadataAuthorityHarness();
+    authority.materialize(task);
+
+    const relativePath = ".ultrafuzz/authorities/final-report.final-report-run-metadata.json";
+    const authorityPath = path.join(workspacePath, ...relativePath.split("/"));
+    assert.equal(authority.relativePath(task), relativePath);
+    const projection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(projection, {
+      run_id: "run-1",
+      source_run_id: "source-run",
+      repository: "https://github.com/example/project",
+      elapsed_time: "unavailable",
+      models_used: [],
+      tokens_used: "unavailable",
+      estimated_spend: "unavailable",
+      partial_pricing: false,
+      strategy_loops: 3,
+      audit_profile: "full",
+      audit_profile_catalog_digest: "3".repeat(64),
+      topology_digest: "4".repeat(64),
+      prompt_digest: "5".repeat(64),
+      expanded_graph_fingerprint: "6".repeat(64)
+    });
+    assert.equal(JSON.stringify(projection).includes("must-not-project"), false);
+    assert.equal(JSON.stringify(projection).includes("private-id"), false);
+    assert.deepEqual(authority.authoritative(task), projection);
+    assert.doesNotThrow(() => authority.assertUnchanged(task));
+
+    const prompt = authority.prompt(
+      "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task",
+      relativePath,
+      "custom/report.json"
+    );
+    assert.ok(prompt.indexOf(relativePath) < prompt.indexOf("trusted runtime"), prompt);
+    assert.match(prompt, /bounded host-generated JSON object/u);
+    assert.match(prompt, /add only agent_execution from the separate final-report data authority/u);
+    assert.equal(prompt.includes('"models_used"'), false, "projection arrays must not expand into the prompt");
+    assert.equal(prompt.includes("must-not-project"), false);
+
+    fs.writeFileSync(authorityPath, `${JSON.stringify({ ...projection, repository: "tampered" })}\n`, "utf8");
+    assert.throws(() => authority.assertUnchanged(task), /run metadata authority was modified/u);
+    authority.materialize(task);
+    assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
+    assert.doesNotThrow(() => authority.assertUnchanged(task));
+
+    for (const directoryContents of [undefined, "nested/retained.txt"] as const) {
+      fs.rmSync(authorityPath);
+      fs.mkdirSync(authorityPath);
+      if (directoryContents !== undefined) {
+        const retainedPath = path.join(authorityPath, ...directoryContents.split("/"));
+        fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
+        fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
+      }
+      authority.materialize(task);
+      assert.equal(fs.lstatSync(authorityPath).isFile(), true);
+      assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
+      assert.doesNotThrow(() => authority.assertUnchanged(task));
+    }
+
+    const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
+    assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata is invalid/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("final-report provenance seals the planned retry chain, failed attempts, and actual producer", () => {
@@ -5145,15 +7335,14 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   assert.match(source, /detail\.ok === true && isPlainJsonRecord\(detail\.data\)/u);
   assert.match(source, /finalReportAgentExecutionAuthority\.get\(task\.attemptId\)/u);
 
-  const promptWithExecution = loadPromptWithAuthoritativeFinalReportAgentExecution();
+  const promptWithAuthority = loadPromptWithAuthoritativeFinalReportPromptAuthority();
   const originalPrompt = "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task";
-  const execution = executionFor(task, 2);
-  const firstAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
-  const fallbackAttemptPrompt = promptWithExecution(originalPrompt, execution, "report.json");
+  const authorityPath = ".ultrafuzz/authorities/final-report.final-report-prompt.json";
+  const firstAttemptPrompt = promptWithAuthority(originalPrompt, authorityPath, "report.json");
+  const fallbackAttemptPrompt = promptWithAuthority(originalPrompt, authorityPath, "report.json");
   assert.equal(fallbackAttemptPrompt, firstAttemptPrompt);
-  assert.match(firstAttemptPrompt, /controller-derived data/u);
-  assert.match(firstAttemptPrompt, /"profile_id": "gpt55-xhigh"/u);
-  assert.match(firstAttemptPrompt, /"failed_attempts"/u);
+  assert.match(firstAttemptPrompt, /bounded host-generated JSON object/u);
+  assert.doesNotMatch(firstAttemptPrompt, /gpt55-xhigh|failed_attempts/u);
 });
 
 test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
@@ -5239,8 +7428,11 @@ test("generated retries do not inspect or inject previous failure text", () => {
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
   assert.match(agent, /lastHeartbeat: undefined/u);
-  assert.match(agent, /messages: _priorMessages/u);
-  assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
+  assert.match(agent, /Reflect\.deleteProperty\(freshArgs, "messages"\)/u);
+  assert.match(
+    agent,
+    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+  );
 });
 
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
@@ -5305,7 +7497,7 @@ test("generated Smithers resets exact task-owned artifact contents before every 
   const agent = source.slice(agentStart, rootsStart);
   assert.match(agent, /if \(firstGenerationForAttempt\)/u);
   assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("return await agent.generate(attemptArgs)"),
+    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(attemptArgs)"),
     agent
   );
 
@@ -5336,6 +7528,7 @@ test("generated Smithers resets exact task-owned artifact contents before every 
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
   assert.match(reset, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\)/u);
+  assert.match(reset, /materializePromptArtifactAuthority\(task\)/u);
   assert.match(reset, /WORKSPACE_PATCH_BASELINE_FILE/u);
 });
 
@@ -5398,7 +7591,7 @@ test("post-agent snapshot restoration keeps modified, deleted, and new source st
   }
 });
 
-test("generated Smithers agent boundary performs no post-completion artifact work", () => {
+test("generated Smithers agent boundary performs only task-local authority checks after completion", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
   const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
@@ -5407,7 +7600,10 @@ test("generated Smithers agent boundary performs no post-completion artifact wor
   assert.ok(agentEnd > agentStart, source);
 
   const agent = source.slice(agentStart, agentEnd);
-  assert.match(agent, /return await agent\.generate\(attemptArgs\)/u);
+  assert.match(
+    agent,
+    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+  );
   assert.doesNotMatch(
     agent,
     /prepareArtifactMirror|materializeMissing|normalizeLegacy|materializeGeneratedTestCompanions|verifyArtifacts/u
@@ -5464,6 +7660,7 @@ test("generated Smithers verifier treats the final-report projector only as a no
   const verifier = source.slice(verifierStart, verifierEnd);
 
   assert.match(verifier, /authoritativeFinalReportCoverage\(task\)/u);
+  assert.match(verifier, /authoritativeFinalReportRunMetadata\(task\)/u);
   assert.match(verifier, /projectCanonicalFinalReport\(report\.value\)/u);
   assert.match(verifier, /isDeepStrictEqual\(projection\.report, report\.value\)/u);
   assert.match(verifier, /markdown\.file\.bytes\.equals\(Buffer\.from\(projection\.markdown, "utf8"\)\)/u);
@@ -5471,7 +7668,6 @@ test("generated Smithers verifier treats the final-report projector only as a no
   assert.doesNotMatch(verifier, /writeFile|writeJson|rename|unlink|rmSync/u);
   assert.doesNotMatch(source, /ultrafuzz\/implemented-properties@1|ultrafuzz\/implemented-properties@2/u);
   assert.match(source, /status: "not-planned",\s+reason: "property-implementation-track-not-declared"/u);
-  assert.doesNotMatch(source, /return "unavailable"/u);
 });
 
 const FINAL_REPORT_AGENT_EXECUTION_FIXTURE = {
@@ -5480,13 +7676,30 @@ const FINAL_REPORT_AGENT_EXECUTION_FIXTURE = {
   producer: { attempt: 1, profile_id: "default", agent_ref: "CodexAgent", role: "primary" }
 };
 
+const FINAL_REPORT_RUN_METADATA_FIXTURE = {
+  run_id: "run-1",
+  source_run_id: "none",
+  repository: "https://github.com/example/project",
+  elapsed_time: "1m 00s",
+  models_used: ["model-a"],
+  tokens_used: "100",
+  estimated_spend: "$0.01",
+  partial_pricing: false,
+  strategy_loops: 1,
+  audit_profile: "full",
+  audit_profile_catalog_digest: "a".repeat(64),
+  topology_digest: "b".repeat(64),
+  prompt_digest: "c".repeat(64),
+  expanded_graph_fingerprint: "d".repeat(64)
+};
+
 function loadFinalReportCanonicalProjectionHarness(): (
   task: { outputs: Array<{ path: string; contract: string }> },
   verifiedOutputs: ReadonlyMap<string, { value: unknown; file: { bytes: Buffer } }>
 ) => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const declarationStart = source.indexOf("function declaredFinalReportOutputPair");
-  const declarationEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", declarationStart);
+  const declarationEnd = source.indexOf("\n\ntype FinalReportRunMetadataProjection", declarationStart);
   const verifierStart = source.indexOf("function isPlainJsonRecord");
   const verifierEnd = source.indexOf("\n\nfunction readInvariantSourceSnapshot", verifierStart);
   assert.ok(declarationStart >= 0 && declarationEnd > declarationStart, source);
@@ -5500,6 +7713,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     "isDeepStrictEqual",
     "projectCanonicalFinalReport",
     "authoritativeFinalReportAgentExecution",
+    "authoritativeFinalReportRunMetadata",
     "Buffer",
     `${emitted}; return verifyFinalReportCanonicalProjection;`
   )(
@@ -5507,6 +7721,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     isDeepStrictEqual,
     (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
     () => FINAL_REPORT_AGENT_EXECUTION_FIXTURE,
+    () => FINAL_REPORT_RUN_METADATA_FIXTURE,
     Buffer
   ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
 }
@@ -5520,7 +7735,7 @@ test("generated canonical report verification selects renamed producers and cust
     ]
   };
   const report = {
-    run_metadata: { agent_execution: FINAL_REPORT_AGENT_EXECUTION_FIXTURE },
+    run_metadata: { ...FINAL_REPORT_RUN_METADATA_FIXTURE, agent_execution: FINAL_REPORT_AGENT_EXECUTION_FIXTURE },
     property_implementation_coverage: {
       status: "not-planned",
       reason: "property-implementation-track-not-declared"
@@ -5537,6 +7752,18 @@ test("generated canonical report verification selects renamed producers and cust
   ]);
 
   assert.doesNotThrow(() => verifyProjection(task, verified));
+
+  const rewrittenRunMetadata = structuredClone(report);
+  rewrittenRunMetadata.run_metadata.repository = "https://github.com/forged/project";
+  const withRewrittenRunMetadata = new Map(verified);
+  withRewrittenRunMetadata.set("deliverables/security-audit.json", {
+    value: rewrittenRunMetadata,
+    file: { bytes: Buffer.from("rewritten JSON") }
+  });
+  assert.throws(
+    () => verifyProjection(task, withRewrittenRunMetadata),
+    /run_metadata differs from the authoritative sanitized projection/u
+  );
 
   const withoutDeclaredMarkdown = new Map(verified);
   withoutDeclaredMarkdown.delete("deliverables/security-audit.md");
@@ -5870,7 +8097,7 @@ test("generated Smithers verifier publishes the complete validated set before ta
   );
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
-      verifier.indexOf("return { artifacts, primary_artifact: primary.path }")
+      verifier.indexOf("const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications)")
   );
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
@@ -5901,7 +8128,7 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
   assert.match(source, /verifiedDependencySnapshot\(task, dependency, producer\)/u);
   assert.match(source, /artifacts: authenticatedArtifacts/u);
-  assert.match(source, /markerBytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
+  assert.match(source, /marker:\s*Object\.freeze\(\{[\s\S]*?bytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
   assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
   assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
   assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
@@ -6082,7 +8309,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   ) => {
     attemptId: string;
     artifactDir: string;
-    markerBytes: Buffer;
+    marker: { path: string; bytes: Buffer; identity: Record<string, bigint> };
     artifacts: ReadonlyMap<string, { contract: string; bytes: Buffer; value: unknown }>;
     publications: ReadonlyMap<string, string>;
     generatedTestBundles: ReadonlyArray<{ framework: string; entries: readonly unknown[] }>;

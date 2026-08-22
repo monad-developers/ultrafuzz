@@ -40,9 +40,11 @@ const WORKFLOW_CONTROL_LOCK = ".workflow-control";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const BUN_MODULE_CONFINEMENT_PATH = "controls/bun-module-confinement.js";
+const BUN_EMPTY_ENVIRONMENT_PATH = "controls/bun-empty.env";
 export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot, descriptorRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"); plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: outside, namespace: "file" }, () => { if (fs.realpathSync(sourceRoot) !== physicalRoot || fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); throw new Error("workflow controller module resolved outside its sealed snapshot"); }); } });\n`;
 const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
   [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE),
+  [BUN_EMPTY_ENVIRONMENT_PATH]: Buffer.from("\n"),
   "controls/bunfig.toml": Buffer.from("\n")
 };
 

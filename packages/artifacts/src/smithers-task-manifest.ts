@@ -1,5 +1,6 @@
 import {
   ARTIFACT_CONTRACT_IDS,
+  isArtifactContractId,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
@@ -7,17 +8,22 @@ import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primit
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
+import {
+  MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
+  MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
+  promptArtifactAuthorityPathSelectorId
+} from "./prompt-artifact-authority-selectors.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v4" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v3" as const;
 export const SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:smithers-task-manifest:4" as const;
+export const MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES = 64 * 1024 * 1024;
 
 const MAX_SMITHERS_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASKS = 100_000;
 const SAFE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
 const EXPANDED_NODE_ID_PATTERN = "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$";
-const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
@@ -26,6 +32,7 @@ const ENVIRONMENT_VARIABLE_PATTERN = "^[A-Za-z_][A-Za-z0-9_]{0,127}$";
 const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const RUN_SOURCE_REF = /^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u;
+const CANONICAL_ARTIFACT_RELATIVE_PATH = new RegExp(CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN, "u");
 const SCHEMA_BINDING_FIELDS = [
   "schemaFile",
   "schemaId",
@@ -62,6 +69,37 @@ const pinnedSubmodulePathJsonSchema = {
     "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
 } as const;
 
+const canonicalArtifactRelativePathJsonSchema = {
+  type: "string",
+  pattern: CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN
+} as const;
+
+const canonicalArtifactRelativePathJsonSchemaRef = {
+  $ref: "#/$defs/canonicalArtifactRelativePath"
+} as const;
+
+const boundedNonNulPathJsonSchemaRef = {
+  $ref: "#/$defs/boundedNonNulPath"
+} as const;
+
+const safeIdJsonSchema = {
+  type: "string",
+  pattern: SAFE_ID_PATTERN
+} as const;
+
+const safeIdJsonSchemaRef = {
+  $ref: "#/$defs/safeId"
+} as const;
+
+const sha256JsonSchema = {
+  type: "string",
+  pattern: SHA256_PATTERN
+} as const;
+
+const sha256JsonSchemaRef = {
+  $ref: "#/$defs/sha256"
+} as const;
+
 const pinnedSubmoduleGitlinkJsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -91,7 +129,7 @@ const pinnedSubmoduleExpectationJsonSchema = {
     schema_version: { const: "ultrafuzz.pinned-submodules-expectation.v1" },
     source_commit: { type: "string", pattern: GIT_OBJECT_PATTERN },
     source_tree: { type: "string", pattern: GIT_OBJECT_PATTERN },
-    manifest_sha256: { type: "string", pattern: SHA256_PATTERN },
+    manifest_sha256: sha256JsonSchemaRef,
     top_level_roots: {
       type: "array",
       minItems: 1,
@@ -126,7 +164,7 @@ const expandedOutputJsonSchema = {
   additionalProperties: false,
   required: ["path", "contract", "contractDigest", "primary"],
   properties: {
-    path: { type: "string", pattern: SAFE_PATH_PATTERN },
+    path: canonicalArtifactRelativePathJsonSchemaRef,
     contract: { enum: ARTIFACT_CONTRACT_IDS },
     contractDigest: { type: "string", pattern: SHA256_PATTERN },
     schemaFile: { type: "string", pattern: SCHEMA_FILE_PATTERN },
@@ -207,6 +245,52 @@ const taskAgentChainEntryJsonSchema = {
     modelName: nonEmptyStringJsonSchema,
     reasoningEffort: nonEmptyStringJsonSchema,
     role: { enum: ["primary", "fallback"] }
+  }
+} as const;
+
+const promptArtifactAuthoritySelectorJsonSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "contract"],
+      properties: {
+        kind: { const: "contract" },
+        contract: { enum: ARTIFACT_CONTRACT_IDS }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "id", "paths"],
+      properties: {
+        kind: { const: "path" },
+        id: { type: "string", pattern: SHA256_PATTERN },
+        paths: {
+          type: "array",
+          minItems: 1,
+          maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
+          uniqueItems: true,
+          items: canonicalArtifactRelativePathJsonSchemaRef
+        }
+      }
+    }
+  ]
+} as const;
+
+const referenceArtifactManifestAuthorityJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["attemptId", "artifactDir", "sizeBytes", "sha256"],
+  properties: {
+    attemptId: safeIdJsonSchemaRef,
+    artifactDir: boundedNonNulPathJsonSchemaRef,
+    sizeBytes: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES
+    },
+    sha256: sha256JsonSchemaRef
   }
 } as const;
 
@@ -374,6 +458,12 @@ export const smithersTaskManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID,
   title: "Ultrafuzz sealed Smithers task manifest",
+  $defs: {
+    canonicalArtifactRelativePath: canonicalArtifactRelativePathJsonSchema,
+    boundedNonNulPath: safePathValueJsonSchema,
+    safeId: safeIdJsonSchema,
+    sha256: sha256JsonSchema
+  },
   type: "object",
   additionalProperties: false,
   required: ["schema_version", "run_id", "smithers_run_id", "workflow_name", "pinned_submodules", "tasks"],
@@ -413,7 +503,7 @@ export const smithersTaskManifestJsonSchema = {
           "metadata"
         ],
         properties: {
-          attemptId: { type: "string", pattern: SAFE_ID_PATTERN },
+          attemptId: safeIdJsonSchemaRef,
           concreteNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
           logicalNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
           preparationSmithersNodeId: {
@@ -463,7 +553,26 @@ export const smithersTaskManifestJsonSchema = {
           dependencyArtifactDirs: {
             type: "array",
             uniqueItems: true,
-            items: safePathValueJsonSchema
+            items: boundedNonNulPathJsonSchemaRef
+          },
+          referenceArtifactManifestAuthorities: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_SMITHERS_TASKS,
+            uniqueItems: true,
+            items: referenceArtifactManifestAuthorityJsonSchema
+          },
+          optionalDependencyArtifactDirs: {
+            type: "array",
+            uniqueItems: true,
+            items: boundedNonNulPathJsonSchemaRef
+          },
+          promptArtifactAuthoritySelectors: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
+            uniqueItems: true,
+            items: promptArtifactAuthoritySelectorJsonSchema
           },
           renderedPromptPath: safePathValueJsonSchema,
           execution: taskExecutionJsonSchema,
@@ -580,6 +689,16 @@ export interface SmithersTaskManifestAgentChainEntry {
   role: "primary" | "fallback";
 }
 
+export type SmithersTaskManifestPromptArtifactAuthoritySelector =
+  { kind: "contract"; contract: ArtifactContractId } | { kind: "path"; id: string; paths: readonly string[] };
+
+export interface SmithersTaskManifestReferenceArtifactManifestAuthority {
+  attemptId: string;
+  artifactDir: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
 export interface SmithersTaskManifestTask {
   attemptId: string;
   concreteNodeId: string;
@@ -605,6 +724,12 @@ export interface SmithersTaskManifestTask {
   workspacePath: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
+  /** Stable byte authorities for every transitive reference ancestor's outer artifact manifest. */
+  referenceArtifactManifestAuthorities?: SmithersTaskManifestReferenceArtifactManifestAuthority[];
+  /** Exact subset whose producer group uses failure_policy=continue. */
+  optionalDependencyArtifactDirs?: string[];
+  /** Canonical union of compact ancestor-output selectors used by the rendered prompt. */
+  promptArtifactAuthoritySelectors?: SmithersTaskManifestPromptArtifactAuthoritySelector[];
   renderedPromptPath?: string;
   execution: SmithersTaskManifestExecution;
   metadata: SmithersTaskManifestMetadata;
@@ -780,6 +905,8 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
     ) {
       throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched execution metadata`);
     }
+    assertReferenceArtifactManifestAuthorities(task);
+    assertPromptArtifactAuthoritySelectors(task);
   }
 
   for (const task of manifest.tasks) {
@@ -806,6 +933,20 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       }
       if (dependencyAttemptId === task.attemptId) {
         throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} depends on itself`);
+      }
+    }
+    for (const optionalDirectory of task.optionalDependencyArtifactDirs ?? []) {
+      if (!task.dependencyArtifactDirs.includes(optionalDirectory)) {
+        throw new Error(
+          `Smithers task ${JSON.stringify(task.attemptId)} optional dependency directory is absent from its ancestor closure`
+        );
+      }
+      const optionalAttemptId = optionalDirectory.split(/[\\/]/u).at(-1);
+      const optionalTask = optionalAttemptId === undefined ? undefined : byAttemptId.get(optionalAttemptId);
+      if (optionalTask === undefined || optionalTask.artifactDir !== optionalDirectory) {
+        throw new Error(
+          `Smithers task ${JSON.stringify(task.attemptId)} optional dependency directory has no exact producer`
+        );
       }
     }
   }
@@ -846,6 +987,109 @@ function assertPinnedSubmoduleExpectation(manifest: SmithersTaskManifestDocument
   }
 }
 
+function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask): void {
+  const selectors = task.promptArtifactAuthoritySelectors;
+  if (selectors === undefined) return;
+  if (selectors.length === 0 || selectors.length > MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS) {
+    throw new Error(
+      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors must be non-empty and bounded`
+    );
+  }
+  let totalPaths = 0;
+  const keys = selectors.map((selector) => {
+    if (selector.kind === "contract") {
+      if (!isArtifactContractId(selector.contract)) {
+        throw new Error(
+          `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selector has an unknown contract`
+        );
+      }
+      return `contract\u0000${selector.contract}`;
+    }
+    if (
+      selector.kind !== "path" ||
+      !/^[0-9a-f]{64}$/u.test(selector.id) ||
+      !Array.isArray(selector.paths) ||
+      selector.paths.length === 0
+    ) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority path selector is invalid`
+      );
+    }
+    totalPaths += selector.paths.length;
+    if (totalPaths > MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority has too many selected paths`
+      );
+    }
+    if (
+      selector.paths.some((selectedPath) => !CANONICAL_ARTIFACT_RELATIVE_PATH.test(selectedPath)) ||
+      new Set(selector.paths).size !== selector.paths.length ||
+      selector.paths.some(
+        (selectedPath, index) => index > 0 && selector.paths[index - 1]!.localeCompare(selectedPath) >= 0
+      )
+    ) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority paths are not unique and canonically ordered`
+      );
+    }
+    if (selector.id !== promptArtifactAuthorityPathSelectorId(selector.paths)) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority path selector ID does not match its paths`
+      );
+    }
+    return `path\u0000${selector.id}`;
+  });
+  if (
+    new Set(keys).size !== keys.length ||
+    keys.some((key, index) => index > 0 && keys[index - 1]!.localeCompare(key) >= 0)
+  ) {
+    throw new Error(
+      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors are not unique and canonically ordered`
+    );
+  }
+}
+
+function assertReferenceArtifactManifestAuthorities(task: SmithersTaskManifestTask): void {
+  const authorities = task.referenceArtifactManifestAuthorities;
+  if (authorities === undefined) return;
+  if (authorities.length === 0 || authorities.length > MAX_SMITHERS_TASKS) {
+    throw new Error(
+      `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authorities must be non-empty and bounded`
+    );
+  }
+  for (const [index, authority] of authorities.entries()) {
+    if (index > 0 && compareCanonicalStrings(authorities[index - 1]!.attemptId, authority.attemptId) >= 0) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authorities are not unique and canonically ordered`
+      );
+    }
+    if (
+      !Number.isSafeInteger(authority.sizeBytes) ||
+      authority.sizeBytes <= 0 ||
+      authority.sizeBytes > MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES ||
+      !/^[0-9a-f]{64}$/u.test(authority.sha256)
+    ) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authority has an invalid byte identity`
+      );
+    }
+    const matchingDirectories = task.dependencyArtifactDirs.filter((directory) => directory === authority.artifactDir);
+    if (matchingDirectories.length !== 1 || portablePathBasename(authority.artifactDir) !== authority.attemptId) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authority has no exact dependency artifact directory`
+      );
+    }
+  }
+}
+
+/** Locate a sealed reference outer-manifest authority by its exact dependency artifact directory. */
+export function referenceArtifactManifestAuthorityForArtifactDir(
+  task: SmithersTaskManifestTask,
+  artifactDir: string
+): SmithersTaskManifestReferenceArtifactManifestAuthority | undefined {
+  return task.referenceArtifactManifestAuthorities?.find((authority) => authority.artifactDir === artifactDir);
+}
+
 function assertPinnedSubmodulePath(value: string): void {
   const segments = value.split("/");
   if (
@@ -871,6 +1115,14 @@ function assertCanonicalUniqueStrings(values: readonly string[], label: string):
   }
 }
 
+function compareCanonicalStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function portablePathBasename(value: string): string | undefined {
+  return value.split(/[\\/]/u).at(-1);
+}
+
 /** Execute the planned-graph/task cross-document gates named by the schema registry. */
 export function assertSmithersTaskManifestMatchesPlannedGraph(
   manifest: SmithersTaskManifestDocument,
@@ -887,6 +1139,7 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
     existing.push(task);
     tasksByConcreteNode.set(task.concreteNodeId, existing);
     assertTaskMatchesPlannedNode(task, node, graphNodes);
+    assertReferenceArtifactManifestAuthoritiesMatchPlannedGraph(task, node, graphNodes);
   }
 
   for (const node of graph.nodes) {
@@ -918,6 +1171,73 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
       throw new Error(`planned-graph node ${JSON.stringify(node.id)} has a mismatched primary workflow task binding`);
     }
   }
+
+  const optionalAttemptIds = new Set(
+    manifest.tasks
+      .filter((task) => {
+        const node = graphNodes.get(task.concreteNodeId)!;
+        return node.group !== undefined && graph.groups[node.group]?.defaults?.failure_policy === "continue";
+      })
+      .map((task) => task.attemptId)
+  );
+  for (const task of manifest.tasks) {
+    const expectedOptionalDirectories = task.dependencyArtifactDirs.filter((directory) => {
+      const attemptId = directory.split(/[\\/]/u).at(-1);
+      return attemptId !== undefined && optionalAttemptIds.has(attemptId);
+    });
+    assertSameStringSet(
+      task.optionalDependencyArtifactDirs ?? [],
+      expectedOptionalDirectories,
+      `Smithers task ${JSON.stringify(task.attemptId)} optional dependency artifact directories`
+    );
+  }
+}
+
+function assertReferenceArtifactManifestAuthoritiesMatchPlannedGraph(
+  task: SmithersTaskManifestTask,
+  node: PlannedGraphNodeDocument,
+  graphNodes: ReadonlyMap<string, PlannedGraphNodeDocument>
+): void {
+  const expectedAttemptIds = plannedAncestorNodeIds(node.id, graphNodes)
+    .flatMap((ancestorId) => {
+      const ancestor = graphNodes.get(ancestorId)!;
+      return ancestor.kind === "reference" ? plannedAttemptIds(ancestor) : [];
+    })
+    .sort(compareCanonicalStrings);
+  const authorities = task.referenceArtifactManifestAuthorities ?? [];
+  assertSameStringArray(
+    authorities.map((authority) => authority.attemptId),
+    expectedAttemptIds,
+    `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authorities`
+  );
+  for (const authority of authorities) {
+    const matchingDirectories = task.dependencyArtifactDirs.filter(
+      (directory) => portablePathBasename(directory) === authority.attemptId
+    );
+    if (matchingDirectories.length !== 1 || matchingDirectories[0] !== authority.artifactDir) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} reference artifact-manifest authority does not match its planned dependency directory`
+      );
+    }
+  }
+}
+
+function plannedAncestorNodeIds(nodeId: string, graphNodes: ReadonlyMap<string, PlannedGraphNodeDocument>): string[] {
+  const node = graphNodes.get(nodeId);
+  if (node === undefined) throw new Error(`planned-graph node ${JSON.stringify(nodeId)} is missing`);
+  const ancestors = new Set<string>();
+  const pending = [...node.depends_on];
+  while (pending.length > 0) {
+    const candidateId = pending.pop()!;
+    if (ancestors.has(candidateId)) continue;
+    const candidate = graphNodes.get(candidateId);
+    if (candidate === undefined) {
+      throw new Error(`planned-graph dependency ${JSON.stringify(candidateId)} is missing`);
+    }
+    ancestors.add(candidateId);
+    pending.push(...candidate.depends_on);
+  }
+  return [...ancestors].sort(compareCanonicalStrings);
 }
 
 function assertTaskMatchesPlannedNode(
@@ -929,6 +1249,7 @@ function assertTaskMatchesPlannedNode(
     task.logicalNodeId !== node.logical_id ||
     task.metadata.node.logicalNodeId !== node.logical_id ||
     task.metadata.node.label !== node.display_name ||
+    task.metadata.node.group !== node.group ||
     task.metadata.run.graphVersion !== "4" ||
     task.metadata.run.topologyVersion !== 2 ||
     task.metadata.loop.index !== node.loop.index ||

@@ -58,6 +58,7 @@ export interface ArtifactProvenance {
   workflow_run_id?: string;
   workflow_task_id?: string;
   source_run_id?: string;
+  verification_marker_sha256?: string;
   origin?: string;
   metadata?: ArtifactProvenanceMetadata;
 }
@@ -104,7 +105,13 @@ export interface WriteArtifactManifestInput {
   provenance?: Partial<ArtifactProvenance>;
   include?: string[];
   outputs?: ArtifactManifestOutputContract[];
-  prerequisiteNodeIds?: string[];
+  prerequisiteNodeIds?: readonly string[];
+  /**
+   * Exact prerequisite-manifest authorities captured by a trusted caller.
+   * Supplying these prevents a later mutable path reread from choosing the
+   * causal digests recorded in this manifest.
+   */
+  prerequisiteManifestDigests?: readonly PrerequisiteManifestDigest[];
   createdAt?: string;
 }
 
@@ -223,6 +230,7 @@ export const artifactManifestJsonSchema = {
         workflow_run_id: { type: "string", minLength: 1 },
         workflow_task_id: { type: "string", minLength: 1 },
         source_run_id: { type: "string", minLength: 1 },
+        verification_marker_sha256: { $ref: "#/$defs/sha256" },
         origin: { type: "string", minLength: 1 },
         metadata: { $ref: "#/$defs/provenanceMetadata" }
       }
@@ -288,6 +296,9 @@ export function writeArtifact(
 
 export function writeArtifactManifest(input: WriteArtifactManifestInput): ArtifactManifest {
   const nodeId = validateSafeId(input.nodeId, "node ID");
+  if (input.prerequisiteNodeIds !== undefined && input.prerequisiteManifestDigests !== undefined) {
+    throw new Error("artifact manifest prerequisite authority is ambiguous");
+  }
   const nodeDir = getNodeArtifactDir(input.layout, nodeId, { create: true });
   const provenance = normalizeArtifactProvenance(input.layout, nodeId, input.provenance);
   const include = input.include?.map((entry) => normalizeSafeRelativePath(entry));
@@ -313,7 +324,10 @@ export function writeArtifactManifest(input: WriteArtifactManifestInput): Artifa
     created_at: input.createdAt ?? new Date().toISOString(),
     files,
     output_contracts: input.outputs ?? [],
-    prerequisite_manifests: prerequisiteManifestDigests(input.layout, input.prerequisiteNodeIds ?? []),
+    prerequisite_manifests:
+      input.prerequisiteManifestDigests === undefined
+        ? prerequisiteManifestDigests(input.layout, input.prerequisiteNodeIds ?? [])
+        : normalizePrerequisiteManifestDigests(input.prerequisiteManifestDigests),
     provenance
   };
   assertValidArtifactManifest(manifest);
@@ -368,13 +382,33 @@ export function verifyArtifactManifestPrerequisites(
   };
 }
 
-function prerequisiteManifestDigests(layout: RunLayout, nodeIds: string[]): PrerequisiteManifestDigest[] {
+function prerequisiteManifestDigests(layout: RunLayout, nodeIds: readonly string[]): PrerequisiteManifestDigest[] {
   return [...new Set(nodeIds)].sort().map((nodeId) => {
     const safeNodeId = validateSafeId(nodeId, "prerequisite node ID");
     const manifestPath = path.join(getNodeArtifactDir(layout, safeNodeId), ARTIFACT_MANIFEST_FILE);
     assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
     return { node_id: safeNodeId, sha256: sha256File(manifestPath) };
   });
+}
+
+function normalizePrerequisiteManifestDigests(
+  authorities: readonly PrerequisiteManifestDigest[]
+): PrerequisiteManifestDigest[] {
+  const normalized = authorities.map((authority) => ({
+    node_id: validateSafeId(authority.node_id, "prerequisite node ID"),
+    sha256: authority.sha256
+  }));
+  const seen = new Set<string>();
+  for (const authority of normalized) {
+    if (!/^[0-9a-f]{64}$/u.test(authority.sha256)) {
+      throw new Error(`prerequisite artifact manifest digest is invalid for ${authority.node_id}`);
+    }
+    if (seen.has(authority.node_id)) {
+      throw new Error(`artifact manifest repeats prerequisite authority ${authority.node_id}`);
+    }
+    seen.add(authority.node_id);
+  }
+  return normalized.sort((left, right) => left.node_id.localeCompare(right.node_id));
 }
 
 export function readArtifactManifest(layout: RunLayout, nodeId: string): ArtifactManifest {
@@ -456,6 +490,7 @@ export function normalizeArtifactProvenance(
   assignOptional(normalized, "workflow_run_id", provenance?.workflow_run_id);
   assignOptional(normalized, "workflow_task_id", provenance?.workflow_task_id);
   assignOptional(normalized, "source_run_id", provenance?.source_run_id);
+  assignOptional(normalized, "verification_marker_sha256", provenance?.verification_marker_sha256);
   assignOptional(normalized, "origin", provenance?.origin);
   assignOptional(normalized, "metadata", provenance?.metadata);
   return normalized;

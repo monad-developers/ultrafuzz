@@ -82,6 +82,7 @@ import { decodeHTML } from "entities";
 import { fromMarkdown } from "mdast-util-from-markdown";
 
 import { authenticatedAggregationSemanticContext } from "./aggregation-semantic-context.js";
+import { authenticatedDependencyAdmissionAttemptIds } from "./dependency-admission.js";
 import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
@@ -112,6 +113,20 @@ const CANONICAL_PROPERTIES_CONTRACT = "ultrafuzz/properties@2" as const;
 const CANONICAL_PROPERTIES_CONVENTIONAL_PATH = "properties.json";
 const CANONICAL_PROPERTIES_MARKDOWN_CONTRACT = "ultrafuzz/nonempty-markdown@1" as const;
 const CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH = "properties.md";
+const DYNAMIC_STRATEGY_OUTPUT_TUPLE_CONTRACTS = [
+  "ultrafuzz/dynamic-strategy-plan@1",
+  "ultrafuzz/dynamic-enumerator-outputs@1",
+  "ultrafuzz/selected-strategies@1",
+  "ultrafuzz/generated-tests@3",
+  "ultrafuzz/findings@2",
+  "ultrafuzz/dynamic-strategy-provenance@1"
+] as const;
+const DYNAMIC_STRATEGY_OUTPUT_ROLE_CONTRACTS: ReadonlySet<string> = new Set([
+  "ultrafuzz/dynamic-strategy-plan@1",
+  "ultrafuzz/dynamic-enumerator-outputs@1",
+  "ultrafuzz/selected-strategies@1",
+  "ultrafuzz/dynamic-strategy-provenance@1"
+]);
 
 // These are semantic projections for topologies that deliberately omit the
 // corresponding producer. They are never written or published as artifacts;
@@ -149,6 +164,8 @@ export interface RequiredArtifactGate {
 export interface ArtifactGateAttemptAuthority {
   task: SmithersTaskManifestTask;
   tasks: readonly SmithersTaskManifestTask[];
+  /** Exact verifier-persisted ancestor admission for this consumer attempt. */
+  admittedDependencyAttemptIds?: readonly string[];
 }
 
 export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[] {
@@ -193,11 +210,16 @@ export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[
 export function dependencyGateForNode(
   node: PlannedGraphNode,
   state: RunState,
-  layout?: RunLayout
+  layout?: RunLayout,
+  graph?: PlannedGraph
 ): DependencyGateDecision {
   const blockedBy = node.depends_on.filter((dependency) => {
     const status = state.nodes[dependency]?.status;
-    return status !== "succeeded" && status !== "reused-from-prior-run";
+    return (
+      status !== "succeeded" &&
+      status !== "reused-from-prior-run" &&
+      !(graph !== undefined && plannedNodeContinuesOnFailure(graph, dependency) && optionalDependencySettled(status))
+    );
   });
   if (blockedBy.length === 0) {
     if (layout !== undefined) {
@@ -300,6 +322,26 @@ export function verifyRequiredArtifactsForNode(layout: RunLayout, node: PlannedG
   return verifyRequiredArtifactsForAttempt(layout, node, node.id);
 }
 
+function dynamicStrategyOutputTupleDiagnostics(layout: RunLayout, node: PlannedGraphNode): RuntimeDiagnostic[] {
+  if (!node.outputs.some((output) => DYNAMIC_STRATEGY_OUTPUT_ROLE_CONTRACTS.has(output.contract))) return [];
+  const invalidCounts = DYNAMIC_STRATEGY_OUTPUT_TUPLE_CONTRACTS.map((contract) => ({
+    contract,
+    count: node.outputs.filter((output) => output.contract === contract).length
+  })).filter(({ count }) => count !== 1);
+  if (invalidCounts.length === 0) return [];
+  return [
+    {
+      code: "DYNAMIC_STRATEGY_OUTPUT_TUPLE_INVALID",
+      message: `Node ${node.id} declaring a dynamic-strategy output role must declare exactly one complete dynamic-strategy output tuple (${DYNAMIC_STRATEGY_OUTPUT_TUPLE_CONTRACTS.join(", ")}); observed ${invalidCounts
+        .map(({ contract, count }) => `${contract}=${count}`)
+        .join(", ")}`,
+      severity: "error",
+      source: "dynamic-strategy-provenance",
+      path: layout.graphPath
+    }
+  ];
+}
+
 export function verifyRequiredArtifactsForAttempt(
   layout: RunLayout,
   node: PlannedGraphNode,
@@ -309,6 +351,10 @@ export function verifyRequiredArtifactsForAttempt(
 ): RequiredArtifactGate {
   const diagnostics: RuntimeDiagnostic[] = [];
   const missing: string[] = [];
+  const dynamicStrategyTupleDiagnostics = dynamicStrategyOutputTupleDiagnostics(layout, node);
+  if (dynamicStrategyTupleDiagnostics.length > 0) {
+    return { ok: false, diagnostics: dynamicStrategyTupleDiagnostics, missing };
+  }
   if (
     node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
     node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
@@ -2291,6 +2337,7 @@ function semanticArtifactSetForSchema(input: {
       ...(severity.severityClassifiedFindings === undefined
         ? {}
         : { severityClassifiedFindings: severity.severityClassifiedFindings }),
+      ...(severity.dedupedFindings === undefined ? {} : { dedupedFindings: severity.dedupedFindings }),
       ...(severity.findingLifecycleLedger === undefined
         ? {}
         : { findingLifecycleLedger: severity.findingLifecycleLedger })
@@ -2449,22 +2496,24 @@ function semanticDifferentialArtifacts(input: {
 
   const tasksByAttempt = new Map(authority.tasks.map((task) => [task.attemptId, task] as const));
   const ancestors = (contract: PlannedGraphNode["outputs"][number]["contract"]) =>
-    finalizedDeclaredContractProducers(input.layout, contract, input.node, authority).flatMap((producer) => {
-      const task = tasksByAttempt.get(producer.attemptId);
-      if (task === undefined) {
-        throw new Error(
-          `differential artifact producer declaration is unavailable: ${JSON.stringify(producer.attemptId)}`
-        );
-      }
-      return producer.outputs.map((output): SemanticDifferentialArtifactBinding => ({
-        attemptId: producer.attemptId,
-        logicalNodeId: task.logicalNodeId,
-        attemptIndex: task.metadata.loop.attemptIndex,
-        path: semanticRunRelativePath(input.layout, output.absolute_path, "finalized differential artifact"),
-        contract: output.contract,
-        document: assertContractDocument(output.value, output.absolute_path, output.contract)
-      }));
-    });
+    finalizedDeclaredContractProducers(input.layout, contract, input.node, authority)
+      .flatMap((producer) => {
+        const task = tasksByAttempt.get(producer.attemptId);
+        if (task === undefined) {
+          throw new Error(
+            `differential artifact producer declaration is unavailable: ${JSON.stringify(producer.attemptId)}`
+          );
+        }
+        return producer.outputs.map((output): SemanticDifferentialArtifactBinding => ({
+          attemptId: producer.attemptId,
+          logicalNodeId: task.logicalNodeId,
+          attemptIndex: task.metadata.loop.attemptIndex,
+          path: semanticRunRelativePath(input.layout, output.absolute_path, "finalized differential artifact"),
+          contract: output.contract,
+          document: assertContractDocument(output.value, output.absolute_path, output.contract)
+        }));
+      })
+      .sort((left, right) => left.path.localeCompare(right.path));
   const siblings = (contract: PlannedGraphNode["outputs"][number]["contract"]) =>
     declaredSiblingOutputsByContract(current, contract).map((output): SemanticDifferentialArtifactBinding => {
       const artifactPath = safeResolveInside(input.artifactDir, output.path, "current differential sibling");
@@ -2540,15 +2589,90 @@ function semanticDynamicStrategyArtifacts(input: {
   attemptAuthority?: ArtifactGateAttemptAuthority;
   authenticated?: AuthenticatedArtifactGateSnapshots;
 }): NonNullable<SemanticArtifactSetContext["dynamicStrategyArtifacts"]> {
-  authenticatedSemanticAttempt(input, "dynamic strategy semantic context");
+  const { authority } = authenticatedSemanticAttempt(input, "dynamic strategy semantic context");
   const readDeclaredSibling = (contract: PlannedGraphNode["outputs"][number]["contract"], label: string): unknown =>
     semanticSiblingJsonArtifact(input.artifactDir, input.node, contract, label, input.authenticated).value;
 
+  const resolvedConfigBytes = readSinglyLinkedRegularFileSnapshotInside(
+    input.layout.root,
+    input.layout.resolvedConfigPath,
+    MAX_ARTIFACT_SNAPSHOT_BYTES,
+    "dynamic strategy resolved configuration authority"
+  );
+  const resolvedConfig = parseProjectConfigToml(
+    new TextDecoder("utf-8", { fatal: true }).decode(resolvedConfigBytes),
+    input.layout.resolvedConfigPath
+  );
+  const dynamicStrategiesEnumeratorPolicy = resolvedConfig.ok
+    ? resolvedConfig.value.dynamicStrategiesEnumerator
+    : undefined;
+  if (
+    dynamicStrategiesEnumeratorPolicy !== "unlimited" &&
+    !(
+      typeof dynamicStrategiesEnumeratorPolicy === "number" &&
+      Number.isSafeInteger(dynamicStrategiesEnumeratorPolicy) &&
+      dynamicStrategiesEnumeratorPolicy >= 0
+    )
+  ) {
+    throw new Error("dynamic strategy resolved configuration does not declare dynamic_strategies_enumerator");
+  }
+
+  const ancestorArtifacts = (contract: PlannedGraphNode["outputs"][number]["contract"]) =>
+    finalizedDeclaredContractProducers(input.layout, contract, input.node, authority)
+      .flatMap((producer) =>
+        producer.outputs.map((output) => ({
+          attemptId: producer.attemptId,
+          logicalNodeId: producer.node.logical_id,
+          path: semanticRunRelativePath(input.layout, output.absolute_path, "dynamic strategy ancestor artifact"),
+          contract: output.contract,
+          document: assertContractDocument(output.value, output.absolute_path, output.contract)
+        }))
+      )
+      .sort((left, right) => left.path.localeCompare(right.path));
+
+  const finalizedAncestorsByAttempt = new Map<string, FinalizedDeclaredProducer>();
+  const ancestorContracts = new Set(
+    authority.tasks.flatMap((task) => task.metadata.artifacts.outputs.map((output) => output.contract))
+  );
+  for (const contract of ancestorContracts) {
+    for (const producer of finalizedDeclaredContractProducers(input.layout, contract, input.node, authority)) {
+      finalizedAncestorsByAttempt.set(producer.attemptId, producer);
+    }
+  }
+  const authenticatedCurrentRunArtifactPaths = [
+    ...new Set(
+      [...finalizedAncestorsByAttempt.values()].flatMap((producer) =>
+        producer.authority.publications.map((publication) =>
+          semanticRunRelativePath(input.layout, publication.absolute_path, "dynamic strategy ancestor publication")
+        )
+      )
+    )
+  ].sort((left, right) => left.localeCompare(right));
+
+  // selected-strategies@1 is the semantic gate's current document; every
+  // other member below is authenticated from this exact attempt's siblings.
   const strategyPlan = readDeclaredSibling("ultrafuzz/dynamic-strategy-plan@1", "dynamic strategy plan");
   const enumeratorOutputs = readDeclaredSibling("ultrafuzz/dynamic-enumerator-outputs@1", "dynamic enumerator outputs");
+  const generatedTests = readDeclaredSibling("ultrafuzz/generated-tests@3", "dynamic generated-test manifest");
   const findings = readDeclaredSibling("ultrafuzz/findings@2", "dynamic findings");
   const provenance = readDeclaredSibling("ultrafuzz/dynamic-strategy-provenance@1", "dynamic strategy provenance");
-  return { strategyPlan, enumeratorOutputs, findings, provenance };
+  return {
+    strategyPlan,
+    enumeratorOutputs,
+    generatedTests,
+    findings,
+    provenance,
+    dynamicStrategiesEnumeratorPolicy,
+    boundaryRecipeArtifacts: ancestorArtifacts("ultrafuzz/boundary-recipes@1"),
+    ancestorFindingArtifacts: ancestorArtifacts("ultrafuzz/findings@2"),
+    currentAttempt: {
+      attemptId: authority.task.attemptId,
+      logicalNodeId: authority.task.logicalNodeId,
+      agentRef: authority.task.agentRef,
+      ...(authority.task.modelName === undefined ? {} : { modelName: authority.task.modelName })
+    },
+    authenticatedCurrentRunArtifactPaths
+  };
 }
 
 function semanticReviewStageContext(input: {
@@ -2596,11 +2720,24 @@ function semanticReviewStageContext(input: {
   if (stage === "dedupe-findings") {
     const findings = sibling("ultrafuzz/findings@2", "deduped findings");
     const strategyDetections = optionalSibling("ultrafuzz/strategy-detections@1", "dedupe strategy detections");
+    const rawFindingArtifacts = finalizedDeclaredContractProducers(
+      input.layout,
+      "ultrafuzz/findings@2",
+      input.node,
+      input.attemptAuthority
+    ).flatMap((producer) =>
+      producer.outputs.map((output) => ({
+        nodeId: producer.node.logical_id,
+        path: semanticRunRelativePath(input.layout, output.absolute_path, "raw findings artifact"),
+        findings: assertContractDocument(output.value, output.absolute_path, "ultrafuzz/findings@2")
+      }))
+    );
     return {
       stage: "dedupe",
       findingsArtifactPath: findings.declaredPath,
       findings: findings.value,
       lifecycleLedger: sibling("ultrafuzz/finding-lifecycle-ledger@1", "dedupe lifecycle ledger").value,
+      rawFindingArtifacts,
       ...(strategyDetections === undefined ? {} : { strategyDetections })
     };
   }
@@ -2650,14 +2787,69 @@ function semanticFinalSeverityContext(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   attemptAuthority?: ArtifactGateAttemptAuthority
-): { severityClassifiedFindings: unknown | null | undefined; findingLifecycleLedger?: unknown } {
+): {
+  severityClassifiedFindings: unknown | null | undefined;
+  dedupedFindings?: unknown | null;
+  findingLifecycleLedger?: unknown | null;
+} {
   const producers = finalizedDeclaredContractProducers(
     layout,
     "ultrafuzz/severity-classified-findings@1",
     consumer,
     attemptAuthority
   );
-  if (producers.length === 0) return { severityClassifiedFindings: null };
+  if (producers.length === 0) {
+    const dedupeProducers = finalizedDeclaredContractProducers(
+      layout,
+      "ultrafuzz/findings@2",
+      consumer,
+      attemptAuthority,
+      {
+        directOnly: true,
+        requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+      }
+    );
+    if (dedupeProducers.length === 0) {
+      return {
+        severityClassifiedFindings: null,
+        dedupedFindings: null,
+        findingLifecycleLedger: null
+      };
+    }
+    if (dedupeProducers.length !== 1 || dedupeProducers[0]!.outputs.length !== 1) {
+      throw new Error(
+        `bounded final report dedupe authority is ambiguous: expected one finalized producer/output, found ${dedupeProducers.length}`
+      );
+    }
+    const producer = dedupeProducers[0]!;
+    const findings = producer.outputs[0]!;
+    const declaredLedgerPaths = producer.node.outputs
+      .filter((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1")
+      .map((output) => output.path)
+      .sort();
+    const ledgers = producer.authority.outputs.filter(
+      (output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1"
+    );
+    const finalizedLedgerPaths = ledgers.map((output) => output.path).sort();
+    if (
+      declaredLedgerPaths.length !== 1 ||
+      ledgers.length !== 1 ||
+      !sameStringSequence(declaredLedgerPaths, finalizedLedgerPaths)
+    ) {
+      throw new Error(
+        `finalized bounded dedupe producer ${JSON.stringify(producer.attemptId)} must declare exactly one paired lifecycle ledger`
+      );
+    }
+    return {
+      severityClassifiedFindings: null,
+      dedupedFindings: assertContractDocument(findings.value, findings.absolute_path, "ultrafuzz/findings@2"),
+      findingLifecycleLedger: assertContractDocument(
+        ledgers[0]!.value,
+        ledgers[0]!.absolute_path,
+        "ultrafuzz/finding-lifecycle-ledger@1"
+      )
+    };
+  }
   if (producers.length !== 1 || producers[0]!.outputs.length !== 1) {
     throw new Error(
       `final report severity authority is ambiguous: expected one finalized producer/output, found ${producers.length}`
@@ -2806,29 +2998,41 @@ function plannedContractProducerStatus(
   attemptAuthority?: ArtifactGateAttemptAuthority
 ): "absent" | "present" | "unknown" {
   if (attemptAuthority !== undefined) {
-    try {
-      const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
-      assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
-      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-      assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
-      return declaredAncestorOutputsByContract(current, declarations, contract).length === 0 ? "absent" : "present";
-    } catch {
-      return "unknown";
-    }
+    const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
+    assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
+    const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+    assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
+    const bindings = declaredAncestorOutputsByContract(current, declarations, contract);
+    if (bindings.length === 0) return "absent";
+    const sealedTasksByAttempt = new Map(attemptAuthority.tasks.map((task) => [task.attemptId, task] as const));
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
+    const attemptIds = [...new Set(bindings.map((binding) => binding.attemptId))];
+    return attemptIds.every((attemptId) => {
+      const sealedProducer = sealedTasksByAttempt.get(attemptId);
+      const concreteNodeId = sealedProducer?.concreteNodeId ?? attemptId;
+      const node = nodesById.get(concreteNodeId);
+      if (node === undefined) throw new Error(`planned contract producer is unavailable: ${attemptId}`);
+      return optionalDeclaredProducerWasNotAdmitted(graph, node, attemptId, sealedProducer, attemptAuthority);
+    })
+      ? "absent"
+      : "present";
   }
   if (!fs.existsSync(layout.graphPath)) return "unknown";
+  let graph: ReturnType<typeof assertPlannedGraph>;
   try {
     assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
-    const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
-    const ancestorIds = plannedAncestorIds(graph, consumer);
-    return graph.nodes.some(
-      (node) => ancestorIds.has(node.id) && node.outputs.some((output) => output.contract === contract)
-    )
-      ? "present"
-      : "absent";
+    graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
   } catch {
     return "unknown";
   }
+  const ancestorIds = plannedAncestorIds(graph, consumer);
+  const producers = graph.nodes.filter(
+    (node) => ancestorIds.has(node.id) && node.outputs.some((output) => output.contract === contract)
+  );
+  if (producers.length === 0) return "absent";
+  return producers.every((node) => optionalDeclaredProducerWasNotAdmitted(graph, node, node.id, undefined, undefined))
+    ? "absent"
+    : "present";
 }
 
 type FinalizedDeclaredProducer = {
@@ -2837,6 +3041,12 @@ type FinalizedDeclaredProducer = {
   authority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
   outputs: readonly VerifiedOutputArtifactSnapshot[];
 };
+
+interface FinalizedDeclaredProducerOptions {
+  directOnly?: boolean;
+  /** Select only producers that declare this paired sibling contract. */
+  requiredSiblingContract?: PlannedGraphNode["outputs"][number]["contract"];
+}
 
 function semanticAttemptDeclarations(
   consumer: PlannedGraphNode,
@@ -2915,6 +3125,7 @@ function assertExactSealedAttemptAuthority(
   authority: ArtifactGateAttemptAuthority
 ): void {
   semanticAttemptDeclarations(consumer, authority);
+  authenticatedDependencyAdmissionAttemptIds(authority.task, authority.admittedDependencyAttemptIds);
   const plannedConsumer = graph.nodes.find((node) => node.id === consumer.id);
   if (plannedConsumer === undefined || plannedConsumer.logical_id !== consumer.logical_id) {
     throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
@@ -3037,7 +3248,7 @@ function finalizedDeclaredContractProducers(
   contract: PlannedGraphNode["outputs"][number]["contract"],
   consumer: PlannedGraphNode,
   attemptAuthority?: ArtifactGateAttemptAuthority,
-  options: { directOnly?: boolean } = {}
+  options: FinalizedDeclaredProducerOptions = {}
 ): FinalizedDeclaredProducer[] {
   assertRegularFileInside(layout.root, layout.graphPath, "planned graph finalized artifact authority");
   const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
@@ -3084,11 +3295,17 @@ function finalizedDeclaredContractProducers(
     bindingsByAttempt.set(binding.attemptId, [...(bindingsByAttempt.get(binding.attemptId) ?? []), binding]);
   }
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
-  return [...bindingsByAttempt.entries()].map(([attemptId, declaredOutputs]) => {
+  return [...bindingsByAttempt.entries()].flatMap(([attemptId, declaredOutputs]) => {
     const concreteNodeId = concreteNodeIdByAttempt.get(attemptId);
     const node = concreteNodeId === undefined ? undefined : nodesById.get(concreteNodeId);
     if (node === undefined)
       throw new Error(`declared semantic producer is absent from the planned graph: ${attemptId}`);
+    if (
+      options.requiredSiblingContract !== undefined &&
+      !node.outputs.some((output) => output.contract === options.requiredSiblingContract)
+    ) {
+      return [];
+    }
     const sealedTask = sealedTaskByAttempt.get(attemptId);
     if (
       attemptAuthority !== undefined &&
@@ -3109,6 +3326,9 @@ function finalizedDeclaredContractProducers(
         throw new Error(`sealed ${contract} declaration does not match the planned producer: ${attemptId}`);
       }
     }
+    if (optionalDeclaredProducerWasNotAdmitted(graph, node, attemptId, sealedTask, attemptAuthority)) {
+      return [];
+    }
     let outputAuthority: ReturnType<typeof loadFinalizedNodeOutputSnapshot>;
     try {
       outputAuthority = loadFinalizedNodeOutputSnapshot({
@@ -3128,8 +3348,33 @@ function finalizedDeclaredContractProducers(
     if (!sameStringSequence(declaredPaths, finalizedPaths)) {
       throw new Error(`finalized ${contract} authority does not match the current declarations for ${attemptId}`);
     }
-    return { attemptId, node, authority: outputAuthority, outputs };
+    return [{ attemptId, node, authority: outputAuthority, outputs }];
   });
+}
+
+function optionalDeclaredProducerWasNotAdmitted(
+  graph: ReturnType<typeof assertPlannedGraph>,
+  node: PlannedGraphNode,
+  attemptId: string,
+  sealedProducer: SmithersTaskManifestTask | undefined,
+  authority: ArtifactGateAttemptAuthority | undefined
+): boolean {
+  const optional =
+    sealedProducer !== undefined && authority !== undefined
+      ? (authority.task.optionalDependencyArtifactDirs ?? []).some(
+          (directory) => path.resolve(directory) === path.resolve(sealedProducer.artifactDir)
+        )
+      : node.group !== undefined && graph.groups[node.group]?.defaults?.failure_policy === "continue";
+  if (!optional) return false;
+  // Semantic consumption is authorized only by the consumer's verifier-bound
+  // preparation decision. A marker that appears or disappears later cannot
+  // enlarge or erase that immutable ancestor set.
+  return (
+    authority === undefined ||
+    !authenticatedDependencyAdmissionAttemptIds(authority.task, authority.admittedDependencyAttemptIds).includes(
+      attemptId
+    )
+  );
 }
 
 interface FinalizedCanonicalPropertyPair {
@@ -9090,8 +9335,10 @@ export function invalidateDownstreamOfFailedRequiredNodes(layout: RunLayout, gra
     if (state.nodes[node.id]?.status !== "pending") {
       continue;
     }
-    const failedDependencies = node.depends_on.filter((dependency) =>
-      ["failed", "timed-out", "canceled", "invalidated", "skipped"].includes(state.nodes[dependency]?.status ?? "")
+    const failedDependencies = node.depends_on.filter(
+      (dependency) =>
+        !plannedNodeContinuesOnFailure(graph, dependency) &&
+        ["failed", "timed-out", "canceled", "invalidated", "skipped"].includes(state.nodes[dependency]?.status ?? "")
     );
     if (failedDependencies.length > 0) {
       state = markNodeBlockedByDependencies(layout, node, {
@@ -9103,4 +9350,13 @@ export function invalidateDownstreamOfFailedRequiredNodes(layout: RunLayout, gra
     }
   }
   return state;
+}
+
+function plannedNodeContinuesOnFailure(graph: PlannedGraph, nodeId: string): boolean {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+  return node?.group !== undefined && graph.groups[node.group]?.defaults?.failure_policy === "continue";
+}
+
+function optionalDependencySettled(status: string | undefined): boolean {
+  return status !== undefined && ["failed", "timed-out", "canceled", "invalidated", "skipped"].includes(status);
 }

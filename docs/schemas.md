@@ -28,7 +28,7 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:evals:recovery-equivalence:1`
 - `urn:ultrafuzz:schema:evals:status:1`
 - `urn:ultrafuzz:schema:evals:public-eval-diagnostics:2`
-- `urn:ultrafuzz:schema:modal:node-input:1`
+- `urn:ultrafuzz:schema:modal:node-input:2`
 - `urn:ultrafuzz:schema:references:reference-cache-manifest:1`
 - `urn:ultrafuzz:schema:runtime:workflow-control-integrity:2`
 - `urn:ultrafuzz:schema:runtime:invariant-suite-handoff:1`

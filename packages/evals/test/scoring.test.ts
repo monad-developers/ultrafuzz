@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+import { loadVerifiedNodeOutputSnapshot } from "@ultrafuzz/runtime";
 
 import {
   EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
@@ -74,7 +75,32 @@ function canonicalFinding(overrides: Record<string, unknown> = {}): Record<strin
     strategy_provenance: {
       detection_rates: [{ strategy: "stateful-invariant", detections: 1, configured_loops: 1 }]
     },
-    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
+    dedupe_key: "finding-1",
+    lifecycle: {
+      dedupe_key: "finding-1",
+      source_artifacts: [
+        {
+          path: "artifacts/raw-findings/findings.json",
+          node_id: "raw-findings",
+          finding_id: "finding-1",
+          title: "Canonical finding",
+          relationship: "primary"
+        }
+      ],
+      strategy_hits: [],
+      triage_classification: "true-positive",
+      triage_reason: "The authenticated test finding is production-relevant.",
+      canonical_severity: "High",
+      final_disposition: "promoted",
+      stages: [
+        {
+          stage: "raw",
+          artifact_path: "artifacts/raw-findings/findings.json",
+          finding_id: "finding-1"
+        },
+        { stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-1" }
+      ]
+    },
     ...overrides
   };
 }
@@ -100,7 +126,32 @@ function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
     affected_files: ["src/Vault.sol"],
     evidence: ["poc test reproduces the drain"],
     description: "The withdrawal path transfers control before its balance update.",
-    lifecycle: { dedupe_key: "finding-1", source_artifacts: [], strategy_hits: [] },
+    dedupe_key: "finding-1",
+    lifecycle: {
+      dedupe_key: "finding-1",
+      source_artifacts: [
+        {
+          path: "artifacts/raw-findings/findings.json",
+          node_id: "raw-findings",
+          finding_id: "finding-1",
+          title: "Reentrancy lets attackers drain the vault via withdraw",
+          relationship: "primary"
+        }
+      ],
+      strategy_hits: [],
+      triage_classification: "true-positive",
+      triage_reason: "The authenticated test finding is production-relevant.",
+      canonical_severity: "High",
+      final_disposition: "promoted",
+      stages: [
+        {
+          stage: "raw",
+          artifact_path: "artifacts/raw-findings/findings.json",
+          finding_id: "finding-1"
+        },
+        { stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-1" }
+      ]
+    },
     ...overrides
   });
 }
@@ -159,6 +210,7 @@ function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
   projectRoot: string;
   evalRunId: string;
   evalRunRoot: string;
+  runRoot: string;
   groundTruthPath: string;
   outputContents: Map<string, string>;
 } {
@@ -207,14 +259,39 @@ function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
       impact: "Medium",
       likelihood: "Medium",
       confidence: "medium",
-      triage_classification: "undetermined",
+      triage_classification: "true-positive",
       recommended_next_action: "Review the overflow trace.",
       evidence: ["reproduction trace"],
       description: "The mint path may overflow an intermediate value.",
       impact_rationale: "An overflow could corrupt minted balances.",
       likelihood_rationale: "The boundary input is reachable but constrained.",
       severity_rationale: "Moderate impact and likelihood make this medium severity.",
-      lifecycle: { dedupe_key: "finding-2", source_artifacts: [], strategy_hits: [] }
+      dedupe_key: "finding-2",
+      lifecycle: {
+        dedupe_key: "finding-2",
+        source_artifacts: [
+          {
+            path: "artifacts/raw-findings/findings.json",
+            node_id: "raw-findings",
+            finding_id: "finding-2",
+            title: "Plausible but unknown overflow",
+            relationship: "primary"
+          }
+        ],
+        strategy_hits: [],
+        triage_classification: "true-positive",
+        triage_reason: "The authenticated test finding is production-relevant.",
+        canonical_severity: "Medium",
+        final_disposition: "promoted",
+        stages: [
+          {
+            stage: "raw",
+            artifact_path: "artifacts/raw-findings/findings.json",
+            finding_id: "finding-2"
+          },
+          { stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-2" }
+        ]
+      }
     })
   ];
   writeVerifiedFinalReport({
@@ -259,12 +336,23 @@ function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
     projectRoot,
     evalRunId,
     evalRunRoot,
+    runRoot,
     groundTruthPath: path.join(groundTruthRoot, "target-a.yml"),
     outputContents
   };
 }
 
 describe("deterministic scorer math", () => {
+  it("backs non-empty terminal reports with a verifier-valid raw-to-dedupe authority chain", () => {
+    const fixture = scoreRunFixture();
+    expect(() =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.runRoot,
+        logicalNodeId: "dedupe-findings"
+      })
+    ).not.toThrow();
+  });
+
   it("fails closed before emitting metrics when private subject binding mismatches", async () => {
     const fixture = scoreRunFixture();
     const groundTruthPath = fixture.groundTruthPath;
