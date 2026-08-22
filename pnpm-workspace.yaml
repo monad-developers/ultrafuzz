@@ -35,4 +35,5 @@ allowBuilds:
   node-pty: false
   protobufjs: true
 patchedDependencies:
+  modal@0.9.0: patches/modal@0.9.0.patch
   npm@11.19.0: patches/npm@11.19.0.patch

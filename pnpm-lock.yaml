@@ -12,6 +12,7 @@ overrides:
   '@effect/sql-sqlite-bun': 4.0.0-beta.105
 
 patchedDependencies:
+  modal@0.9.0: 9accfbbd1590adb697cbc549e196f0f139357421988180457c20c633eebd82ae
   npm@11.19.0: beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f
 
 importers:
@@ -242,7 +243,7 @@ importers:
         version: link:../security
       modal:
         specifier: 0.9.0
-        version: 0.9.0
+        version: 0.9.0(patch_hash=9accfbbd1590adb697cbc549e196f0f139357421988180457c20c633eebd82ae)
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
@@ -11540,7 +11541,7 @@ snapshots:
     dependencies:
       brace-expansion: 2.1.4
 
-  modal@0.9.0:
+  modal@0.9.0(patch_hash=9accfbbd1590adb697cbc549e196f0f139357421988180457c20c633eebd82ae):
     dependencies:
       cbor-x: 1.6.4
       long: 5.3.2
