@@ -19,6 +19,9 @@ import {
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider,
   ModalNodeCleanupRefusedError,
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  modalNodeLifecycleTimeoutMs,
+  modalNodeLifecycleTimeoutSeconds,
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
@@ -145,6 +148,23 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       /^ufz-run-with-spaces-node-attempt-bas-[0-9a-f]{12}$/u
     );
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
+  });
+
+  it("adds one bounded cloud lifecycle reserve without changing the inner timeout", () => {
+    const innerTimeoutSeconds = 1_800;
+    const lifecycleTimeoutSeconds = modalNodeLifecycleTimeoutSeconds(innerTimeoutSeconds);
+
+    expect(MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(1_800);
+    expect(lifecycleTimeoutSeconds).toBe(3_600);
+    expect(modalNodeLifecycleTimeoutMs(innerTimeoutSeconds)).toBe(3_600_000);
+    expect(lifecycleTimeoutSeconds - MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(innerTimeoutSeconds);
+    const lifecycleStartedAt = 1_000_000;
+    const innerStartedAt = lifecycleStartedAt + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS * 1000;
+    const lifecycleDeadline = lifecycleStartedAt + modalNodeLifecycleTimeoutMs(innerTimeoutSeconds);
+    expect(lifecycleDeadline - innerStartedAt).toBe(innerTimeoutSeconds * 1000);
+    expect(modalNodeLifecycleTimeoutSeconds(84_600)).toBe(86_400);
+    expect(() => modalNodeLifecycleTimeoutSeconds(0)).toThrow(/inner timeout/u);
+    expect(() => modalNodeLifecycleTimeoutSeconds(84_601)).toThrow(/inner timeout/u);
   });
 
   it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
@@ -2044,6 +2064,15 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         })
       ).resolves.toMatchObject({ status: "finished" });
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
+      expect(client.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          command: ["sleep", String(60 + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS)],
+          timeoutMs: (60 + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS) * 1000
+        })
+      );
+      expect(fixture.input.resources.timeout_seconds).toBe(60);
       expect(sandbox.exec).not.toHaveBeenCalled();
       expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
     } finally {

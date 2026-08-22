@@ -64,6 +64,15 @@ must explicitly select a one-attempt profile such as `smoke` or set
 run in the same VM; the controller independently verifies the published
 artifacts before dependent nodes can start.
 
+The configured `timeout_seconds` remains the inner agent execution budget.
+Modal cloud nodes add a fixed 30-minute outer lifecycle reserve for handoff
+construction and upload, sandbox admission, durable workspace initialization,
+and result publication. The generated outer workflow sandbox, controller-side
+provider deadline, and Modal sandbox lifetime all include that reserve; the
+relocated inner task does not. Because Modal limits a sandbox to 24 hours,
+cloud-node `timeout_seconds` may be at most 84,600 seconds; configuration
+validation rejects larger base or per-node values before launch.
+
 The image installs a root-owned, non-writable `/usr/local/bin/ultrafuzz`
 launcher for the same source build under `/opt/ultrafuzz`. Before model work,
 the worker runs `ultrafuzz json validate` on a real known-valid fixture and

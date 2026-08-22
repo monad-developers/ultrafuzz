@@ -7629,7 +7629,7 @@ export default smithers((ctx) => {
               ctx.outputMaybe(outputs.verification, { nodeId: producer.verifierId })
             );
             if (dependencyVerificationAuthorities === undefined) return null;
-            if (cloudProvider === undefined || task.execution.provider !== "modal") {
+            if (cloudProvider === undefined || modalModule === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
             }
             if (task.executionSnapshotRoot === undefined) {
@@ -7676,8 +7676,8 @@ export default smithers((ctx) => {
                   continueOnFail={task.continueOnFail}
                   allowNetwork
                   reviewDiffs={false}
-                  timeoutMs={task.execution.resources.timeoutSeconds * 1000}
-                  heartbeatTimeoutMs={task.execution.resources.timeoutSeconds * 1000}
+                  timeoutMs={modalModule.modalNodeLifecycleTimeoutMs(task.execution.resources.timeoutSeconds)}
+                  heartbeatTimeoutMs={modalModule.modalNodeLifecycleTimeoutMs(task.execution.resources.timeoutSeconds)}
                   retries={0}
                   retryPolicy={task.retryPolicy}
                   meta={task.metadata}

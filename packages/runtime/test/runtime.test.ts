@@ -8340,6 +8340,9 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
 
   const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  for (const node of plan.value!.expanded_graph.nodes) {
+    if (node.kind === "agentic") node.retryPolicy.maxAttempts = 1;
+  }
   plan.value!.resolved_config.execution = {
     mode: "cloud",
     provider: "modal",
@@ -8431,6 +8434,16 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
+  assert.match(
+    workflowSource,
+    /timeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
+  );
+  assert.match(
+    workflowSource,
+    /heartbeatTimeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
+  );
+  assert.match(workflowSource, /timeout_seconds: task\.execution\.resources\.timeoutSeconds/u);
+  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs\}/u);
   assert.match(
     workflowSource,
     /<Task[\s\S]*?agent=\{agentForTask\(task, fullTaskPrompt\)\}[\s\S]*?retries=\{task\.retries\}/u
