@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isBuiltin } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -44,7 +45,13 @@ import {
   type ResolvedConfig
 } from "@ultrafuzz/config";
 import { isPathInside, isSensitiveSecretValue, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
-import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
+import {
+  assertExpandedGraphSchema,
+  type ExpandedGraph,
+  type ExpandedNode,
+  type ModelFanoutProvenance
+} from "@ultrafuzz/topology";
+import * as ts from "typescript";
 
 import {
   DATA_GOVERNANCE_PROVENANCE_PATH,
@@ -74,7 +81,8 @@ import {
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_SCHEMA_VERSION,
   WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
-  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
+  type WorkflowExecutionDependenciesDocument
 } from "./runtime-contracts.js";
 import { assertRuntimeDocument, parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import {
@@ -84,7 +92,7 @@ import {
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
-import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import type { VerifiedWorkflowControlSnapshot, WorkflowExecutionControlFile } from "./workflow-integrity.js";
 import {
   acquireWorkflowExecutionSnapshotAnchor,
   hasWorkflowExecutionSnapshotCapability,
@@ -112,10 +120,12 @@ const MAX_PACKAGE_MANAGER_MANIFEST_BYTES = 1024 * 1024;
 const MAX_PACKAGE_MANAGER_MANIFEST_DEPTH = 32;
 const MAX_PACKAGE_MANAGER_MANIFEST_ITEMS = 10_000;
 const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
+const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
+const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
@@ -587,6 +597,17 @@ const SMITHERS_ENGINE_RESUME_IDENTITY_PATCH = `          runMetadata,
           persistedWorkflowPath,
           {
             acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE = `  const acceptedWorkflowMismatches =
+    options.acceptWorkflowChange === true
+      ? mismatches.filter((mismatch) => workflowHashMismatchLabels.includes(mismatch))
+      : [];`;
+const SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH = `  const acceptedWorkflowMismatches =
+    options.acceptWorkflowChange === true
+      ? mismatches.filter(
+          (mismatch) =>
+            mismatch === "workflow path changed" || workflowHashMismatchLabels.includes(mismatch),
+        )
+      : [];`;
 const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "workflow",
           workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
           workflowHash: runMetadata.workflowHash,`;
@@ -723,6 +744,7 @@ export type SmithersCompatibilityPatchId =
   | "engine_durability_metadata"
   | "engine_run_metadata"
   | "engine_resume_identity"
+  | "engine_refresh_path_acceptance"
   | "engine_insert_workflow_path"
   | "engine_activate_workflow_path"
   | "engine_update_workflow_path"
@@ -911,6 +933,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE,
     patched: SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_refresh_path_acceptance",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE,
+    patched: SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH,
     upstreamAbsent: []
   },
   {
@@ -1177,6 +1207,334 @@ export interface CompiledSmithersWorkflow {
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
   dataGovernance?: RunDataGovernanceReference;
+}
+
+export interface RefreshedSmithersControllerSnapshot {
+  snapshot: VerifiedWorkflowControlSnapshot;
+  controllerSourceDigest: string;
+  semanticFingerprint: string;
+}
+
+/**
+ * Rebuild the controller-owned portion of an already sealed workflow from the
+ * currently installed, stock Ultrafuzz packages. Campaign inputs remain the
+ * exact bytes authenticated by the launch seal. A compatibility refresh is
+ * deliberately narrower than an upgrade: existing module paths cannot vanish
+ * and the sealed dependency map remains authoritative. New Ultrafuzz-owned
+ * module files are admitted only from the installed package root and become
+ * explicit members of the new generation manifest. Newly required runner
+ * compatibility replacements are applied only to their exact sealed package
+ * paths and bytes before the refreshed generation is authenticated.
+ */
+export function refreshedSmithersControllerSnapshot(input: {
+  projectRoot: string;
+  layout: RunLayout;
+  original: VerifiedWorkflowControlSnapshot;
+  config: ResolvedConfig;
+}): RefreshedSmithersControllerSnapshot {
+  const projectRoot = path.resolve(input.projectRoot);
+  const taskDocument = parseSealedTaskDocument(input.original.contents.tasks);
+  if (taskDocument.run_id !== input.layout.runId) {
+    throw new Error("controller refresh task manifest does not match the run ID");
+  }
+  const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(input.original.contents.expanded_graph));
+  const nonBlockingAttemptIds = taskDocument.tasks
+    .filter((task) => {
+      const group = task.metadata.node.group;
+      return group !== undefined && expandedGraph.groups[group]?.defaults?.failure_policy === "continue";
+    })
+    .map((task) => task.attemptId)
+    .sort();
+  const source = inspectControllerSource(projectRoot);
+  const compiled: CompiledSmithersWorkflow = {
+    schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+    runId: input.layout.runId,
+    smithersRunId: taskDocument.smithers_run_id,
+    workflowName: taskDocument.workflow_name,
+    tasks: taskDocument.tasks,
+    nonBlockingAttemptIds,
+    projectRoot,
+    ...(taskDocument.source_revision === undefined ? {} : { sourceRevision: taskDocument.source_revision }),
+    ...(taskDocument.source_ref === undefined ? {} : { sourceRef: taskDocument.source_ref }),
+    workflowPath: input.original.paths.workflowPath,
+    evidenceWorkflowPath: input.original.paths.evidenceWorkflowPath,
+    expandedGraphPath: input.original.paths.expandedGraphPath,
+    configPath: input.original.paths.configPath,
+    resolvedConfigPath: executionFileSourcePath(input.original, "controls/resolved-config.json"),
+    executionConfigPath: executionFileSourcePath(input.original, "controls/ultrafuzz.toml"),
+    inputPath: input.original.paths.inputPath,
+    tasksPath: input.original.paths.tasksPath,
+    logsDir: path.join(input.layout.root, "smithers", "logs"),
+    productionSourceRoots: input.config.permissions.productionSourceRoots,
+    controllerSourceDigest: source.digest,
+    ...(taskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: taskDocument.pinned_submodules })
+  };
+
+  const executionFiles = input.original.executionFiles.map((file) => ({
+    ...file,
+    contents: Buffer.from(file.contents)
+  }));
+  replaceStockAgentFiles(projectRoot, executionFiles);
+  const dependencyMap = refreshedControllerDependencyMap(executionFiles);
+  replaceInternalModuleFiles(executionFiles, dependencyMap);
+  applyRefreshedSmithersCompatibilityPatches(executionFiles, dependencyMap);
+  const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
+  const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
+  return {
+    snapshot: {
+      ...input.original,
+      contents: { ...input.original.contents, workflow },
+      executionFiles
+    },
+    controllerSourceDigest: source.digest,
+    semanticFingerprint
+  };
+}
+
+function parseSealedTaskDocument(contents: Buffer): SmithersTaskManifestDocument {
+  const value = parseStrictJsonBytes(contents);
+  assertValidSmithersTaskManifest(value);
+  return value;
+}
+
+function executionFileSourcePath(snapshot: VerifiedWorkflowControlSnapshot, snapshotPath: string): string {
+  const file = snapshot.executionFiles.find((candidate) => candidate.snapshotPath === snapshotPath);
+  if (file === undefined) throw new Error(`controller refresh is missing sealed ${snapshotPath}`);
+  return file.sourcePath;
+}
+
+function replaceStockAgentFiles(
+  projectRoot: string,
+  files: Array<WorkflowExecutionControlFile & { contents: Buffer }>
+): void {
+  const prefix = ".smithers/agents/";
+  const sealed = files.filter((file) => file.snapshotPath.startsWith(prefix));
+  const agentsRoot = path.join(projectRoot, ".smithers", "agents");
+  const current = walkExecutionFiles(agentsRoot).map((sourcePath) => ({
+    sourcePath,
+    snapshotPath: `${prefix}${relativeExecutionPath(agentsRoot, sourcePath)}`
+  }));
+  assertSameControllerPathSet(sealed, current, "stock controller adapters");
+  const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
+  for (const file of sealed) {
+    const sourcePath = byPath.get(file.snapshotPath)!;
+    file.sourcePath = sourcePath;
+    file.contents = readRegularFileSnapshot(sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+  }
+}
+
+function refreshedControllerDependencyMap(
+  files: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
+): WorkflowExecutionDependenciesDocument {
+  const dependencyManifest = files.find(
+    (file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH
+  );
+  if (dependencyManifest === undefined) {
+    throw new Error("controller refresh is missing its sealed dependency map");
+  }
+  return parseRuntimeDocumentBytes(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    dependencyManifest.contents,
+    "controller refresh dependency map"
+  );
+}
+
+function replaceInternalModuleFiles(
+  files: Array<WorkflowExecutionControlFile & { contents: Buffer }>,
+  dependencyMap: WorkflowExecutionDependenciesDocument
+): void {
+  const byModule = new Map<string, Array<WorkflowExecutionControlFile & { contents: Buffer }>>();
+  for (const file of files) {
+    const match = /^modules\/(@ultrafuzz\/[^/]+)\/(.+)$/u.exec(file.snapshotPath);
+    if (match === null) continue;
+    const entries = byModule.get(match[1]!) ?? [];
+    entries.push(file);
+    byModule.set(match[1]!, entries);
+  }
+  for (const [moduleName, sealed] of byModule) {
+    const manifestSnapshotPath = path.posix.join("modules", moduleName, "package.json");
+    const sealedManifest = sealed.find((file) => file.snapshotPath === manifestSnapshotPath);
+    if (sealedManifest === undefined) {
+      throw new Error(`controller module ${moduleName} is missing its sealed package manifest`);
+    }
+    const moduleRoot = workflowPackageRoot(sealedManifest.sourcePath);
+    const packageJsonPath = path.join(moduleRoot, "package.json");
+    if (fs.realpathSync(packageJsonPath) !== fs.realpathSync(sealedManifest.sourcePath)) {
+      throw new Error(`controller module ${moduleName} has a mismatched sealed package manifest path`);
+    }
+    const manifest = readWorkflowPackageManifest(packageJsonPath);
+    if (manifest.name !== moduleName) {
+      throw new Error(`controller module package manifest name does not match ${moduleName}`);
+    }
+    const currentManifest = readRegularFileSnapshot(packageJsonPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    if (!currentManifest.equals(sealedManifest.contents)) {
+      throw new Error(
+        `controller module ${moduleName} changed its package manifest; controller refresh cannot change dependency or executable authority`
+      );
+    }
+    const candidates = [packageJsonPath];
+    for (const directory of ["dist", "schema"]) {
+      const root = path.join(moduleRoot, directory);
+      if (fs.existsSync(root)) candidates.push(...walkExecutionFiles(root));
+    }
+    const dockerfile = path.join(moduleRoot, "Dockerfile");
+    if (fs.existsSync(dockerfile)) candidates.push(dockerfile);
+    const current = candidates.map((sourcePath) => ({
+      sourcePath,
+      snapshotPath: path.posix.join("modules", moduleName, relativeExecutionPath(moduleRoot, sourcePath)),
+      contents: readRegularFileSnapshot(sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES),
+      executable: (fs.statSync(sourcePath).mode & 0o111) !== 0
+    }));
+    assertRefreshedModuleAuthority(moduleName, current, dependencyMap);
+    const currentPaths = new Set(current.map((file) => file.snapshotPath));
+    if (sealed.some((file) => !currentPaths.has(file.snapshotPath))) {
+      throw new Error(`controller module ${moduleName} removed a sealed execution path`);
+    }
+    const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
+    const currentByPath = new Map(current.map((file) => [file.snapshotPath, file]));
+    for (const file of sealed) {
+      const sourcePath = byPath.get(file.snapshotPath)!;
+      file.sourcePath = sourcePath;
+      file.contents = currentByPath.get(file.snapshotPath)!.contents;
+    }
+    const sealedPaths = new Set(sealed.map((file) => file.snapshotPath));
+    for (const file of current.filter((candidate) => !sealedPaths.has(candidate.snapshotPath))) {
+      files.push({
+        sourcePath: file.sourcePath,
+        snapshotPath: file.snapshotPath,
+        contents: file.contents
+      });
+    }
+  }
+}
+
+function assertRefreshedModuleAuthority(
+  moduleName: string,
+  files: readonly {
+    sourcePath: string;
+    snapshotPath: string;
+    contents: Buffer;
+    executable: boolean;
+  }[],
+  dependencyMap: WorkflowExecutionDependenciesDocument
+): void {
+  const modules = dependencyMap.modules.filter((candidate) => candidate.name === moduleName);
+  if (modules.length !== 1) {
+    throw new Error(`controller module ${moduleName} does not have exactly one sealed dependency identity`);
+  }
+  const module = modules[0]!;
+  if (module.id !== `module:${moduleName}` || module.snapshot_path !== path.posix.join("modules", moduleName)) {
+    throw new Error(`controller module ${moduleName} differs from its sealed dependency identity`);
+  }
+  const issuers = dependencyMap.issuers.filter((candidate) => candidate.id === module.id);
+  if (issuers.length !== 1 || issuers[0]!.snapshot_path !== module.snapshot_path) {
+    throw new Error(`controller module ${moduleName} does not have exactly one sealed dependency issuer`);
+  }
+  const dependencies = new Set(Object.keys(issuers[0]!.dependencies));
+  const executablePaths = new Set(dependencyMap.executable_paths);
+  for (const file of files) {
+    if (file.executable !== executablePaths.has(file.snapshotPath)) {
+      throw new Error(`controller module ${moduleName} changed executable authority for ${file.snapshotPath}`);
+    }
+    if (!/\.(?:c|m)?js$/u.test(file.snapshotPath)) continue;
+    let source: string;
+    try {
+      source = new TextDecoder("utf-8", { fatal: true }).decode(file.contents);
+    } catch {
+      throw new Error(`controller module ${moduleName} source ${file.snapshotPath} is not valid UTF-8`);
+    }
+    for (const imported of ts.preProcessFile(source, true, true).importedFiles) {
+      const specifier = imported.fileName;
+      if (specifier.startsWith(".") || isBuiltin(specifier) || specifier === "bun") continue;
+      const segments = specifier.split("/");
+      const dependencyName = specifier.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0]!;
+      if (dependencyName === moduleName || dependencies.has(dependencyName)) continue;
+      throw new Error(
+        `controller module ${moduleName} source ${file.snapshotPath} imports ${dependencyName} outside its sealed dependency authority`
+      );
+    }
+  }
+}
+
+function applyRefreshedSmithersCompatibilityPatches(
+  files: Array<WorkflowExecutionControlFile & { contents: Buffer }>,
+  dependencyMap: WorkflowExecutionDependenciesDocument
+): void {
+  const bySnapshotPath = new Map(files.map((file) => [file.snapshotPath, file]));
+  if (bySnapshotPath.size !== files.length) {
+    throw new Error("controller refresh execution paths are duplicated");
+  }
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const packages = dependencyMap.packages.filter((candidate) => candidate.name === patch.packageName);
+    // Explicit external runners do not belong to the sealed dependency closure.
+    if (packages.length === 0) continue;
+    if (packages.length !== 1) {
+      throw new Error(`controller refresh has multiple sealed roots for ${patch.packageName}`);
+    }
+    const dependency = packages[0]!;
+    if (dependency.version !== SMITHERS_VERSION) {
+      throw new Error(`controller refresh ${patch.packageName} dependency must remain at ${SMITHERS_VERSION}`);
+    }
+    const packageManifestPath = path.posix.join(dependency.snapshot_path, "package.json");
+    const packageManifest = bySnapshotPath.get(packageManifestPath);
+    if (packageManifest === undefined) {
+      throw new Error(`controller refresh is missing sealed runner package manifest ${packageManifestPath}`);
+    }
+    const packageMetadata = parseStrictJsonBytes(packageManifest.contents);
+    if (
+      !isObjectRecord(packageMetadata) ||
+      packageMetadata.name !== patch.packageName ||
+      packageMetadata.version !== SMITHERS_VERSION
+    ) {
+      throw new Error(`controller refresh sealed package metadata differs for ${patch.packageName}`);
+    }
+    const snapshotPath = path.posix.join(dependency.snapshot_path, patch.sourceRelativePath);
+    const source = bySnapshotPath.get(snapshotPath);
+    if (source === undefined) {
+      throw new Error(`controller refresh is missing sealed runner source ${snapshotPath}`);
+    }
+    let contents: string;
+    try {
+      contents = new TextDecoder("utf-8", { fatal: true }).decode(source.contents);
+    } catch {
+      throw new Error(`authenticated controller runner ${patch.id} source is not valid UTF-8`);
+    }
+    source.contents = Buffer.from(
+      applyRequiredSmithersPatch(
+        contents,
+        patch.patchable,
+        patch.patched,
+        `authenticated controller runner ${patch.id}`
+      ),
+      "utf8"
+    );
+  }
+}
+
+function assertSameControllerPathSet(
+  sealed: readonly { snapshotPath: string }[],
+  current: readonly { snapshotPath: string }[],
+  label: string
+): void {
+  const left = sealed.map((file) => file.snapshotPath).sort(compareWorkflowExecutionStrings);
+  const right = current.map((file) => file.snapshotPath).sort(compareWorkflowExecutionStrings);
+  if (JSON.stringify(left) !== JSON.stringify(right)) {
+    throw new Error(`${label} changed its execution closure; controller refresh requires an exact path set`);
+  }
+}
+
+function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
+  for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
+    const bytes = snapshot.contents[key];
+    hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
+  }
+  for (const file of snapshot.executionFiles
+    .filter((candidate) => candidate.snapshotPath.startsWith("controls/"))
+    .sort((left, right) => compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath))) {
+    hash.update(`${file.snapshotPath}\0${file.contents.byteLength}\0`).update(file.contents);
+  }
+  return hash.digest("hex");
 }
 
 export interface SubmitSmithersInput {
@@ -2351,6 +2709,10 @@ export async function runSmithersLifecycleCommand(input: {
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
+  controllerRefreshAuthority?: {
+    controllerGeneration: string;
+    executionSnapshotRoot: string;
+  };
 }): Promise<{
   stdout: string;
   stderr: string;
@@ -2383,6 +2745,19 @@ export async function runSmithersLifecycleCommand(input: {
     }
     assertRegularFileInside(paths.runRoot, paths.inputPath, "persisted workflow input");
     return fs.readFileSync(paths.inputPath, "utf8");
+  };
+  const workflowChangeAcceptanceArgs = (): readonly string[] => {
+    const authority = input.controllerRefreshAuthority;
+    if (authority === undefined) return [];
+    if (!SHA256_DIGEST.test(authority.controllerGeneration)) {
+      throw new Error("controller refresh authority has an invalid generation");
+    }
+    const snapshotRoot = path.resolve(authority.executionSnapshotRoot);
+    if (path.basename(snapshotRoot) !== authority.controllerGeneration) {
+      throw new Error("controller refresh authority does not match its execution snapshot");
+    }
+    assertRegularFileInside(snapshotRoot, input.workflowPath, "refreshed controller workflow");
+    return ["--accept-workflow-change"];
   };
 
   let preResumeStderr = "";
@@ -2570,6 +2945,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--force",
           "--detach",
+          ...workflowChangeAcceptanceArgs(),
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           ...workflowLogDirArgs(),
           "--format",
@@ -2665,6 +3041,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           ...(input.force === true ? ["--force"] : []),
           "--detach",
+          ...workflowChangeAcceptanceArgs(),
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           ...workflowLogDirArgs(),
           "--format",
@@ -2695,6 +3072,27 @@ export async function runSmithersLifecycleCommand(input: {
     stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
     ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
+}
+
+export async function assertSmithersControllerRefreshable(input: {
+  smithersRunId: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  const inspection = await runSmithersInspectionCommand({
+    args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
+    projectRoot: input.projectRoot,
+    env: input.env
+  });
+  if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) return;
+  if (!inspection.ok) {
+    throw new Error(
+      `workflow inspection failed before controller refresh: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
+    );
+  }
+  if (smithersRunStateIsActive(parseCurrentSmithersInspect(inspection, input.smithersRunId))) {
+    throw new Error("controller refresh requires a stopped, terminal, or missing workflow run");
+  }
 }
 
 export async function runSmithersInspectionCommand(input: {
@@ -3806,6 +4204,11 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     ],
     [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
     [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
+    [
+      SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_SOURCE,
+      SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH,
+      "authenticated controller workflow path acceptance"
+    ],
     [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
     [
       SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,

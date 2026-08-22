@@ -43,8 +43,14 @@ const runWorkflowProvenanceSchema = z.strictObject({
   compiledRunId: nonEmptyString,
   name: nonEmptyString,
   controlGeneration: sha256,
+  controllerGeneration: sha256.optional(),
+  controllerGenerationJournal: z.literal("smithers/controller-generation-journal.json").optional(),
   linkId: canonicalUuidSchema,
-  executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
+  executionSnapshot: z.string().regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u),
+  controllerExecutionSnapshot: z
+    .string()
+    .regex(/^smithers\/execution-snapshots\/[0-9a-f]{64}$/u)
+    .optional()
 });
 const runRecoveryProvenanceSchema = z
   .strictObject({
@@ -628,11 +634,14 @@ export const runStateJsonSchema = {
         compiledRunId: { type: "string", minLength: 1 },
         name: { type: "string", minLength: 1 },
         controlGeneration: { type: "string", pattern: "^[0-9a-f]{64}$" },
+        controllerGeneration: { $ref: "#/$defs/runWorkflowProvenance/properties/controlGeneration" },
+        controllerGenerationJournal: { const: "smithers/controller-generation-journal.json" },
         linkId: canonicalUuidJsonSchema,
         executionSnapshot: {
           type: "string",
           pattern: "^smithers/execution-snapshots/[0-9a-f]{64}$"
-        }
+        },
+        controllerExecutionSnapshot: { $ref: "#/$defs/runWorkflowProvenance/properties/executionSnapshot" }
       }
     },
     nodeProvenance: {

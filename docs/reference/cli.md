@@ -291,7 +291,7 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--json]
+  [--reset-node <workflow-node-id>] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -305,6 +305,20 @@ ultrafuzz fork <run-id> \
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the workflow run
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
 and maps workflow details into the stable Ultrafuzz JSON envelope.
+
+`resume --refresh-controller` is a recovery-only compatibility operation for a
+stopped or terminal workflow. It rebuilds the controller-owned workflow,
+Ultrafuzz modules, and stock adapters from the currently installed Ultrafuzz
+packages, publishes them as a new immutable execution snapshot, and resumes the
+same Ultrafuzz and workflow run IDs. The original control generation and every
+older snapshot remain retained. Sealed graph, task, prompt, configuration,
+operator-input, source, reference, and target semantics must remain byte-for-byte
+authenticated; this option cannot upgrade dependencies or change campaign
+inputs. Active workflows are rejected so two controller generations can never
+execute concurrently. A durable generation journal reconciles interrupted
+manifest, snapshot, event, and metadata publication on a later
+`resume --refresh-controller`. Ordinary `resume` and `resume --reset-node`
+continue using the last committed controller generation without rebuilding it.
 
 Runs created before workflow control seals and authenticated link journals
 cannot be resumed or inspected safely in place. Their stored artifacts remain

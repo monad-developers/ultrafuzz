@@ -1461,6 +1461,28 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(retriedData.submitted, true);
   assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run-replayed");
 
+  const controllerRefreshed = await cli(
+    project,
+    ["resume", runData.run_id, "--refresh-controller", "--max-concurrency", "8", "--json"],
+    env
+  );
+  assert.equal(
+    controllerRefreshed.code,
+    0,
+    `resume controller refresh: ${controllerRefreshed.stderr}${controllerRefreshed.stdout}`
+  );
+  const controllerRefreshBody = parseJson(controllerRefreshed);
+  assertNoSmithersSurface(controllerRefreshBody);
+  const controllerRefreshData = controllerRefreshBody.data as { submitted: boolean; workflow_run_id: string };
+  assert.equal(controllerRefreshData.submitted, true);
+  assert.equal(controllerRefreshData.workflow_run_id, "ultrafuzz-cli-run-replayed");
+  const controllerRefreshMetadata = readRunMetadataDocument(path.join(runData.run_root, "run.json"), runData.run_id);
+  assert.match(controllerRefreshMetadata.workflow?.controller_generation ?? "", /^[0-9a-f]{64}$/u);
+  assert.notEqual(
+    controllerRefreshMetadata.workflow?.controller_generation,
+    controllerRefreshMetadata.workflow?.control_generation
+  );
+
   const fork = await cli(
     project,
     [

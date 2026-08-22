@@ -655,6 +655,12 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "controllerGeneration": {
+          "$ref": "#/$defs/runWorkflowProvenance/properties/controlGeneration"
+        },
+        "controllerGenerationJournal": {
+          "const": "smithers/controller-generation-journal.json"
+        },
         "linkId": {
           "type": "string",
           "format": "uuid",
@@ -663,6 +669,9 @@
         "executionSnapshot": {
           "type": "string",
           "pattern": "^smithers/execution-snapshots/[0-9a-f]{64}$"
+        },
+        "controllerExecutionSnapshot": {
+          "$ref": "#/$defs/runWorkflowProvenance/properties/executionSnapshot"
         }
       }
     },

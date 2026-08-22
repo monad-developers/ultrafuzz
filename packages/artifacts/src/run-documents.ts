@@ -236,8 +236,11 @@ export interface RunMetadataWorkflow {
   tasks_path: string;
   control_integrity_path: string;
   control_generation: string;
+  controller_generation?: string;
+  controller_generation_journal_path?: string;
   workflow_link_id: string;
   execution_snapshot_path: string;
+  controller_execution_snapshot_path?: string;
   task_node_ids: string[];
 }
 
