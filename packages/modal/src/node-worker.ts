@@ -648,14 +648,38 @@ export async function runDurableWorkflow(
         environment
       );
     } catch (error) {
-      if (!isMissingWorkflowRun(error)) throw error;
-      await runChecked(
-        "run-workflow",
-        smithers,
-        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false),
-        projectRoot,
-        environment
-      );
+      if (isMissingWorkflowRun(error)) {
+        await runChecked(
+          "run-workflow",
+          smithers,
+          workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false),
+          projectRoot,
+          environment
+        );
+      } else {
+        const retryTaskId = await selectedInnerRetriesExhaustedTaskId(
+          smithers,
+          projectRoot,
+          localRunId,
+          [input.selected_task.id, input.selected_task.preparationId, input.selected_task.verifierId],
+          environment
+        );
+        if (retryTaskId === undefined) throw error;
+        // Unlike `up`, retry-task has no separate execution and persistence workflow paths. Give it
+        // the verified physical identity and prevent the sealed launcher from rewriting that identity
+        // back through the descriptor used only while executing ordinary run/resume commands.
+        const retryEnvironment: Record<string, string | undefined> = {
+          ...environment,
+          ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: undefined
+        };
+        await runChecked(
+          "retry-workflow-task",
+          smithers,
+          workflowRetryTaskCommandArguments(canonicalWorkflowPath, localRunId, retryTaskId),
+          projectRoot,
+          retryEnvironment
+        );
+      }
     }
     verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
   } finally {
@@ -712,11 +736,59 @@ export function workflowCommandArguments(
   ];
 }
 
+export function workflowRetryTaskCommandArguments(workflowPath: string, localRunId: string, taskId: string): string[] {
+  return [
+    "retry-task",
+    workflowPath,
+    "--run-id",
+    localRunId,
+    "--node-id",
+    taskId,
+    "--iteration",
+    "0",
+    "--force",
+    "--accept-workflow-change",
+    "--format",
+    "json"
+  ];
+}
+
 function isMissingWorkflowRun(error: unknown): boolean {
   return (
     error instanceof CloudWorkerCommandError &&
     /\bRUN_NOT_FOUND\b|\bRun not found\b/u.test(`${error.stdout}\n${error.stderr}`)
   );
+}
+
+async function selectedInnerRetriesExhaustedTaskId(
+  smithers: string,
+  projectRoot: string,
+  localRunId: string,
+  taskIds: readonly string[],
+  environment: Record<string, string>
+): Promise<string | undefined> {
+  try {
+    const diagnosis = await runChecked(
+      "diagnose-resume-workflow",
+      smithers,
+      ["why", localRunId, "--format", "json"],
+      projectRoot,
+      environment,
+      64 * 1024
+    );
+    const parsed = JSON.parse(diagnosis.stdout) as unknown;
+    const data = isRecord(parsed) && isRecord(parsed.data) ? parsed.data : parsed;
+    if (!isRecord(data) || !Array.isArray(data.blockers)) return undefined;
+    const eligibleTaskIds = new Set(taskIds);
+    for (const blocker of data.blockers) {
+      if (!isRecord(blocker) || blocker.kind !== "retries-exhausted") continue;
+      const blockedTaskId = typeof blocker.nodeId === "string" ? blocker.nodeId : blocker.node_id;
+      if (typeof blockedTaskId === "string" && eligibleTaskIds.has(blockedTaskId)) return blockedTaskId;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function initializeDurableNodeWorkspace(
@@ -1227,15 +1299,16 @@ async function runChecked(
   command: string,
   args: string[],
   cwd: string,
-  env: Record<string, string> = {}
-): Promise<void> {
+  env: Record<string, string | undefined> = {},
+  outputLimit = 4_096
+): Promise<{ stdout: string; stderr: string }> {
   const child = spawn(command, args, {
     cwd,
     env: { ...process.env, ...env },
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const stdout = readBoundedText(child.stdout);
-  const stderr = readBoundedText(child.stderr);
+  const stdout = readBoundedText(child.stdout, outputLimit);
+  const stderr = readBoundedText(child.stderr, outputLimit);
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code ?? 1));
@@ -1244,6 +1317,7 @@ async function runChecked(
   if (exitCode !== 0) {
     throw new CloudWorkerCommandError(phase, path.basename(command), exitCode, stdoutText, stderrText);
   }
+  return { stdout: stdoutText, stderr: stderrText };
 }
 
 class CloudWorkerCommandError extends Error {
