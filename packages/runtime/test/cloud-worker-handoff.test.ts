@@ -1299,7 +1299,7 @@ nodes:
     depends_on: [join]
 `;
 
-test("compiled threat-model and goal-plan cloud tasks hand off the reference tree and planner catalog", async () => {
+test("compiled threat-model and goal-plan cloud tasks hand off and relocate the reference tree and planner catalog", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cloud-database-"));
   initProject({ projectRoot: project, force: true });
   writePrompt(
@@ -1394,6 +1394,35 @@ test("compiled threat-model and goal-plan cloud tasks hand off the reference tre
     assert.match(promptBody, new RegExp(escapeRegExp(path.join(runRoot, database.relative_path)), "u"));
     assert.match(promptBody, new RegExp(escapeRegExp(referenceAttemptDir), "u"));
     assert.doesNotMatch(promptBody, /Database: unavailable/u);
+
+    const worker = relocateWorker({ project, runRoot, compiled, sandboxes: [] });
+    const captured: HarnessTaskSpecSummary[] = [];
+    try {
+      await renderGeneratedWorkflow({
+        workflowPath: path.join(worker, path.relative(project, compiled.workflowPath)),
+        cwd: worker,
+        forbidDynamicMaterialization: true,
+        workflowInput: {
+          cloud_worker: true,
+          task_id: sandboxInput.task_id,
+          attempt_id: sandboxInput.attempt_id,
+          execution_generation: sandboxInput.execution_generation,
+          selected_task: sandboxInput.selected_task,
+          tasks: []
+        },
+        captureTaskSpecs: captured
+      });
+
+      const selected = captured.find((candidate) => candidate.logicalNodeId === logicalNodeId);
+      assert.ok(selected, `${logicalNodeId} must remain selected after worker relocation`);
+      assert.deepEqual(
+        selected.referenceArtifactDirs,
+        [path.join(worker, path.relative(project, referenceAttemptDir))],
+        `${logicalNodeId} must relocate its reference handoff under the worker root`
+      );
+    } finally {
+      fs.rmSync(worker, { recursive: true, force: true });
+    }
   }
   fs.rmSync(project, { recursive: true, force: true });
 });

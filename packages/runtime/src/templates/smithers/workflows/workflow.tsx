@@ -995,8 +995,12 @@ function generatedDependencyTaskSpecs(
 ): typeof taskSpecs {
   const compiledAttemptIds = new Set(serializedTaskSpecs.map((task) => task.attemptId));
   const declaredVerifierIds = new Set(selected.metadata.dependencies.smithersNodeIds);
+  const referenceArtifactDirs = new Set(selected.referenceArtifactDirs);
   const reconstructed: typeof taskSpecs = [];
   for (const dependencyArtifactDir of selected.dependencyArtifactDirs) {
+    // Static references participate in artifact ancestry but are not executable attempts, so they
+    // have neither a serialized task spec nor a verifier to reconstruct on the worker.
+    if (referenceArtifactDirs.has(dependencyArtifactDir)) continue;
     const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
     if (compiledAttemptIds.has(dependencyAttemptId)) continue;
     if (!declaredVerifierIds.has(`verify:${dependencyAttemptId}`)) {

@@ -23,6 +23,7 @@ export interface HarnessTaskSpecSummary {
   attemptId: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
+  referenceArtifactDirs: string[];
   logicalNodeId: string;
   modelProfileId: string;
   modelName: string | null;
@@ -106,6 +107,7 @@ export async function renderGeneratedWorkflow(input: {
     attemptId: task.attemptId,
     artifactDir: task.artifactDir,
     dependencyArtifactDirs: [...task.dependencyArtifactDirs],
+    referenceArtifactDirs: [...task.referenceArtifactDirs],
     logicalNodeId: task.metadata.node.logicalNodeId,
     modelProfileId: task.metadata.model.profileId,
     modelName: task.modelName ?? null,
