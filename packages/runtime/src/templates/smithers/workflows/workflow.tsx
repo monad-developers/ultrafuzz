@@ -947,9 +947,20 @@ function hydrateSelectedTaskHandoff(spec: ReturnType<typeof cloudSelectedTaskHan
     workspacePath: relocatedHandoffPath(spec.workspacePath, "task workspace"),
     artifactRelativeDir: spec.artifactDir,
     artifactDir: relocatedHandoffPath(spec.artifactDir, "task artifact directory"),
-    dependencyArtifactDirs: [...spec.dependencyArtifactDirs],
-    referenceArtifactDirs: [...spec.referenceArtifactDirs],
-    ...(spec.vulnerabilityDatabase === undefined ? {} : { vulnerabilityDatabase: spec.vulnerabilityDatabase }),
+    dependencyArtifactDirs: spec.dependencyArtifactDirs.map((directory) =>
+      relocatedHandoffPath(directory, "dependency artifact directory")
+    ),
+    referenceArtifactDirs: spec.referenceArtifactDirs.map((directory) =>
+      relocatedHandoffPath(directory, "reference artifact directory")
+    ),
+    ...(spec.vulnerabilityDatabase === undefined
+      ? {}
+      : {
+          vulnerabilityDatabase: {
+            ...spec.vulnerabilityDatabase,
+            catalogPath: relocatedHandoffPath(spec.vulnerabilityDatabase.catalogPath, "vulnerability database catalog")
+          }
+        }),
     runRoot: spec.runRoot,
     workflowPath: spec.workflowPath,
     sourceProjectRoot: spec.sourceProjectRoot,
@@ -984,8 +995,12 @@ function generatedDependencyTaskSpecs(
 ): typeof taskSpecs {
   const compiledAttemptIds = new Set(serializedTaskSpecs.map((task) => task.attemptId));
   const declaredVerifierIds = new Set(selected.metadata.dependencies.smithersNodeIds);
+  const referenceArtifactDirs = new Set(selected.referenceArtifactDirs);
   const reconstructed: typeof taskSpecs = [];
   for (const dependencyArtifactDir of selected.dependencyArtifactDirs) {
+    // Static references participate in artifact ancestry but are not executable attempts, so they
+    // have neither a serialized task spec nor a verifier to reconstruct on the worker.
+    if (referenceArtifactDirs.has(dependencyArtifactDir)) continue;
     const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
     if (compiledAttemptIds.has(dependencyAttemptId)) continue;
     if (!declaredVerifierIds.has(`verify:${dependencyAttemptId}`)) {
