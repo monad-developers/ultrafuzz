@@ -15,7 +15,13 @@ import {
   type EvalConfig,
   type RuntimeConfigOverrides
 } from "@ultrafuzz/config";
-import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  effectiveAuditPolicy,
+  loadResolvedProject,
+  startRun,
+  syncRun,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
@@ -36,11 +42,12 @@ import {
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
   type EvalBenchmarkWorkflowInput,
   type EvalDurableDiagnostic,
-  type EvalSmokeBenchmarkExecutionInput,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
   type EvalModelProfile,
   type EvalPlanValue,
+  type EvalPublicFullBenchmarkWorkflowInput,
+  type EvalPublicSmokeBenchmarkWorkflowInput,
   type EvalRunRecord,
   type EvalRunValue,
   type EvalSuiteSpec
@@ -269,6 +276,22 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   } catch (error) {
     launch = { ok: false, workflowIds: [], diagnostics: [diagnosticFromError(error, "EVAL_ROW_LAUNCH_FAILED")] };
   }
+  if (launch.ok && launch.runId !== runId) {
+    launch = {
+      ok: false,
+      workflowIds: launch.workflowIds,
+      diagnostics: [
+        ...launch.diagnostics,
+        diagnosticFromError(
+          new EvalError(
+            "EVAL_ROW_RUN_ID_MISMATCH",
+            `eval row ${input.row.id} launcher returned run ${JSON.stringify(launch.runId)} instead of requested run ${JSON.stringify(runId)}`,
+            { expected_run_id: runId, actual_run_id: launch.runId }
+          )
+        )
+      ]
+    };
+  }
 
   const finishedAt = new Date().toISOString();
   // Everything from here to the `runs.jsonl` append is enrichment read off the
@@ -280,16 +303,16 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   const enrichmentDiagnostics: RuntimeDiagnostic[] = [];
   let runFingerprints: ReturnType<typeof readRunFingerprints> = {};
   let runAuditPolicy: ReturnType<typeof readRunAuditPolicy> = {};
-  if (launch.ok && launch.runRoot !== undefined) {
+  if (launch.ok && launch.runRoot !== undefined && launch.runId !== undefined) {
     if (launch.graphFingerprint === undefined || launch.configFingerprint === undefined) {
       try {
-        runFingerprints = readRunFingerprints(launch.runRoot);
+        runFingerprints = readRunFingerprints(launch.runRoot, launch.runId);
       } catch (error) {
         enrichmentDiagnostics.push(rowEnrichmentDiagnostic("state.json", error));
       }
     }
     try {
-      runAuditPolicy = readRunAuditPolicy(launch.runRoot);
+      runAuditPolicy = readRunAuditPolicy(launch.runRoot, launch.runId);
     } catch (error) {
       enrichmentDiagnostics.push(rowEnrichmentDiagnostic("plan.json", error));
     }
@@ -319,6 +342,9 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           ...(runAuditPolicy.audit_profile_catalog_digest === undefined
             ? {}
             : { audit_profile_catalog_digest: runAuditPolicy.audit_profile_catalog_digest }),
+          ...(runAuditPolicy.topology_path_origin === undefined
+            ? {}
+            : { topology_path_origin: runAuditPolicy.topology_path_origin }),
           ...(runAuditPolicy.topology_digest === undefined ? {} : { topology_digest: runAuditPolicy.topology_digest }),
           ...(runAuditPolicy.prompt_digest === undefined ? {} : { prompt_digest: runAuditPolicy.prompt_digest }),
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
@@ -390,6 +416,13 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   }
   assertHeldOutPathsAbsent(input.row.target_id, input.row.target.path, input.row.target.held_out_paths);
   const runnerProfile = input.suite.model_profiles[input.row.runner_model_profile];
+  const benchmarkLaunchOverrides = benchmarkModelProfileOverrides(input.row, runnerProfile);
+  await assertPackagedBenchmarkPrelaunchPolicy({
+    row: input.row,
+    projectRoot: input.row.target.path,
+    runtimeOverrides: benchmarkLaunchOverrides.runtimeOverrides,
+    ...(input.env === undefined ? {} : { env: input.env })
+  });
   const result = await startRun({
     projectRoot: input.row.target.path,
     ...(input.row.variant.topology_path === undefined ? {} : { topologyPath: input.row.variant.topology_path }),
@@ -403,7 +436,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
     ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {}),
     workflowInput: buildWorkflowInput(input.row),
     ...benchmarkTopologyTransform(input.row),
-    ...benchmarkModelProfileOverrides(input.row, runnerProfile),
+    ...benchmarkLaunchOverrides,
     ...(input.env !== undefined ? { env: input.env } : {})
   });
   if (result.ok && result.value) {
@@ -419,6 +452,63 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   }
   return { ok: false, workflowIds: [], diagnostics: result.diagnostics };
 };
+
+/** Fail before `startRun` can create a run or submit model work on mismatched public benchmark policy. */
+export async function assertPackagedBenchmarkPrelaunchPolicy(input: {
+  row: Pick<EvalMatrixRow, "workflow_input" | "variant">;
+  projectRoot: string;
+  runtimeOverrides: RuntimeConfigOverrides | undefined;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  const workflowInput = validatedBenchmarkWorkflowInput(input.row.workflow_input);
+  if (workflowInput === undefined || !("benchmark_lane" in workflowInput)) return;
+  const expectedPolicy = packagedBenchmarkAuditPolicy(workflowInput);
+  if (input.row.variant.topology !== undefined || input.row.variant.topology_path !== undefined) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark variants cannot override the packaged topology`
+    );
+  }
+  const resolved = await loadResolvedProject({
+    projectRoot: input.projectRoot,
+    ...(input.runtimeOverrides === undefined ? {} : { runtimeOverrides: input.runtimeOverrides }),
+    ...(input.env === undefined ? {} : { env: input.env })
+  });
+  if (resolved.config === undefined) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark target configuration could not be resolved before launch`,
+      { diagnostics: resolved.diagnostics }
+    );
+  }
+  let policy: ReturnType<typeof effectiveAuditPolicy>;
+  try {
+    policy = effectiveAuditPolicy({ projectRoot: input.projectRoot, config: resolved.config });
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark target topology could not be resolved before launch`,
+      { reason: error instanceof Error ? error.message : String(error) }
+    );
+  }
+  if (
+    policy.auditProfile !== expectedPolicy.auditProfile ||
+    policy.catalogDigest !== expectedPolicy.catalogDigest ||
+    policy.topologyDigest !== expectedPolicy.topologyDigest ||
+    policy.topologyPathOrigin !== "audit-profile"
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark effective audit profile, catalog digest, and topology digest must match and originate from the current packaged policy`,
+      {
+        effective_audit_profile: policy.auditProfile,
+        effective_audit_profile_catalog_digest: policy.catalogDigest,
+        effective_topology_digest: policy.topologyDigest,
+        effective_topology_origin: policy.topologyPathOrigin
+      }
+    );
+  }
+}
 
 export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_input">): {
   topologyTransform?: { strategyLoops?: number; excludedNodeIds?: string[] };
@@ -440,35 +530,48 @@ export function benchmarkModelProfileOverrides(
 ): { runtimeOverrides?: RuntimeConfigOverrides } {
   const input = validatedBenchmarkWorkflowInput(row.workflow_input);
   if (input === undefined) return { runtimeOverrides: { forbidModelFallback: true } };
-  const execution = input.benchmark_execution;
-  if (!("workflow_profile" in execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) {
+  if (!("benchmark_lane" in input)) {
     return { runtimeOverrides: { forbidModelFallback: true } };
   }
-  assertSmokeAuditPolicy(execution);
+  const expectedPolicy = packagedBenchmarkAuditPolicy(input);
   if (runnerProfile === undefined) {
-    throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
+    throw new EvalError(
+      "EVAL_MODEL_PROFILE_UNKNOWN",
+      `${expectedPolicy.auditProfile} benchmark runner profile is missing`
+    );
   }
   return {
     runtimeOverrides: {
-      auditProfile: "smoke",
+      auditProfile: expectedPolicy.auditProfile,
       forbidModelFallback: true
     }
   };
 }
 
-function assertSmokeAuditPolicy(execution: EvalSmokeBenchmarkExecutionInput): void {
+function packagedBenchmarkAuditPolicy(
+  input: EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput
+): { auditProfile: "smoke" | "full"; catalogDigest: string; topologyDigest: string } {
   const catalog = loadAuditProfileCatalog();
-  const topologyDigest = packagedTopologyDigest(auditProfile("smoke", catalog), catalog);
-  if (
-    execution.audit_profile !== "smoke" ||
-    execution.audit_profile_catalog_digest !== catalog.digest ||
-    execution.topology_digest !== topologyDigest
-  ) {
-    throw new EvalError(
-      "EVAL_BENCHMARK_EXECUTION_INVALID",
-      "smoke benchmark audit profile, catalog digest, and topology digest must match the packaged smoke policy"
-    );
+  const auditProfileId = input.benchmark_lane;
+  const topologyDigest = packagedTopologyDigest(auditProfile(auditProfileId, catalog), catalog);
+  if (topologyDigest === undefined) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", `${auditProfileId} benchmark packaged topology is missing`);
   }
+  if (input.benchmark_lane === "smoke") {
+    const execution = input.benchmark_execution;
+    if (
+      execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE ||
+      execution.audit_profile !== "smoke" ||
+      execution.audit_profile_catalog_digest !== catalog.digest ||
+      execution.topology_digest !== topologyDigest
+    ) {
+      throw new EvalError(
+        "EVAL_BENCHMARK_EXECUTION_INVALID",
+        "smoke benchmark audit profile, workflow profile, catalog digest, and topology digest must match the packaged policy"
+      );
+    }
+  }
+  return { auditProfile: auditProfileId, catalogDigest: catalog.digest, topologyDigest };
 }
 
 export interface WatchEvalRowInput {
@@ -533,7 +636,7 @@ export async function watchEvalRow(
   };
 
   await startRowIfReady(false);
-  let state = readStateSafe(runRoot);
+  let state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   while (state !== undefined && !isTerminalRunStatus(state.status) && Date.now() < deadline) {
     try {
       await sync({
@@ -556,7 +659,7 @@ export async function watchEvalRow(
       const drained = await pump.drain();
       diagnostics.push(...drained.warnings);
     }
-    state = readStateSafe(runRoot);
+    state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
     if (state !== undefined && isTerminalRunStatus(state.status)) {
       break;
     }
@@ -567,7 +670,7 @@ export async function watchEvalRow(
   await startRowIfReady(true);
   const finalDrain = await pump.drain();
   diagnostics.push(...finalDrain.warnings);
-  state = readStateSafe(runRoot);
+  state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
   const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
     syncFailureCount === 0
@@ -673,7 +776,7 @@ function readGraph(runRoot: string): unknown {
   return readPlannedGraphDocument(graphPath);
 }
 
-function readStateSafe(runRoot: string): RunState | undefined {
+function readStateSafe(runRoot: string, expectedRunId?: string): RunState | undefined {
   const statePath = path.join(runRoot, "state.json");
   try {
     fs.lstatSync(statePath);
@@ -683,7 +786,11 @@ function readStateSafe(runRoot: string): RunState | undefined {
     }
     throw error;
   }
-  return readRunState(statePath);
+  const state = readRunState(statePath);
+  if (expectedRunId !== undefined && state.run_id !== expectedRunId) {
+    throw new Error(`run state identity does not match run ${JSON.stringify(expectedRunId)}`);
+  }
+  return state;
 }
 
 /** The row's terminal report path, or nothing -- never a throw that would cost the row its journal entry. */
@@ -691,11 +798,14 @@ function readTerminalReportPath(runRoot: string): string | undefined {
   return resolveTerminalReportPath({ runRoot }).path;
 }
 
-function readRunFingerprints(runRoot: string): {
+function readRunFingerprints(
+  runRoot: string,
+  expectedRunId: string
+): {
   graph_fingerprint?: string;
   config_fingerprint?: string;
 } {
-  const value = readStateSafe(runRoot);
+  const value = readStateSafe(runRoot, expectedRunId);
   if (value === undefined) return {};
   return {
     ...(value.graph_fingerprint === undefined ? {} : { graph_fingerprint: value.graph_fingerprint }),
@@ -709,9 +819,13 @@ function readRunFingerprints(runRoot: string): {
  * so the caller can record the fault rather than record a run whose profile
  * provenance was guessed.
  */
-function readRunAuditPolicy(runRoot: string): {
+function readRunAuditPolicy(
+  runRoot: string,
+  expectedRunId: string
+): {
   audit_profile?: string;
   audit_profile_catalog_digest?: string;
+  topology_path_origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
   topology_digest?: string;
   prompt_digest?: string;
 } {
@@ -724,13 +838,29 @@ function readRunAuditPolicy(runRoot: string): {
     }
     throw error;
   }
-  const plan = readRunPlanDocument(planPath);
+  const plan = readRunPlanDocument(planPath, expectedRunId);
+  const topologyPathOrigin = evalTopologyPathOrigin(plan.audit_profile.topology_path_origin);
   return {
     audit_profile: plan.audit_profile.id,
     audit_profile_catalog_digest: plan.audit_profile.catalog_digest,
+    topology_path_origin: topologyPathOrigin,
     topology_digest: plan.audit_profile.topology_digest,
     prompt_digest: plan.prompt_digest
   };
+}
+
+function evalTopologyPathOrigin(
+  value: string
+): "project-default" | "audit-profile" | "project-config" | "runtime-override" {
+  switch (value) {
+    case "project-default":
+    case "audit-profile":
+    case "project-config":
+    case "runtime-override":
+      return value;
+    default:
+      throw new Error(`run plan declares unknown topology path origin ${value}`);
+  }
 }
 
 function rowEnrichmentDiagnostic(

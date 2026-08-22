@@ -1,7 +1,9 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { isArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
+import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authority-selectors.js";
 import { writeJsonDurable } from "./safe-paths.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -67,9 +69,13 @@ export interface RunPlanExecution {
 export type RunPlanArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
-  | { kind: "ancestor_artifacts_by_path"; logicalIds: string[]; relativePaths: string[] }
-  | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
+  | {
+      kind: "ancestor_artifact_path_authority";
+      logicalIds: string[];
+      selectorId: string;
+      relativePaths: string[];
+    }
+  | { kind: "ancestor_contract_artifact_authority"; logicalIds: string[]; contract: string };
 
 export interface RunPlanRenderedPrompt {
   node_id: string;
@@ -357,6 +363,24 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
       throw new Error(`run plan repeats rendered prompt attempt ${JSON.stringify(prompt.attempt_id)}`);
     }
     attempts.add(prompt.attempt_id);
+    for (const reference of prompt.artifact_references) {
+      if (reference.kind === "ancestor_contract_artifact_authority" && !isArtifactContractId(reference.contract)) {
+        throw new Error(
+          `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an unknown compact authority contract`
+        );
+      }
+      if (reference.kind !== "ancestor_artifact_path_authority") continue;
+      if (
+        reference.relativePaths.some(
+          (selectedPath, index) => index > 0 && reference.relativePaths[index - 1]!.localeCompare(selectedPath) >= 0
+        ) ||
+        reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)
+      ) {
+        throw new Error(
+          `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an invalid compact path authority group`
+        );
+      }
+    }
   }
   return document;
 }

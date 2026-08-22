@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isDirectiveConformingFinalReportMarkdown,
   projectCanonicalFinalReport,
+  projectPublicCanonicalFinalReport,
   renderCoverageEvidenceMarkdownSection,
   supportsCanonicalFinalReportProjection
 } from "../src/final-report-markdown.js";
@@ -121,6 +122,34 @@ test("canonical final-report validation renders Markdown without rewriting the v
   assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
   assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(first.markdown, first.report), true);
+});
+
+test("public final-report projection redacts private paths without changing internal report authority", () => {
+  const input = renderableReport();
+  const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
+  issue.description =
+    "Inspect /srv/customer/private/reproducer.sol, C:\\Users\\runner\\secret.log, " +
+    "\\\\internal-host\\customer\\proof.sol, reproducer:file:///home/runner/private/proof.sol, " +
+    ".ultrafuzz/runs/private/report.json, marker;/var/private/semicolon.sol, " +
+    "and https://github.com/example/public.";
+  (issue.proof_of_concept as Record<string, unknown>).code = "// retain this comment\n/* and this block comment */";
+  const before = structuredClone(input);
+
+  const internal = projectCanonicalFinalReport(input);
+  const published = projectPublicCanonicalFinalReport(input);
+
+  assert.deepEqual(input, before);
+  assert.deepEqual(internal.report, before);
+  assert.match(JSON.stringify(internal.report), /\/srv\/customer\/private\/reproducer\.sol/u);
+  assert.doesNotMatch(
+    JSON.stringify(published.report),
+    /\/srv\/customer\/private|C:\\\\Users\\\\runner|internal-host|file:\/\/\/home|\.ultrafuzz\/runs|\/var\/private/u
+  );
+  assert.match(JSON.stringify(published.report), /\[redacted-path\]/u);
+  assert.match(JSON.stringify(published.report), /https:\/\/github\.com\/example\/public/u);
+  assert.match(JSON.stringify(published.report), /retain this comment/u);
+  assert.match(JSON.stringify(published.report), /and this block comment/u);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
 });
 
 test("canonical final-report validation rejects presentation drift instead of repairing it", () => {

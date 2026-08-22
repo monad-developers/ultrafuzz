@@ -26,15 +26,21 @@ Base test setup:
 
 ## 1. Consolidate
 
-Consolidate properties from these topology-required lens artifacts into a single catalog.
-Each lens now emits `properties/<lens>.json` alongside its Markdown table. Read
-and validate every lens JSON artifact first; it is the machine-readable source
-of truth. Use the Markdown only as a human-readable companion and parity check.
-Use `{{schema_path}}/property-lens.schema.json` to validate each
-source catalog and assign every retained priority as `high`, `medium`, or
-`low`.
+Consolidate properties from every topology-required lens JSON into a single
+catalog. Each lens emits one `ultrafuzz/property-lens@2` output. Read and
+validate every selected lens JSON; it is the machine-readable source of truth.
+Use `{{schema_path}}/property-lens.schema.json` to validate each source catalog
+and assign every retained priority as `high`, `medium`, or `low`.
 
-{{ancestor_artifacts}}
+Sealed JSON authority for every declared ancestor property-lens artifact:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/property-lens@2}}
+
+Read the manifest definition instead of expecting an expanded lens path or
+source array in this prompt. Use each selected producer task's exact
+`logical_node_id` as `source_node_id`, and retain the selector's required
+run-relative `localeCompare` order. Do not infer a source from a Markdown
+companion, hard-coded lens list, or same-named workspace file.
 
 Deduplicate equivalent properties across artifacts. When in doubt, err on the side of retaining multiple similar properties rather than risk removing one that represents a distinct concept or carries different meaning.
 

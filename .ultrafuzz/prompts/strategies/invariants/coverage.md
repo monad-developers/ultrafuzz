@@ -51,6 +51,14 @@ Apply these Recon/Chimera rules:
 - Prioritize stateful sequences that reach edge states described by the
   property catalog, handler inventory, source constants, and public workflow
   boundaries.
+- Treat anti-vacuity as a prerequisite to useful coverage. A coverage run is
+  not meaningful merely because the harness deployed, declarations were
+  selected, or assertions stayed green. Confirm from actual Recon evidence that
+  at least one relevant handler reached its target protocol call and completed
+  a meaningful state transition. Record handlers that only return at guards,
+  select empty target sets, fail harness-side preprocessing, or never complete
+  a protocol mutation as blockers in `coverage-report.md`, not as covered
+  behavior. Never add synthetic coverage-only actions to satisfy this rule.
 - Audit inherited handlers before coverage fuzzing. Scan every generated
   handler source, enumerate protocol calls and `try/catch`, `.call`, and
   `.delegatecall` boundaries, and record
@@ -116,6 +124,10 @@ Apply these Recon/Chimera rules:
      `recon/**` files (`test/recon/**` or `tests/recon/**`).
    - If production sources are missing, record the attribution blocker before
      further iteration.
+   - Reconcile declaration coverage with observed action reachability. If no
+     meaningful state-changing protocol action completed, report the run as
+     anti-vacuity-blocked regardless of its declaration percentage or green
+     assertions.
    - Refresh every checkpoint after each authenticated measurement before
      starting another fuzz or build.
 

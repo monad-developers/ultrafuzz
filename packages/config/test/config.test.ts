@@ -7,6 +7,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRIAGE_PANEL_SIZE,
   DEFAULT_TRIAGE_QUORUM,
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
+  MODAL_SANDBOX_MAX_LIFETIME_SECONDS,
   REDACTION_PLACEHOLDER,
   assertNoRedactionPlaceholders,
   applyDefaultProfileOverrides,
@@ -428,6 +431,81 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       );
       expect(localProviderSettings.diagnostics.map((entry) => entry.code)).not.toContain(
         "CONFIG_POSITIVE_INTEGER_INVALID"
+      );
+    }
+  });
+
+  it("reserves Modal lifecycle time without exceeding the provider's 24-hour sandbox limit", () => {
+    const credentials = {
+      MODAL_TOKEN_ID: "available",
+      MODAL_TOKEN_SECRET: "available"
+    };
+    const execution = {
+      mode: "cloud" as const,
+      provider: "modal" as const,
+      providers: {
+        modal: {
+          app: "node-runs",
+          image: "runner:stable",
+          credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+        }
+      }
+    };
+
+    expect(MODAL_SANDBOX_MAX_LIFETIME_SECONDS).toBe(86_400);
+    expect(MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(1_800);
+    expect(MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS).toBe(84_600);
+    expect(
+      resolveConfig({
+        env: credentials,
+        projectConfig: {
+          execution: {
+            ...execution,
+            resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS }
+          }
+        }
+      }).ok
+    ).toBe(true);
+
+    const oversizedBase = resolveConfig({
+      env: credentials,
+      projectConfig: {
+        execution: {
+          ...execution,
+          resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
+        }
+      }
+    });
+    expect(oversizedBase.ok).toBe(false);
+    if (!oversizedBase.ok) {
+      expect(oversizedBase.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          path: ["execution", "resources", "timeout_seconds"]
+        })
+      );
+    }
+
+    const oversized = resolveConfig({
+      env: credentials,
+      projectConfig: {
+        execution: {
+          ...execution,
+          nodes: {
+            discovery: {
+              resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
+            }
+          }
+        }
+      }
+    });
+    expect(oversized.ok).toBe(false);
+    if (!oversized.ok) {
+      expect(oversized.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          path: ["execution", "nodes", "discovery", "resources", "timeout_seconds"]
+        })
       );
     }
   });

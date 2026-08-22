@@ -238,7 +238,7 @@ function contractFixtures(): ContractFixtures {
       diagnostic_code: "worker-live"
     },
     [MODAL_NODE_INPUT_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node.v1",
+      schema_version: "ultrafuzz.modal.node.v2",
       run_id: "run-1",
       task_id: "task-1",
       attempt_id: "attempt-1",
@@ -249,6 +249,8 @@ function contractFixtures(): ContractFixtures {
       artifact_dir: ".ultrafuzz/runs/run-1/artifacts/attempt-1",
       workspace_dir: ".ultrafuzz/runs/run-1/workspaces/attempt-1",
       dependency_artifact_dirs: [],
+      optional_dependency_artifact_dirs: [],
+      dependency_verification_authorities: [],
       resources: { cpu: 1, memory_mib: 1024, timeout_seconds: 60 },
       agent_credential_env: ["OPENAI_API_KEY"]
     },
@@ -568,6 +570,17 @@ describe("Modal strict JSON contract foundation", () => {
         })
       )
     ).toThrow(ModalDocumentValidationError);
+    const nodeInput = contractFixtures()[MODAL_NODE_INPUT_SCHEMA_ID];
+    expect(() =>
+      parseModalDocumentBytes(
+        MODAL_NODE_INPUT_SCHEMA_ID,
+        bytes({ ...nodeInput, schema_version: "ultrafuzz.modal.node.v1" })
+      )
+    ).toThrow(ModalDocumentValidationError);
+    const { dependency_verification_authorities: _authorities, ...nodeInputWithoutAuthorities } = nodeInput;
+    expect(() => parseModalDocumentBytes(MODAL_NODE_INPUT_SCHEMA_ID, bytes(nodeInputWithoutAuthorities))).toThrow(
+      ModalDocumentValidationError
+    );
     expect(() =>
       parseModalDocumentBytes(
         MODAL_NODE_CHECKPOINT_SCHEMA_ID,

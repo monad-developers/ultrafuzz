@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { assertRegularFileInside, parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
 import {
@@ -16,6 +17,7 @@ import {
   type EvalEfficiencyCompleteness,
   type EvalFindingScore,
   type EvalMatrixRow,
+  type EvalRunRecord,
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
@@ -24,9 +26,15 @@ import {
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   parsePublicEvalDiagnostics
 } from "./public-diagnostics.js";
-import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
+import { parseRecoveryEquivalence, reconcileEvalRunRecords } from "./recovery-equivalence.js";
 import { EVAL_HISTORY_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
-import { readEvalFindingScores, readEvalMatrix, readEvalRunManifest, readEvalScoreSummary } from "./eval-durable.js";
+import {
+  readEvalFindingScores,
+  readEvalMatrix,
+  readEvalRunManifest,
+  readEvalRunRecords,
+  readEvalScoreSummary
+} from "./eval-durable.js";
 import { EvalError, evalRunRoot, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v2" as const;
@@ -1114,8 +1122,10 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   chartPaths: string[];
 } {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
+  const benchmarkPolicyRoot = input.benchmarkPolicyRoot ?? input.projectRoot;
   const manifest = readEvalRunManifest(path.join(root, "eval.json"));
   const matrix = readEvalMatrix(path.join(root, "matrix.json"));
+  const records = readEvalRunRecords(path.join(root, "runs.jsonl"));
   const summary = readEvalScoreSummary(path.join(root, "summary.json"));
   const scores = readEvalFindingScores(path.join(root, "scores.jsonl"));
   const publicEvalDiagnostics = readOptionalPublicEvalDiagnostics(root);
@@ -1128,13 +1138,14 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   ) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPATIBLE", "run and scoring lineage do not match");
   }
-  assertPublicBenchmarkGeneration(
-    input.benchmarkPolicyRoot ?? input.projectRoot,
-    input.benchmark,
-    input.lane,
-    manifest.suite,
-    matrix
-  );
+  assertPublicBenchmarkGeneration(benchmarkPolicyRoot, input.benchmark, input.lane, manifest.suite, matrix);
+  assertPublicBenchmarkRunPolicy({
+    benchmarkPolicyRoot,
+    evalRunId: input.evalRunId,
+    lane: input.lane,
+    matrix,
+    records
+  });
   const matches = matchedGroundTruthByRow(matrix, summary.rows, scores);
   const observations = createEvalHistoryObservations({
     benchmark: input.benchmark,
@@ -1160,6 +1171,74 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
     appended,
     chartPaths: [...charts.keys()].map((file) => path.join(input.chartsDirectory, file))
   };
+}
+
+/**
+ * Bind public history publication to the policy recorded by each launched run,
+ * not only to the benchmark lane claimed by eval.json and matrix.json.
+ */
+export function assertPublicBenchmarkRunPolicy(input: {
+  benchmarkPolicyRoot: string;
+  evalRunId: string;
+  lane: EvalHistoryLane;
+  matrix: EvalMatrixRow[];
+  records: EvalRunRecord[];
+}): void {
+  const catalog = loadAuditProfileCatalog(
+    path.join(input.benchmarkPolicyRoot, "packages", "config", "audit-profiles.yml")
+  );
+  const topologyDigest = packagedTopologyDigest(auditProfile(input.lane, catalog), catalog);
+  if (topologyDigest === undefined) {
+    throw new EvalError(
+      "EVAL_HISTORY_RUN_POLICY_INVALID",
+      `packaged ${input.lane} benchmark topology is unavailable for publication`
+    );
+  }
+  const rows = new Map(input.matrix.map((row) => [row.id, row]));
+  for (const record of input.records) {
+    const row = rows.get(record.row_id);
+    if (
+      record.eval_run_id !== input.evalRunId ||
+      row === undefined ||
+      record.target_id !== row.target_id ||
+      record.variant_id !== row.variant_id ||
+      record.trial_id !== row.trial_id
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_RUN_POLICY_INVALID",
+        `eval run record ${record.row_id} does not belong to the claimed public benchmark matrix`
+      );
+    }
+    if (
+      record.status === "launched" &&
+      (record.audit_profile !== input.lane ||
+        record.audit_profile_catalog_digest !== catalog.digest ||
+        record.topology_path_origin !== "audit-profile" ||
+        record.topology_digest !== topologyDigest)
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_RUN_POLICY_INVALID",
+        `eval row ${row.id} did not run under the current packaged ${input.lane} audit policy`,
+        {
+          row_id: row.id,
+          actual_audit_profile: record.audit_profile,
+          actual_audit_profile_catalog_digest: record.audit_profile_catalog_digest,
+          actual_topology_path_origin: record.topology_path_origin,
+          actual_topology_digest: record.topology_digest
+        }
+      );
+    }
+  }
+  const recordsByRow = reconcileEvalRunRecords(input.records);
+  for (const row of input.matrix) {
+    const record = recordsByRow.get(row.id);
+    if (record?.status !== "launched") {
+      throw new EvalError(
+        "EVAL_HISTORY_RUN_POLICY_INVALID",
+        `eval row ${row.id} has no current launched run record for public history publication`
+      );
+    }
+  }
 }
 
 function readOptionalPublicEvalDiagnostics(root: string): unknown | undefined {

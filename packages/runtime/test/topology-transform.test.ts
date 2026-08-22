@@ -131,10 +131,13 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
     "differential-repair-and-report-review",
     "dynamic-strategy-generator"
   ];
-  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
-    strategyLoops: 1,
-    excludedNodeIds: smokeExcludedNodeIds
-  });
+  const transformed = transformTopologyForRun(
+    loadTopology(repositoryRoot, { topologyPath: packagedTopology("full").path, requirePromptFiles: true }),
+    {
+      strategyLoops: 1,
+      excludedNodeIds: smokeExcludedNodeIds
+    }
+  );
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
     strategyLoops: 1,
     excludedNodeIds: smokeExcludedNodeIds
@@ -155,12 +158,17 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
   // strategy except the stateful-invariant chain, so the retained chain still
   // has to reach the review fan-in through its own surviving dependencies.
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-  const source = loadTopology(repositoryRoot, { requirePromptFiles: true });
+  const source = loadTopology(repositoryRoot, {
+    topologyPath: packagedTopology("full").path,
+    requirePromptFiles: true
+  });
   const invariantNodeIds = source.nodes
-    .filter((node) => node.group === "strategies" && node.id.startsWith("stateful-invariant-"))
+    .filter((node) => node.id.startsWith("stateful-invariant-"))
     .map((node) => node.id);
   const invariantOnlyExcludedNodeIds = source.nodes
-    .filter((node) => node.group === "strategies" && !invariantNodeIds.includes(node.id))
+    .filter(
+      (node) => (node.group === "strategies" || node.group === "specialists") && !invariantNodeIds.includes(node.id)
+    )
     .map((node) => node.id);
   const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
   const transformed = transformTopologyForRun(source, transform);

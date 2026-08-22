@@ -305,7 +305,7 @@ describe("trusted automatic eval-history publication handoff", () => {
       framework: "foundry"
     });
     changedCohort.matrix_rows_per_pair = 41;
-    changedCohort.control_timeout_seconds = 21_000;
+    changedCohort.control_timeout_seconds = 55_200;
     expect(
       validateAutomaticPublicationManifest(changedCohort, {
         ...context,
@@ -677,7 +677,7 @@ function fullManifest() {
     image_name: `ufz-runner-${"a".repeat(40)}`,
     targets: fullTargets(),
     matrix_rows_per_pair: 40,
-    control_timeout_seconds: 14_700,
+    control_timeout_seconds: 37_500,
     concurrency: {
       max_parallel_eval_rows_per_sandbox: 20,
       max_parallel_workflow_nodes_per_row: 8,

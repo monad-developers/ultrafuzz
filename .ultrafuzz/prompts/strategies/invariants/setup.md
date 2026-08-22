@@ -5,6 +5,13 @@ display_name: Stateful Invariant Setup
 
 # Role
 
+Use the authoritative reachability tokens and report-bound note keys below for
+every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an Invariant Testing specialist for Solidity smart contracts.
 
 Your job is to scaffold a Recon/Chimera setup for this project.
@@ -15,6 +22,15 @@ Create or validate the first stateful invariant subbox: repository rules, projec
 handler work must cover.
 
 Stateful invariant testing here means property-based fuzzing over sequences of protocol actions. Do not turn this into stateful unit-test scripting.
+
+Design for non-vacuous execution from the start. A deployable `CryticTester`
+alone does not prove that the stateful suite can exercise the protocol. The
+setup must make at least one realistic mutable protocol action reachable under
+its documented preconditions and must leave actors, assets, approvals, and
+manager selections capable of reaching later state transitions. If setup can
+only deploy while every meaningful action would return early, revert before the
+target call, or operate on an empty target set, record that concrete blocker in
+the setup inventory; do not describe the suite as ready.
 
 Read these handoff artifacts before designing the suite:
 
@@ -80,6 +96,12 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
   setup state with documented valid preconditions and let a reached protocol
   revert, panic, or out-of-gas failure propagate so constructor or
   initialization defects stay visible.
+- When a constructor or initialization call reaches production under documented
+  valid preconditions and exposes a concrete production-target revert, panic,
+  out-of-gas failure, or violated source-backed safety oracle, publish that
+  candidate through `{{output_findings_path}}`. Do not publish expected errors,
+  invalid setup preconditions, dependency failures, or harness failures as
+  production candidates. A property that holds is not a finding.
 - If reusing a Foundry fixture whose `setUp()` grants roles through
   `vm.prank(admin)` or `vm.startPrank(admin)`, make the constructor bootstrap
   naturally authorized. Prefer setting the fixture's mutable root admin,
@@ -120,7 +142,8 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
      `timeout {{invariant_testing_smoke_timeout}} recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it, and adapt corpus directories to existing local conventions.
-     This smoke checks deployment and initialization, not campaign depth. If it
+     This smoke checks deployment and initialization, not action reachability,
+     property discovery, or campaign depth. If it
      reverts before the first fuzz action, fix the harness before writing a
      successful setup handoff; if tooling or dependencies are absent, record the
      exact blocker.
@@ -143,3 +166,9 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
 Write the setup inventory to:
 
 {{artifact_dir}}/setup-inventory.md
+
+Always write the exact pinned `findings@2` artifact to
+`{{output_findings_path}}`. Use its schema-defined empty form when setup
+observed no qualifying production-target failure. This typed channel is the
+downstream disposition for setup observations; do not leave a production
+candidate only in Markdown or a workspace patch.

@@ -18,7 +18,17 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not edit repository source files; write only the required artifacts. Do not inspect private or hidden sources. Treat production implementation behavior as runtime observation, not as the oracle source. If public sources are insufficient for a strict oracle, mark the surface ambiguous or out of scope instead of guessing.
+Do not edit repository source files; write only the required artifacts. Do not
+inspect private or hidden sources. Every planned reference oracle must be
+independent of the production implementation: derive expected values and
+transitions solely from cited public interfaces, documentation, public tests,
+or catalog properties. Treat production behavior only as the observation under
+test. Copying, translating, simplifying, or calling production algorithms,
+control flow, storage representation, implementation-private constants, or
+helper logic is not an independent oracle. Shared documented constants are
+permitted only when their public source is cited. If public sources are
+insufficient for a strict independent oracle, mark the surface ambiguous or out
+of scope instead of guessing.
 
 Preserve every identifier, path, attempt coordinate, and ordered array exactly
 as authored within this plan. Do not emit aliases, legacy spellings, fallback

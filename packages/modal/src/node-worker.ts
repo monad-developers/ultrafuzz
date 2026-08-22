@@ -963,6 +963,11 @@ function sameResumableNodeInput(
     left.artifact_dir === right.artifact_dir &&
     left.workspace_dir === right.workspace_dir &&
     sameStrings(left.dependency_artifact_dirs, right.dependency_artifact_dirs) &&
+    sameStrings(left.optional_dependency_artifact_dirs ?? [], right.optional_dependency_artifact_dirs ?? []) &&
+    sameDependencyVerificationAuthorities(
+      left.dependency_verification_authorities,
+      right.dependency_verification_authorities
+    ) &&
     left.resources.cpu === right.resources.cpu &&
     left.resources.memory_mib === right.resources.memory_mib &&
     left.resources.timeout_seconds === right.resources.timeout_seconds &&
@@ -973,6 +978,21 @@ function sameResumableNodeInput(
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameDependencyVerificationAuthorities(
+  left: StrictModalNodeInputDocument["dependency_verification_authorities"],
+  right: StrictModalNodeInputDocument["dependency_verification_authorities"]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (value, index) =>
+        value.attempt_id === right[index]?.attempt_id &&
+        value.marker_sha256 === right[index]?.marker_sha256 &&
+        value.size_bytes === right[index]?.size_bytes
+    )
+  );
 }
 
 function readRestoreMarker(

@@ -1,12 +1,13 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { parseProjectConfigToml, resolveConfig } from "@ultrafuzz/config";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 import { DEFAULT_BENCHMARK_MODELS } from "../src/defaults.js";
-import { capModalTargetTopologyTimeouts, modalTargetToml } from "../src/workspace-config.js";
+import { PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS } from "../src/public-worker.js";
+import { modalTargetToml } from "../src/workspace-config.js";
 
 describe("Modal target model profiles", () => {
   it("overrides both explicit default and benchmark profiles with the selected model", () => {
@@ -40,6 +41,40 @@ describe("Modal target model profiles", () => {
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
+  });
+
+  it("selects the packaged full audit profile for full target preparation", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, "full");
+
+    expect(config).toContain('audit_profile = "full"');
+    expect(config).toContain("dynamic_strategies_enumerator = 3");
+    const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.auditProfile).toBe("full");
+
+    const topology = parse(fs.readFileSync(path.resolve("../config/topologies/full.yml"), "utf8")) as {
+      groups: { specialists: { defaults: { failure_policy: string; timeout_seconds: number } } };
+      nodes: Array<{ id: string; group?: string }>;
+    };
+    const campaign = topology.nodes.find((node) => node.id === "stateful-invariant-campaign");
+    expect(campaign?.group).toBe("specialists");
+    expect(topology.groups.specialists.defaults.failure_policy).toBe("continue");
+    const specialistTimeoutSeconds = topology.groups.specialists.defaults.timeout_seconds;
+    const hostShutdownGraceSeconds = 5 * 60;
+    const finalizationReserveSeconds = Math.min(5 * 60, Math.floor(specialistTimeoutSeconds / 6));
+    const invariantBudgetSeconds =
+      resolved.value.invariants.invariantTestingSmokeTimeoutSeconds +
+      resolved.value.invariants.invariantTestingFuzzerTimeoutSeconds +
+      hostShutdownGraceSeconds +
+      finalizationReserveSeconds;
+    expect(specialistTimeoutSeconds).toBe(7_200);
+    expect(invariantBudgetSeconds).toBe(4_800);
+    expect(specialistTimeoutSeconds).toBeGreaterThanOrEqual(invariantBudgetSeconds);
+    expect(PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS).toBeGreaterThan(specialistTimeoutSeconds);
   });
 
   it("uses the staged API key for a public Claude benchmark target", () => {
@@ -129,21 +164,5 @@ describe("Modal target model profiles", () => {
     const parsed = parseProjectConfigToml(config, "modal-openrouter-ultrafuzz.toml");
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
-  });
-
-  it("caps explicit group and node timeouts to the public benchmark node budget", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-timeout-cap-"));
-    const topologyPath = path.join(root, "topology.yml");
-    fs.writeFileSync(
-      topologyPath,
-      "groups:\n  strategies:\n    defaults:\n      timeout_seconds: 7200\nnodes:\n  - id: short\n    timeout_seconds: 300\n  - id: long\n    timeout_seconds: 3600\n"
-    );
-
-    capModalTargetTopologyTimeouts(topologyPath, 900);
-
-    expect(fs.readFileSync(topologyPath, "utf8")).toBe(
-      "groups:\n  strategies:\n    defaults:\n      timeout_seconds: 900\nnodes:\n  - id: short\n    timeout_seconds: 300\n  - id: long\n    timeout_seconds: 900\n"
-    );
-    expect(() => capModalTargetTopologyTimeouts(topologyPath, 0)).toThrow(/positive integer/u);
   });
 });
