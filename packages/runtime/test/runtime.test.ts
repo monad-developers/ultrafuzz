@@ -8355,6 +8355,7 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
   const project = tempProject();
   writeFanoutProject(project);
+  fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
   const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
   fs.writeFileSync(
     topologyPath,
@@ -8394,9 +8395,6 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
 
   const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  for (const node of plan.value!.expanded_graph.nodes) {
-    if (node.kind === "agentic") node.retryPolicy.maxAttempts = 1;
-  }
   plan.value!.resolved_config.execution = {
     mode: "cloud",
     provider: "modal",
@@ -8568,6 +8566,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
     configPath,
     fs
       .readFileSync(configPath, "utf8")
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")
       .replace(
         '[agents.KimiAgent]\nauth = "subscription"',
         '[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"'
@@ -10346,7 +10345,8 @@ test("startRun forwards cloud provider credentials through the Smithers environm
     configPath,
     `${fs
       .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
 
 [execution.providers.modal]
 app = "ultrafuzz-test"
@@ -18258,6 +18258,10 @@ test("retry recovery survives an interrupted submission projection and rejects s
   staleTerminalHealth.data.bottleneck = [];
   staleTerminalHealth.data.liveness = { state: "failed" };
   staleTerminalHealth.data.finishedAtMs = 2_000;
+  const recoveredAttemptEvents = workflowEvents(workflowRunId, [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }
+  ]);
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -18266,7 +18270,7 @@ test("retry recovery survives an interrupted submission projection and rejects s
       error: { message: "Task failed: node:project-discovery" },
       steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
     }),
-    events: "",
+    events: recoveredAttemptEvents,
     status: staleTerminalHealth,
     why: {
       ok: true,
@@ -18282,6 +18286,7 @@ test("retry recovery survives an interrupted submission projection and rejects s
       meta: { command: "why", duration: "1ms" }
     }
   });
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
   const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
@@ -18319,11 +18324,7 @@ test("retry recovery survives an interrupted submission projection and rejects s
     steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
   });
   fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
-    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
-    "utf8"
-  );
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, recoveredAttemptEvents, "utf8");
 
   const first = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
@@ -19470,7 +19471,9 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
   const localConfig = fs.readFileSync(configPath, "utf8");
   fs.writeFileSync(
     configPath,
-    `${localConfig.replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+    `${localConfig
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
 
 [execution.providers.modal]
 app = "ultrafuzz-test"
@@ -19531,6 +19534,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   );
   fs.chmodSync(smithers, 0o755);
   const env = {
+    ...Object.fromEntries(effectiveRouteEnvironment("CodexAgent", process.env).map(([name]) => [name, undefined])),
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
     MODAL_TOKEN_ID: "provider-one",

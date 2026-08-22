@@ -635,10 +635,12 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   assert.match(localConfig, /\[execution\]\nmode = "local"\n/u);
   fs.writeFileSync(
     configPath,
-    `${localConfig.replace(
-      '[execution]\nmode = "local"\n',
-      '[execution]\nmode = "cloud"\nprovider = "modal"\n'
-    )}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
+    `${localConfig
+      .replace('[execution]\nmode = "local"\n', '[execution]\nmode = "cloud"\nprovider = "modal"\n')
+      .replace(
+        "[agents.CodexAgent]",
+        "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]"
+      )}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
     "utf8"
   );
   const cloudPlan = await planRun({

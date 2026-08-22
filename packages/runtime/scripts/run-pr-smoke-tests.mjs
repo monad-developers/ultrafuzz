@@ -16,7 +16,9 @@ const namedTests = new Map([
       "validate rejects unknown agent references before launch",
       "plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission",
       "compileSmithersWorkflow gates native dependencies on deterministic artifact verification",
+      "compileSmithersWorkflow maps cloud attempts to portable provider sandboxes",
       "resume reopens a terminal failed workflow with only pending ready work",
+      "retry recovery survives an interrupted submission projection and rejects superseding same-link attempts",
       "forced retry resume renews a stale terminal deadline without duplicating an active workflow"
     ]
   ],

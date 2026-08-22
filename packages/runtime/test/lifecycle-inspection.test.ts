@@ -26,6 +26,7 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
+import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
@@ -1280,7 +1281,8 @@ test("startRun delegates cloud requirements to the execution-provider probe befo
     configPath,
     `${fs
       .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
 
 [execution.providers.modal]
 app = "ultrafuzz-test"
@@ -1295,6 +1297,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     projectRoot: project,
     runId: "missing-cloud-recon",
     env: {
+      ...Object.fromEntries(effectiveRouteEnvironment("CodexAgent", process.env).map(([name]) => [name, undefined])),
       PATH: path.join(project, "controller-empty-bin"),
       MODAL_TOKEN_ID: "provider-one",
       MODAL_TOKEN_SECRET: "provider-two"
