@@ -15856,7 +15856,11 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   const resolvedConfig = evidence.verifiedControl.executionFiles.find(
     (file) => file.snapshotPath === "controls/resolved-config.json"
   );
+  const dependencyManifest = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "dependencies/manifest.json"
+  );
   assert.ok(resolvedConfig);
+  assert.ok(dependencyManifest);
   const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
 
   const moduleName = "@ultrafuzz/synthetic-controller-fixture";
@@ -15871,10 +15875,29 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   fs.writeFileSync(modulePath, currentModule);
   const manifestSnapshotPath = `modules/${moduleName}/package.json`;
   const moduleSnapshotPath = `modules/${moduleName}/dist/index.js`;
+  const moduleId = `module:${moduleName}`;
+  const moduleRootSnapshotPath = `modules/${moduleName}`;
+  const dependencyMap = JSON.parse(dependencyManifest.contents.toString("utf8")) as {
+    modules: Array<{ id: string; name: string; snapshot_path: string }>;
+    issuers: Array<{ id: string; snapshot_path: string; dependencies: Record<string, string> }>;
+  };
+  const refreshedDependencyMap = {
+    ...dependencyMap,
+    modules: [...dependencyMap.modules, { id: moduleId, name: moduleName, snapshot_path: moduleRootSnapshotPath }].sort(
+      (left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+    ),
+    issuers: [...dependencyMap.issuers, { id: moduleId, snapshot_path: moduleRootSnapshotPath, dependencies: {} }].sort(
+      (left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+    )
+  };
   const syntheticSnapshot = {
     ...evidence.verifiedControl,
     executionFiles: [
-      ...evidence.verifiedControl.executionFiles,
+      ...evidence.verifiedControl.executionFiles.map((file) =>
+        file.snapshotPath === dependencyManifest.snapshotPath
+          ? { ...file, contents: Buffer.from(`${JSON.stringify(refreshedDependencyMap, null, 2)}\n`, "utf8") }
+          : file
+      ),
       {
         sourcePath: packageJsonPath,
         snapshotPath: manifestSnapshotPath,
@@ -15898,6 +15921,44 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   assert.deepEqual(
     refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === moduleSnapshotPath)?.contents,
     currentModule
+  );
+
+  const bootstrapPath = path.join(packageRoot, "dist", "bootstrap.js");
+  const bootstrapSnapshotPath = `modules/${moduleName}/dist/bootstrap.js`;
+  fs.writeFileSync(bootstrapPath, 'import "synthetic-dependency";\nexport const bootstrap = true;\n');
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: syntheticSnapshot,
+        config
+      }),
+    /imports synthetic-dependency outside its sealed dependency authority/u
+  );
+
+  fs.writeFileSync(bootstrapPath, 'import "./index.js";\nexport const bootstrap = true;\n');
+  fs.chmodSync(bootstrapPath, 0o755);
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: syntheticSnapshot,
+        config
+      }),
+    /changed executable authority/u
+  );
+  fs.chmodSync(bootstrapPath, 0o644);
+  const admitted = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: syntheticSnapshot,
+    config
+  });
+  assert.equal(
+    admitted.snapshot.executionFiles.some((file) => file.snapshotPath === bootstrapSnapshotPath),
+    true
   );
 
   fs.writeFileSync(
