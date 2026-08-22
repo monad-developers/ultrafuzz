@@ -57,6 +57,7 @@ import {
   type StrictModalNodeWorkerErrorDocument
 } from "./modal-contracts.js";
 import { writeDeterministicTarGzip } from "./deterministic-archive.js";
+import { copyModalSandboxFileToLocal, type ModalDownloadCredentials } from "./modal-download.js";
 import { assertModalDocumentValue, parseModalDocumentBytes, writeModalDocumentAtomic } from "./modal-documents.js";
 import { assertModalNodeCheckpointResultContext } from "./modal-semantic-gates.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
@@ -360,7 +361,7 @@ async function runModalNodeSandbox(
     }
 
     result ??= await waitForModalNodeResult(sandbox, request, workerInput, executionDeadline);
-    await publishModalNodeResult(sandbox, request.rootDir, input, result);
+    await publishModalNodeResult(sandbox, request.rootDir, input, result, { tokenId, tokenSecret });
     request.heartbeat({
       stage: "published",
       provider: "modal",
@@ -1095,7 +1096,8 @@ async function publishModalNodeResult(
   sandbox: Sandbox,
   projectRoot: string,
   input: ModalNodeSandboxInput,
-  result: ModalNodeResult
+  result: ModalNodeResult,
+  credentials: ModalDownloadCredentials
 ): Promise<void> {
   const root = fs.realpathSync(path.resolve(projectRoot));
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
@@ -1104,7 +1106,7 @@ async function publishModalNodeResult(
   fs.chmodSync(temporaryRoot, 0o700);
   try {
     const archive = path.join(temporaryRoot, "result.tgz");
-    await sandbox.filesystem.copyToLocal(result.artifact_archive, archive);
+    await copyModalSandboxFileToLocal(sandbox, result.artifact_archive, archive, credentials);
     const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
     if (digest !== result.artifact_sha256) {
       throw new Error("cloud node publication digest mismatch");
