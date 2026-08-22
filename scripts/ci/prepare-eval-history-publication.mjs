@@ -767,7 +767,7 @@ function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, ma
 }
 
 function defaultMaxRuntimeSeconds(mode) {
-  return mode === "full" ? 60 * 60 : 4 * 60 * 60 + 10 * 60;
+  return mode === "full" ? 15_000 : 4 * 60 * 60 + 10 * 60;
 }
 
 function positiveSafeInteger(value, label) {

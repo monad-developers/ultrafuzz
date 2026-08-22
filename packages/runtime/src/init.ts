@@ -17,7 +17,7 @@ import { migrateStockSmithers032PackageManifest, renderSmithersPackageJson } fro
 import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
-const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("full").path, "utf8");
+const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("default").path, "utf8");
 
 const MAX_AGENT_ADAPTER_REVIEW_BYTES = 256 * 1024;
 const AGENT_TEMPLATES = [

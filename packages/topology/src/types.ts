@@ -28,6 +28,8 @@ export interface TopologyGroupDefaults {
   timeout_seconds?: number;
   max_attempts?: number;
   model_profiles?: string[];
+  /** Continue independent workflow branches when a node in this group fails. */
+  failure_policy?: "halt" | "continue";
 }
 
 export interface TopologyGroup {

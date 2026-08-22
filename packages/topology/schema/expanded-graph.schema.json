@@ -58,6 +58,9 @@
                   "type": "string",
                   "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
                 }
+              },
+              "failure_policy": {
+                "enum": ["halt", "continue"]
               }
             }
           }

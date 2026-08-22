@@ -28,6 +28,10 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifact
   ) {
     return ineligible("the completed run is not an eligible default-branch benchmark producer");
   }
+  const benchmarkMode = benchmarkModeFromArtifacts(artifactsValue, workflowRun);
+  if (!benchmarkMode) {
+    return ineligible("the completed producer attempt does not have one unambiguous benchmark artifact lane");
+  }
   const jobs = jobRecords(jobsValue);
   for (const requiredJob of ["launch", "collect"]) {
     const matching = jobs.filter((job) => job.name === requiredJob);
@@ -35,21 +39,21 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifact
       return ineligible(`the ${requiredJob} job did not complete successfully`);
     }
   }
+  const monitorJobs = jobs.filter((job) => job.name === "monitor_full");
+  const expectedMonitorConclusion = benchmarkMode === "full" ? "success" : "skipped";
+  if (monitorJobs.length !== 1 || monitorJobs[0]?.conclusion !== expectedMonitorConclusion) {
+    return ineligible(`the full-lane monitor job did not have the expected ${expectedMonitorConclusion} conclusion`);
+  }
 
   const candidateCommit = FULL_COMMIT.test(workflowRun.head_sha) ? workflowRun.head_sha : undefined;
   if (!candidateCommit) {
     return ineligible("the exact benchmark candidate commit could not be established");
   }
-  const benchmarkMode = benchmarkModeFromArtifacts(artifactsValue, workflowRun);
-  if (!benchmarkMode) {
-    return ineligible("the completed producer attempt does not have one unambiguous benchmark artifact lane");
-  }
-
   return {
     eligible: true,
     candidateCommit,
     benchmarkMode,
-    reason: "the exact launch and collect jobs completed successfully"
+    reason: "the exact launch, staged monitor, and collect topology completed successfully"
   };
 }
 

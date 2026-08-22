@@ -88,6 +88,7 @@ test(
     fs.mkdirSync(path.dirname(guard), { recursive: true });
     fs.writeFileSync(guard, "export {};\n");
     fs.writeFileSync(path.join(path.dirname(guard), "bunfig.toml"), "\n");
+    fs.writeFileSync(path.join(path.dirname(guard), "bun-empty.env"), "\n");
     writeExecutable(
       runner,
       "#!/usr/bin/env bun\nimport '@smthrs/cli'; console.log(JSON.stringify({ dotenv: process.env.ULTRAFUZZ_HOSTILE_DOTENV ?? null, injections: ['BUN_OPTIONS', 'BUN_INSPECT_PRELOAD', 'NODE_PATH', 'NODE_OPTIONS'].map((name) => process.env[name] ?? null) }));\n"
@@ -120,14 +121,15 @@ test(
     try {
       const expected = [
         `--config=${path.join(path.dirname(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT!), "bunfig.toml")}`,
+        `--env-file=${path.join(path.dirname(env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT!), "bun-empty.env")}`,
         "--no-env-file",
         "--no-install",
         "--no-addons",
         "--preserve-symlinks",
         "--preserve-symlinks-main"
       ];
-      assert.deepEqual(anchor.argumentPrefix.slice(0, 6), expected);
-      assert.equal(anchor.argumentPrefix[6], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`);
+      assert.deepEqual(anchor.argumentPrefix.slice(0, 7), expected);
+      assert.equal(anchor.argumentPrefix[7], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`);
     } finally {
       anchor.close();
     }
@@ -145,6 +147,10 @@ test(
       delete env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT;
       assert.throws(() => acquireSmithersExecutableAnchor(env), /requires a sealed snapshot path/u);
       env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT = sealedGuard;
+      const sealedEmptyEnvironment = path.join(path.dirname(sealedGuard), "bun-empty.env");
+      fs.writeFileSync(sealedEmptyEnvironment, "ULTRAFUZZ_HOSTILE_DOTENV=hostile\n");
+      assert.throws(() => acquireSmithersExecutableAnchor(env), /changed at the controller command boundary/u);
+      fs.writeFileSync(sealedEmptyEnvironment, "\n");
       fs.writeFileSync(guard, "malformed");
       assert.throws(() => acquireSmithersExecutableAnchor(env), /changed at the controller command boundary/u);
     } finally {

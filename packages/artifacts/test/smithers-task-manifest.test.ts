@@ -6,10 +6,12 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
+  referenceArtifactManifestAuthorityForArtifactDir,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask
 } from "../src/smithers-task-manifest.js";
 import type { PlannedGraphDocument } from "../src/planned-graph.js";
+import { promptArtifactAuthorityPathSelectorId } from "../src/prompt-artifact-authority-selectors.js";
 
 const SHA256 = "a".repeat(64);
 
@@ -178,7 +180,78 @@ function bytes(value: unknown): Buffer {
 test("strictly parses the current sealed Smithers task manifest and planned-graph join", () => {
   const parsed = parseSmithersTaskManifestBytes(bytes(manifest()));
   assert.equal(parsed.schema_version, SMITHERS_TASK_MANIFEST_SCHEMA_VERSION);
+  assert.equal("promptArtifactAuthoritySelectors" in parsed.tasks[0]!, false);
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, graph()));
+});
+
+test("accepts canonical prompt artifact authority selectors and rejects duplicate or unordered selectors", () => {
+  const paths = ["reports/alpha.json", "reports/zeta.json"];
+  const pathSelector = { kind: "path" as const, id: promptArtifactAuthorityPathSelectorId(paths), paths };
+  const selected = task({
+    promptArtifactAuthoritySelectors: [
+      { kind: "contract", contract: "ultrafuzz/findings@2" },
+      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
+      pathSelector
+    ]
+  });
+  const parsed = parseSmithersTaskManifestBytes(bytes(manifest([selected])));
+  assert.deepEqual(parsed.tasks[0]!.promptArtifactAuthoritySelectors, selected.promptArtifactAuthoritySelectors);
+
+  const duplicate = structuredClone(selected);
+  duplicate.promptArtifactAuthoritySelectors!.push(structuredClone(pathSelector));
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([duplicate]))), /registered schema/u);
+
+  const unordered = structuredClone(selected);
+  unordered.promptArtifactAuthoritySelectors!.reverse();
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([unordered]))),
+    /prompt artifact authority selectors are not unique and canonically ordered/u
+  );
+});
+
+test("rejects empty, unknown-contract, unsafe-path, and mismatched-ID prompt artifact authority selectors", () => {
+  const withSelectors = (promptArtifactAuthoritySelectors: unknown[]) => ({
+    ...task(),
+    promptArtifactAuthoritySelectors
+  });
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([withSelectors([]) as SmithersTaskManifestTask]))),
+    /registered schema/u
+  );
+  assert.throws(
+    () =>
+      parseSmithersTaskManifestBytes(
+        bytes(
+          manifest([
+            withSelectors([
+              { kind: "contract", contract: "ultrafuzz/not-a-registered-contract@1" }
+            ]) as SmithersTaskManifestTask
+          ])
+        )
+      ),
+    /registered schema/u
+  );
+  const paths = ["reports/alpha.json"];
+  assert.throws(
+    () =>
+      parseSmithersTaskManifestBytes(
+        bytes(
+          manifest([
+            withSelectors([
+              { kind: "path", id: promptArtifactAuthorityPathSelectorId(paths), paths: ["../controller-secret.json"] }
+            ]) as SmithersTaskManifestTask
+          ])
+        )
+      ),
+    /registered schema/u
+  );
+  assert.throws(
+    () =>
+      parseSmithersTaskManifestBytes(
+        bytes(manifest([withSelectors([{ kind: "path", id: "0".repeat(64), paths }]) as SmithersTaskManifestTask]))
+      ),
+    /path selector ID does not match its paths/u
+  );
 });
 
 test("accepts a 100-attempt task chain and rejects 101 attempts at the manifest boundary", () => {
@@ -297,7 +370,20 @@ test("rejects missing graph coverage, extra tasks, and graph dependency drift", 
 });
 
 test("planned-graph joins retain reference dependencies without inventing workflow tasks for them", () => {
-  const referenceDependency = task({ dependencies: ["reference-input"], dependencySmithersNodeIds: [] });
+  const referenceArtifactDir = "/runs/run-1/artifacts/reference-input";
+  const referenceDependency = task({
+    dependencies: ["reference-input"],
+    dependencySmithersNodeIds: [],
+    dependencyArtifactDirs: [referenceArtifactDir],
+    referenceArtifactManifestAuthorities: [
+      {
+        attemptId: "reference-input",
+        artifactDir: referenceArtifactDir,
+        sizeBytes: 123,
+        sha256: SHA256
+      }
+    ]
+  });
   referenceDependency.metadata.dependencies = {
     concreteNodeIds: ["reference-input"],
     attemptIds: ["reference-input"],
@@ -334,4 +420,124 @@ test("planned-graph joins retain reference dependencies without inventing workfl
     model_fanout: []
   });
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, withReference));
+  assert.deepEqual(referenceArtifactManifestAuthorityForArtifactDir(parsed.tasks[0]!, referenceArtifactDir), {
+    attemptId: "reference-input",
+    artifactDir: referenceArtifactDir,
+    sizeBytes: 123,
+    sha256: SHA256
+  });
+
+  const missing = structuredClone(parsed);
+  delete missing.tasks[0]!.referenceArtifactManifestAuthorities;
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(missing, withReference),
+    /reference artifact-manifest authorities/u
+  );
+
+  const foreign = structuredClone(parsed);
+  foreign.tasks[0]!.dependencyArtifactDirs.push("/runs/run-1/artifacts/foreign-reference");
+  foreign.tasks[0]!.referenceArtifactManifestAuthorities = [
+    {
+      attemptId: "foreign-reference",
+      artifactDir: "/runs/run-1/artifacts/foreign-reference",
+      sizeBytes: 123,
+      sha256: SHA256
+    }
+  ];
+  const parsedForeign = parseSmithersTaskManifestBytes(bytes(foreign));
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(parsedForeign, withReference),
+    /reference artifact-manifest authorities/u
+  );
+
+  const transitiveGraph = structuredClone(withReference);
+  const transitiveProducerNode = transitiveGraph.nodes[0]!;
+  transitiveProducerNode.depends_on = ["intermediate"];
+  const intermediateNode = structuredClone(transitiveProducerNode);
+  intermediateNode.id = "intermediate";
+  intermediateNode.logical_id = "intermediate";
+  intermediateNode.display_name = "intermediate";
+  intermediateNode.depends_on = ["reference-input"];
+  intermediateNode.artifact_dir = "artifacts/intermediate";
+  intermediateNode.prompt_id = "intermediate";
+  intermediateNode.prompt_path = ".ultrafuzz/prompts/intermediate.md";
+  intermediateNode.workflow = { node_id: "node:intermediate", task_node_ids: ["node:intermediate"] };
+  transitiveGraph.nodes.push(intermediateNode);
+  const intermediateArtifactDir = "/runs/run-1/artifacts/intermediate";
+  const transitiveProducer = structuredClone(referenceDependency);
+  transitiveProducer.dependencies = ["intermediate"];
+  transitiveProducer.dependencySmithersNodeIds = ["verify:intermediate"];
+  transitiveProducer.dependencyArtifactDirs = [intermediateArtifactDir, referenceArtifactDir];
+  transitiveProducer.metadata.dependencies = {
+    concreteNodeIds: ["intermediate"],
+    attemptIds: ["intermediate"],
+    smithersNodeIds: ["verify:intermediate"]
+  };
+  const intermediate = task({
+    attemptId: "intermediate",
+    concreteNodeId: "intermediate",
+    logicalNodeId: "intermediate",
+    dependencies: ["reference-input"],
+    dependencySmithersNodeIds: [],
+    dependencyArtifactDirs: [referenceArtifactDir],
+    referenceArtifactManifestAuthorities: structuredClone(referenceDependency.referenceArtifactManifestAuthorities)
+  });
+  intermediate.metadata.dependencies = {
+    concreteNodeIds: ["reference-input"],
+    attemptIds: ["reference-input"],
+    smithersNodeIds: []
+  };
+  const transitiveManifest = parseSmithersTaskManifestBytes(bytes(manifest([transitiveProducer, intermediate])));
+  assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(transitiveManifest, transitiveGraph));
+  delete transitiveManifest.tasks[0]!.referenceArtifactManifestAuthorities;
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(transitiveManifest, transitiveGraph),
+    /reference artifact-manifest authorities/u
+  );
+});
+
+test("rejects malformed or noncanonical reference artifact-manifest authorities", () => {
+  const firstDir = "/runs/run-1/artifacts/reference-a";
+  const secondDir = "/runs/run-1/artifacts/reference-b";
+  const base = task({
+    dependencyArtifactDirs: [firstDir, secondDir],
+    referenceArtifactManifestAuthorities: [
+      { attemptId: "reference-a", artifactDir: firstDir, sizeBytes: 1, sha256: SHA256 }
+    ]
+  });
+
+  const unordered = structuredClone(base);
+  unordered.referenceArtifactManifestAuthorities = [
+    { attemptId: "reference-b", artifactDir: secondDir, sizeBytes: 1, sha256: SHA256 },
+    { attemptId: "reference-a", artifactDir: firstDir, sizeBytes: 1, sha256: SHA256 }
+  ];
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([unordered]))),
+    /not unique and canonically ordered/u
+  );
+
+  const duplicate = structuredClone(base);
+  duplicate.referenceArtifactManifestAuthorities = [
+    { attemptId: "reference-a", artifactDir: firstDir, sizeBytes: 1, sha256: SHA256 },
+    { attemptId: "reference-a", artifactDir: firstDir, sizeBytes: 2, sha256: "b".repeat(64) }
+  ];
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([duplicate]))),
+    /not unique and canonically ordered/u
+  );
+
+  const wrongDirectory = structuredClone(base);
+  wrongDirectory.referenceArtifactManifestAuthorities![0]!.artifactDir = secondDir;
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([wrongDirectory]))),
+    /no exact dependency artifact directory/u
+  );
+
+  const wrongDigest = structuredClone(base);
+  wrongDigest.referenceArtifactManifestAuthorities![0]!.sha256 = "A".repeat(64);
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([wrongDigest]))), /registered schema/u);
+
+  const oversized = structuredClone(base);
+  oversized.referenceArtifactManifestAuthorities![0]!.sizeBytes = 64 * 1024 * 1024 + 1;
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([oversized]))), /registered schema/u);
 });

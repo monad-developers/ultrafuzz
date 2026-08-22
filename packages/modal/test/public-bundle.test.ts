@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
-import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { projectCanonicalFinalReport, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
 import { MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID } from "../src/modal-contracts.js";
@@ -566,6 +566,56 @@ describe("public Modal benchmark bundles", () => {
         files: [{ path: "reports/target-a/report.json", root, source: report }]
       })
     ).toThrow(/symlink/u);
+  });
+
+  it("rejects a hard-linked public source", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-hardlink-"));
+    const privateSource = path.join(root, "private-report.json");
+    const report = path.join(root, "report.json");
+    fs.writeFileSync(privateSource, "{}\n");
+    fs.linkSync(privateSource, report);
+
+    expect(() =>
+      createPublicBenchmarkBundle({
+        benchmark: "evmbench",
+        lane: "smoke",
+        modelSlug: "gpt-5-6-luna",
+        model: "gpt-5.6-luna",
+        reasoning: "high",
+        candidateCommit: "c".repeat(40),
+        evalRunId: "eval-hardlink",
+        lineage: TEST_LINEAGE,
+        files: [{ path: "reports/target-a/report.json", root, source: report }]
+      })
+    ).toThrow(/singly linked regular file/u);
+  });
+
+  it("rejects a canonical internal report until its JSON crosses the privacy-safe public projection", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-private-report-"));
+    const rowId = "target-a-runner-trial-1";
+    const files = completePublicSources(root, [rowId]);
+    const jsonSource = files.find((source) => source.path === `reports/${rowId}/report.json`);
+    const markdownSource = files.find((source) => source.path === `reports/${rowId}/report.md`);
+    if (jsonSource === undefined || markdownSource === undefined) throw new Error("missing report fixture");
+    const report = JSON.parse(fs.readFileSync(jsonSource.source, "utf8")) as {
+      issues: Array<Record<string, unknown>>;
+    };
+    report.issues[0]!.description = "The reproducer was captured at /srv/customer/private/reproducer.sol.";
+    const internal = projectCanonicalFinalReport(report);
+    fs.writeFileSync(jsonSource.source, `${JSON.stringify(internal.report, null, 2)}\n`);
+    fs.writeFileSync(markdownSource.source, internal.markdown);
+
+    expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files })).toThrow(
+      /privacy-safe public final-report projection/u
+    );
+
+    const published = projectPublicCanonicalFinalReport(report);
+    fs.writeFileSync(jsonSource.source, `${JSON.stringify(published.report, null, 2)}\n`);
+    fs.writeFileSync(markdownSource.source, published.markdown);
+    const bundle = createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files });
+    const publicJson = bundleFileText(bundle, `reports/${rowId}/report.json`);
+    expect(publicJson).not.toContain("/srv/customer/private/reproducer.sol");
+    expect(publicJson).toContain("[redacted-path]");
   });
 
   it("refuses a pre-existing intermediate output symlink without writing through it", () => {

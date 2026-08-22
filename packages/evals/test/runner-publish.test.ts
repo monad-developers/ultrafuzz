@@ -12,6 +12,7 @@ import { appendEvalRunRecord, readEvalMatrix, readEvalRunRecords } from "../src/
 import { publishEvalRun } from "../src/publish.js";
 import { loadBoundEvalReportAuthority } from "../src/report-authority.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
+import { boundedEvalWorkflowRunId } from "../src/utils.js";
 import {
   RecordingReporter,
   cleanRecoveryEquivalence,
@@ -30,12 +31,79 @@ import {
 const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:05:00.000Z";
 
-function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" | "canceled" = "succeeded"): void {
+function expectedRowRunId(evalRunId: string, row: ReturnType<typeof testRow>): string {
+  return boundedEvalWorkflowRunId([evalRunId, row.run_id]);
+}
+
+function writeRunPlanPolicyFixture(runRoot: string, runId: string): void {
+  const digestA = "a".repeat(64);
+  const digestB = "b".repeat(64);
+  fs.writeFileSync(
+    path.join(runRoot, "plan.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.run-plan.v3",
+      run_id: runId,
+      mode: "run",
+      graph_fingerprint: digestA,
+      config_fingerprint: digestB,
+      redacted_config_fingerprint: digestA,
+      prompt_digest: digestB,
+      controller_source_digest: digestA,
+      execution: {
+        mode: "local",
+        retentionDays: 30,
+        resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 300 },
+        nodes: {},
+        providers: {}
+      },
+      topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1, required_commands: [] },
+      audit_profile: {
+        id: "full",
+        catalog_digest: digestA,
+        effective_topology_path: "topology.json",
+        topology_path_origin: "audit-profile",
+        topology_digest: digestB,
+        prompt_digest: digestB,
+        expanded_graph_fingerprint: digestA,
+        effective_settings: {},
+        setting_origins: {},
+        overridden_settings: [],
+        topology_overridden: false
+      },
+      data_governance: {
+        schema_version: "ultrafuzz.data-governance-provenance.v1",
+        path: "data-governance.json",
+        sha256: digestA,
+        policy_digest: digestB,
+        input_digest: digestA,
+        sensitivity: "private",
+        acknowledgement_status: "approved"
+      },
+      rendered_prompts: [],
+      policy_posture: {
+        config: "pass",
+        topology: "pass",
+        prompts: "pass",
+        paths: "pass",
+        agents: "pass",
+        trust: "pass"
+      }
+    })}\n`,
+    "utf8"
+  );
+}
+
+function terminalRunFixture(
+  runRoot: string,
+  status: "succeeded" | "timed-out" | "canceled" = "succeeded",
+  runId = "run-1"
+): void {
   const controlGeneration = "a".repeat(64);
   const graph = currentPlannedGraph(["setup-1", "final-report"]);
   graph.nodes[1]!.depends_on = ["setup-1"];
   writeRunFixture({
     runRoot,
+    runId,
     events: [
       {
         event_id: `evt-${"0".repeat(24)}`,
@@ -76,7 +144,7 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
       }
     ],
     state: currentRunState({
-      runId: "run-1",
+      runId,
       status,
       nodes: {
         "setup-1": { status: "succeeded", started_at: T0, finished_at: T1 },
@@ -92,8 +160,8 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
         "report.json": JSON.stringify({
           schema_version: "ultrafuzz.report.v3",
           run_metadata: {
-            run_id: "run-1",
-            source_run_id: "run-1",
+            run_id: runId,
+            source_run_id: runId,
             repository: "https://example.com/target-a",
             elapsed_time: "5m",
             models_used: ["gpt-test"],
@@ -119,7 +187,7 @@ function terminalRunFixture(runRoot: string, status: "succeeded" | "timed-out" |
     }
   });
   const attempt = createNodeAttemptLedgerEntry(
-    { runId: "run-1" },
+    { runId },
     {
       workflowRunId: "workflow-1",
       controlGeneration,
@@ -429,7 +497,8 @@ describe("runner", () => {
       const suite = testSuite(path.join(base, "gt"));
       const row = testRow(suite);
       const evalRunRoot = path.join(base, "eval-run");
-      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-enrichment");
+      const runId = expectedRowRunId("eval-enrichment", row);
+      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
       fs.mkdirSync(evalRunRoot, { recursive: true });
       fs.mkdirSync(runRoot, { recursive: true });
       fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
@@ -445,7 +514,7 @@ describe("runner", () => {
         appendRecord: true,
         launcher: async () => ({
           ok: true,
-          runId: "run-enrichment",
+          runId,
           runRoot,
           workflowIds: ["workflow-enrichment"],
           diagnostics: []
@@ -454,7 +523,7 @@ describe("runner", () => {
 
       expect(record).toMatchObject({
         status: "launched",
-        ultrafuzz_run_id: "run-enrichment",
+        ultrafuzz_run_id: runId,
         ultrafuzz_run_root: runRoot,
         diagnostics: [
           {
@@ -469,12 +538,54 @@ describe("runner", () => {
     }
   );
 
+  it("records the actual post-launch run-plan audit policy and topology origin", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-policy-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const evalRunRoot = path.join(base, "eval-run");
+    const runId = expectedRowRunId("eval-policy", row);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
+    fs.mkdirSync(evalRunRoot, { recursive: true });
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
+    writeRunPlanPolicyFixture(runRoot, runId);
+
+    const record = await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId: "eval-policy",
+      evalRunRoot,
+      row,
+      suite,
+      appendRecord: true,
+      launcher: async () => ({
+        ok: true,
+        runId,
+        runRoot,
+        workflowIds: ["workflow-policy"],
+        graphFingerprint: "a".repeat(64),
+        configFingerprint: "b".repeat(64),
+        diagnostics: []
+      })
+    });
+
+    expect(record).toMatchObject({
+      audit_profile: "full",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_path_origin: "audit-profile",
+      topology_digest: "b".repeat(64),
+      prompt_digest: "b".repeat(64)
+    });
+    expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+  });
+
   it("records a present dangling state enrichment as invalid instead of absent", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-launch-dangling-state-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const evalRunRoot = path.join(base, "eval-run");
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-enrichment");
+    const runId = expectedRowRunId("eval-enrichment", row);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
     fs.mkdirSync(evalRunRoot, { recursive: true });
     fs.mkdirSync(runRoot, { recursive: true });
     fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
@@ -490,7 +601,7 @@ describe("runner", () => {
       appendRecord: true,
       launcher: async () => ({
         ok: true,
-        runId: "run-enrichment",
+        runId,
         runRoot,
         workflowIds: ["workflow-enrichment"],
         diagnostics: []
@@ -512,9 +623,146 @@ describe("runner", () => {
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
   });
 
+  it.each(["state.json", "plan.json"] as const)(
+    "rejects schema-valid %s enrichment from another run without borrowing its authority",
+    async (foreignDocument) => {
+      const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-foreign-run-enrichment-"));
+      const suite = testSuite(path.join(base, "gt"));
+      const row = testRow(suite);
+      const evalRunRoot = path.join(base, "eval-run");
+      const runId = expectedRowRunId("eval-enrichment", row);
+      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
+      fs.mkdirSync(evalRunRoot, { recursive: true });
+      fs.mkdirSync(runRoot, { recursive: true });
+      fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
+      if (foreignDocument === "state.json") {
+        fs.writeFileSync(
+          path.join(runRoot, foreignDocument),
+          `${JSON.stringify(currentRunState({ runId: "run-foreign" }))}\n`,
+          "utf8"
+        );
+      } else {
+        writeRunPlanPolicyFixture(runRoot, "run-foreign");
+      }
+
+      const record = await launchEvalRow({
+        projectRoot: base,
+        suitePath: "suite.yml",
+        evalRunId: "eval-enrichment",
+        evalRunRoot,
+        row,
+        suite,
+        appendRecord: true,
+        launcher: async () => ({
+          ok: true,
+          runId,
+          runRoot,
+          workflowIds: ["workflow-expected"],
+          ...(foreignDocument === "plan.json"
+            ? { graphFingerprint: "c".repeat(64), configFingerprint: "d".repeat(64) }
+            : {}),
+          diagnostics: []
+        })
+      });
+
+      expect(record).toMatchObject({
+        status: "launched",
+        ultrafuzz_run_id: runId,
+        diagnostics: [
+          {
+            code: "EVAL_ROW_ENRICHMENT_INVALID",
+            severity: "error",
+            message: expect.stringContaining(foreignDocument)
+          }
+        ]
+      });
+      if (foreignDocument === "state.json") {
+        expect(record).not.toHaveProperty("graph_fingerprint");
+        expect(record).not.toHaveProperty("config_fingerprint");
+      } else {
+        expect(record).not.toHaveProperty("audit_profile");
+        expect(record).not.toHaveProperty("audit_profile_catalog_digest");
+        expect(record).not.toHaveProperty("topology_path_origin");
+        expect(record).not.toHaveProperty("topology_digest");
+        expect(record).not.toHaveProperty("prompt_digest");
+      }
+      expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+    }
+  );
+
+  it("rejects a complete launcher-returned run that does not use the row-owned requested ID", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-foreign-launch-run-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const evalRunId = "eval-launch-binding";
+    const expectedRunId = expectedRowRunId(evalRunId, row);
+    const foreignRunId = "foreign-complete-run";
+    const foreignRunRoot = path.join(base, "target", ".ultrafuzz", "runs", foreignRunId);
+    const evalRunRoot = path.join(base, "eval-run");
+    fs.mkdirSync(foreignRunRoot, { recursive: true });
+    fs.mkdirSync(evalRunRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRunRoot, "runs.jsonl"), "");
+    fs.writeFileSync(
+      path.join(foreignRunRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ runId: foreignRunId }))}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(path.join(foreignRunRoot, "graph.json"), `${JSON.stringify(currentPlannedGraph())}\n`, "utf8");
+    writeRunPlanPolicyFixture(foreignRunRoot, foreignRunId);
+
+    const record = await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId,
+      evalRunRoot,
+      row,
+      suite,
+      appendRecord: true,
+      launcher: async (input) => {
+        expect(input.runId).toBe(expectedRunId);
+        return {
+          ok: true,
+          runId: foreignRunId,
+          runRoot: foreignRunRoot,
+          workflowIds: ["workflow-foreign"],
+          diagnostics: []
+        };
+      }
+    });
+
+    expect(record).toMatchObject({
+      status: "failed",
+      workflow_ids: ["workflow-foreign"],
+      diagnostics: [
+        {
+          code: "EVAL_ROW_RUN_ID_MISMATCH",
+          severity: "error",
+          message: expect.stringContaining(expectedRunId)
+        }
+      ]
+    });
+    expect(record).not.toHaveProperty("ultrafuzz_run_id");
+    expect(record).not.toHaveProperty("ultrafuzz_run_root");
+    expect(record).not.toHaveProperty("graph_fingerprint");
+    expect(record).not.toHaveProperty("audit_profile");
+    expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+  });
+
   it("rejects a row missing its topology backend before creating an Ultrafuzz run", async () => {
     const project = mkdtempSync(path.join(tmpdir(), "ufz-evals-required-command-"));
     initProject({ projectRoot: project, force: true });
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        // The packaged full topology intentionally quarantines stateful
+        // specialists, so their missing backends are warnings. Use the
+        // focused invariant profile to exercise the blocking preflight.
+        .replace('audit_profile = "default"', 'audit_profile = "invariant-only"')
+        .replace("default_timeout_seconds = 3600", "default_timeout_seconds = 7200"),
+      "utf8"
+    );
     const suite = testSuite(path.join(project, "ground-truth"));
     const row = testRow(suite, { target: { ...testRow(suite).target, path: project } });
 
@@ -542,17 +790,18 @@ describe("runner", () => {
     expect(record.diagnostics[0]).not.toHaveProperty("details");
     const runsRoot = path.join(project, ".ultrafuzz", "runs");
     expect(fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : []).toEqual([]);
-  });
+  }, 20_000);
 
   it("keeps a detached workflow nonterminal after its launcher exits", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-detached-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-detached");
+    const runId = expectedRowRunId("eval-detached", row);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
     writeRunFixture({
       runRoot,
       state: currentRunState({
-        runId: "run-detached",
+        runId,
         status: "running",
         nodes: {},
         overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
@@ -567,7 +816,7 @@ describe("runner", () => {
       suite,
       launcher: async () => ({
         ok: true,
-        runId: "run-detached",
+        runId,
         runRoot,
         workflowIds: ["workflow-detached"],
         diagnostics: []
@@ -592,11 +841,13 @@ describe("runner", () => {
     );
     const suite = testSuite(groundTruthRoot);
     suite.targets[0]!.ref = "0".repeat(40);
+    const row = testRow(suite);
+    const runId = expectedRowRunId("eval-detached-summary", row);
     const suitePath = path.join(project, "suite.yml");
     writeSuiteInputFixture(suitePath, suite);
     initializeTestGitRepository(project);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-    terminalRunFixture(runRoot);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
+    terminalRunFixture(runRoot, "succeeded", runId);
 
     const result = await runEvalSuite({
       projectRoot: project,
@@ -607,7 +858,7 @@ describe("runner", () => {
       watch: false,
       launcher: async () => ({
         ok: true,
-        runId: "run-1",
+        runId,
         runRoot,
         workflowIds: ["workflow-1"],
         diagnostics: []
@@ -640,11 +891,13 @@ describe("runner", () => {
     );
     const suite = testSuite(groundTruthRoot);
     suite.targets[0]!.ref = "0".repeat(40);
+    const row = testRow(suite);
+    const runId = expectedRowRunId("eval-watch-default", row);
     const suitePath = path.join(project, "suite.yml");
     writeSuiteInputFixture(suitePath, suite);
     initializeTestGitRepository(project);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-    terminalRunFixture(runRoot);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
+    terminalRunFixture(runRoot, "succeeded", runId);
 
     const result = await runEvalSuite({
       projectRoot: project,
@@ -654,7 +907,7 @@ describe("runner", () => {
       provider: "none",
       launcher: async () => ({
         ok: true,
-        runId: "run-1",
+        runId,
         runRoot,
         workflowIds: ["workflow-1"],
         diagnostics: []
@@ -683,14 +936,16 @@ describe("runner", () => {
     );
     const suite = testSuite(groundTruthRoot);
     suite.targets[0]!.ref = "0".repeat(40);
+    const row = testRow(suite);
+    const runId = expectedRowRunId("eval-watch-timeout", row);
     const suitePath = path.join(project, "suite.yml");
     writeSuiteInputFixture(suitePath, suite);
     initializeTestGitRepository(project);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
     writeRunFixture({
       runRoot,
       state: currentRunState({
-        runId: "run-1",
+        runId,
         status: "running",
         nodes: {},
         overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
@@ -708,7 +963,7 @@ describe("runner", () => {
       pollIntervalMs: 1,
       launcher: async () => ({
         ok: true,
-        runId: "run-1",
+        runId,
         runRoot,
         workflowIds: ["workflow-1"],
         diagnostics: []
@@ -736,21 +991,24 @@ describe("runner", () => {
       );
       const suite = testSuite(groundTruthRoot);
       suite.targets[0]!.ref = "0".repeat(40);
+      const row = testRow(suite);
+      const evalRunId = `eval-${status}`;
+      const runId = expectedRowRunId(evalRunId, row);
       const suitePath = path.join(project, "suite.yml");
       writeSuiteInputFixture(suitePath, suite);
       initializeTestGitRepository(project);
-      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-      terminalRunFixture(runRoot, status);
+      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
+      terminalRunFixture(runRoot, status, runId);
 
       const result = await runEvalSuite({
         projectRoot: project,
         suitePath,
-        evalRunId: `eval-${status}`,
+        evalRunId,
         groundTruthRoot,
         provider: "none",
         launcher: async () => ({
           ok: true,
-          runId: "run-1",
+          runId,
           runRoot,
           workflowIds: ["workflow-1"],
           diagnostics: []
@@ -769,7 +1027,8 @@ describe("runner", () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-lineage-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    const runId = expectedRowRunId("eval-1", row);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", runId);
     fs.mkdirSync(runRoot, { recursive: true });
     const record = await launchEvalRow({
       projectRoot: base,
@@ -785,7 +1044,7 @@ describe("runner", () => {
       },
       launcher: async () => ({
         ok: true,
-        runId: "run-1",
+        runId,
         runRoot,
         workflowIds: ["workflow-1"],
         graphFingerprint: "graph-generated",
@@ -936,6 +1195,89 @@ describe("runner", () => {
         pollIntervalMs: 1
       })
     ).rejects.toThrow();
+    expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
+    expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+  });
+
+  it("rejects a schema-valid foreign run state swapped in while watching", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-foreign-state-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: currentRunState({
+        runId: "run-1",
+        status: "running",
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph([], undefined)
+    });
+    const reporter = new RecordingReporter();
+    const evalRunRoot = path.join(base, "eval-run");
+    const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
+    let swapped = false;
+
+    await expect(
+      watchEvalRow({
+        plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+        row,
+        record,
+        reporters: [reporter],
+        evalRunRoot,
+        sync: async () => {
+          swapped = true;
+          fs.writeFileSync(
+            path.join(runRoot, "state.json"),
+            `${JSON.stringify(currentRunState({ runId: "foreign-run" }))}\n`,
+            "utf8"
+          );
+        },
+        pollIntervalMs: 1
+      })
+    ).rejects.toThrow('run state belongs to "foreign-run", expected "run-1"');
+
+    expect(swapped).toBe(true);
+    expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
+    expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
+  });
+
+  it("binds the initial watched state read to the journaled run ID", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-initial-foreign-state-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: currentRunState({
+        runId: "foreign-run",
+        status: "running",
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph([], undefined)
+    });
+    const reporter = new RecordingReporter();
+    const evalRunRoot = path.join(base, "eval-run");
+    const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
+    const sync = vi.fn(async () => undefined);
+
+    await expect(
+      watchEvalRow({
+        plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+        row,
+        record,
+        reporters: [reporter],
+        evalRunRoot,
+        sync,
+        pollIntervalMs: 1
+      })
+    ).rejects.toThrow('run state identity does not match run "run-1"');
+
+    expect(sync).not.toHaveBeenCalled();
     expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
   });

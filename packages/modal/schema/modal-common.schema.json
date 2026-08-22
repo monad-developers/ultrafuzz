@@ -694,11 +694,12 @@
         "artifact_dir",
         "workspace_dir",
         "dependency_artifact_dirs",
+        "dependency_verification_authorities",
         "resources",
         "agent_credential_env"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.modal.node.v1" },
+        "schema_version": { "const": "ultrafuzz.modal.node.v2" },
         "run_id": { "$ref": "#/$defs/nonEmptyString" },
         "task_id": { "$ref": "#/$defs/nonEmptyString" },
         "attempt_id": { "$ref": "#/$defs/safeId" },
@@ -719,6 +720,27 @@
           "maxItems": 100000,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/boundedPath" }
+        },
+        "optional_dependency_artifact_dirs": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedPath" }
+        },
+        "dependency_verification_authorities": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["attempt_id", "marker_sha256", "size_bytes"],
+            "properties": {
+              "attempt_id": { "$ref": "#/$defs/safeId" },
+              "marker_sha256": { "$ref": "#/$defs/sha256" },
+              "size_bytes": { "$ref": "#/$defs/nonNegativeInteger" }
+            }
+          }
         },
         "project_archive_sha256": { "$ref": "#/$defs/sha256" },
         "resources": {

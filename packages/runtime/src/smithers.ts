@@ -15,7 +15,10 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  isArtifactContractId,
+  MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
+  promptArtifactAuthorityPathSelectorId,
   readRegularFileSnapshot,
   readRunPlanDocument,
   sha256Bytes,
@@ -30,6 +33,8 @@ import {
   type SmithersTaskManifestAgentChainEntry,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestMetadata,
+  type SmithersTaskManifestPromptArtifactAuthoritySelector,
+  type SmithersTaskManifestReferenceArtifactManifestAuthority,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import {
@@ -244,7 +249,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       }
       return value;
     };
-    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
+    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
       cwd,
       stdio:
         snapshotDescriptor === undefined
@@ -286,7 +291,7 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
 const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
 const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
-const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
+const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
 
 // Ultrafuzz invokes this process through a descriptor held by its controller.
 // Each detached descendant receives that directory atomically as fd 3, opens a
@@ -1154,6 +1159,8 @@ export interface CompiledSmithersWorkflow {
   smithersRunId: string;
   workflowName: string;
   tasks: readonly CompiledSmithersTask[];
+  /** Attempts whose group explicitly quarantines failures from independent branches. */
+  nonBlockingAttemptIds: readonly string[];
   projectRoot: string;
   sourceRevision?: string;
   sourceRef?: string;
@@ -1267,14 +1274,18 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
     );
   }
-  const renderedByAttempt = new Map(
-    input.renderedPrompts.map((prompt) => [prompt.attempt_id, prompt.rendered_prompt_path])
-  );
-  const tasks = input.graph.nodes.flatMap((node) =>
+  const renderedByAttempt = new Map(input.renderedPrompts.map((prompt) => [prompt.attempt_id, prompt]));
+  const referenceArtifactManifestAuthorityCache = new Map<
+    string,
+    SmithersTaskManifestReferenceArtifactManifestAuthority
+  >();
+  const compiledTasks = input.graph.nodes.flatMap((node) =>
     nodeAttemptsFor(node)
       .filter(() => node.kind === "agentic")
-      .map((attempt) =>
-        compileTask({
+      .map((attempt) => {
+        const renderedPrompt = renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id);
+        const ancestorNodeIds = artifactAncestorNodeIds(node.id, input.graph.nodes);
+        return compileTask({
           config: input.config,
           env: input.env ?? {},
           graph: input.graph,
@@ -1284,17 +1295,36 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           sourceRevision: source?.revision,
           sourceRef: source?.ref,
           workflowName,
-          renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
+          renderedPromptPath: renderedPrompt?.rendered_prompt_path,
+          promptArtifactAuthoritySelectors: promptArtifactAuthoritySelectorsFor(renderedPrompt),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
           dependencyAgenticAttemptIds: node.dependsOn.flatMap(
             (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
           ),
-          artifactDependencyAttemptIds: artifactAncestorNodeIds(node.id, input.graph.nodes).flatMap(
-            (ancestor) => attemptsByNodeId.get(ancestor) ?? []
+          artifactDependencyAttemptIds: ancestorNodeIds.flatMap((ancestor) => attemptsByNodeId.get(ancestor) ?? []),
+          referenceArtifactManifestAuthorities: referenceArtifactManifestAuthoritiesForAncestors(
+            ancestorNodeIds,
+            input.graph.nodes,
+            input.runLayout,
+            referenceArtifactManifestAuthorityCache
           )
-        })
-      )
+        });
+      })
   );
+  const nonBlockingAttemptIds = compiledTasks
+    .filter((task) => {
+      const group = task.metadata.node.group;
+      return group !== undefined && input.graph.groups[group]?.defaults?.failure_policy === "continue";
+    })
+    .map((task) => task.attemptId)
+    .sort();
+  const nonBlockingAttemptIdSet = new Set(nonBlockingAttemptIds);
+  const tasks = compiledTasks.map((task) => ({
+    ...task,
+    optionalDependencyArtifactDirs: task.dependencyArtifactDirs.filter((directory) =>
+      nonBlockingAttemptIdSet.has(path.basename(directory))
+    )
+  }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
@@ -1324,6 +1354,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     smithersRunId,
     workflowName,
     tasks,
+    nonBlockingAttemptIds,
     projectRoot,
     ...(source === undefined ? {} : { sourceRevision: source.revision, sourceRef: source.ref }),
     workflowPath,
@@ -1467,6 +1498,11 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
+  // Prompt artifact-authority selectors resolve through the same immutable
+  // execution generation as the workflow and rendered prompts. Keep the
+  // complete task manifest in that snapshot so a local continuation and a
+  // relocated cloud worker read identical sealed task/output declarations.
+  add(compiled.tasksPath, "controls/tasks.json");
   const plan = readRunPlanDocument(planPath, layout.runId);
   const governancePath = (() => {
     const candidate = path.join(layout.root, plan.data_governance.path),
@@ -4137,6 +4173,8 @@ function compileTask(input: {
   sourceRef?: string;
   workflowName: string;
   renderedPromptPath?: string;
+  promptArtifactAuthoritySelectors?: readonly SmithersTaskManifestPromptArtifactAuthoritySelector[];
+  referenceArtifactManifestAuthorities?: readonly SmithersTaskManifestReferenceArtifactManifestAuthority[];
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
   artifactDependencyAttemptIds: readonly string[];
@@ -4276,10 +4314,57 @@ function compileTask(input: {
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
+    ...(input.referenceArtifactManifestAuthorities === undefined
+      ? {}
+      : { referenceArtifactManifestAuthorities: [...input.referenceArtifactManifestAuthorities] }),
+    ...(input.promptArtifactAuthoritySelectors === undefined
+      ? {}
+      : { promptArtifactAuthoritySelectors: [...input.promptArtifactAuthoritySelectors] }),
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
     execution,
     metadata
   };
+}
+
+function promptArtifactAuthoritySelectorsFor(
+  renderedPrompt: RenderedPromptPlan | undefined
+): SmithersTaskManifestPromptArtifactAuthoritySelector[] | undefined {
+  if (renderedPrompt === undefined) return undefined;
+  const selectors = new Map<string, SmithersTaskManifestPromptArtifactAuthoritySelector>();
+  for (const reference of renderedPrompt.artifact_references) {
+    if (reference.kind === "ancestor_contract_artifact_authority") {
+      const contract = reference.contract;
+      if (!isArtifactContractId(contract)) {
+        throw new Error(
+          `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an unknown prompt artifact authority contract ${JSON.stringify(contract)}`
+        );
+      }
+      const selector = { kind: "contract", contract } as const;
+      selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
+      continue;
+    }
+    if (reference.kind !== "ancestor_artifact_path_authority") continue;
+    const paths = [...reference.relativePaths];
+    if (
+      paths.length === 0 ||
+      reference.selectorId !== promptArtifactAuthorityPathSelectorId(paths) ||
+      paths.some((selectedPath, index) => index > 0 && paths[index - 1]!.localeCompare(selectedPath) >= 0)
+    ) {
+      throw new Error(
+        `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an invalid prompt artifact authority path selector group`
+      );
+    }
+    const selector = { kind: "path", id: reference.selectorId, paths } as const;
+    selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
+  }
+  if (selectors.size === 0) return undefined;
+  return [...selectors.values()].sort((left, right) =>
+    promptArtifactAuthoritySelectorKey(left).localeCompare(promptArtifactAuthoritySelectorKey(right))
+  );
+}
+
+function promptArtifactAuthoritySelectorKey(selector: SmithersTaskManifestPromptArtifactAuthoritySelector): string {
+  return selector.kind === "contract" ? `contract\u0000${selector.contract}` : `path\u0000${selector.id}`;
 }
 
 function agentChainForTask(
@@ -4439,6 +4524,46 @@ function artifactAncestorNodeIds(nodeId: string, nodes: readonly ExpandedNode[])
   return [...ancestors].sort();
 }
 
+function referenceArtifactManifestAuthoritiesForAncestors(
+  ancestorNodeIds: readonly string[],
+  nodes: readonly ExpandedNode[],
+  runLayout: RunLayout,
+  cache: Map<string, SmithersTaskManifestReferenceArtifactManifestAuthority>
+): SmithersTaskManifestReferenceArtifactManifestAuthority[] | undefined {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const authorities = ancestorNodeIds
+    .flatMap((ancestorNodeId) => {
+      const ancestor = nodesById.get(ancestorNodeId);
+      if (ancestor === undefined) {
+        throw new Error(
+          `cannot seal reference artifact manifest for unknown ancestor ${JSON.stringify(ancestorNodeId)}`
+        );
+      }
+      if (ancestor.kind !== "reference") return [];
+      return nodeAttemptsFor(ancestor).map((attempt) => {
+        const cached = cache.get(attempt.attemptId);
+        if (cached !== undefined) return cached;
+        const artifactDir = getNodeArtifactDir(runLayout, attempt.attemptId);
+        const manifestPath = path.join(artifactDir, "artifact-manifest.json");
+        const label = `reference artifact manifest for ${JSON.stringify(attempt.attemptId)}`;
+        assertNoSymlinkComponents(runLayout.root, manifestPath, label);
+        assertRegularFileInside(runLayout.root, manifestPath, label);
+        const bytes = readRegularFileSnapshot(manifestPath, MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES);
+        if (bytes.byteLength === 0) throw new Error(`${label} must not be empty`);
+        const authority = {
+          attemptId: attempt.attemptId,
+          artifactDir,
+          sizeBytes: bytes.byteLength,
+          sha256: sha256Bytes(bytes)
+        } satisfies SmithersTaskManifestReferenceArtifactManifestAuthority;
+        cache.set(attempt.attemptId, authority);
+        return authority;
+      });
+    })
+    .sort((left, right) => (left.attemptId < right.attemptId ? -1 : left.attemptId > right.attemptId ? 1 : 0));
+  return authorities.length === 0 ? undefined : authorities;
+}
+
 function nodeAttemptsFor(node: ExpandedNode): NodeAttemptProvenance[] {
   if (node.modelFanout.length === 0) {
     return [
@@ -4590,6 +4715,15 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
+  const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
+  const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
+  for (const task of compiled.tasks) {
+    const artifactDir = path.resolve(task.artifactDir);
+    if (taskByArtifactDir.has(artifactDir)) {
+      throw new Error(`multiple compiled tasks share artifact directory ${JSON.stringify(artifactDir)}`);
+    }
+    taskByArtifactDir.set(artifactDir, task);
+  }
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
@@ -4597,6 +4731,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       preparationId: task.preparationSmithersNodeId,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
+      continueOnFail: nonBlockingAttemptIds.has(task.attemptId),
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
       agentChain: task.agentChain,
@@ -4612,8 +4747,16 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
         executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
       ),
+      optionalDependencyArtifactDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
+        executionPath(compiled.projectRoot, task, directory, "optional dependency artifact directory")
+      ),
+      dependencyVerificationProducers: dependencyVerificationProducersForTask(task, taskByArtifactDir),
+      ...(task.promptArtifactAuthoritySelectors === undefined
+        ? {}
+        : { promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors }),
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
+      sourceTaskManifestPath: compiled.tasksPath,
       sourceProjectRoot: compiled.projectRoot,
       sourceRevision: task.sourceRevision ?? null,
       sourceRef: task.sourceRef ?? null,
@@ -4629,6 +4772,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
             finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
           }
         : null,
+      dynamicStrategiesEnumeratorPolicy: config.dynamicStrategiesEnumerator,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: {
@@ -4654,6 +4798,26 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_MODAL_MODULE__: JSON.stringify(
       compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
     )
+  });
+}
+
+function dependencyVerificationProducersForTask(
+  task: CompiledSmithersTask,
+  taskByArtifactDir: ReadonlyMap<string, CompiledSmithersTask>
+): Array<{ attemptId: string; verifierId: string; optional: boolean }> {
+  const optionalArtifactDirs = new Set(
+    (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.resolve(directory))
+  );
+  return task.dependencyArtifactDirs.flatMap((directory) => {
+    const producer = taskByArtifactDir.get(path.resolve(directory));
+    if (producer === undefined) return [];
+    return [
+      {
+        attemptId: producer.attemptId,
+        verifierId: producer.verifierSmithersNodeId,
+        optional: optionalArtifactDirs.has(path.resolve(directory))
+      }
+    ];
   });
 }
 

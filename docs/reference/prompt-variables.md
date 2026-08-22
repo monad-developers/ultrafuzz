@@ -78,13 +78,12 @@ is required.
 
 ## Artifact Variables
 
-| Variable                                                      | Meaning                                                                     |
-| ------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `ancestor_artifacts`                                          | Markdown list of required artifact files from direct topology dependencies. |
-| `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                  |
-| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's primary contracted output.          |
-| `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.  |
-| `ancestor_artifacts_by_path:<path>[,<path>...]`               | Markdown list of matching declared outputs from any ancestor producer.      |
+| Variable                                              | Meaning                                                            |
+| ----------------------------------------------------- | ------------------------------------------------------------------ |
+| `artifact_path:<logical-node-id>`                     | Absolute artifact directory path for an ancestor producer.         |
+| `artifact_handoff:<logical-node-id>`                  | Absolute path to an ancestor producer's primary contracted output. |
+| `ancestor_contract_artifact_authority:<contract>`     | Bounded task-local JSON selector for typed ancestor outputs.       |
+| `ancestor_artifact_path_authority:<path>[,<path>...]` | Bounded task-local JSON selector for exact ancestor output paths.  |
 
 Artifact variables may reference only ancestor nodes. Handoff producers must
 declare exactly one `outputs` entry with `primary: true`.
@@ -96,13 +95,66 @@ Read the setup notes at {{artifact_path:setup-foundry}}/setup/setup-foundry.md.
 ```
 
 `artifact_handoff` resolves to a file and does not accept a suffix.
-`ancestor_artifacts` resolves to declared contracted outputs and does not
-accept a suffix.
-`ancestor_artifacts_by_path` accepts safe, exact output-relative paths and
-renders `None declared by this topology.` when no ancestor declares a match.
-This makes optional handoffs explicit without rendering unrelated outputs.
 
-Looped producers render as a Markdown bullet list of concrete attempt paths.
+The legacy collection helpers `ancestor_artifacts`,
+`ancestor_artifacts_by_path`, `ancestor_generated_test_manifests`, and
+`ancestor_generated_test_manifest_authorities` are rejected. Migrate them to a
+compact contract or exact-path authority; generated-test intake normally uses
+`ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3`.
+
+`ancestor_contract_artifact_authority:<contract>` selects transitive ancestor
+outputs by an exact registered artifact contract, but does not render their
+paths or a source-authority table into the prompt. It renders a bounded pointer
+to `.ultrafuzz/authorities/<attemptId>.json` inside the current task workspace,
+the exact current `attemptId`, and the requested contract. Unknown contracts
+fail prompt validation.
+
+`ancestor_artifact_path_authority:<path,...>` provides the same bounded sealed
+JSON pointer while selecting transitive ancestor outputs by exact declared
+output paths. It is appropriate when a consumer needs a fixed set of filenames
+whose contracts are shared with unrelated outputs, such as final-report
+fallback intake. It records the matching logical producers, canonically ordered
+path group, and deterministic SHA-256 selector ID in the run plan. Prompt prose
+contains only that fixed-size ID; the authenticated sidecar's matching
+`selectors[]` entry carries the paths. Missing and duplicate path arguments
+fail prompt validation.
+
+Compact authority selectors are only for agentic task producers. If the exact
+contract or path selector matches any `kind: reference` ancestor, rendering
+fails closed, even when it also matches agentic ancestors. A consumer of a
+fixed reference node must name it explicitly with
+`artifact_path:<logical-node-id>` or `artifact_handoff:<logical-node-id>`.
+Selectors with no matching ancestor remain valid and produce an empty authority.
+
+The runtime generates that JSON immediately before each model attempt. It
+reparses the controller-only sealed task manifest, authenticates the exact
+required and marker-admitted optional dependency set, relocates it to the
+current execution root, and projects only outputs matched by the current
+prompt's compact selectors. The shared `controls/tasks.json` file is never
+added to agent filesystem access.
+
+The authority document contains its schema version, run and attempt IDs,
+`artifact_path_base`, canonical selectors, and a `producers` array. Each
+producer exposes only `attempt_id`, `logical_node_id`, a portable
+`artifacts/<attemptId>` directory, and selected output `path`/`contract` pairs.
+Resolve `artifact_dir` beneath `artifact_path_base` and append the output path;
+reject absolute or escaping paths. An empty `producers` array means no matching
+ancestor was admitted. Controller paths, source and workspace identity, model
+metadata, unrelated tasks, and unselected outputs are absent. Exact authority
+bytes are restored before retries and checked after every model call, so agent
+mutation fails verification. Serialization is capped at 32 MiB and fails before
+the runtime writes the task-local sidecar.
+
+These compact authorities are used for findings lifecycle intake, property
+lenses, boundary recipes, final-report machine handoffs, and differential
+plan, reference-harness, lane-result, triage, and audited-lane coordinates.
+Their rendered size is constant regardless of the number of looped or
+model-fanout producers or the number of paths in an exact-path group. The
+renderer still records the exact matching logical ancestor IDs and contract or
+path filter in the run plan so topology validation and host semantic gates
+share the same sealed-declaration selection. Filenames and hard-coded strategy
+IDs are never producer authority.
+
 Use deterministic split-work assignment for looped strategies:
 
 ```text

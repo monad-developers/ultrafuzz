@@ -47,7 +47,7 @@ import { planRun } from "./plan-run.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { hasRuntimeErrors, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   assertControllerExecutionSnapshotDigest,
   assertProviderScopedSensitiveEnvironmentCapability
@@ -264,15 +264,19 @@ export async function startRun(input: StartRunInput) {
       },
       forbiddenSecretValues
     });
-    return runtimeResult(true, {
-      run_id: plan.layout.runId,
-      run_root: plan.layout.root,
-      status: readRunState(plan.layout).status,
-      ...(plan.source_run_id ? { source_run_id: plan.source_run_id } : {}),
-      graph_fingerprint: plan.graph_fingerprint,
-      config_fingerprint: plan.config_fingerprint,
-      workflow_ids: [compiled.smithersRunId]
-    });
+    return runtimeResult(
+      true,
+      {
+        run_id: plan.layout.runId,
+        run_root: plan.layout.root,
+        status: readRunState(plan.layout).status,
+        ...(plan.source_run_id ? { source_run_id: plan.source_run_id } : {}),
+        graph_fingerprint: plan.graph_fingerprint,
+        config_fingerprint: plan.config_fingerprint,
+        workflow_ids: [compiled.smithersRunId]
+      },
+      planned.diagnostics
+    );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
     updateRunStatus(plan.layout, "failed", undefined, { forbiddenSecretValues });
@@ -299,6 +303,11 @@ async function requiredCommandPreflightDiagnostics(
     input.env ?? process.env
   );
   const requiredCommands = [...new Set(expandedGraph.nodes.flatMap((node) => node.requiredCommands ?? []))].sort();
+  const blockingRequiredCommands = new Set(
+    expandedGraph.nodes
+      .filter((node) => !expandedNodeContinuesOnFailure(expandedGraph, node))
+      .flatMap((node) => node.requiredCommands ?? [])
+  );
   let commandProbes: Awaited<ReturnType<typeof probeCommandsForExecution>>;
   try {
     commandProbes =
@@ -310,6 +319,29 @@ async function requiredCommandPreflightDiagnostics(
             createProviderAppIfMissing: true
           })
         : await input.requiredCommandProbe(requiredCommands);
+    if (!Array.isArray(commandProbes)) {
+      throw new Error("required-command probe returned a non-array result");
+    }
+    const expectedCommands = new Set(requiredCommands);
+    const seenCommands = new Set<string>();
+    for (const probe of commandProbes) {
+      if (
+        probe === null ||
+        typeof probe !== "object" ||
+        typeof probe.name !== "string" ||
+        !expectedCommands.has(probe.name) ||
+        seenCommands.has(probe.name) ||
+        typeof probe.available !== "boolean" ||
+        (probe.path !== null && typeof probe.path !== "string") ||
+        (probe.version !== null && typeof probe.version !== "string")
+      ) {
+        throw new Error("required-command probe returned an incomplete or ambiguous result set");
+      }
+      seenCommands.add(probe.name);
+    }
+    if (seenCommands.size !== expectedCommands.size) {
+      throw new Error("required-command probe omitted one or more requested commands");
+    }
   } catch (error) {
     return [
       ...credentialDiagnostics,
@@ -323,7 +355,10 @@ async function requiredCommandPreflightDiagnostics(
     ];
   }
   const probeByName = new Map(commandProbes.map((probe) => [probe.name, probe]));
-  const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available !== true);
+  // Only an exact, successfully returned `available: false` result is a
+  // missing-command disposition. Probe exceptions and opaque/partial results
+  // above are operational failures and must never degrade to optional warnings.
+  const missingCommands = requiredCommands.filter((command) => probeByName.get(command)?.available === false);
   const missingRequirements = missingCommands.map((command) => ({
     command,
     node_ids: [
@@ -334,21 +369,34 @@ async function requiredCommandPreflightDiagnostics(
       )
     ].sort()
   }));
-  return missingCommands.length === 0
-    ? credentialDiagnostics
-    : [
-        ...credentialDiagnostics,
-        {
-          code: "RUN_REQUIRED_COMMAND_MISSING",
-          message: `required topology commands are not available in the configured execution environment: ${missingRequirements
-            .map((requirement) => `${requirement.command} (required by ${requirement.node_ids.join(", ")})`)
-            .join("; ")}`,
-          severity: "error",
-          source: "runtime",
-          path: "topology.required_commands",
-          details: { commands: missingCommands, requirements: missingRequirements }
-        }
-      ];
+  const blockingMissingCommands = missingCommands.filter((command) => blockingRequiredCommands.has(command));
+  const optionalMissingCommands = missingCommands.filter((command) => !blockingRequiredCommands.has(command));
+  const diagnosticFor = (
+    commands: string[],
+    severity: RuntimeDiagnostic["severity"]
+  ): RuntimeDiagnostic | undefined => {
+    if (commands.length === 0) return undefined;
+    const requirements = missingRequirements.filter((requirement) => commands.includes(requirement.command));
+    return {
+      code: severity === "error" ? "RUN_REQUIRED_COMMAND_MISSING" : "RUN_OPTIONAL_COMMAND_MISSING",
+      message: `${severity === "error" ? "required" : "optional specialist"} topology commands are not available in the configured execution environment: ${requirements
+        .map((requirement) => `${requirement.command} (required by ${requirement.node_ids.join(", ")})`)
+        .join("; ")}`,
+      severity,
+      source: "runtime",
+      path: "topology.required_commands",
+      details: { commands, requirements }
+    };
+  };
+  return [
+    ...credentialDiagnostics,
+    diagnosticFor(optionalMissingCommands, "warning"),
+    diagnosticFor(blockingMissingCommands, "error")
+  ].filter((diagnostic): diagnostic is RuntimeDiagnostic => diagnostic !== undefined);
+}
+
+function expandedNodeContinuesOnFailure(graph: ExpandedGraph, node: ExpandedGraph["nodes"][number]): boolean {
+  return node.group !== undefined && graph.groups[node.group]?.defaults?.failure_policy === "continue";
 }
 
 function openRouterCredentialPreflightDiagnostics(
@@ -487,8 +535,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   try {
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
     const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
+    const taskDocument = parseSealedTaskManifest(evidence.verifiedControl.contents);
     const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
-    if (preflightDiagnostics.length > 0) {
+    if (hasRuntimeErrors(preflightDiagnostics)) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
     // Reconcile Smithers before retrying so a stale local running state cannot
@@ -520,26 +569,49 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
       | undefined;
     if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
+      const nonBlockingAttemptIds = new Set(
+        taskDocument.tasks
+          .filter((task) => {
+            const node = sealedGraph.nodes.find((candidate) => candidate.id === task.concreteNodeId);
+            return node !== undefined && expandedNodeContinuesOnFailure(sealedGraph, node);
+          })
+          .map((task) => task.attemptId)
+      );
       const failedNodes: RunRecoveryProvenance["failed_nodes"] = [];
       let completeAttemptAuthority = true;
       for (const node of Object.values(stateBeforeLifecycle.nodes).filter(
-        (candidate) => candidate.status === "failed" || candidate.status === "timed-out"
+        (candidate) =>
+          (candidate.status === "failed" || candidate.status === "timed-out") &&
+          !nonBlockingAttemptIds.has(candidate.node_id)
       )) {
         const provenance = node.provenance as Record<string, unknown> | undefined;
         const workflow = provenance?.workflow as Record<string, unknown> | undefined;
         const workflowTaskId = workflow?.task_id;
         const failedAttempt = workflow?.attempt;
+        const sealedTasks = taskDocument.tasks.filter((task) => task.attemptId === node.node_id);
+        const sealedTask = sealedTasks.length === 1 ? sealedTasks[0] : undefined;
+        const sealedWorkflowTaskIds =
+          sealedTask === undefined
+            ? undefined
+            : new Set([
+                sealedTask.preparationSmithersNodeId,
+                sealedTask.smithersNodeId,
+                sealedTask.verifierSmithersNodeId
+              ]);
         if (
+          sealedTask === undefined ||
           typeof workflowTaskId !== "string" ||
-          workflowTaskId.length === 0 ||
+          sealedWorkflowTaskIds?.has(workflowTaskId) !== true ||
+          workflow?.agent_task_id !== sealedTask.smithersNodeId ||
+          workflow?.verifier_task_id !== sealedTask.verifierSmithersNodeId ||
           typeof failedAttempt !== "number" ||
           !Number.isSafeInteger(failedAttempt) ||
-          failedAttempt < 0
+          failedAttempt < 1
         ) {
           // A multi-attempt concrete node is only a projection over its
-          // authoritative task attempts. Any other missing task/attempt
-          // identity makes this recovery fail closed.
-          if (Array.isArray(workflow?.aggregate_attempt_statuses)) continue;
+          // authoritative task attempts and cannot be substituted for one.
+          // Any missing or foreign sealed task/attempt identity makes this
+          // recovery fail closed rather than hiding a required failure.
           completeAttemptAuthority = false;
           break;
         }
@@ -549,7 +621,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           typeof category !== "string" ||
           !NODE_PROVENANCE_FAILURE_CATEGORIES.includes(
             category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"]
-          )
+          ) ||
+          failure?.causal_task_id !== workflowTaskId ||
+          failure?.causal_failure_category !== category ||
+          !Array.isArray(failure?.dependent_task_ids) ||
+          failure.dependent_task_ids.length !== 0
         ) {
           completeAttemptAuthority = false;
           break;
@@ -584,7 +660,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
-    const taskDocument = parseSealedTaskManifest(evidence.verifiedControl.contents);
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleEnvironment = {
@@ -751,12 +826,16 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         }
       });
     }
-    return runtimeResult(true, {
-      run_id: input.runId,
-      workflow_run_id: workflowRunId,
-      action,
-      submitted: !lifecycleResult.alreadyRunning
-    });
+    return runtimeResult(
+      true,
+      {
+        run_id: input.runId,
+        workflow_run_id: workflowRunId,
+        action,
+        submitted: !lifecycleResult.alreadyRunning
+      },
+      preflightDiagnostics
+    );
   } catch (error) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
   }

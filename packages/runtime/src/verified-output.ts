@@ -38,6 +38,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt, type ArtifactGateAttemptAuthority } from "./artifact-gates.js";
+import { authenticatedDependencyAdmissionAttemptIds } from "./dependency-admission.js";
 import { projectCanonicalFinalReport } from "./final-report-markdown.js";
 import { verifySealedTaskManifestSnapshot, type VerifiedSealedTaskManifestSnapshot } from "./workflow-integrity.js";
 
@@ -396,8 +397,10 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
     sealedTaskManifest,
     candidate.attemptId,
     logicalNodeId,
-    plannedNode
+    plannedNode,
+    documents.marker.admitted_dependency_attempt_ids
   );
+  assertVerificationMarkerManifestBinding(documents, sealedAttempt.authority.task);
   const prerequisiteManifests = capturePrerequisiteManifestAuthority(
     layout,
     graph,
@@ -428,6 +431,26 @@ function finalizedManifestSeal(nodeState: NodeState): string {
     throw invalidAuthority(`controller artifact manifest digest is missing for ${nodeState.node_id}`);
   }
   return digest;
+}
+
+function assertVerificationMarkerManifestBinding(documents: AuthorityDocuments, task: SmithersTaskManifestTask): void {
+  const markerDigest = documents.manifest.provenance.verification_marker_sha256;
+  if (markerDigest === undefined) {
+    // Legacy controller manifests can remain readable only when the sealed
+    // closure has no optional ancestors and therefore no admission choice for
+    // a replacement marker to alter.
+    if ((task.optionalDependencyArtifactDirs?.length ?? 0) > 0) {
+      throw invalidAuthority(
+        `artifact manifest does not authenticate optional dependency admission for ${task.attemptId}`
+      );
+    }
+    return;
+  }
+  if (sha256Bytes(documents.markerBytes) !== markerDigest) {
+    throw invalidAuthority(
+      `artifact verification marker does not match controller manifest authority for ${task.attemptId}`
+    );
+  }
 }
 
 function capturePrerequisiteManifestAuthority(
@@ -479,7 +502,6 @@ function capturePrerequisiteManifestAuthority(
       seenPrerequisites.add(prerequisite.node_id);
     }
     const task = tasksByAttempt.get(manifest.node_id);
-    let expectedPrerequisiteAttemptIds: readonly string[];
     if (task !== undefined) {
       if (
         task.concreteNodeId !== plannedNode.id ||
@@ -488,23 +510,48 @@ function capturePrerequisiteManifestAuthority(
       ) {
         throw invalidAuthority(`sealed task ${task.attemptId} does not bind its current planned node`);
       }
-      expectedPrerequisiteAttemptIds = task.dependencies;
+      const optionalDependencyAttemptIds = new Set(
+        (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory))
+      );
+      const declaredPrerequisiteAttemptIds = new Set(task.dependencies);
+      const isRootConsumer = task.attemptId === sealedAttempt.authority.task.attemptId;
+      const rootAdmitted = new Set(sealedAttempt.authority.admittedDependencyAttemptIds ?? []);
+      const expectedRootPrerequisites = task.dependencies.filter((attemptId) => rootAdmitted.has(attemptId));
+      if (isRootConsumer) {
+        if (
+          expectedRootPrerequisites.length !== prerequisiteAttemptIds.length ||
+          expectedRootPrerequisites.some((attemptId, index) => attemptId !== prerequisiteAttemptIds[index])
+        ) {
+          throw invalidAuthority(
+            `artifact manifest prerequisite attempt IDs do not match the verifier-persisted admission for ${manifest.node_id}`
+          );
+        }
+      } else if (
+        declaredPrerequisiteAttemptIds.size !== task.dependencies.length ||
+        prerequisiteAttemptIds.some((attemptId) => !declaredPrerequisiteAttemptIds.has(attemptId)) ||
+        task.dependencies.some(
+          (attemptId) => !optionalDependencyAttemptIds.has(attemptId) && !seenPrerequisites.has(attemptId)
+        )
+      ) {
+        throw invalidAuthority(
+          `artifact manifest prerequisite attempt IDs do not match the pinned sealed dependencies for ${manifest.node_id}`
+        );
+      }
     } else {
       if (plannedNode.kind !== "reference" || manifest.node_id !== plannedNode.id) {
         throw invalidAuthority(`artifact manifest ${manifest.node_id} has no exact sealed task declaration`);
       }
-      expectedPrerequisiteAttemptIds = plannedNode.depends_on;
-    }
-    const expectedPrerequisites = new Set(expectedPrerequisiteAttemptIds);
-    if (
-      expectedPrerequisites.size !== expectedPrerequisiteAttemptIds.length ||
-      expectedPrerequisites.size !== seenPrerequisites.size ||
-      [...expectedPrerequisites].some((attemptId) => !seenPrerequisites.has(attemptId)) ||
-      prerequisiteAttemptIds.some((attemptId) => !expectedPrerequisites.has(attemptId))
-    ) {
-      throw invalidAuthority(
-        `artifact manifest prerequisite attempt IDs do not match the exact sealed dependencies for ${manifest.node_id}`
-      );
+      const expectedPrerequisites = new Set(plannedNode.depends_on);
+      if (
+        expectedPrerequisites.size !== plannedNode.depends_on.length ||
+        expectedPrerequisites.size !== seenPrerequisites.size ||
+        [...expectedPrerequisites].some((attemptId) => !seenPrerequisites.has(attemptId)) ||
+        prerequisiteAttemptIds.some((attemptId) => !expectedPrerequisites.has(attemptId))
+      ) {
+        throw invalidAuthority(
+          `artifact manifest prerequisite attempt IDs do not match the exact planned dependencies for ${manifest.node_id}`
+        );
+      }
     }
 
     for (const prerequisite of manifest.prerequisite_manifests) {
@@ -590,7 +637,8 @@ function resolveSealedAttemptGateAuthority(
   snapshot: VerifiedSealedTaskManifestSnapshot,
   attemptId: string,
   logicalNodeId: string,
-  plannedNode: PlannedGraphNodeDocument
+  plannedNode: PlannedGraphNodeDocument,
+  persistedAdmissionAttemptIds: readonly string[] | undefined
 ): SealedAttemptGateAuthority {
   const matches = snapshot.document.tasks.filter((task) => task.attemptId === attemptId);
   if (matches.length !== 1) {
@@ -602,7 +650,14 @@ function resolveSealedAttemptGateAuthority(
   if (task.concreteNodeId !== plannedNode.id || task.logicalNodeId !== logicalNodeId) {
     throw invalidAuthority(`sealed task authority for finalized attempt ${attemptId} does not bind its planned node`);
   }
-  return { snapshot, authority: { task, tasks: snapshot.document.tasks } };
+  return {
+    snapshot,
+    authority: {
+      task,
+      tasks: snapshot.document.tasks,
+      admittedDependencyAttemptIds: authenticatedDependencyAdmissionAttemptIds(task, persistedAdmissionAttemptIds)
+    }
+  };
 }
 
 function readCurrentSealedTaskManifest(
@@ -858,7 +913,12 @@ function hasSuccessfulFinalizationAuthority(node: NodeState): boolean {
 }
 
 function readAuthorityDocuments(layout: RunLayout, attemptId: string): AuthorityDocuments {
-  const markerRoot = verificationMarkerRoot(layout);
+  let markerRoot: string;
+  try {
+    markerRoot = verificationMarkerRoot(layout);
+  } catch (error) {
+    throw invalidAuthority("artifact verification marker root is unsafe", error);
+  }
   const markerPath = safeResolveInside(markerRoot, `${attemptId}.json`, "verification marker path");
   const manifestPath = safeResolveInside(
     safeResolveInside(layout.artifactsDir, attemptId, "artifact directory"),

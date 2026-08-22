@@ -23,6 +23,13 @@ image IDs are recorded in each run's provenance after the images are built.
 - `full` uses the complete topology with longer deadlines and bounded concurrency.
   Use it for the detect split only after a dry-run and budget review.
 
+The public full lane binds the packaged Ultrafuzz `full` audit profile. Target
+preparation validates that profile, and the launcher derives its current
+catalog and topology digests and refuses an effective-policy mismatch before
+creating a run. The actual run-plan policy and topology origin are checked again
+before public-history publication; the lane does not inherit the direct-only
+project topology.
+
 Both profiles are explicit JSON files under `profiles/`. Model and reasoning
 overrides become part of the benchmark identity and the overlay image, so repeated
 runs with the same lock and controls record the same identity.

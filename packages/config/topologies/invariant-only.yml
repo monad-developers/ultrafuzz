@@ -349,6 +349,8 @@ nodes:
       - path: setup-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -364,6 +366,8 @@ nodes:
       - path: handler-coverage-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json

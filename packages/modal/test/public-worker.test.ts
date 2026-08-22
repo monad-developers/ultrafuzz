@@ -60,7 +60,7 @@ import {
   publicScoreCommandTimeoutSeconds,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
-import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
+import { createPublicBenchmarkBundle, type PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
@@ -1583,6 +1583,54 @@ it("publishes only the final journal record for each benchmark row", () => {
   );
 });
 
+it("projects private paths out of public report JSON without changing verified internal report bytes", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-private-report-"));
+  try {
+    const controlRoot = path.join(root, "control");
+    const evalRunId = "eval-private-report";
+    const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+    const runRoot = path.join(root, "target-run");
+    fs.mkdirSync(evalRoot, { recursive: true });
+    const base = currentTerminalReport();
+    const report = currentTerminalReport({
+      run_metadata: {
+        ...(base.run_metadata as Record<string, unknown>),
+        run_id: "target-run",
+        source_run_id: "target-run",
+        models_used: ["fixture-model", "/srv/customer/private/model-config"]
+      }
+    });
+    const reportPath = writeCurrentTerminalReport(runRoot, { report });
+    const rowId = "target-a-runner-trial-1";
+    fs.writeFileSync(
+      path.join(evalRoot, "runs.jsonl"),
+      `${JSON.stringify({
+        row_id: rowId,
+        ultrafuzz_run_id: "target-run",
+        ultrafuzz_run_root: runRoot,
+        report_json_path: reportPath,
+        final_status: "succeeded",
+        workflow: { status: "succeeded", terminal: true }
+      })}\n`
+    );
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+    const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+    fs.writeFileSync(diagnosticsPath, "{}\n");
+
+    const sources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath });
+    const publicJson = sources.find((source) => source.path === `reports/${rowId}/report.json`)?.immutableContents;
+    const publicMarkdown = sources.find((source) => source.path === `reports/${rowId}/report.md`)?.immutableContents;
+    if (publicJson === undefined || publicMarkdown === undefined) throw new Error("missing projected public report");
+
+    expect(fs.readFileSync(reportPath, "utf8")).toContain("/srv/customer/private/model-config");
+    expect(publicJson.toString("utf8")).not.toContain("/srv/customer/private/model-config");
+    expect(publicJson.toString("utf8")).toContain("[redacted-path]");
+    expect(publicMarkdown.toString("utf8")).not.toContain("/srv/customer/private/model-config");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("uses report.json as the sole public finding authority", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
   const controlRoot = path.join(root, "control");
@@ -1986,6 +2034,66 @@ it("refuses to follow a symlinked optional row artifact", () => {
     expect(optionalRowArtifactSources(root, "row-1")).toEqual([]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("refuses a hard-linked optional row artifact", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-hardlink-"));
+  try {
+    const privateSource = path.join(root, "private-threat-model.md");
+    fs.writeFileSync(privateSource, "# private source\n");
+    const nodeRoot = path.join(root, "artifacts/threat-model");
+    fs.mkdirSync(nodeRoot, { recursive: true });
+    fs.linkSync(privateSource, path.join(nodeRoot, "THREAT_MODEL.md"));
+
+    expect(optionalRowArtifactSources(root, "row-1")).toEqual([]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("fails closed when a captured optional artifact is overwritten or replaced", () => {
+  for (const mutation of ["overwrite", "replace"] as const) {
+    const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", `ultrafuzz-public-worker-${mutation}-`));
+    try {
+      const nodeRoot = path.join(root, "artifacts/threat-model");
+      const source = path.join(nodeRoot, "THREAT_MODEL.md");
+      fs.mkdirSync(nodeRoot, { recursive: true });
+      fs.writeFileSync(source, "# original bytes\n");
+      const files = optionalRowArtifactSources(root, "row-1");
+      expect(files).toHaveLength(1);
+
+      if (mutation === "overwrite") {
+        fs.writeFileSync(source, "# tampered bytes\n");
+      } else {
+        const replacement = path.join(nodeRoot, "replacement.md");
+        fs.writeFileSync(replacement, "# original bytes\n");
+        fs.renameSync(replacement, source);
+      }
+
+      expect(() =>
+        createPublicBenchmarkBundle({
+          benchmark: "evmbench",
+          lane: "smoke",
+          modelSlug: "gpt-5-6-luna",
+          model: "gpt-5.6-luna",
+          reasoning: "high",
+          candidateCommit: "c".repeat(40),
+          evalRunId: `eval-${mutation}`,
+          lineage: {
+            logical_run_id: "fixture-run",
+            generation: 1,
+            attempt: 1,
+            attempt_id: "attempt-1",
+            fingerprints: { config: "1".repeat(64), source: "2".repeat(64), image: "3".repeat(64) },
+            model_fingerprint: "4".repeat(64)
+          },
+          files
+        })
+      ).toThrow(/changed after immutable capture/u);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -153,11 +153,16 @@ The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
 `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at
 `max`. It also pins
 `strategy_loops: 1`, while all three disable flags are `false`, so it retains
-the complete production topology with invariant tests, differential tests, and
-dynamic strategies. Both lanes default to one trial per variant and use the
-separate GPT-5.6 Sol `xhigh` judge. The benchmark adapter converts either lane
-into the normal `EvalSuiteSpec` and can project one runner for an isolated Modal
-pair while retaining the fixed judge.
+the packaged `full` audit profile with invariant tests, differential tests, and
+dynamic strategies. The launcher derives the current packaged audit-profile
+catalog and topology digests from the lane and verifies both against the
+target's effective policy before creating a run. Public benchmark variants
+that supply a topology override are rejected at launch. The actual run-plan
+profile, catalog, topology origin, and topology digest are recorded and checked
+again before public-history publication. Both lanes default to one trial per
+variant and use the separate GPT-5.6 Sol `xhigh` judge. The benchmark adapter
+converts either lane into the normal `EvalSuiteSpec` and can project one runner
+for an isolated Modal pair while retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
 nine SVG charts in one transaction:
@@ -222,12 +227,18 @@ explicitly select smoke for an ad hoc run. Full uses GPT-5.6 Luna `high`, Claude
 Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro `max` by default. Its model
 and reasoning inputs can override all full-lane runners. Full runs only through
 that manual dispatch; pushes always select smoke. Both modes retain the standard
-Modal CPU and memory allocation. Smoke rows receive a
-15,000-second watchdog, covering both allowed attempts across the smoke graph's
-four sequential agent stages plus transition slack. Full-lane rows retain the
-3,600-second watchdog, and both publish ordinary 30-day Actions artifacts. Missing
-credentials, revision drift, unavailable ground truth, failed model work,
-scoring errors, or an incomplete configured matrix fail before publication.
+Modal CPU and memory allocation. Smoke rows keep their 15,000-second watchdog,
+covering both allowed attempts across the smoke graph's four sequential agent
+stages plus transition slack. Manual full-lane rows use the same 15,000-second
+schema ceiling as a bounded execution budget while retaining their existing
+specialist node durations. That row cutoff is not a worst-case completion
+guarantee for the complete topology. The full lane seals one 37,500-second
+control deadline in the launch job, monitors only its first 19,500 seconds in a
+full-only hosted job, and hands the remaining 18,000 seconds to collection;
+recovery in either phase cannot reset that deadline. Both modes publish
+ordinary 30-day Actions artifacts. Missing credentials, revision drift,
+unavailable ground truth, failed model work, scoring errors, or an incomplete
+configured matrix fail before publication.
 
 Every publisher rebuilds from the latest `main` tip and uses a normal
 fast-forward push authenticated by the repository-scoped eval-history GitHub

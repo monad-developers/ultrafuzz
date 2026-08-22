@@ -263,6 +263,9 @@
           "type": "string",
           "minLength": 1
         },
+        "verification_marker_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "origin": {
           "type": "string",
           "minLength": 1

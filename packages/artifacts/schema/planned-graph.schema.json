@@ -56,6 +56,9 @@
           "kind": {
             "enum": ["agentic", "reference"]
           },
+          "group": {
+            "$ref": "#/$defs/safeId"
+          },
           "depends_on": {
             "type": "array",
             "uniqueItems": true,
@@ -434,6 +437,9 @@
                 "type": "string",
                 "minLength": 1
               }
+            },
+            "failure_policy": {
+              "enum": ["halt", "continue"]
             }
           }
         }
