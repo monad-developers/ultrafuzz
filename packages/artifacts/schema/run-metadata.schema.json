@@ -305,10 +305,21 @@
         "control_generation": {
           "$ref": "#/$defs/sha256"
         },
+        "controller_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_generation_journal_path": {
+          "type": "string",
+          "minLength": 1
+        },
         "workflow_link_id": {
           "$ref": "#/$defs/uuid"
         },
         "execution_snapshot_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "controller_execution_snapshot_path": {
           "type": "string",
           "minLength": 1
         },

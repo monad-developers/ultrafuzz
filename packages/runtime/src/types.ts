@@ -496,6 +496,8 @@ export interface WorkflowLifecycleInput {
   resetNode?: string;
   force?: boolean;
   retryFailed?: boolean;
+  /** Rebuild and authenticate only the controller closure for this same run. */
+  refreshController?: boolean;
   label?: string;
   env?: Record<string, string | undefined>;
 }

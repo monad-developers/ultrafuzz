@@ -29,6 +29,7 @@ import {
   parseModalNodeWorkerInput,
   readModalExecutionDependencyClosure,
   probeModalCommands,
+  verifyModalExecutionSnapshotClosure,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
@@ -901,6 +902,139 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
         /duplicate property name/iu
       );
     } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("retains committed controller-generation authority in refreshed cloud handoffs", async () => {
+    const fixture = createProjectFixture();
+    const authority = installControllerGenerationFixture(fixture, 2);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-refreshed-controller-handoff-"));
+    let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "refreshed controller handoff test" });
+
+      expect(fs.readFileSync(path.join(extracted, fixture.input.workflow_path), "utf8")).toBe(
+        "export default { refreshed: 2 };\n"
+      );
+      for (const relativePath of [
+        `${fixture.input.run_root}/events.jsonl`,
+        `${fixture.input.run_root}/smithers/controller-generation-journal.json`,
+        ...authority.manifestPaths.map((manifestPath) => path.relative(fixture.root, manifestPath))
+      ]) {
+        expect(fs.existsSync(path.join(extracted, relativePath))).toBe(true);
+      }
+    } finally {
+      archive?.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects uncommitted, unknown, mismatched, and tampered refreshed controller generations", () => {
+    const fixture = createProjectFixture();
+    const authority = installControllerGenerationFixture(fixture, 2);
+    const journalPath = path.join(
+      fixture.root,
+      fixture.input.run_root,
+      "smithers",
+      "controller-generation-journal.json"
+    );
+    const manifestPath = path.join(
+      fixture.root,
+      fixture.input.run_root,
+      "smithers",
+      "controller-generations",
+      `${authority.controllerGeneration}.json`
+    );
+    const ancestorManifestPath = authority.manifestPaths[0]!;
+    const eventPath = path.join(fixture.root, fixture.input.run_root, "events.jsonl");
+    const originalJournal = fs.readFileSync(journalPath);
+    const originalManifest = fs.readFileSync(manifestPath);
+    const originalAncestorManifest = fs.readFileSync(ancestorManifestPath);
+    const originalEvents = fs.readFileSync(eventPath);
+    const originalSnapshotRoot = fixture.input.execution_snapshot_root;
+    const originalWorkflowPath = fixture.input.workflow_path;
+    try {
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).not.toThrow();
+
+      const prepared = JSON.parse(originalJournal.toString("utf8")) as {
+        entries: Array<Record<string, unknown>>;
+      };
+      const pending = prepared.entries.at(-1)!;
+      Object.assign(pending, { phase: "prepared" });
+      for (const key of ["committed_at", "event_id", "event_at"]) delete pending[key];
+      fs.writeFileSync(journalPath, `${JSON.stringify(prepared, null, 2)}\n`);
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /uncommitted journal transition/u
+      );
+      fs.writeFileSync(journalPath, originalJournal);
+
+      fixture.input.workflow_path = `${fixture.input.execution_snapshot_root}/controls/bunfig.toml`;
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /workflow path does not match its committed controller generation/u
+      );
+      fixture.input.workflow_path = originalWorkflowPath;
+
+      const unknownGeneration = "f".repeat(64);
+      const unknownSnapshotRoot = `${path.posix.dirname(originalSnapshotRoot)}/${unknownGeneration}`;
+      fs.renameSync(path.join(fixture.root, originalSnapshotRoot), path.join(fixture.root, unknownSnapshotRoot));
+      fixture.input.execution_snapshot_root = unknownSnapshotRoot;
+      fixture.input.workflow_path = originalWorkflowPath.replace(originalSnapshotRoot, unknownSnapshotRoot);
+      if (fixture.input.prompt_path !== undefined) {
+        fixture.input.prompt_path = fixture.input.prompt_path.replace(originalSnapshotRoot, unknownSnapshotRoot);
+      }
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /not the committed journal head/u
+      );
+      fs.renameSync(path.join(fixture.root, unknownSnapshotRoot), path.join(fixture.root, originalSnapshotRoot));
+      fixture.input.execution_snapshot_root = originalSnapshotRoot;
+      fixture.input.workflow_path = originalWorkflowPath;
+      if (fixture.input.prompt_path !== undefined) {
+        fixture.input.prompt_path = fixture.input.prompt_path.replace(unknownSnapshotRoot, originalSnapshotRoot);
+      }
+
+      const tamperedAncestor = JSON.parse(originalAncestorManifest.toString("utf8")) as Record<string, unknown>;
+      tamperedAncestor.controller_source_digest = "9".repeat(64);
+      const tamperedAncestorBytes = Buffer.from(`${JSON.stringify(tamperedAncestor, null, 2)}\n`, "utf8");
+      const tamperedAncestorSha256 = crypto.createHash("sha256").update(tamperedAncestorBytes).digest("hex");
+      const tamperedJournal = JSON.parse(originalJournal.toString("utf8")) as {
+        entries: Array<{ manifest_sha256: string }>;
+      };
+      const tamperedEvents = originalEvents
+        .toString("utf8")
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { payload: { manifest_sha256: string; semantic_fingerprint: string } });
+      tamperedJournal.entries[0]!.manifest_sha256 = tamperedAncestorSha256;
+      tamperedEvents[0]!.payload.manifest_sha256 = tamperedAncestorSha256;
+      fs.writeFileSync(ancestorManifestPath, tamperedAncestorBytes);
+      fs.writeFileSync(journalPath, `${JSON.stringify(tamperedJournal, null, 2)}\n`);
+      fs.writeFileSync(eventPath, `${tamperedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /controller generation manifest identity is invalid/u
+      );
+      fs.writeFileSync(ancestorManifestPath, originalAncestorManifest);
+      fs.writeFileSync(journalPath, originalJournal);
+      fs.writeFileSync(eventPath, originalEvents);
+
+      const eventLines = originalEvents.toString("utf8").trimEnd().split("\n");
+      fs.writeFileSync(eventPath, `${eventLines.slice(1).join("\n")}\n`);
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /event does not authenticate its journal entry/u
+      );
+      fs.writeFileSync(eventPath, originalEvents);
+
+      tamperedEvents[0]!.payload.semantic_fingerprint = "8".repeat(64);
+      fs.writeFileSync(eventPath, `${tamperedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).toThrow(
+        /event does not authenticate its journal entry/u
+      );
+    } finally {
+      if (fs.existsSync(ancestorManifestPath)) fs.writeFileSync(ancestorManifestPath, originalAncestorManifest);
+      if (fs.existsSync(eventPath)) fs.writeFileSync(eventPath, originalEvents);
+      if (fs.existsSync(manifestPath)) fs.writeFileSync(manifestPath, originalManifest);
       fixture.cleanup();
     }
   });
@@ -3502,6 +3636,179 @@ function createProjectFixture(
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
     }
   };
+}
+
+function installControllerGenerationFixture(
+  fixture: ReturnType<typeof createProjectFixture>,
+  generationCount = 1
+): { controllerGeneration: string; manifestPaths: string[] } {
+  if (!Number.isSafeInteger(generationCount) || generationCount < 1) {
+    throw new Error("controller generation fixture count is invalid");
+  }
+  const runRoot = path.join(fixture.root, fixture.input.run_root);
+  const originalSnapshotRoot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+  const controlSeal = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "control-integrity.json"), "utf8")) as {
+    execution_files: Array<{ snapshot_path: string; sha256: string; size_bytes: number }>;
+  };
+  const controlGeneration = path.basename(originalSnapshotRoot);
+  const workflowPath = path
+    .relative(originalSnapshotRoot, path.join(fixture.root, fixture.input.workflow_path))
+    .split(path.sep)
+    .join("/");
+  const semanticFingerprint = "3".repeat(64);
+  const workflowLinkId = "00000000-0000-4000-8000-000000000001";
+  const entries: Array<Record<string, unknown>> = [];
+  const events: Array<Record<string, unknown>> = [];
+  const manifestPaths: string[] = [];
+  let previousControllerGeneration = controlGeneration;
+  let controllerGeneration = controlGeneration;
+  for (let index = 1; index <= generationCount; index += 1) {
+    const refreshedWorkflow =
+      index === 1 ? "export default { refreshed: true };\n" : `export default { refreshed: ${index} };\n`;
+    const files = [
+      {
+        path: workflowPath,
+        kind: "workflow" as const,
+        sha256: sha256Hex(refreshedWorkflow),
+        size_bytes: Buffer.byteLength(refreshedWorkflow)
+      },
+      ...controlSeal.execution_files.map((file) => ({
+        path: file.snapshot_path,
+        kind: "execution" as const,
+        sha256: file.sha256,
+        size_bytes: file.size_bytes
+      }))
+    ].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+    const controllerSourceDigest = sha256Hex(`controller source ${index}\n`);
+    controllerGeneration = controllerGenerationDigestFixture({
+      runId: "run-one",
+      controlGeneration,
+      controllerSourceDigest,
+      semanticFingerprint,
+      workflowPath,
+      files
+    });
+    const refreshedSnapshotRoot = path.join(path.dirname(originalSnapshotRoot), controllerGeneration);
+    fs.cpSync(originalSnapshotRoot, refreshedSnapshotRoot, {
+      recursive: true,
+      dereference: false,
+      verbatimSymlinks: true
+    });
+    makeFixtureTreeWritable(refreshedSnapshotRoot);
+    fs.writeFileSync(path.join(refreshedSnapshotRoot, workflowPath), refreshedWorkflow);
+    sealFixtureSnapshot(refreshedSnapshotRoot);
+
+    const manifest = {
+      schema_version: "ultrafuzz.workflow-controller-generation.v1",
+      run_id: "run-one",
+      control_generation: controlGeneration,
+      controller_generation: controllerGeneration,
+      controller_source_digest: controllerSourceDigest,
+      semantic_fingerprint: semanticFingerprint,
+      workflow_path: workflowPath,
+      files
+    };
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const manifestSha256 = crypto.createHash("sha256").update(manifestBytes).digest("hex");
+    const manifestRelativePath = `smithers/controller-generations/${controllerGeneration}.json`;
+    const manifestPath = path.join(runRoot, manifestRelativePath);
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, manifestBytes);
+    manifestPaths.push(manifestPath);
+
+    const baseTimestamp = Date.parse("2026-08-22T01:59:57.000Z") + index * 3_000;
+    const preparedAt = new Date(baseTimestamp).toISOString();
+    const eventAt = new Date(baseTimestamp + 1_000).toISOString();
+    const committedAt = new Date(baseTimestamp + 2_000).toISOString();
+    const eventPayload = {
+      workflow_run_id: "workflow-run-one",
+      workflow_link_id: workflowLinkId,
+      control_generation: controlGeneration,
+      controller_generation: controllerGeneration,
+      previous_controller_generation: previousControllerGeneration,
+      manifest_sha256: manifestSha256,
+      semantic_fingerprint: semanticFingerprint,
+      sequence: index
+    };
+    const eventId = `evt-${crypto.createHash("sha256").update(JSON.stringify(eventPayload)).digest("hex").slice(0, 24)}`;
+    events.push({
+      schema_version: "ultrafuzz.event-record.v2",
+      event_id: eventId,
+      timestamp: eventAt,
+      run_id: "run-one",
+      event_type: "workflow-controller-generation-recorded",
+      payload: eventPayload,
+      status: "running"
+    });
+    entries.push({
+      sequence: index,
+      controller_generation: controllerGeneration,
+      previous_controller_generation: previousControllerGeneration,
+      manifest_path: manifestRelativePath,
+      manifest_sha256: manifestSha256,
+      workflow_run_id: "workflow-run-one",
+      workflow_link_id: workflowLinkId,
+      phase: "committed",
+      prepared_at: preparedAt,
+      updated_at: committedAt,
+      committed_at: committedAt,
+      event_id: eventId,
+      event_at: eventAt
+    });
+    previousControllerGeneration = controllerGeneration;
+  }
+  fs.writeFileSync(path.join(runRoot, "events.jsonl"), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  fs.writeFileSync(
+    path.join(runRoot, "smithers", "controller-generation-journal.json"),
+    `${JSON.stringify(
+      {
+        schema_version: "ultrafuzz.workflow-controller-generation-journal.v1",
+        run_id: "run-one",
+        control_generation: controlGeneration,
+        entries
+      },
+      null,
+      2
+    )}\n`
+  );
+
+  const previousSnapshotRoot = fixture.input.execution_snapshot_root;
+  fixture.input.execution_snapshot_root = `${path.posix.dirname(previousSnapshotRoot)}/${controllerGeneration}`;
+  fixture.input.workflow_path = fixture.input.workflow_path.replace(
+    `${previousSnapshotRoot}/`,
+    `${fixture.input.execution_snapshot_root}/`
+  );
+  if (fixture.input.prompt_path !== undefined) {
+    fixture.input.prompt_path = fixture.input.prompt_path.replace(
+      `${previousSnapshotRoot}/`,
+      `${fixture.input.execution_snapshot_root}/`
+    );
+  }
+  return { controllerGeneration, manifestPaths };
+}
+
+function controllerGenerationDigestFixture(input: {
+  runId: string;
+  controlGeneration: string;
+  controllerSourceDigest: string;
+  semanticFingerprint: string;
+  workflowPath: string;
+  files: readonly { path: string; kind: "workflow" | "execution"; sha256: string; size_bytes: number }[];
+}): string {
+  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-generation-v1\0");
+  for (const value of [
+    input.runId,
+    input.controlGeneration,
+    input.controllerSourceDigest,
+    input.semanticFingerprint,
+    input.workflowPath
+  ]) {
+    hash.update(`${Buffer.byteLength(value)}\0${value}\0`);
+  }
+  for (const file of input.files) {
+    hash.update(`${file.kind}\0${file.path}\0${file.size_bytes}\0${file.sha256}\0`);
+  }
+  return hash.digest("hex");
 }
 
 function refreshDependencyVerificationAuthority(

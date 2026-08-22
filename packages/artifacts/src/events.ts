@@ -63,6 +63,7 @@ export const EVENT_RECORD_TYPES = [
   "artifact-manifest-written",
   "materialize-selection",
   "workflow-link-recorded",
+  "workflow-controller-generation-recorded",
   "workflow-cancel-confirmed",
   "workflow-cancel-requested",
   "workflow-compiled",
@@ -271,6 +272,16 @@ const workflowRunLinkPayloadSchema = z.strictObject({
   lifecycle_result_event_id: eventIdSchema.optional(),
   lifecycle_result_at: timestampSchema.optional()
 });
+const workflowControllerGenerationPayloadSchema = z.strictObject({
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_link_id: workflowLinkIdSchema,
+  control_generation: sha256Schema,
+  controller_generation: sha256Schema,
+  previous_controller_generation: sha256Schema,
+  manifest_sha256: sha256Schema,
+  semantic_fingerprint: sha256Schema,
+  sequence: nonNegativeSafeIntegerSchema
+});
 const cancelPayloadSchema = z.strictObject({
   action: z.literal("cancel"),
   workflow_run_id: nonEmptyStringSchema,
@@ -395,6 +406,11 @@ export const eventRecordSchema = z.discriminatedUnion("event_type", [
   nodeEventVariant("artifact-manifest-written", z.literal("succeeded"), artifactManifestWrittenPayloadSchema),
   runEventVariant("materialize-selection", z.enum(["dry-run", "succeeded"]), materializeSelectionPayloadSchema),
   runEventVariant("workflow-link-recorded", runStatusSchema, workflowRunLinkPayloadSchema),
+  runEventVariant(
+    "workflow-controller-generation-recorded",
+    runStatusSchema,
+    workflowControllerGenerationPayloadSchema
+  ),
   runEventVariant(
     "workflow-cancel-confirmed",
     z.literal("canceled"),
@@ -696,6 +712,30 @@ const eventRecordJsonSchemaDefinitions = {
       lifecycle_result_at: { $ref: "#/$defs/timestamp" }
     }
   },
+  workflowControllerGenerationPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "workflow_run_id",
+      "workflow_link_id",
+      "control_generation",
+      "controller_generation",
+      "previous_controller_generation",
+      "manifest_sha256",
+      "semantic_fingerprint",
+      "sequence"
+    ],
+    properties: {
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      controller_generation: { $ref: "#/$defs/sha256" },
+      previous_controller_generation: { $ref: "#/$defs/sha256" },
+      manifest_sha256: { $ref: "#/$defs/sha256" },
+      semantic_fingerprint: { $ref: "#/$defs/sha256" },
+      sequence: { $ref: "#/$defs/nonNegativeSafeInteger" }
+    }
+  },
   workflowCancelConfirmedPayload: {
     type: "object",
     additionalProperties: false,
@@ -933,6 +973,11 @@ export const eventRecordJsonSchema = {
       "materializeSelectionPayload"
     ),
     eventRecordJsonSchemaVariant("workflow-link-recorded", { enum: RUN_STATE_STATUSES }, "workflowRunLinkPayload"),
+    eventRecordJsonSchemaVariant(
+      "workflow-controller-generation-recorded",
+      { enum: RUN_STATE_STATUSES },
+      "workflowControllerGenerationPayload"
+    ),
     eventRecordJsonSchemaVariant("workflow-cancel-confirmed", { const: "canceled" }, "workflowCancelConfirmedPayload"),
     eventRecordJsonSchemaVariant(
       "workflow-cancel-requested",

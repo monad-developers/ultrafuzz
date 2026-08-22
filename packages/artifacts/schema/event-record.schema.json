@@ -386,6 +386,34 @@
           "$ref": "#/$defs/safeId"
         },
         "event_type": {
+          "const": "workflow-controller-generation-recorded"
+        },
+        "status": {
+          "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
+        },
+        "payload": {
+          "$ref": "#/$defs/workflowControllerGenerationPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
           "const": "workflow-cancel-confirmed"
         },
         "status": {
@@ -1235,6 +1263,46 @@
         },
         "lifecycle_result_at": {
           "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "workflowControllerGenerationPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation",
+        "controller_generation",
+        "previous_controller_generation",
+        "manifest_sha256",
+        "semantic_fingerprint",
+        "sequence"
+      ],
+      "properties": {
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "previous_controller_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "semantic_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sequence": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
         }
       }
     },

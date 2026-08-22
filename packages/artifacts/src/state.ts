@@ -157,8 +157,11 @@ export interface RunWorkflowProvenance {
   compiledRunId: string;
   name: string;
   controlGeneration: string;
+  controllerGeneration?: string;
+  controllerGenerationJournal?: string;
   linkId: string;
   executionSnapshot: string;
+  controllerExecutionSnapshot?: string;
 }
 
 export interface RunProvenance {
