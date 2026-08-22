@@ -17,6 +17,7 @@ import {
   writeJsonDurable,
   writeRunMetadataDocument,
   writeRunState,
+  type EventRecord,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 
@@ -29,6 +30,7 @@ const MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
 const JOURNAL_FILE = "controller-generation-journal.json";
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/u;
+type ControllerGenerationEvent = Extract<EventRecord, { event_type: "workflow-controller-generation-recorded" }>;
 
 interface ControllerGenerationFile {
   path: string;
@@ -82,6 +84,21 @@ export interface EffectiveControllerGeneration {
   snapshot: VerifiedWorkflowControlSnapshot;
   controllerGeneration: string;
   authorizedGenerations: string[];
+}
+
+export interface CommittedControllerGenerationAuthority {
+  controlGeneration: string;
+  controllerGeneration: string;
+  workflowPath: string;
+  files: readonly {
+    path: string;
+    kind: "workflow" | "execution";
+    sha256: string;
+    sizeBytes: number;
+  }[];
+  journalPath: string;
+  manifestPaths: readonly string[];
+  eventRecords: readonly ControllerGenerationEvent[];
 }
 
 /** Prepare the append-only transition before publishing its immutable tree. */
@@ -221,6 +238,66 @@ export function effectiveControllerGeneration(
     snapshot: snapshotFromManifest(layout, original, manifest),
     controllerGeneration: head.controller_generation,
     authorizedGenerations: authorizedGenerations(journal, original.generation)
+  };
+}
+
+/**
+ * Authenticate a selected refreshed execution snapshot without changing the
+ * run's metadata/state projections. Cloud handoff verification uses this
+ * read-only surface after the normal lifecycle path has selected and committed
+ * a controller generation.
+ */
+export function verifyCommittedControllerGenerationAuthority(
+  layout: RunLayout,
+  controlGeneration: string,
+  controllerGeneration: string
+): CommittedControllerGenerationAuthority {
+  if (!SHA256.test(controlGeneration) || !SHA256.test(controllerGeneration)) {
+    throw new Error("controller generation selection is invalid");
+  }
+  if (controllerGeneration === controlGeneration) {
+    throw new Error("original workflow control must use its control seal authority");
+  }
+  const journal = readJournal(layout, controlGeneration);
+  const eventRecords = verifyControllerGenerationJournalEvents(layout, journal);
+  if (journal.entries.some((candidate) => candidate.phase !== "committed")) {
+    throw new Error("selected controller generation has an uncommitted journal transition");
+  }
+  const entry = committedHead(journal);
+  if (entry === undefined || entry.controller_generation !== controllerGeneration) {
+    throw new Error("selected controller generation is not the committed journal head");
+  }
+  const manifest = readManifest(layout, entry);
+  if (manifest.control_generation !== controlGeneration) {
+    throw new Error("controller generation is not rooted in the workflow control seal");
+  }
+  const expectedGeneration = controllerGenerationDigest({
+    runId: manifest.run_id,
+    controlGeneration: manifest.control_generation,
+    controllerSourceDigest: manifest.controller_source_digest,
+    semanticFingerprint: manifest.semantic_fingerprint,
+    workflowPath: manifest.workflow_path,
+    files: manifest.files
+  });
+  if (manifest.controller_generation !== expectedGeneration) {
+    throw new Error("controller generation manifest identity is invalid");
+  }
+  verifyControllerGenerationEvent(layout, journal, entry, manifest, eventRecords);
+  return {
+    controlGeneration,
+    controllerGeneration,
+    workflowPath: manifest.workflow_path,
+    files: manifest.files.map((file) => ({
+      path: file.path,
+      kind: file.kind,
+      sha256: file.sha256,
+      sizeBytes: file.size_bytes
+    })),
+    journalPath: path.join(layout.root, "smithers", JOURNAL_FILE),
+    manifestPaths: journal.entries.map((candidate) =>
+      safeResolveInside(layout.root, candidate.manifest_path, "controller generation manifest")
+    ),
+    eventRecords: structuredClone(eventRecords)
   };
 }
 
@@ -424,10 +501,12 @@ function controllerGenerationEventPayload(
   };
 }
 
-function controllerGenerationEvent(layout: RunLayout, entry: ControllerGenerationEntry) {
-  const matches = controllerGenerationEvents(layout).filter(
-    (event) => event.payload.controller_generation === entry.controller_generation
-  );
+function controllerGenerationEvent(
+  layout: RunLayout,
+  entry: ControllerGenerationEntry,
+  events = controllerGenerationEvents(layout)
+) {
+  const matches = events.filter((event) => event.payload.controller_generation === entry.controller_generation);
   if (matches.length > 1) throw new Error("controller generation has duplicate durable events");
   return matches[0];
 }
@@ -435,10 +514,15 @@ function controllerGenerationEvent(layout: RunLayout, entry: ControllerGeneratio
 function controllerGenerationEvents(layout: RunLayout) {
   const events = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (events.malformedRecords > 0) throw new Error("workflow event journal contains malformed records");
-  return events.records.filter((event) => event.event_type === "workflow-controller-generation-recorded");
+  return events.records.filter(
+    (event): event is ControllerGenerationEvent => event.event_type === "workflow-controller-generation-recorded"
+  );
 }
 
-function verifyControllerGenerationJournalEvents(layout: RunLayout, journal: ControllerGenerationJournal): void {
+function verifyControllerGenerationJournalEvents(
+  layout: RunLayout,
+  journal: ControllerGenerationJournal
+): ControllerGenerationEvent[] {
   const events = controllerGenerationEvents(layout);
   const entries = new Map(journal.entries.map((entry) => [entry.controller_generation, entry]));
   if (entries.size !== journal.entries.length) {
@@ -451,6 +535,7 @@ function verifyControllerGenerationJournalEvents(layout: RunLayout, journal: Con
   }
   for (const entry of journal.entries) {
     const manifest = readManifest(layout, entry);
+    verifyControllerGenerationManifestIdentity(journal, entry, manifest);
     const matches = events.filter((event) => event.payload.controller_generation === entry.controller_generation);
     if (matches.length > 1) throw new Error("controller generation has duplicate durable events");
     const event = matches[0];
@@ -467,15 +552,39 @@ function verifyControllerGenerationJournalEvents(layout: RunLayout, journal: Con
       throw new Error("controller generation event does not authenticate its journal entry");
     }
   }
+  return events;
+}
+
+function verifyControllerGenerationManifestIdentity(
+  journal: ControllerGenerationJournal,
+  entry: ControllerGenerationEntry,
+  manifest: ControllerGenerationManifest
+): void {
+  const expectedGeneration = controllerGenerationDigest({
+    runId: manifest.run_id,
+    controlGeneration: manifest.control_generation,
+    controllerSourceDigest: manifest.controller_source_digest,
+    semanticFingerprint: manifest.semantic_fingerprint,
+    workflowPath: manifest.workflow_path,
+    files: manifest.files
+  });
+  if (
+    manifest.control_generation !== journal.control_generation ||
+    manifest.controller_generation !== entry.controller_generation ||
+    manifest.controller_generation !== expectedGeneration
+  ) {
+    throw new Error("controller generation manifest identity is invalid");
+  }
 }
 
 function verifyControllerGenerationEvent(
   layout: RunLayout,
   journal: ControllerGenerationJournal,
   entry: ControllerGenerationEntry,
-  manifest: ControllerGenerationManifest
+  manifest: ControllerGenerationManifest,
+  events = controllerGenerationEvents(layout)
 ): void {
-  const event = controllerGenerationEvent(layout, entry);
+  const event = controllerGenerationEvent(layout, entry, events);
   if (
     event === undefined ||
     event.event_id !== entry.event_id ||

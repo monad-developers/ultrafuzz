@@ -17,6 +17,7 @@ import {
 import {
   INVARIANT_PINNED_SOURCE_BRANCH,
   INVARIANT_PINNED_SOURCE_REF,
+  layoutForRunRoot,
   materializePromptSchemas,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
@@ -25,6 +26,7 @@ import {
 import {
   parseRuntimeDocumentBytes,
   trustedGitExecutable,
+  verifyCommittedControllerGenerationAuthority,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID
 } from "@ultrafuzz/runtime";
 import {
@@ -57,6 +59,7 @@ const EXECUTION_DEPENDENCY_MANIFEST = "dependencies/manifest.json";
 const MAX_HANDOFF_SNAPSHOT_ENTRIES = 100_000;
 const MAX_HANDOFF_SNAPSHOT_FILE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;
+const MAX_HANDOFF_AUTHORITY_PROOF_BYTES = 64 * 1024 * 1024;
 const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
@@ -1384,15 +1387,26 @@ function readExpectedExecutionSnapshotFiles(
 ): Map<string, ExpectedSnapshotFile> {
   const sealPath = path.join(runRoot, "smithers", "control-integrity.json");
   const sealContents = readStableRegularFile(sealPath, 64 * 1024 * 1024, "workflow control seal");
-  const generation = crypto.createHash("sha256").update(sealContents).digest("hex");
-  if (generation !== path.basename(snapshotRoot)) {
-    throw new Error("execution snapshot generation does not match its workflow control seal");
-  }
+  const controlGeneration = crypto.createHash("sha256").update(sealContents).digest("hex");
+  const snapshotGeneration = path.basename(snapshotRoot);
   const parsed = parseRuntimeDocumentBytes(
     WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
     sealContents,
     "workflow control seal"
   );
+  const relativeWorkflow = path.relative(snapshotRoot, workflowPath).split(path.sep).join("/");
+  const checkedWorkflow = checkedSnapshotRelativePath(relativeWorkflow, "sealed workflow path");
+  if (snapshotGeneration !== controlGeneration) {
+    const layout = layoutForRunRoot(runRoot);
+    if (parsed.run_id !== layout.runId) {
+      throw new Error("workflow control seal run ID does not match its run root");
+    }
+    const authority = verifyCommittedControllerGenerationAuthority(layout, controlGeneration, snapshotGeneration);
+    if (authority.workflowPath !== checkedWorkflow) {
+      throw new Error("refreshed workflow path does not match its committed controller generation");
+    }
+    return new Map(authority.files.map((file) => [file.path, { sha256: file.sha256, size: BigInt(file.sizeBytes) }]));
+  }
   const expected = new Map<string, ExpectedSnapshotFile>();
   for (const value of parsed.execution_files) {
     if (!isRecord(value) || typeof value.snapshot_path !== "string") {
@@ -1402,8 +1416,6 @@ function readExpectedExecutionSnapshotFiles(
     if (expected.has(relativePath)) throw new Error("workflow control seal execution files are duplicated");
     expected.set(relativePath, parseExpectedSnapshotFile(value, "sealed execution file"));
   }
-  const relativeWorkflow = path.relative(snapshotRoot, workflowPath).split(path.sep).join("/");
-  const checkedWorkflow = checkedSnapshotRelativePath(relativeWorkflow, "sealed workflow path");
   if (!checkedWorkflow.startsWith(".smithers/workflows/") || expected.has(checkedWorkflow)) {
     throw new Error("sealed workflow path is invalid or duplicated");
   }
@@ -1420,12 +1432,60 @@ function copyWorkflowControlSealChecked(
 ): void {
   const source = path.join(runRoot, "smithers", "control-integrity.json");
   const contents = readStableRegularFile(source, 64 * 1024 * 1024, "workflow control seal");
-  if (crypto.createHash("sha256").update(contents).digest("hex") !== path.basename(snapshotRoot)) {
-    throw new Error("workflow control seal does not match the execution snapshot generation");
+  const controlGeneration = crypto.createHash("sha256").update(contents).digest("hex");
+  const snapshotGeneration = path.basename(snapshotRoot);
+  let authorityProofBytes = 0;
+  const addAuthorityProofBytes = (byteLength: number): void => {
+    authorityProofBytes += byteLength;
+    if (authorityProofBytes > MAX_HANDOFF_AUTHORITY_PROOF_BYTES) {
+      throw new Error("controller generation authority proof exceeds the handoff limit");
+    }
+  };
+  const copyAuthorityFile = (sourcePath: string, label: string): void => {
+    assertChildPath(runRoot, sourcePath, label);
+    const authorityContents = readStableRegularFile(sourcePath, 64 * 1024 * 1024, label);
+    addAuthorityProofBytes(authorityContents.byteLength);
+    const destination = path.join(staging, path.relative(projectRoot, sourcePath));
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(destination, authorityContents, { flag: "wx", mode: 0o600 });
+  };
+  let refreshedAuthority: ReturnType<typeof verifyCommittedControllerGenerationAuthority> | undefined;
+  if (controlGeneration !== snapshotGeneration) {
+    const parsed = parseRuntimeDocumentBytes(
+      WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+      contents,
+      "workflow control seal"
+    );
+    const layout = layoutForRunRoot(runRoot);
+    if (parsed.run_id !== layout.runId) {
+      throw new Error("workflow control seal run ID does not match its run root");
+    }
+    refreshedAuthority = verifyCommittedControllerGenerationAuthority(layout, controlGeneration, snapshotGeneration);
   }
   const destination = path.join(staging, path.relative(projectRoot, source));
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   fs.writeFileSync(destination, contents, { flag: "wx", mode: 0o600 });
+  if (refreshedAuthority !== undefined) {
+    copyAuthorityFile(refreshedAuthority.journalPath, "controller generation journal");
+    for (const manifestPath of refreshedAuthority.manifestPaths) {
+      copyAuthorityFile(manifestPath, "controller generation manifest");
+    }
+    const eventProofPath = path.join(staging, path.relative(projectRoot, path.join(runRoot, "events.jsonl")));
+    const eventLines: string[] = [];
+    for (const event of refreshedAuthority.eventRecords) {
+      const line = JSON.stringify(event);
+      addAuthorityProofBytes(Buffer.byteLength(line, "utf8") + 1);
+      eventLines.push(line);
+    }
+    const eventProof = Buffer.from(`${eventLines.join("\n")}\n`, "utf8");
+    fs.mkdirSync(path.dirname(eventProofPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(eventProofPath, eventProof, { flag: "wx", mode: 0o600 });
+    verifyCommittedControllerGenerationAuthority(
+      layoutForRunRoot(path.join(staging, path.relative(projectRoot, runRoot))),
+      controlGeneration,
+      snapshotGeneration
+    );
+  }
 }
 
 /** Verifies an extracted or durable snapshot against its generation-bound control seal. */
