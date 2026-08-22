@@ -1793,6 +1793,73 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("stages and publishes results through the canonical trusted mount while rejecting an alias below it", async () => {
+    const project = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(project.root, project.input);
+    project.input.project_archive_sha256 = archive.sha256;
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-publication-alias-"));
+    const canonicalMount = path.join(fixture, "canonical-volume");
+    const mountAlias = path.join(fixture, "data");
+    const outside = path.join(fixture, "outside");
+    const source = path.join(fixture, "source");
+    fs.mkdirSync(canonicalMount);
+    fs.mkdirSync(outside);
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, "finding.json"), '{"ok":true}\n');
+    fs.symlinkSync(canonicalMount, mountAlias, "dir");
+    try {
+      const lexicalAttemptRoot = path.join(mountAlias, "ultrafuzz-nodes", "run", "attempt");
+      const workspace = await initializeDurableNodeWorkspace(
+        lexicalAttemptRoot,
+        archive.path,
+        project.input,
+        mountAlias
+      );
+      expect(workspace.attemptRoot).toBe(path.join(canonicalMount, "ultrafuzz-nodes", "run", "attempt"));
+
+      // Publication staging below the canonical attempt root is an ordinary directory, so the
+      // unchanged destination guard accepts it.
+      const staged = path.join(workspace.attemptRoot, ".result-publishing-canonical", "bundle");
+      copySafeTree(source, staged);
+      expect(fs.readFileSync(path.join(staged, "finding.json"), "utf8")).toBe('{"ok":true}\n');
+
+      // Addressing the same directory through the trusted mount alias is what release publication did
+      // and is still refused, so the guard was not weakened to accept the alias itself.
+      expect(() => copySafeTree(source, path.join(lexicalAttemptRoot, ".result-publishing-lexical", "bundle"))).toThrow(
+        /cloud publication destination is unsafe/u
+      );
+
+      // An alias injected below the trusted mount stays rejected, and nothing escapes through it.
+      const poisonedPublishing = path.join(workspace.attemptRoot, ".result-publishing-poisoned");
+      fs.symlinkSync(outside, poisonedPublishing, "dir");
+      expect(() => copySafeTree(source, path.join(poisonedPublishing, "bundle"))).toThrow(
+        /cloud publication destination is unsafe/u
+      );
+      expect(fs.readdirSync(outside)).toEqual([]);
+
+      // The controller matches the durable record against the lexical data root it dispatched.
+      const checkpoint = workspace.recordCheckpoint("completed");
+      expect(checkpoint.workspace_path).toBe(path.posix.join(lexicalAttemptRoot, "workspace"));
+      expect(checkpoint.handoff_archive).toBe(path.posix.join(lexicalAttemptRoot, "input", "project.tgz"));
+      const index = JSON.parse(fs.readFileSync(workspace.checkpointIndex, "utf8")) as {
+        workspace_path: string;
+        handoff_archive: string;
+        checkpoints: Array<{ manifest: string; stage: string }>;
+      };
+      expect(index.workspace_path).toBe(path.posix.join(lexicalAttemptRoot, "workspace"));
+      expect(index.handoff_archive).toBe(path.posix.join(lexicalAttemptRoot, "input", "project.tgz"));
+      expect(index.checkpoints.at(-1)).toMatchObject({
+        manifest: path.posix.join(lexicalAttemptRoot, "checkpoints", `${checkpoint.checkpoint_id}.json`),
+        stage: "completed"
+      });
+    } finally {
+      makeFixtureTreeWritable(fixture);
+      fs.rmSync(fixture, { recursive: true, force: true });
+      archive.cleanup();
+      project.cleanup();
+    }
+  });
+
   it("tolerates concurrent creation of shared durable volume ancestors", () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-mount-race-"));
     const canonicalMount = path.join(fixture, "canonical-volume");
