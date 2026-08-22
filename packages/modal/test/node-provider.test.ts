@@ -389,6 +389,70 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("builds a handoff when one artifact tree is both a dependency and a reference", async () => {
+    const fixture = createProjectFixture();
+    const sharedArtifactDir = fixture.input.dependency_artifact_dirs[0]!;
+    const input = parseModalNodeSandboxInput({
+      ...fixture.input,
+      reference_artifact_dirs: [sharedArtifactDir],
+      selected_task: {
+        ...fixture.selectedTask,
+        referenceArtifactDirs: [sharedArtifactDir]
+      }
+    });
+    const dependencyOnlyContentFingerprint = modalNodeHandoffContentFingerprint(fixture.root, fixture.input);
+    const dependencyOnlyDispatchFingerprint = modalNodeDispatchFingerprint(fixture.input);
+    const overlappingContentFingerprint = modalNodeHandoffContentFingerprint(fixture.root, input);
+    const overlappingDispatchFingerprint = modalNodeDispatchFingerprint(input);
+    let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      expect(input.selected_task).toMatchObject({
+        dependencyArtifactDirs: expect.arrayContaining([sharedArtifactDir]),
+        referenceArtifactDirs: [sharedArtifactDir]
+      });
+      expect(overlappingContentFingerprint).not.toBe(dependencyOnlyContentFingerprint);
+      expect(overlappingDispatchFingerprint).not.toBe(dependencyOnlyDispatchFingerprint);
+
+      archive = await createModalNodeHandoffArchive(fixture.root, input);
+      expect(archive.contentSha256).toBe(overlappingContentFingerprint);
+      const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" }).split("\n");
+      expect(entries.filter((entry) => entry === `./${sharedArtifactDir}/declared.txt`)).toHaveLength(1);
+    } finally {
+      archive?.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects non-identical dependency and reference artifact tree overlaps", async () => {
+    const fixture = createProjectFixture();
+    const artifactDir = fixture.input.dependency_artifact_dirs[0]!;
+    const nestedArtifactDir = `${artifactDir}/nested`;
+    fs.mkdirSync(path.join(fixture.root, nestedArtifactDir));
+    const inputFor = (dependencyArtifactDirs: string[], referenceArtifactDirs: string[]) =>
+      parseModalNodeSandboxInput({
+        ...fixture.input,
+        dependency_artifact_dirs: dependencyArtifactDirs,
+        reference_artifact_dirs: referenceArtifactDirs,
+        selected_task: {
+          ...fixture.selectedTask,
+          dependencyArtifactDirs,
+          referenceArtifactDirs
+        }
+      });
+    try {
+      for (const input of [
+        inputFor([artifactDir], [nestedArtifactDir]),
+        inputFor([nestedArtifactDir], [artifactDir])
+      ]) {
+        await expect(createModalNodeHandoffArchive(fixture.root, input)).rejects.toThrow(
+          /dependency and reference artifact trees overlap without being identical/u
+        );
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("fingerprints equivalent handoff contents deterministically and detects changed prompt bytes", async () => {
     const fixture = createProjectFixture();
     const first = await createModalNodeHandoffArchive(fixture.root, fixture.input);
