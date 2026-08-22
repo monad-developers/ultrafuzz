@@ -32,7 +32,8 @@ import {
   resolveDurableDataRoot,
   runDurableWorkflow,
   workerResultPublicationMode,
-  workflowCommandArguments
+  workflowCommandArguments,
+  workflowRetryTaskCommandArguments
 } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
 
@@ -1294,11 +1295,30 @@ describe("Modal node sandbox provider", () => {
         fixture.input,
         false
       );
+      const retry = workflowRetryTaskCommandArguments(
+        "/volume/workflow.tsx",
+        "inner-run",
+        fixture.selectedTask.preparationId
+      );
       expect(resume).toEqual(
         expect.arrayContaining(["up", "/volume/workflow.tsx", "--resume", "--force", "--run-id", "inner-run"])
       );
       expect(fresh).toEqual(expect.arrayContaining(["up", "/volume/workflow.tsx", "--run-id", "inner-run"]));
       expect(fresh).not.toContain("--resume");
+      expect(retry).toEqual([
+        "retry-task",
+        "/volume/workflow.tsx",
+        "--run-id",
+        "inner-run",
+        "--node-id",
+        fixture.selectedTask.preparationId,
+        "--iteration",
+        "0",
+        "--force",
+        "--accept-workflow-change",
+        "--format",
+        "json"
+      ]);
     } finally {
       fixture.cleanup();
     }
@@ -1330,6 +1350,83 @@ describe("Modal node sandbox provider", () => {
         /selected task handoff is required/u
       );
     } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("retries the exact generated preparation task for the selected inner task", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-preparation-retry-test-"));
+    const logPath = path.join(root, "commands.jsonl");
+    const retryEnvironmentPath = path.join(root, "retry-environment.json");
+    const fixture = createProjectFixture({
+      smithersCli: `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
+if (args[0] === "up" && args.includes("--resume")) process.exit(1);
+if (args[0] === "why") {
+  process.stdout.write(JSON.stringify({ data: { blockers: [{ kind: "retries-exhausted", nodeId: "prepare:attempt-one" }] } }));
+}
+if (args[0] === "retry-task") {
+  fs.writeFileSync(${JSON.stringify(retryEnvironmentPath)}, JSON.stringify({
+    persistedWorkflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH ?? null
+  }));
+  const nodeId = args[args.indexOf("--node-id") + 1];
+  if (nodeId !== "prepare:attempt-one") process.exit(1);
+}
+`
+    });
+    try {
+      await runDurableWorkflow(fixture.root, "inner-run", fixture.input);
+      const commands = fs
+        .readFileSync(logPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      expect(commands.map(([command]) => command)).toEqual(["up", "why", "retry-task"]);
+      expect(commands[2]).toEqual(
+        expect.arrayContaining([
+          "--node-id",
+          fixture.selectedTask.preparationId,
+          "--iteration",
+          "0",
+          "--accept-workflow-change"
+        ])
+      );
+      expect(commands[2]![1]).toBe(path.join(fixture.root, fixture.input.workflow_path));
+      expect(JSON.parse(fs.readFileSync(retryEnvironmentPath, "utf8"))).toEqual({ persistedWorkflow: null });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps an exhausted task outside the selected task family terminal", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-unrelated-retry-test-"));
+    const logPath = path.join(root, "commands.jsonl");
+    const fixture = createProjectFixture({
+      smithersCli: `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
+if (args[0] === "up" && args.includes("--resume")) process.exit(1);
+if (args[0] === "why") {
+  process.stdout.write(JSON.stringify({ blockers: [{ kind: "retries-exhausted", nodeId: "prepare:another-attempt" }] }));
+}
+`
+    });
+    try {
+      await expect(runDurableWorkflow(fixture.root, "inner-run", fixture.input)).rejects.toThrow(
+        /cloud worker phase resume-workflow failed/u
+      );
+      const commands = fs
+        .readFileSync(logPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      expect(commands.map(([command]) => command)).toEqual(["up", "why"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
       fixture.cleanup();
     }
   });
