@@ -107,7 +107,7 @@ export interface EvalTarget {
 
 export interface EvalVariant {
   id: string;
-  /** Optional topology override; when omitted the target project's CI topology is used unmodified. */
+  /** Optional private/operator-suite override; public benchmark variants must use their packaged topology. */
   topology?: string;
   workflow_input?: EvalWorkflowInput;
   runner_model_profile?: string;
@@ -431,6 +431,7 @@ export interface EvalRunRecord {
   config_fingerprint?: string;
   audit_profile?: string;
   audit_profile_catalog_digest?: string;
+  topology_path_origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
   topology_digest?: string;
   prompt_digest?: string;
   candidate_label?: string;

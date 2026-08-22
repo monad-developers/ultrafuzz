@@ -61,7 +61,8 @@ const topologyGroupJsonSchema = {
           type: "array",
           uniqueItems: true,
           items: { type: "string", pattern: SAFE_ID_PATTERN }
-        }
+        },
+        failure_policy: { enum: ["halt", "continue"] }
       }
     }
   }

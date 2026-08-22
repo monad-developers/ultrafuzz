@@ -3,7 +3,57 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 
-import { loadBuiltInPromptAssets } from "../src/index.js";
+import { extractPromptVariables, loadBuiltInPromptAssets, SUPPORTED_TEMPLATE_VARIABLES } from "../src/index.js";
+
+interface ShippedTopologyNode {
+  id: string;
+  kind: string;
+  prompt?: string;
+  group?: string;
+  loops?: number;
+  model_profiles?: string[];
+}
+
+interface ShippedTopology {
+  defaults: { strategy_loops: number };
+  groups?: Record<string, { defaults?: { loops?: number; model_profiles?: string[] } }>;
+  nodes: ShippedTopologyNode[];
+}
+
+const SHIPPED_TOPOLOGIES = [
+  [".ultrafuzz/topology.yml", "../../../.ultrafuzz/topology.yml"],
+  ["packages/config/topologies/default.yml", "../../config/topologies/default.yml"],
+  ["packages/config/topologies/full.yml", "../../config/topologies/full.yml"],
+  ["packages/config/topologies/invariant-only.yml", "../../config/topologies/invariant-only.yml"],
+  ["packages/config/topologies/smoke.yml", "../../config/topologies/smoke.yml"]
+] as const;
+
+function readTopology(relativePath: string): ShippedTopology {
+  const topologyPath = fileURLToPath(new URL(relativePath, import.meta.url));
+  return YAML.parse(readFileSync(topologyPath, "utf8")) as ShippedTopology;
+}
+
+function effectiveAttemptCount(topology: ShippedTopology, node: ShippedTopologyNode): number {
+  const groupDefaults = node.group === undefined ? undefined : topology.groups?.[node.group]?.defaults;
+  const loops =
+    node.loops ??
+    groupDefaults?.loops ??
+    (node.kind === "agentic" && node.group === "strategies" ? topology.defaults.strategy_loops : 1);
+  const profiles =
+    node.kind === "agentic"
+      ? node.model_profiles?.length
+        ? node.model_profiles
+        : groupDefaults?.model_profiles?.length
+          ? groupDefaults.model_profiles
+          : ["current-profile"]
+      : ["current-profile"];
+  return loops * profiles.length;
+}
+
+function topologyPromptPath(node: ShippedTopologyNode): string | undefined {
+  if (node.kind !== "agentic") return undefined;
+  return node.prompt ?? (node.group === undefined ? `${node.id}.md` : `${node.group}/${node.id}.md`);
+}
 
 function prompt(relativePath: string): string {
   const asset = loadBuiltInPromptAssets().find((entry) => entry.relativePath === relativePath);
@@ -17,72 +67,75 @@ function generatedTestManifestSources(markdown: string): string[] {
   return [...markdown.matchAll(/\{\{artifact_path:([^}]+)\}\}\/generated-tests\.json/gu)].map((match) => match[1]!);
 }
 
-const BUG_SEARCH_STRATEGIES = [
-  ["round-trip", "strategies/round-trip.md"],
+const DIRECT_BUG_SEARCH_STRATEGIES = [
+  ["admin-config-boundaries", "strategies/admin-config-boundaries.md"],
+  ["amm-boundary-liquidity", "strategies/amm-boundary-liquidity.md"],
+  ["batch-atomicity-unsupported-actions", "strategies/batch-atomicity-unsupported-actions.md"],
+  ["boundary-tests", "strategies/boundary-tests.md"],
+  ["differential-library-tests", "strategies/differential-library-tests.md"],
+  ["encode-decode", "strategies/encode-decode.md"],
+  ["expand-coverage", "strategies/expand-coverage.md"],
+  ["external-dependency-boundaries", "strategies/external-dependency-boundaries.md"],
   ["externalized-state-accounting", "strategies/externalized-state-accounting.md"],
-  ["packed-action-parity", "strategies/packed-action-parity.md"],
-  ["rounding-direction-audit", "strategies/rounding-direction-audit.md"],
+  ["lifecycle-view-boundaries", "strategies/lifecycle-view-boundaries.md"],
   ["market-exhaustion-boundaries", "strategies/market-exhaustion-boundaries.md"],
+  ["order-replacement-collateral", "strategies/order-replacement-collateral.md"],
+  ["packed-action-parity", "strategies/packed-action-parity.md"],
+  ["payable-fallback-accounting", "strategies/payable-fallback-accounting.md"],
+  ["round-trip", "strategies/round-trip.md"],
+  ["rounding-direction-audit", "strategies/rounding-direction-audit.md"],
+  ["router-exact-accounting", "strategies/router-exact-accounting.md"],
   ["state-machine-boundaries", "strategies/state-machine-boundaries.md"],
-  ["lifecycle-view-boundaries", "strategies/lifecycle-view-boundaries.md"]
+  ["time-warp-sequences", "strategies/time-warp-sequences.md"],
+  ["workflow-property-based-tests", "strategies/workflow-property-based-tests.md"]
 ] as const;
 
-const CANONICAL_PERSONA_SENTENCE = "You are a security researcher specializing in Solidity smart contracts.";
-const CANONICAL_EMPTY_FINDINGS_SENTENCE =
-  "If no finding is confirmed, use only the empty form defined by the exact pinned schema in the central output contract.";
-const CANONICAL_OPTIONAL_POC_SENTENCE =
-  "A compact Foundry test or proof of concept may support a candidate finding when useful, but test authoring is optional evidence rather than the objective.";
-const CANONICAL_POC_PERSISTENCE_SENTENCE =
-  "If you author an optional PoC test, keep it under `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the `generated-tests/` directory under `{{artifact_dir}}`, and list that artifact-relative path in `{{artifact_dir}}/generated-tests.json`.";
-const CANONICAL_EMPTY_POC_BUNDLE_SENTENCE =
-  "When no optional PoC exists, write the empty bundle defined by the exact pinned generated-tests schema.";
-const CANONICAL_EXECUTION_CAPTURE_SENTENCE =
-  "When gathering execution evidence, run one direct command at a time and let Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes, command chaining, or output-shortening wrappers.";
-const CANONICAL_FINALIZATION_RESERVE_SENTENCE =
-  "Use the Timeout and Finalization reserve values in the Topology Runtime Context.";
+const EXACT_FUZZING_SENTENCE = "You may use fuzzing when input discovery or sequence search helps with the proof.";
 
 function normalized(markdown: string): string {
   return markdown.replace(/\s+/gu, " ");
 }
 
-const DIRECT_TEST_CONSTRUCTION_STRATEGIES = [
-  "encode-decode",
-  "differential-library-tests",
-  "workflow-property-based-tests",
-  "time-warp-sequences",
-  "expand-coverage",
-  "admin-config-boundaries",
-  "external-dependency-boundaries",
-  "amm-boundary-liquidity",
-  "payable-fallback-accounting",
-  "batch-atomicity-unsupported-actions",
-  "router-exact-accounting",
-  "order-replacement-collateral"
-] as const;
-
 describe("prompt semantic anchors", () => {
-  it("keeps approved bug-search strategies on the canonical optional-PoC contract", () => {
+  it("keeps every direct strategy on the finding-first optional-evidence policy", () => {
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
     };
     const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
 
-    for (const [id, relativePath] of BUG_SEARCH_STRATEGIES) {
+    expect(DIRECT_BUG_SEARCH_STRATEGIES).toHaveLength(20);
+    for (const [id, relativePath] of DIRECT_BUG_SEARCH_STRATEGIES) {
       const markdown = prompt(relativePath);
       const flat = normalized(markdown);
       const outputs = nodeById.get(id)?.outputs ?? [];
-      expect(flat, id).toContain(CANONICAL_PERSONA_SENTENCE);
-      expect(markdown, id).toMatch(/\bfind concrete, source-backed bugs associated with\b/u);
+      expect(flat, id).toMatch(/every distinct/iu);
+      expect(flat, id).toMatch(/concrete/iu);
+      expect(flat, id).toMatch(/source-backed/iu);
+      expect(flat, id).toMatch(/reachable/iu);
+      expect(flat, id).toMatch(/production(?:-| )bugs?/iu);
+      expect(flat, id).toMatch(/(?:falsifiable.{0,40}hypothes|hypothes.{0,40}falsifiable)/iu);
       expect(markdown, id).toContain("A property that holds is not a finding.");
-      expect(flat, id).toContain(CANONICAL_OPTIONAL_POC_SENTENCE);
-      expect(flat, id).toContain(CANONICAL_POC_PERSISTENCE_SENTENCE);
-      expect(flat, id).toContain(CANONICAL_EMPTY_POC_BUNDLE_SENTENCE);
-      expect(flat, id).toContain(CANONICAL_EXECUTION_CAPTURE_SENTENCE);
-      expect(flat, id).toContain(CANONICAL_FINALIZATION_RESERVE_SENTENCE);
-      expect(flat, id).toContain(CANONICAL_EMPTY_FINDINGS_SENTENCE);
+      expect(
+        markdown.match(new RegExp(EXACT_FUZZING_SENTENCE.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "gu")),
+        id
+      ).toHaveLength(1);
+      expect(flat, id).toContain("Test code is optional; adequate confirmation is mandatory.");
+      expect(flat, id).toMatch(/minimal deterministic/iu);
+      expect(flat, id).toMatch(/when (?:execution|runtime confirmation|runtime behavior) is needed/iu);
+      expect(flat, id).toMatch(/source-complete static proof/iu);
+      expect(flat, id).toMatch(
+        /(?:runtime-dependent claims|claim that depends on runtime behavior|runtime behavior but was not executed)/iu
+      );
+      expect(flat, id).toMatch(/(?:remain unresolved|as unresolved)/iu);
+      expect(flat, id).toMatch(
+        /(?:no-findings|no confirmed findings|no finding is confirmed|no findings is a valid)/iu
+      );
+      expect(flat, id).toMatch(/(?:primary result|primary deliverable|primary security result)/iu);
+      expect(flat, id).toContain("generated-tests@3");
+      expect(flat, id).toMatch(/(?:always write|always write and validate|manifest is always mandatory)/iu);
+      expect(flat, id).toMatch(/empty (?:bundle|manifest)/iu);
       expect(markdown, id).toContain("{{output_findings_path}}");
-      expect(markdown, id).toMatch(/\{\{artifact_(?:handoff|path):base-test-setup\}\}/u);
       expect(markdown, id).not.toMatch(/Your job is to author/u);
       expect(
         outputs.filter((output) => output.contract === "ultrafuzz/findings@2"),
@@ -93,19 +146,11 @@ describe("prompt semantic anchors", () => {
         id
       ).toHaveLength(1);
     }
-
-    const boundaryOutputs = nodeById.get("boundary-tests")?.outputs ?? [];
-    expect(boundaryOutputs.map((output) => output.path)).toEqual(["boundary-recipes.md", "boundary-recipes.json"]);
-    for (const id of DIRECT_TEST_CONSTRUCTION_STRATEGIES) {
-      expect(
-        nodeById.get(id)?.outputs?.some((output) => output.contract === "ultrafuzz/generated-tests@3"),
-        id
-      ).toBe(true);
-    }
   });
 
   it("keeps issue 5 refinements aligned with their topology roles", () => {
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+    const flatDynamic = normalized(dynamic);
     const boundary = prompt("strategies/boundary-tests.md");
     const handlers = prompt("strategies/invariants/handlers.md");
     const dedupe = prompt("review/dedupe-findings.md");
@@ -119,28 +164,240 @@ describe("prompt semantic anchors", () => {
     ]) {
       const markdown = prompt(relativePath);
       expect(markdown, relativePath).toContain("A property that holds is not a finding.");
-      expect(normalized(markdown), relativePath).toContain(CANONICAL_EMPTY_FINDINGS_SENTENCE);
+      expect(normalized(markdown), relativePath).toMatch(
+        /(?:no-findings|no confirmed findings|no finding is confirmed|no findings is a valid)/iu
+      );
     }
-    expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
-    expect(dynamic).toContain("{{ancestor_artifacts_by_path:findings.json}}");
-    expect(dynamic).toContain("{{ancestor_artifacts_by_path:boundary-recipes.md,boundary-recipes.json}}");
+    expect(dynamic).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}");
+    expect(dynamic).not.toContain("{{ancestor_generated_test_manifests}}");
+    expect(dynamic).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}");
+    expect(dynamic).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/boundary-recipes@1}}");
+    expect(dynamic).not.toContain("{{ancestor_artifacts_by_path:boundary-recipes.md,boundary-recipes.json}}");
+    expect(dedupe).not.toContain("{{ancestor_artifacts}}");
     expect(generatedTestManifestSources(dynamic)).toEqual([]);
-    expect(normalized(dynamic)).toContain("are a mandatory validation queue for this node");
-    expect(normalized(dynamic)).toContain("Record a disposition for every queued recipe in `strategy-plan.json`");
-    expect(normalized(dynamic)).toContain(
-      "Treat those findings as hypotheses to cover, not as coverage already achieved"
+    expect(flatDynamic).toContain("are a mandatory validation queue for this node");
+    expect(flatDynamic).toContain("A value of `0` disables independent enumerator sub-agents only");
+    expect(flatDynamic).toContain(
+      "The coordinator is the sole recommendation owner for every strategy ID beginning with the reserved prefix `boundary-recipe-`"
     );
-    expect(boundary).not.toContain("{{output_findings_path}}");
-    expect(boundary).not.toContain("{{strategy_attempt_test_dir}}");
-    expect(boundary).not.toContain("{{finding_reachability_vocabulary}}");
-    expect(boundary).not.toContain("{{finding_note_key_vocabulary}}");
-    expect(handlers).toContain("This node declares no findings output.");
-    expect(handlers).not.toContain("{{output_findings_path}}");
+    expect(flatDynamic).toContain(
+      "joining each recipe only to findings outputs from the exact same producer object (`attempt_id`, `logical_node_id`, and `artifact_dir`)"
+    );
+    expect(flatDynamic).toContain("`boundary-recipe-<producer-attempt-id>:<recipe-id>`");
+    expect(flatDynamic).toContain("Repeated recipe IDs from different producer attempts stay distinct");
+    expect(flatDynamic).toContain(
+      "Independent enumerator sub-agents must not emit a recommendation whose `strategy_id` begins with that prefix"
+    );
+    expect(flatDynamic).toContain(
+      "If and only if the mandatory queue is non-empty, write one coordinator-owned record with the reserved `enumerator_id` `boundary-recipe-coordinator` as the first row"
+    );
+    expect(flatDynamic).toContain(
+      "is not a spawned enumerator sub-agent, and does not consume the resolved enumerator policy"
+    );
+    expect(flatDynamic).toContain(
+      "The exact `enumerators` array is `[]` when the mandatory queue is empty and contains only the reserved `boundary-recipe-coordinator` record when the mandatory queue is non-empty"
+    );
+    expect(flatDynamic).toContain(
+      "Keep `dynamic_strategies_enumerator` equal to the resolved value `0`; the coordinator record does not change it to `1`"
+    );
+    expect(flatDynamic).toContain(
+      'A selected `boundary-recipe-*` row must use exactly `["boundary-recipe-coordinator"]` as its `enumerator_ids`'
+    );
+    expect(flatDynamic).toContain("Record a disposition for every queued recipe in `strategy-plan.json`");
+    expect(flatDynamic).toContain(
+      "The two contract-derived sealed selectors above are the complete declared producer intake"
+    );
+    expect(flatDynamic).toContain("Test code is optional; adequate confirmation is mandatory.");
+    expect(dynamic).toContain(EXACT_FUZZING_SENTENCE);
+    expect(flatDynamic).toContain("Give every selected strategy sub-agent the complete investigation policy");
+    expect(flatDynamic).toContain(
+      "every distinct enumerator recommendation ID that is not selected, once each in first-distinct-appearance order"
+    );
+    expect(boundary).toContain("{{output_findings_path}}");
+    expect(boundary).toContain("generated-tests@3");
+    expect(handlers).toContain("{{output_findings_path}}");
+    expect(normalized(handlers)).toContain("when no production-target failure was observed");
     expect(normalized(dedupe)).toContain("must never contribute rows to `deduped-findings.json`");
     expect(normalized(dedupe)).toContain("is not a blocked state and does not invalidate that producer's findings");
+    expect(normalized(dedupe)).toContain("exactly one `primary` source");
+    expect(normalized(dedupe)).toContain("`duplicate_finding_ids` is the first-distinct-appearance projection");
+    expect(normalized(dedupe)).toContain("`family_variant_keys` is exactly the kept finding's");
     expect(normalized(triage)).toContain(
       "the missing reproducer is neither blocked validation nor demotion evidence by itself"
     );
+  });
+
+  it("specifies marker-admitted bounded artifact authorities", () => {
+    const specsPath = fileURLToPath(new URL("../../../docs/SPECS.md", import.meta.url));
+    const specs = readFileSync(specsPath, "utf8");
+    const flatSpecs = normalized(specs);
+
+    expect(specs).toContain("- `ancestor_contract_artifact_authority:<contract>`");
+    expect(specs).toContain("- `ancestor_artifact_path_authority:<path>[,<path>...]`");
+    expect(flatSpecs).toContain(
+      "bounded pointer to the task-local JSON document at `<task-workspace>/.ultrafuzz/authorities/<attemptId>.json`"
+    );
+    expect(flatSpecs).toContain(
+      "It MUST NOT expand matching producer paths, model-fanout attempts, or source-authority rows into the prompt"
+    );
+    expect(flatSpecs).toContain("That shared control file and its parent directory MUST NOT be admitted to the agent");
+    expect(flatSpecs).toContain(
+      "Controller-host paths, workspaces, source identities, model metadata, unrelated tasks, and unselected outputs MUST be omitted"
+    );
+  });
+
+  it("keeps shipped prompts and the public variable set off legacy artifact collections", () => {
+    const forbiddenVariableNames = new Set([
+      "ancestor_artifacts",
+      "ancestor_artifacts_by_path",
+      "ancestor_generated_test_manifests",
+      "ancestor_generated_test_manifest_authorities"
+    ]);
+
+    for (const asset of loadBuiltInPromptAssets()) {
+      const forbiddenReferences = extractPromptVariables(asset.markdown).filter((reference) =>
+        forbiddenVariableNames.has(reference.name)
+      );
+      expect(forbiddenReferences, asset.relativePath).toEqual([]);
+    }
+
+    for (const forbiddenVariableName of forbiddenVariableNames) {
+      expect(SUPPORTED_TEMPLATE_VARIABLES).not.toContain(forbiddenVariableName);
+    }
+  });
+
+  it("keeps named producer helpers on exactly one effective shipped attempt", () => {
+    const assetsByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset]));
+
+    for (const [topologyName, relativePath] of SHIPPED_TOPOLOGIES) {
+      const topology = readTopology(relativePath);
+      const nodesById = new Map(topology.nodes.map((node) => [node.id, node]));
+
+      for (const consumer of topology.nodes) {
+        const promptPath = topologyPromptPath(consumer);
+        if (promptPath === undefined) continue;
+        const asset = assetsByPath.get(promptPath);
+        expect(asset, `${topologyName}: ${consumer.id} prompt ${promptPath}`).toBeDefined();
+        if (asset === undefined) continue;
+
+        for (const reference of extractPromptVariables(asset.markdown)) {
+          if (
+            (reference.name !== "artifact_path" && reference.name !== "artifact_handoff") ||
+            reference.argument === undefined
+          ) {
+            continue;
+          }
+          const producer = nodesById.get(reference.argument);
+          expect(producer, `${topologyName}: ${consumer.id} uses ${reference.raw}`).toBeDefined();
+          if (producer === undefined) continue;
+          expect(
+            effectiveAttemptCount(topology, producer),
+            `${topologyName}: ${consumer.id} uses ${reference.raw}`
+          ).toBe(1);
+        }
+      }
+    }
+
+    const invariantTopology = readTopology("../../config/topologies/invariant-only.yml");
+    const coverageNode = invariantTopology.nodes.find((node) => node.id === "stateful-invariant-coverage");
+    expect(coverageNode).toBeDefined();
+    expect(effectiveAttemptCount(invariantTopology, coverageNode!)).toBeGreaterThan(1);
+
+    for (const relativePath of [
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ]) {
+      const references = extractPromptVariables(prompt(relativePath));
+      expect(references, relativePath).toContainEqual(
+        expect.objectContaining({ name: "ancestor_artifact_path_authority", argument: "coverage-report.md" })
+      );
+      expect(references, relativePath).not.toContainEqual(
+        expect.objectContaining({ name: "artifact_path", argument: "stateful-invariant-coverage" })
+      );
+    }
+  });
+
+  it("keeps specialist oracle, path-projection, gap-review, and anti-vacuity safeguards", () => {
+    const planner = prompt("strategies/differential/differential-oracle-planner.md");
+    const scout = prompt("strategies/differential-library-tests.md");
+    const harness = prompt("strategies/differential/reference-harness-author.md");
+    const auditor = prompt("strategies/differential/reference-and-lane-auditor.md");
+    const laneAuthor = prompt("strategies/differential/differential-lane-author.md");
+    const redTriage = prompt("strategies/differential/differential-red-triage.md");
+    const gapReview = prompt("strategies/differential/differential-repair-and-report-review.md");
+
+    expect(normalized(planner)).toContain("Every planned reference oracle must be independent");
+    expect(normalized(scout)).toContain("Require an independent differential oracle");
+    expect(normalized(harness)).toContain("Every oracle must be independent of the production implementation");
+    expect(normalized(auditor)).toContain("Audit oracle independence explicitly");
+    expect(normalized(laneAuthor)).toContain("Use only the audited independent reference oracle");
+    for (const [relativePath, markdown] of [
+      ["strategies/differential/reference-harness-author.md", harness],
+      ["strategies/differential/reference-and-lane-auditor.md", auditor]
+    ] as const) {
+      expect(
+        markdown.match(/\{\{ancestor_contract_artifact_authority:ultrafuzz\/differential-plan@1\}\}/gu),
+        relativePath
+      ).toHaveLength(1);
+      expect(normalized(markdown), relativePath).toContain(
+        "Sealed JSON authority for every declared ancestor differential plan"
+      );
+      expect(normalized(markdown), relativePath).toMatch(/instead of expecting (?:an )?expanded path arrays?/u);
+      expect(normalized(markdown), relativePath).toMatch(/manifest-derived absolute (?:plan )?paths?/u);
+    }
+    expect(auditor).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/reference-harness@1}}");
+    expect(laneAuthor).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1}}");
+    expect(redTriage).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1}}");
+    expect(harness).not.toContain("{{artifact_handoff:differential-oracle-planner}}");
+    expect(auditor).not.toContain("{{artifact_handoff:differential-oracle-planner}}");
+    expect(auditor).not.toContain("{{artifact_handoff:reference-harness-author}}");
+    expect(laneAuthor).not.toContain("{{artifact_handoff:reference-and-lane-auditor}}");
+    expect(redTriage).not.toContain("{{artifact_handoff:differential-lane-author}}");
+    for (const contract of [
+      "ultrafuzz/semantic-red-registry@1",
+      "ultrafuzz/differential-red-triage@1",
+      "ultrafuzz/differential-lane-result@1",
+      "ultrafuzz/audited-differential-lanes@1"
+    ] as const) {
+      expect(gapReview).toContain(`{{ancestor_contract_artifact_authority:${contract}}}`);
+    }
+    for (const expandedSelector of [
+      "{{artifact_handoff:differential-red-triage}}",
+      "{{artifact_path:differential-red-triage}}/triage-a.json",
+      "{{artifact_path:differential-red-triage}}/triage-b.json",
+      "{{artifact_handoff:differential-lane-author}}",
+      "{{artifact_handoff:reference-and-lane-auditor}}"
+    ] as const) {
+      expect(gapReview).not.toContain(expandedSelector);
+    }
+
+    expect(normalized(gapReview)).toContain("Apply these exact derived projections in declared input order");
+    expect(normalized(gapReview)).toContain("`missing_lane_work_orders` contains exactly the projected ready lanes");
+    expect(normalized(gapReview)).toContain(
+      "`incomplete_campaign_work_orders` contains exactly the projected lane-result rows"
+    );
+    expect(normalized(gapReview)).toContain("only for genuine evidence-backed explanation of that exact row");
+    expect(normalized(gapReview)).toContain("Do not probe for, count, or require nested attempt directories");
+
+    for (const relativePath of [
+      "strategies/invariants/setup.md",
+      "strategies/invariants/handlers.md",
+      "strategies/invariants/coverage.md",
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ] as const) {
+      expect(normalized(prompt(relativePath)), relativePath).toMatch(/(?:anti-vacuity|non-vacuous|non-vacuity)/iu);
+    }
+
+    for (const relativePath of [
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ] as const) {
+      const markdown = normalized(prompt(relativePath));
+      expect(markdown, relativePath).toMatch(/independent(?:ly derived)? accounting equations?/u);
+      expect(markdown, relativePath).toMatch(/never (?:call, )?copy,\s+translate, simplify, or re-derive/iu);
+      expect(markdown, relativePath).toContain("they may not assume the property under test");
+    }
   });
 
   it("keeps pinned schemas as the sole producer-side JSON shape authority", () => {
@@ -342,6 +599,8 @@ describe("prompt semantic anchors", () => {
     expect(fanin).toContain("{{artifact_handoff:project-discovery}}");
     expect(fanin).toContain("{{artifact_handoff:actors-flows}}");
     expect(fanin).toContain("{{artifact_handoff:base-test-setup}}");
+    expect(fanin).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/property-lens@2}}");
+    expect(fanin).not.toContain("{{ancestor_artifacts}}");
     expect(fanin).toContain("Target-derived consolidation");
     expect(fanin).toMatch(/Retain every explicit mathematical\s+invariant/u);
     expect(fanin).toMatch(
@@ -553,7 +812,7 @@ describe("prompt semantic anchors", () => {
     const flatCampaign = campaign.replace(/\s+/gu, " ");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
-    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
     const topologySource = readFileSync(topologyPath, "utf8");
     const topology = YAML.parse(topologySource) as {
       nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string; contract: string }> }[];
@@ -581,16 +840,17 @@ describe("prompt semantic anchors", () => {
     expect(campaignNode?.outputs?.find((output) => output.path === "campaign-plan.json")?.contract).toBe(
       "ultrafuzz/invariant-campaign-plan@2"
     );
-    expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
+    expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).not.toContain(
       "stateful-invariant-campaign"
     );
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
     expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
-    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
-    expect(aggregate).toContain("{{ancestor_generated_test_manifest_authorities}}");
-    expect(dynamic).toContain("{{ancestor_generated_test_manifests}}");
+    expect(aggregate).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}");
+    expect(aggregate).not.toContain("{{ancestor_generated_test_manifests}}");
+    expect(aggregate).not.toContain("{{ancestor_generated_test_manifest_authorities}}");
+    expect(dynamic).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}");
     expect(dynamic).not.toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("final recon-fuzzer campaign");
@@ -682,7 +942,7 @@ describe("prompt semantic anchors", () => {
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
-    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: {
         id: string;
@@ -769,6 +1029,15 @@ describe("prompt semantic anchors", () => {
     expect(flatDynamic).toContain("identifies every recommending enumerator in enumerator-output order");
     expect(dynamic).toContain("`dynamic_strategy_id` must name a row in `selected-strategies.json`");
     expect(flatDynamic).toContain("Every generated-file strategy ID must name a selected strategy");
+    expect(flatDynamic).toContain(
+      "Set `current_run_artifacts` exactly equal to the ordered `strategy-plan.json#current_run_artifacts_considered[*].path` projection"
+    );
+    expect(flatDynamic).toContain("Do not omit, add, reorder, or duplicate a path between those two sibling artifacts");
+    expect(flatDynamic).toContain(
+      "The `generated_files[*].source_path` rows must exactly cover every runnable and support path in this attempt's declared `generated-tests.json`"
+    );
+    expect(flatDynamic).toContain("all six sibling JSON artifacts from this exact producer attempt");
+    expect(flatDynamic).toContain("After finalizing the six JSON artifacts");
     expect(flatDynamic).toContain("one named, non-mutating contextual gate");
   });
 
@@ -779,7 +1048,7 @@ describe("prompt semantic anchors", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/generated-tests.mdx", import.meta.url)
     );
-    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
     };
@@ -799,6 +1068,11 @@ describe("prompt semantic anchors", () => {
     const generatedTestsTemplate = readFileSync(templatePath, "utf8");
     expect(generatedTestsTemplate).toContain("exact pinned schema named by `Validate against`");
     expect(generatedTestsTemplate).toContain("exact `Validation command`");
+    expect(generatedTestsTemplate).toContain("role-specific prompt controls whether executable evidence is required");
+    expect(generatedTestsTemplate).toContain("The manifest is always mandatory");
+    expect(normalized(generatedTestsTemplate)).toContain(
+      "an empty bundle is valid evidence transport and is not a reason to block, demote, or invalidate"
+    );
     expect(generatedTestsTemplate).toContain("must be strict UTF-8 text");
     expect(generatedTestsTemplate).toContain("logical producer");
     expect(generatedTestsTemplate).toContain("checked-in native framework");
@@ -828,12 +1102,11 @@ describe("prompt semantic anchors", () => {
     expect(readFileSync(topologyPath, "utf8")).toMatch(
       /id: reference-harness-author[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
     );
-    // The aggregate prompt no longer hardcodes one {{artifact_path:<producer>}} line
-    // per generated-test producer: it resolves them through
-    // {{ancestor_generated_test_manifests}}, which is what lets the packaged smoke
-    // and invariant-only topologies work, since those producers do not exist there.
-    // A static list would have to be edited for every topology.
-    expect(aggregate).toContain("{{ancestor_generated_test_manifests}}");
+    // The aggregate prompt no longer hardcodes one {{artifact_path:<producer>}}
+    // line per generated-test producer or expands their paths into the prompt.
+    // The sealed contract selector works across packaged topologies without a
+    // static list that must change with every topology.
+    expect(aggregate).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}");
     expect([...aggregateManifestSources]).toEqual([]);
     expect(generatedTestProducers.size).toBeGreaterThan(0);
     for (const sourceId of new Set([
@@ -858,30 +1131,37 @@ describe("prompt semantic anchors", () => {
     expect(actors).toContain("do not create an\nundeclared `findings.json`");
   });
 
-  it("keeps admin/config tests target-native and mirrors canonical generated-test companions", () => {
+  it("keeps optional admin/config evidence target-native and mirrors authored companions", () => {
     const admin = prompt("strategies/admin-config-boundaries.md");
 
-    expect(admin).toContain("focused target-native tests");
+    expect(admin).toContain("Use source analysis first.");
     expect(admin).toContain("Base test setup (when rendered):");
     expect(admin).not.toContain("Base Foundry setup:");
-    expect(admin).toContain("For Foundry targets, write `.t.sol`");
-    expect(admin).toMatch(/For\s+Hardhat targets, use the existing JavaScript or TypeScript test location/u);
-    expect(admin).toMatch(/For Vyper targets, use the existing pytest, Ape,\s+Brownie/u);
-    expect(admin).toContain("Keep every generated test");
-    expect(admin).toContain("inside `{{workspace_path}}`");
-    expect(admin).toMatch(/Do not introduce Foundry into a Hardhat or Vyper\s+target/u);
+    expect(admin).toContain("When execution is needed, author only the minimal deterministic test or PoC");
+    expect(admin).toContain("For Foundry, Hardhat, Vyper, or other targets");
+    expect(admin).toContain("inside `{{workspace_path}}` and");
+    expect(admin).toContain("Do not introduce a different\nframework.");
     expect(admin).toMatch(/Do not install or fetch\s+missing tools or dependencies/u);
-    expect(admin).toContain("{{artifact_dir}}/generated-tests/GeneratedTest.ext");
-    expect(admin).toContain("`generated-tests/<relative-file>` path");
+    expect(admin).toContain("the `generated-tests` directory under `{{artifact_dir}}`");
+    expect(admin).toContain("`generated-tests/<relative-file>` artifact path");
     expect(admin).toContain("{{artifact_dir}}/generated-tests.json");
-    expect(admin).toContain("Never list the workspace");
+    expect(admin).toContain("never its workspace path");
   });
 
   it("validates deduped native reproducers without hydrating isolated workspaces", () => {
     const dedupe = prompt("review/dedupe-findings.md");
 
-    expect(dedupe).toContain("{{ancestor_artifacts}}");
-    expect(dedupe).toContain("When this list includes project-discovery or base-test setup handoffs");
+    expect(dedupe).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}");
+    expect(dedupe).toContain("{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}");
+    expect(normalized(dedupe)).toContain("exact same `attempt_id`, `logical_node_id`, and `artifact_dir`");
+    expect(normalized(dedupe)).toContain("manifest from that producer output's exact declared `path`");
+    expect(normalized(dedupe)).toContain("Never hardcode `generated-tests.json`");
+    expect(dedupe).not.toContain("`logicalNodeId`");
+    expect(dedupe).toContain(
+      "{{ancestor_artifact_path_authority:setup/project-discovery.md,setup/base-test-setup.md}}"
+    );
+    expect(dedupe).not.toContain("{{ancestor_artifacts}}");
+    expect(dedupe).toContain("When this authority selects project-discovery or base-test setup handoffs");
     expect(dedupe).toMatch(
       /When they are absent, do not treat the omission as an error and do not\s+run native tests/u
     );
@@ -928,7 +1208,7 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain("Foundry `.t.sol`");
     expect(aggregate).toMatch(/Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`/u);
     expect(aggregate).toContain("existing native Python test `.py` files");
-    expect(aggregate).toContain("Bind its one framework to the checked-in native framework");
+    expect(normalized(aggregate)).toContain("Bind its one framework to the checked-in native framework");
     expect(aggregate).toMatch(/Never infer, synthesize, normalize, or\s+convert a missing or mismatched framework/u);
     expect(aggregate).toContain("Preserve the manifest's one `framework` only on its `source_bundles` record");
     expect(aggregate).toContain("copied and skipped entry rows must not repeat `framework`");
@@ -947,16 +1227,19 @@ describe("prompt semantic anchors", () => {
     // read the `attempt-<n>` destination-layout segment as the node identity and
     // wrote `attempt-0` for every strategy bundle, which the authenticated
     // aggregation gate rejected. Keep the binding, and keep it strategy-agnostic.
+    expect(normalized(aggregate)).toContain("The sealed selector above is binding");
     expect(normalized(aggregate)).toContain(
-      "The source-authority table above is mechanically derived from the topology and is binding"
+      "write its producer's exact `logical_node_id` as `source node_id` into every corresponding `source_bundles`"
+    );
+    expect(aggregate).toContain("producer `artifact_dir` joined with that declared path");
+    expect(aggregate).not.toContain("`logicalNodeId`");
+    expect(aggregate).not.toContain("`artifactDir`");
+    expect(normalized(aggregate)).toContain(
+      "write `source_manifest_relative_path` byte-for-byte from the selected output's declared `path`"
     );
     expect(normalized(aggregate)).toContain(
-      "write its exact `source node_id` into every corresponding `source_bundles`"
+      "Never insert an artifact directory prefix such as `artifacts/<source-node>/`"
     );
-    expect(normalized(aggregate)).toContain(
-      "write `source_manifest_relative_path` byte-for-byte from that table's canonical relative-path column"
-    );
-    expect(aggregate).toContain("Never insert an artifact directory\nprefix such as `artifacts/<source-node>/`");
     expect(normalized(aggregate)).toContain("a directory segment such as `attempt-<n>` is never a `node_id`");
     expect(aggregate).toContain("artifact-relative path, byte size, digest, and any\nsource metadata exactly");
     expect(aggregate).toContain("corresponding\n`generated-test` or `support-file` kind");
@@ -990,6 +1273,33 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("Stop and report an invalid\nupstream artifact");
     expect(report).not.toContain("generated Solidity PoCs");
     expect(report).not.toContain("minimized self-contained Foundry reproducer");
+  });
+
+  it("uses only the injected sanitized Run summary projection", () => {
+    const report = prompt("review/final-report.md");
+    const flatReport = normalized(report);
+
+    expect(flatReport).toContain(
+      "authoritative workspace-relative path for a bounded, sanitized Run summary JSON projection"
+    );
+    expect(flatReport).toContain("copy its complete JSON object exactly into `report.json.run_metadata`");
+    expect(flatReport).toContain("add only that separately injected field");
+    expect(flatReport).toContain("metadata only from the injected sanitized projection described above");
+    expect(flatReport).toContain("Models used: `<models_used from the injected sanitized projection, or unavailable>`");
+    expect(flatReport).toContain("including a `dropped` false positive");
+    expect(flatReport).toContain("Omission never means dropped");
+    for (const forbidden of [
+      "{{run_metadata_path}}",
+      "run.json",
+      "state.json",
+      "graph.json",
+      "config.resolved.toml",
+      "git remote get-url origin",
+      "config/state/backend metadata",
+      "authoritative run record"
+    ]) {
+      expect(report, forbidden).not.toContain(forbidden);
+    }
   });
 
   it("keeps the severity matrix and reportability gates in the classifier prompt", () => {
@@ -1094,6 +1404,11 @@ describe("prompt semantic anchors", () => {
 
   it("gives the final-report producer the canonical Markdown renderer", () => {
     const markdown = prompt("review/final-report.md");
+    expect(markdown).toContain("{{ancestor_artifact_path_authority:aggregation.json,");
+    expect(markdown).not.toContain("{{ancestor_artifacts_by_path:aggregation.json,severity-classified-findings.json");
+    expect(markdown).toContain(
+      "{{ancestor_artifact_path_authority:setup/project-discovery.md,setup/setup-foundry.md,setup/base-test-setup.md,smoke-context.md}}"
+    );
     expect(markdown).toContain(
       "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
     );

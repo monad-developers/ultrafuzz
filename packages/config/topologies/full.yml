@@ -16,6 +16,15 @@ groups:
       timeout_seconds: 7200
       model_profiles:
         - default
+  specialists:
+    label: Optional specialists
+    color: "#9333ea"
+    defaults:
+      loops: 1
+      timeout_seconds: 7200
+      model_profiles:
+        - default
+      failure_policy: continue
   references:
     label: References
     color: "#4b5563"
@@ -348,9 +357,13 @@ nodes:
     outputs:
       - path: boundary-recipes.md
         contract: ultrafuzz/nonempty-markdown@1
-        primary: true
       - path: boundary-recipes.json
         contract: ultrafuzz/boundary-recipes@1
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@3
   - id: encode-decode
     kind: agentic
     prompt: strategies/encode-decode.md
@@ -421,9 +434,9 @@ nodes:
     outputs:
       - path: coverage-expansion.md
         contract: ultrafuzz/nonempty-markdown@1
-        primary: true
       - path: findings.json
         contract: ultrafuzz/findings@2
+        primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@3
   - id: admin-config-boundaries
@@ -436,11 +449,11 @@ nodes:
     outputs:
       - path: admin-config-boundary-matrix.md
         contract: ultrafuzz/nonempty-markdown@1
-        primary: true
       - path: admin-config-boundary-matrix.json
         contract: ultrafuzz/admin-config-boundary-matrix@1
       - path: findings.json
         contract: ultrafuzz/findings@2
+        primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@3
   - id: external-dependency-boundaries
@@ -452,11 +465,11 @@ nodes:
     outputs:
       - path: dependency-scope-matrix.md
         contract: ultrafuzz/nonempty-markdown@1
-        primary: true
       - path: dependency-scope-matrix.json
         contract: ultrafuzz/dependency-scope-matrix@1
       - path: findings.json
         contract: ultrafuzz/findings@2
+        primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@3
   - id: externalized-state-accounting
@@ -468,11 +481,11 @@ nodes:
     outputs:
       - path: externalized-state-accounting.md
         contract: ultrafuzz/nonempty-markdown@1
-        primary: true
       - path: externalized-state-accounting.json
         contract: ultrafuzz/externalized-state-accounting@1
       - path: findings.json
         contract: ultrafuzz/findings@2
+        primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@3
   - id: amm-boundary-liquidity
@@ -598,13 +611,15 @@ nodes:
   - id: stateful-invariant-setup
     kind: agentic
     prompt: strategies/invariants/setup.md
-    group: strategies
+    group: specialists
     depends_on:
       - property-specification-fanin
     outputs:
       - path: setup-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -613,13 +628,15 @@ nodes:
   - id: stateful-invariant-handlers
     kind: agentic
     prompt: strategies/invariants/handlers.md
-    group: strategies
+    group: specialists
     depends_on:
       - stateful-invariant-setup
     outputs:
       - path: handler-coverage-inventory.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
       - path: workspace.patch
         contract: ultrafuzz/text@1
       - path: workspace-patch.json
@@ -628,7 +645,7 @@ nodes:
   - id: stateful-invariant-coverage
     kind: agentic
     prompt: strategies/invariants/coverage.md
-    group: strategies
+    group: specialists
     required_commands:
       - covg-eval
       - recon
@@ -663,7 +680,7 @@ nodes:
   - id: stateful-invariant-implement-properties
     kind: agentic
     prompt: strategies/invariants/implement-properties.md
-    group: strategies
+    group: specialists
     depends_on:
       - stateful-invariant-coverage
     outputs:
@@ -684,7 +701,7 @@ nodes:
   - id: stateful-invariant-campaign
     kind: agentic
     prompt: strategies/invariants/invariant-testing-campaign.md
-    group: strategies
+    group: specialists
     required_commands:
       - recon
     depends_on:
@@ -711,7 +728,7 @@ nodes:
   - id: differential-oracle-planner
     kind: agentic
     prompt: strategies/differential/differential-oracle-planner.md
-    group: strategies
+    group: specialists
     depends_on:
       - property-specification-fanin
     outputs:
@@ -722,7 +739,7 @@ nodes:
   - id: reference-harness-author
     kind: agentic
     prompt: strategies/differential/reference-harness-author.md
-    group: strategies
+    group: specialists
     depends_on:
       - differential-oracle-planner
     outputs:
@@ -735,7 +752,7 @@ nodes:
   - id: reference-and-lane-auditor
     kind: agentic
     prompt: strategies/differential/reference-and-lane-auditor.md
-    group: strategies
+    group: specialists
     depends_on:
       - reference-harness-author
     outputs:
@@ -746,7 +763,7 @@ nodes:
   - id: differential-lane-author
     kind: agentic
     prompt: strategies/differential/differential-lane-author.md
-    group: strategies
+    group: specialists
     depends_on:
       - reference-and-lane-auditor
     outputs:
@@ -761,7 +778,7 @@ nodes:
   - id: differential-red-triage
     kind: agentic
     prompt: strategies/differential/differential-red-triage.md
-    group: strategies
+    group: specialists
     depends_on:
       - differential-lane-author
     outputs:
@@ -776,7 +793,7 @@ nodes:
   - id: differential-repair-and-report-review
     kind: agentic
     prompt: strategies/differential/differential-repair-and-report-review.md
-    group: strategies
+    group: specialists
     depends_on:
       - differential-red-triage
     outputs:
@@ -795,7 +812,7 @@ nodes:
   - id: dynamic-strategy-generator
     kind: agentic
     prompt: strategies/dynamic-strategy-generator.md
-    group: strategies
+    group: specialists
     depends_on:
       - boundary-tests
       - encode-decode
@@ -817,17 +834,6 @@ nodes:
       - order-replacement-collateral
       - state-machine-boundaries
       - lifecycle-view-boundaries
-      - stateful-invariant-setup
-      - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
-      - stateful-invariant-campaign
-      - differential-oracle-planner
-      - reference-harness-author
-      - reference-and-lane-auditor
-      - differential-lane-author
-      - differential-red-triage
-      - differential-repair-and-report-review
     outputs:
       - path: strategy-plan.json
         contract: ultrafuzz/dynamic-strategy-plan@1
@@ -868,16 +874,7 @@ nodes:
       - order-replacement-collateral
       - state-machine-boundaries
       - lifecycle-view-boundaries
-      - stateful-invariant-setup
-      - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
       - stateful-invariant-campaign
-      - differential-oracle-planner
-      - reference-harness-author
-      - reference-and-lane-auditor
-      - differential-lane-author
-      - differential-red-triage
       - differential-repair-and-report-review
       - dynamic-strategy-generator
     outputs:

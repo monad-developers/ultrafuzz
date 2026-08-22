@@ -18,17 +18,43 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Use source analysis and concrete execution evidence to investigate each
-hypothesis. A compact Foundry test or proof of concept may support a candidate
-finding when useful, but test authoring is optional evidence rather than the
-objective.
+Investigate every distinct, concrete, source-backed, reachable production-bug
+hypothesis within this strategy's scope. State each candidate as a falsifiable
+hypothesis: identify the source-backed expected behavior, the suspected
+violation, the reachable production path, the safety impact, and the evidence
+that would confirm or refute it. Follow each hypothesis to a supported
+disposition. A complete investigation with no confirmed findings is valid.
 
-If you author an optional PoC test, keep it under
+A property that holds is not a finding.
+
+Test code is optional; adequate confirmation is mandatory.
+A source-complete static proof may confirm a finding only when it mechanically establishes the full reachable violation.
+The proof must establish the expected behavior, violation, reachability, and
+safety impact across every relevant production path. Runtime-dependent claims
+that were not executed remain unresolved and must not be reported as confirmed
+findings.
+
+When execution is needed, author only the minimal deterministic target-native
+test or proof of concept needed to confirm or refute the hypothesis. Executable
+evidence counts only when the relevant test or proof of concept compiles and
+runs successfully. Harness, dependency, fixture, compilation, and runner
+failures are not evidence of a production bug.
+
+You may use fuzzing when input discovery or sequence search helps with the proof.
+
+Fuzzing, test authoring, and producing any minimum number of test files are not
+objectives or requirements.
+
+If execution requires an authored test or proof of concept, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the
 `generated-tests/` directory under `{{artifact_dir}}`, and list that
-artifact-relative path in `{{artifact_dir}}/generated-tests.json`. When no
-optional PoC exists, write the empty bundle defined by the exact pinned
-generated-tests schema.
+artifact-relative path in `{{artifact_dir}}/generated-tests.json`.
+
+Always write `{{artifact_dir}}/generated-tests.json` and its corresponding
+bundle using the exact pinned `generated-tests@3` schema in the central output
+contract. Include every runnable test and every non-runnable support file the
+test needs. The schema-defined empty bundle is valid when no test or support
+file was authored.
 
 When gathering execution evidence, run one direct command at a time and let
 Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes,
@@ -92,12 +118,10 @@ Prefer small state setups with one or two price levels so exhaustion behavior is
 observable. Classify exact rounding rules as incomplete-spec when public sources
 do not define them.
 
-A property that holds is not a finding.
-
-Write only confirmed, structured findings to {{output_findings_path}} using the
-exact pinned `findings@2` schema in the central output contract. If no finding
-is confirmed, use only the empty form defined by the exact pinned schema in the
-central output contract.
+The primary deliverable is {{output_findings_path}}. Always write only
+confirmed, structured findings there using the exact pinned `findings@2`
+schema in the central output contract. If no finding is confirmed, write the
+schema-defined empty form; no findings is a valid result.
 
 Use only the authoritative report-bound note vocabulary:
 

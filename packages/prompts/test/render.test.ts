@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { promptArtifactAuthorityPathSelectorId } from "@ultrafuzz/artifacts";
 import {
   loadBuiltInPromptAssets,
   PromptError,
@@ -26,12 +27,12 @@ afterEach(() => {
 function baseRenderInput(tmp: string): PromptRenderInput {
   const runArtifacts = path.join(tmp, "runs", "run-1", "artifacts");
   return {
-    prompt:
-      "Setup {{artifact_handoff:base-test-setup}}\nAll {{ancestor_artifacts:base-test-setup}}\nCurrent {{artifact_path}}/findings.json",
+    prompt: "Setup {{artifact_handoff:base-test-setup}}\nCurrent {{artifact_path}}/findings.json",
     graph: {
       logicalNodes: [
         {
           id: "project-discovery",
+          kind: "agentic",
           outputs: [
             {
               path: "setup/project-discovery.md",
@@ -44,6 +45,7 @@ function baseRenderInput(tmp: string): PromptRenderInput {
         },
         {
           id: "base-test-setup",
+          kind: "agentic",
           dependsOn: ["project-discovery"],
           outputs: [
             {
@@ -64,6 +66,7 @@ function baseRenderInput(tmp: string): PromptRenderInput {
         },
         {
           id: "boundary-tests",
+          kind: "agentic",
           dependsOn: ["base-test-setup"],
           outputs: [
             {
@@ -130,6 +133,31 @@ const nonSchemaContracts = new Set(["ultrafuzz/nonempty-markdown@1", "ultrafuzz/
 
 function occurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
+}
+
+function taskLocalArtifactAuthorityPath(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, ".ultrafuzz", "authorities", `${input.node.concreteId}.json`);
+}
+
+function expectTaskLocalArtifactAuthority(rendered: string, input: PromptRenderInput): void {
+  const authorityPath = taskLocalArtifactAuthorityPath(input);
+  const legacyTaskManifestPath = path.join(path.dirname(input.run.metadataPath), "smithers", "tasks.json");
+  const legacyControlManifestPath = path.join(path.dirname(input.run.metadataPath), "controls", "tasks.json");
+
+  expect(rendered).toContain(`Read the runtime-generated ancestor artifact authority JSON at \`${authorityPath}\``);
+  expect(rendered).toContain(`Confirm its \`attempt_id\` is \`${input.node.concreteId}\``);
+  expect(rendered).toContain("verifier-admitted ancestor producers");
+  expect(rendered).toContain("`artifact_path_base`");
+  expect(rendered).not.toContain(legacyTaskManifestPath);
+  expect(rendered).not.toContain(legacyControlManifestPath);
+  expect(rendered).not.toContain(".ultrafuzz-verification");
+  expect(rendered).not.toContain("`dependencyArtifactDirs`");
+  expect(rendered).not.toContain("`optionalDependencyArtifactDirs`");
+  expect(rendered).not.toContain("`metadata.artifacts.outputs`");
+  expect(rendered).not.toContain("- source node_id:");
+  expect(rendered).not.toContain("source_manifest_relative_path:");
+  expect(rendered).not.toContain("source_manifest_path:");
+  expect(rendered).not.toMatch(/"producers"\s*:\s*\[/u);
 }
 
 describe("prompt rendering", () => {
@@ -335,13 +363,13 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).not.toContain('"node_id":"<node-id>"');
     expect(result.renderedMarkdown).toContain("## Generated-test Bundle Instructions");
     expect(result.renderedMarkdown).toContain(
-      `Author runnable generated test source files under \`${path.join(input.node.workspacePath, "test", "foundry", "boundary-tests")}\``
+      `When you author executable evidence, keep runnable generated test or reproducer source under \`${path.join(input.node.workspacePath, "test", "foundry", "boundary-tests")}\``
     );
     expect(result.renderedMarkdown).toContain(
       `mirror every declared bundle file under \`${path.join(input.node.artifactDir, "generated-tests")}\``
     );
     expect(result.renderedMarkdown).toContain(
-      `write the manifest to exactly \`${path.join(input.node.artifactDir, "generated-tests.json")}\``
+      `The manifest is always mandatory: write it to exactly \`${path.join(input.node.artifactDir, "generated-tests.json")}\``
     );
     expect(result.renderedMarkdown).toContain("`run_id` exactly to `run-1`");
     expect(result.renderedMarkdown).toContain("`node_id` exactly to `boundary-tests`");
@@ -389,6 +417,7 @@ describe("prompt rendering", () => {
       const runArtifacts = path.join(root, "runs", "schema-authority", "artifacts");
       const logicalNodes = topology.nodes.map((node) => ({
         id: node.id,
+        kind: node.kind === "reference" ? ("reference" as const) : ("agentic" as const),
         dependsOn: node.depends_on ?? [],
         artifactDir: path.join(runArtifacts, node.id),
         outputs: (node.outputs ?? []).map((output, index) => {
@@ -486,6 +515,7 @@ describe("prompt rendering", () => {
     const workspacePath = path.join(root, "workspaces", "final-report");
     const logicalNodes = topology.nodes.map((node) => ({
       id: node.id,
+      kind: node.kind === "reference" ? ("reference" as const) : ("agentic" as const),
       dependsOn: node.depends_on ?? [],
       artifactDir: path.join(runArtifacts, node.id),
       outputs: (node.outputs ?? []).map((output, index) => ({
@@ -497,7 +527,7 @@ describe("prompt rendering", () => {
       }))
     }));
 
-    const rendered = renderPrompt({
+    const input: PromptRenderInput = {
       prompt: promptMarkdown!,
       graph: { logicalNodes },
       node: {
@@ -516,14 +546,42 @@ describe("prompt rendering", () => {
         metadataPath: path.join(root, "runs", "smoke-render", "run.json")
       },
       outputs: { patchPath: path.join(artifactDir, "workspace.patch") }
-    }).renderedMarkdown;
+    };
+    const rendered = renderPrompt(input).renderedMarkdown;
 
-    expect(rendered).toContain(path.join(runArtifacts, "smoke-context", "smoke-context.md"));
-    expect(rendered).toContain(path.join(runArtifacts, "dedupe-findings", "deduped-findings.json"));
+    expectTaskLocalArtifactAuthority(rendered, input);
+    expect(
+      occurrences(
+        rendered,
+        `Read the runtime-generated ancestor artifact authority JSON at \`${taskLocalArtifactAuthorityPath(input)}\``
+      )
+    ).toBe(2);
+    expect(occurrences(rendered, `Confirm its \`attempt_id\` is \`${input.node.concreteId}\``)).toBe(2);
+    const machineSelectorId = promptArtifactAuthorityPathSelectorId(
+      [
+        "aggregation.json",
+        "severity-classified-findings.json",
+        "deduped-findings.json",
+        "strategy-detections.json",
+        "finding-lifecycle-ledger.json",
+        "properties.json",
+        "implemented-properties.json",
+        "recon-fuzzer-results.json",
+        "campaign-summary.json"
+      ].sort()
+    );
+    const contextSelectorId = promptArtifactAuthorityPathSelectorId(
+      ["setup/project-discovery.md", "setup/setup-foundry.md", "setup/base-test-setup.md", "smoke-context.md"].sort()
+    );
+    expect(rendered).toContain(`path entry whose \`id\` is \`${machineSelectorId}\``);
+    expect(rendered).toContain(`path entry whose \`id\` is \`${contextSelectorId}\``);
+    expect(rendered).not.toContain(path.join(runArtifacts, "smoke-context", "smoke-context.md"));
+    expect(rendered).toContain("`deduped-findings.json`");
+    expect(rendered).not.toContain(path.join(runArtifacts, "dedupe-findings", "deduped-findings.json"));
     expect(rendered).toContain("In bounded classification mode");
     expect(rendered).toContain("compute `severity` from the matrix");
     expect(rendered).toContain("Strict severity-handoff mode");
-    expect(rendered).toMatch(/applies when\s+`severity-classified-findings\.json` is rendered/u);
+    expect(rendered).toMatch(/applies when\s+`severity-classified-findings\.json` is selected/u);
     expect(rendered).not.toContain("bounded-final-review");
     expect(rendered).not.toContain("workspace-patch.json");
   });
@@ -539,6 +597,7 @@ describe("prompt rendering", () => {
     input.prompt = boundaryPrompt!.markdown;
     input.graph.logicalNodes.push({
       id: "property-specification-fanin",
+      kind: "agentic",
       outputs: [
         {
           path: "properties.md",
@@ -605,6 +664,7 @@ describe("prompt rendering", () => {
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: Array<{
         id: string;
+        kind?: string;
         prompt?: string;
         depends_on?: string[];
         outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
@@ -615,6 +675,7 @@ describe("prompt rendering", () => {
     const runArtifacts = path.join(root, "runs", "generated-test-render", "artifacts");
     const logicalNodes = topology.nodes.map((node) => ({
       id: node.id,
+      kind: node.kind === "reference" ? ("reference" as const) : ("agentic" as const),
       dependsOn: node.depends_on ?? [],
       artifactDir: path.join(runArtifacts, node.id),
       outputs: (node.outputs ?? []).map((output, index) => ({
@@ -661,14 +722,16 @@ describe("prompt rendering", () => {
 
       expect(rendered.match(/## Generated-test Bundle Instructions/gu), producer.id).toHaveLength(1);
       expect(rendered, producer.id).toContain(
-        `Author runnable generated test source files under \`${path.join(workspacePath, "test", "foundry", producer.id)}\``
+        `When you author executable evidence, keep runnable generated test or reproducer source under \`${path.join(workspacePath, "test", "foundry", producer.id)}\``
       );
       expect(rendered, producer.id).toContain(
         `mirror every declared bundle file under \`${path.join(artifactDir, "generated-tests")}\``
       );
       expect(rendered, producer.id).toContain(
-        `write the manifest to exactly \`${path.join(artifactDir, "generated-tests.json")}\``
+        `The manifest is always mandatory: write it to exactly \`${path.join(artifactDir, "generated-tests.json")}\``
       );
+      expect(rendered, producer.id).toContain("generated test, PoC, fuzz-test, and support files are optional");
+      expect(rendered, producer.id).toContain("an empty bundle is valid evidence transport");
       expect(rendered, producer.id).toContain("`run_id` exactly to `generated-test-render`");
       expect(rendered, producer.id).toContain(`\`node_id\` exactly to \`${producer.id}\``);
       expect(rendered, producer.id).toContain(
@@ -683,6 +746,7 @@ describe("prompt rendering", () => {
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: Array<{
         id: string;
+        kind?: string;
         prompt?: string;
         depends_on?: string[];
         outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
@@ -697,6 +761,7 @@ describe("prompt rendering", () => {
     const workspacePath = path.join(root, "workspaces", "aggregate-test-files");
     const logicalNodes = topology.nodes.map((node) => ({
       id: node.id,
+      kind: node.kind === "reference" ? ("reference" as const) : ("agentic" as const),
       dependsOn: node.depends_on ?? [],
       artifactDir: path.join(runArtifacts, node.id),
       outputs: (node.outputs ?? []).map((output, index) => ({
@@ -740,7 +805,11 @@ describe("prompt rendering", () => {
     // Survives end-to-end rendering, not just the on-disk prompt: the topology
     // supplies the authoritative source-node/manifest pair so an agent cannot
     // substitute an `attempt-<n>` destination segment for the source node id.
-    expect(rendered).toContain("source-authority table above is mechanically derived from the topology and");
+    expect(rendered).toContain("The sealed selector above is binding");
+    expect(rendered).toContain("producer's exact `logical_node_id` as `source node_id`");
+    expect(rendered).toContain("producer `artifact_dir` joined with that declared path");
+    expect(rendered).not.toContain("`logicalNodeId`");
+    expect(rendered).not.toContain("`artifactDir`");
     expect(rendered).toContain("byte-for-byte equal to that manifest's root-level `node_id`");
     expect(rendered.replace(/\s+/gu, " ")).toContain("directory segment such as `attempt-<n>` is never a `node_id`");
     expect(rendered).toContain("preserve the source identity");
@@ -818,179 +887,402 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do not add Markdown fences");
   });
 
-  it("derives generated-test manifests only from matching transitive ancestor output contracts", () => {
+  it("rejects legacy ancestor collection helpers with compact-authority migrations", () => {
+    const migrations = [
+      ["{{ancestor_artifacts}}", "ancestor_contract_artifact_authority:<contract>"],
+      ["{{ancestor_artifacts:boundary-tests}}", "ancestor_contract_artifact_authority:<contract>"],
+      ["{{ancestor_artifacts_by_path:findings.json}}", "ancestor_artifact_path_authority:<path>"],
+      ["{{ancestor_generated_test_manifests}}", "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3"],
+      [
+        "{{ancestor_generated_test_manifest_authorities}}",
+        "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3"
+      ]
+    ] as const;
+
+    for (const [template, replacement] of migrations) {
+      expect(() => validatePromptVariables(template), template).toThrow(
+        new RegExp(`legacy prompt helper .* is no longer supported; migrate to .*${replacement.replaceAll("/", "\\/")}`)
+      );
+    }
+  });
+
+  it("renders a bounded sealed authority while retaining transitive findings-contract selection", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    const boundaryTests = input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!;
-    delete boundaryTests.artifactDir;
-    input.graph.concreteNodes = [
-      {
-        id: "boundary-tests-1",
-        logicalId: "boundary-tests",
-        artifactDir: path.join(input.run.artifactsDir, "boundary-tests-1")
-      },
-      {
-        id: "boundary-tests-0",
-        logicalId: "boundary-tests",
-        artifactDir: path.join(input.run.artifactsDir, "boundary-tests-0")
-      }
-    ];
+    input.graph.logicalNodes.push({
+      id: "dedupe-findings",
+      kind: "agentic",
+      dependsOn: ["boundary-tests"],
+      outputs: [],
+      artifactDir: path.join(input.run.artifactsDir, "dedupe-findings")
+    });
+    input.node.logicalId = "dedupe-findings";
+    input.node.concreteId = "dedupe-findings";
+    input.node.artifactDir = path.join(input.run.artifactsDir, "dedupe-findings");
+    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
+    input.prompt = "Authorities:\n{{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}";
+    input.graph.logicalNodes
+      .find((node) => node.id === "base-test-setup")!
+      .outputs!.push({
+        path: "transitive-findings.json",
+        contract: "ultrafuzz/findings@2",
+        primary: false,
+        description: "A transitive findings output included by contract-derived lifecycle intake."
+      });
+
+    const result = renderPrompt(input);
+
+    expectTaskLocalArtifactAuthority(result.renderedMarkdown, input);
+    expect(result.renderedMarkdown).toContain("entries whose `contract` is `ultrafuzz/findings@2`");
+    expect(result.renderedMarkdown).toContain("reject any absolute or escaping result");
+    expect(result.renderedMarkdown).not.toContain("base-test-setup");
+    expect(result.renderedMarkdown).not.toContain("boundary-tests");
+    expect(result.renderedMarkdown).not.toContain("transitive-findings.json");
+    expect(result.renderedMarkdown).not.toContain("artifacts/boundary-tests/findings.json");
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: ["base-test-setup", "boundary-tests"],
+      contract: "ultrafuzz/findings@2"
+    });
+
+    const directProducer = input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!;
+    directProducer.outputs = directProducer.outputs?.filter((output) => output.contract !== "ultrafuzz/findings@2");
+    const transitiveOnly = renderPrompt(input);
+    expect(transitiveOnly.renderedMarkdown).toBe(result.renderedMarkdown);
+    expect(transitiveOnly.artifactReferences).toContainEqual({
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: ["base-test-setup"],
+      contract: "ultrafuzz/findings@2"
+    });
+
+    const transitiveProducer = input.graph.logicalNodes.find((node) => node.id === "base-test-setup")!;
+    transitiveProducer.outputs = transitiveProducer.outputs?.filter(
+      (output) => output.contract !== "ultrafuzz/findings@2"
+    );
+    const emptyAncestorSet = renderPrompt(input);
+    expect(emptyAncestorSet.renderedMarkdown).toBe(result.renderedMarkdown);
+    expect(emptyAncestorSet.artifactReferences).toContainEqual({
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: [],
+      contract: "ultrafuzz/findings@2"
+    });
+  });
+
+  it("does not inline an unbounded ancestor path array into workflow prompts", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
     input.graph.logicalNodes.push(
       {
-        id: "findings-only",
+        id: "differential-oracle-planner",
+        kind: "agentic",
         dependsOn: ["boundary-tests"],
         outputs: [
           {
-            path: "findings.json",
-            contract: "ultrafuzz/findings@2",
+            path: "differential-plan.json",
+            contract: "ultrafuzz/differential-plan@1",
             primary: true,
-            description: "A findings-only ancestor."
+            description: "A differential plan."
           }
         ],
-        artifactDir: path.join(input.run.artifactsDir, "findings-only")
+        artifactDirs: [path.join(input.run.artifactsDir, "Planner-Z"), path.join(input.run.artifactsDir, "planner-a")]
       },
       {
-        id: "secondary-tests",
-        dependsOn: ["findings-only"],
-        outputs: [
-          {
-            path: "manifests/generated-tests.json",
-            contract: "ultrafuzz/generated-tests@3",
-            primary: true,
-            description: "A generated-test manifest at a nonstandard declared path."
-          }
-        ],
-        artifactDir: path.join(input.run.artifactsDir, "secondary-tests")
-      },
-      {
-        id: "unrelated-tests",
-        dependsOn: ["project-discovery"],
-        outputs: [
-          {
-            path: "generated-tests.json",
-            contract: "ultrafuzz/generated-tests@3",
-            primary: true,
-            description: "A matching output from a non-ancestor."
-          }
-        ],
-        artifactDir: path.join(input.run.artifactsDir, "unrelated-tests")
-      },
-      {
-        id: "aggregate-test-files",
-        dependsOn: ["secondary-tests"],
+        id: "reference-harness-author",
+        kind: "agentic",
+        dependsOn: ["differential-oracle-planner"],
         outputs: [],
-        artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
+        artifactDir: path.join(input.run.artifactsDir, "reference-harness-author")
       }
     );
-    input.node.logicalId = "aggregate-test-files";
-    input.node.concreteId = "aggregate-test-files";
-    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
+    input.node.logicalId = "reference-harness-author";
+    input.node.concreteId = "reference-harness-author";
+    input.node.artifactDir = path.join(input.run.artifactsDir, "reference-harness-author");
     input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
-    input.prompt = "Generated tests:\n{{ancestor_generated_test_manifests}}";
+    input.prompt = "Plans: {{ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1}}";
 
-    const result = renderPrompt(input);
-    const manifestPaths = [
-      path.join(input.run.artifactsDir, "boundary-tests-0", "generated-tests.json"),
-      path.join(input.run.artifactsDir, "boundary-tests-1", "generated-tests.json"),
-      path.join(input.run.artifactsDir, "secondary-tests", "manifests", "generated-tests.json")
-    ].sort();
+    const oneAncestor = renderPrompt(input);
+    input.graph.logicalNodes.find((node) => node.id === "differential-oracle-planner")!.artifactDirs = Array.from(
+      { length: 2_000 },
+      (_, index) => path.join(input.run.artifactsDir, `model-attempt-${String(index).padStart(4, "0")}`)
+    );
+    let dependency = "differential-oracle-planner";
+    for (let index = 0; index < 2_000; index += 1) {
+      const id = `ancestor-plan-${String(index).padStart(4, "0")}`;
+      input.graph.logicalNodes.push({
+        id,
+        kind: "agentic",
+        dependsOn: [dependency],
+        outputs: [
+          {
+            path: "differential-plan.json",
+            contract: "ultrafuzz/differential-plan@1",
+            primary: true,
+            description: "Another differential plan ancestor."
+          }
+        ],
+        artifactDir: path.join(input.run.artifactsDir, id)
+      });
+      dependency = id;
+    }
+    input.graph.logicalNodes.find((node) => node.id === "reference-harness-author")!.dependsOn = [dependency];
+    const manyAncestors = renderPrompt(input);
 
-    expect(result.renderedMarkdown).toBe(`Generated tests:\n${manifestPaths.map((entry) => `- ${entry}`).join("\n")}`);
-    expect(result.artifactReferences).toContainEqual({
-      kind: "ancestor_artifacts_by_contract",
-      logicalIds: ["boundary-tests", "secondary-tests"],
-      contract: "ultrafuzz/generated-tests@3"
+    expect(manyAncestors.renderedMarkdown).toBe(oneAncestor.renderedMarkdown);
+    expectTaskLocalArtifactAuthority(manyAncestors.renderedMarkdown, input);
+    expect(manyAncestors.renderedMarkdown).toContain("entries whose `contract` is `ultrafuzz/differential-plan@1`");
+    expect(manyAncestors.renderedMarkdown).not.toContain("differential-plan.json");
+    expect(manyAncestors.renderedMarkdown).not.toContain("ancestor-plan-");
+    expect(manyAncestors.renderedMarkdown).not.toContain("model-attempt-");
+    const authorityReference = manyAncestors.artifactReferences.find(
+      (reference) =>
+        reference.kind === "ancestor_contract_artifact_authority" &&
+        reference.contract === "ultrafuzz/differential-plan@1"
+    );
+    expect(authorityReference).toMatchObject({
+      kind: "ancestor_contract_artifact_authority",
+      contract: "ultrafuzz/differential-plan@1"
     });
+    expect(
+      authorityReference?.kind === "ancestor_contract_artifact_authority" && authorityReference.logicalIds
+    ).toHaveLength(2_001);
   });
 
-  it("renders one generated-test manifest as a plain path and a no-match sentinel for findings-only ancestors", () => {
+  it("does not inline model-fanout paths for compact exact-output-path authority", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    input.graph.logicalNodes.push({
-      id: "aggregate-test-files",
-      dependsOn: ["boundary-tests"],
-      outputs: [],
-      artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
+    input.prompt = "Setup: {{ancestor_artifact_path_authority:setup/base-test-setup.md}}";
+
+    const oneProducerAttempt = renderPrompt(input);
+    input.graph.logicalNodes.find((node) => node.id === "base-test-setup")!.artifactDirs = Array.from(
+      { length: 2_000 },
+      (_, index) => path.join(input.run.artifactsDir, `setup-model-attempt-${String(index).padStart(4, "0")}`)
+    );
+    let dependency = "base-test-setup";
+    for (let index = 0; index < 2_000; index += 1) {
+      const id = `setup-ancestor-${String(index).padStart(4, "0")}`;
+      input.graph.logicalNodes.push({
+        id,
+        kind: "agentic",
+        dependsOn: [dependency],
+        outputs: [
+          {
+            path: "setup/base-test-setup.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            primary: true,
+            description: "Another exact setup handoff."
+          }
+        ],
+        artifactDir: path.join(input.run.artifactsDir, id)
+      });
+      dependency = id;
+    }
+    input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!.dependsOn = [dependency];
+    const manyProducerAttempts = renderPrompt(input);
+
+    expect(manyProducerAttempts.renderedMarkdown).toBe(oneProducerAttempt.renderedMarkdown);
+    expectTaskLocalArtifactAuthority(manyProducerAttempts.renderedMarkdown, input);
+    expect(manyProducerAttempts.renderedMarkdown).toContain(
+      `entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["setup/base-test-setup.md"])}\``
+    );
+    expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup/base-test-setup.md");
+    expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup-model-attempt-");
+    expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup-ancestor-");
+    const authorityReference = manyProducerAttempts.artifactReferences.find(
+      (reference) =>
+        reference.kind === "ancestor_artifact_path_authority" &&
+        reference.relativePaths.includes("setup/base-test-setup.md")
+    );
+    expect(authorityReference).toMatchObject({
+      kind: "ancestor_artifact_path_authority",
+      selectorId: promptArtifactAuthorityPathSelectorId(["setup/base-test-setup.md"]),
+      relativePaths: ["setup/base-test-setup.md"]
     });
-    input.node.logicalId = "aggregate-test-files";
-    input.node.concreteId = "aggregate-test-files";
-    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
-    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
-    input.prompt = "Generated tests:\n{{ancestor_generated_test_manifests}}";
+    expect(
+      authorityReference?.kind === "ancestor_artifact_path_authority" && authorityReference.logicalIds
+    ).toHaveLength(2_001);
+  });
 
-    expect(renderPrompt(input).renderedMarkdown).toBe(
-      `Generated tests:\n${path.join(input.run.artifactsDir, "boundary-tests", "generated-tests.json")}`
+  it("keeps coverage-report authority constant across hundreds of producer attempts", () => {
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/invariant-only.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as TopologyDocument;
+    const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+    const root = path.join(os.tmpdir(), "ultrafuzz-coverage-authority-size");
+    const runArtifacts = path.join(root, "runs", "coverage-authority-size", "artifacts");
+    const logicalNodes: PromptRenderInput["graph"]["logicalNodes"] = topology.nodes.map((node) => ({
+      id: node.id,
+      kind: node.kind === "reference" ? "reference" : "agentic",
+      dependsOn: node.depends_on ?? [],
+      artifactDir: path.join(runArtifacts, node.id),
+      outputs: (node.outputs ?? []).map((output, index) => ({
+        path: output.path,
+        contract: output.contract,
+        primary: output.primary ?? index === 0,
+        description: `${output.contract} invariant output.`
+      }))
+    }));
+    const coverageProducer = logicalNodes.find((node) => node.id === "stateful-invariant-coverage")!;
+    const consumerPromptPaths = [
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ];
+
+    for (const promptPath of consumerPromptPaths) {
+      const consumer = topology.nodes.find((node) => node.prompt === promptPath)!;
+      const prompt = promptByPath.get(promptPath);
+      expect(prompt, promptPath).toBeDefined();
+      const artifactDir = path.join(runArtifacts, `${consumer.id}-attempt-0`);
+      const input: PromptRenderInput = {
+        prompt: prompt!,
+        graph: { logicalNodes },
+        node: {
+          logicalId: consumer.id,
+          concreteId: `${consumer.id}-attempt-0`,
+          artifactDir,
+          workspacePath: path.join(root, "workspaces", `${consumer.id}-attempt-0`),
+          repoPath: path.join(root, "repo"),
+          attemptIndex: 0,
+          loopIndex: 0,
+          loopCount: 1
+        },
+        run: {
+          id: "coverage-authority-size",
+          artifactsDir: runArtifacts,
+          metadataPath: path.join(root, "runs", "coverage-authority-size", "run.json")
+        },
+        outputs: { patchPath: path.join(artifactDir, "workspace.patch") }
+      };
+
+      coverageProducer.artifactDirs = undefined;
+      const oneAttempt = renderPrompt(input);
+      coverageProducer.artifactDirs = Array.from({ length: 400 }, (_, index) =>
+        path.join(runArtifacts, `synthetic-coverage-attempt-${String(index).padStart(3, "0")}`)
+      );
+      const hundredsOfAttempts = renderPrompt(input);
+
+      expect(hundredsOfAttempts.renderedMarkdown, promptPath).toBe(oneAttempt.renderedMarkdown);
+      expect(hundredsOfAttempts.renderedMarkdown.length, promptPath).toBe(oneAttempt.renderedMarkdown.length);
+      expectTaskLocalArtifactAuthority(hundredsOfAttempts.renderedMarkdown, input);
+      expect(hundredsOfAttempts.renderedMarkdown).toContain(
+        `path entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["coverage-report.md"])}\``
+      );
+      expect(hundredsOfAttempts.renderedMarkdown).not.toContain("synthetic-coverage-attempt-");
+    }
+  });
+
+  it("renders both compact selectors as task-local authority pointers", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = [
+      "{{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}",
+      "{{ancestor_artifact_path_authority:findings.json}}"
+    ].join("\n");
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+    const authorityPath = taskLocalArtifactAuthorityPath(input);
+
+    expectTaskLocalArtifactAuthority(rendered, input);
+    expect(occurrences(rendered, `ancestor artifact authority JSON at \`${authorityPath}\``)).toBe(2);
+    expect(occurrences(rendered, `Confirm its \`attempt_id\` is \`${input.node.concreteId}\``)).toBe(2);
+    expect(occurrences(rendered, "`artifact_path_base`")).toBe(2);
+    expect(rendered).toContain("entries whose `contract` is `ultrafuzz/findings@2`");
+    expect(rendered).toContain(
+      `path entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["findings.json"])}\``
+    );
+    expect(rendered).not.toContain("project-discovery");
+    expect(rendered).not.toContain("base-test-setup");
+  });
+
+  it("rejects compact authority selectors that match a reference ancestor", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    const reference = input.graph.logicalNodes.find((node) => node.id === "project-discovery")!;
+    reference.kind = "reference";
+
+    input.prompt = "{{ancestor_contract_artifact_authority:ultrafuzz/nonempty-markdown@1}}";
+    expect(() => renderPrompt(input)).toThrow(
+      /compact authority selector `ancestor_contract_artifact_authority:ultrafuzz\/nonempty-markdown@1` cannot select reference ancestor `project-discovery`; fixed reference consumers must use `artifact_path:project-discovery` or `artifact_handoff:project-discovery`/u
     );
 
-    const boundaryTests = input.graph.logicalNodes.find((node) => node.id === "boundary-tests")!;
-    boundaryTests.outputs = boundaryTests.outputs?.filter(
-      (output) => output.contract !== "ultrafuzz/generated-tests@3"
+    input.prompt = "{{ancestor_artifact_path_authority:setup/project-discovery.md}}";
+    expect(() => renderPrompt(input)).toThrow(
+      /compact authority selector `ancestor_artifact_path_authority:setup\/project-discovery\.md` cannot select reference ancestor `project-discovery`; fixed reference consumers must use `artifact_path:project-discovery` or `artifact_handoff:project-discovery`/u
     );
-    const sentinel = renderPrompt(input);
-    expect(sentinel.renderedMarkdown).toBe("Generated tests:\nNone declared by this topology.");
-    expect(sentinel.artifactReferences).toContainEqual({
-      kind: "ancestor_artifacts_by_contract",
+
+    input.prompt = "{{artifact_path:project-discovery}}\n{{artifact_handoff:project-discovery}}";
+    const fixedReference = renderPrompt(input).renderedMarkdown;
+    expect(fixedReference).toContain(path.join(input.run.artifactsDir, "project-discovery"));
+    expect(fixedReference).toContain(
+      path.join(input.run.artifactsDir, "project-discovery", "setup", "project-discovery.md")
+    );
+  });
+
+  it("keeps zero-match compact authority selectors valid", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = [
+      "{{ancestor_contract_artifact_authority:ultrafuzz/report@3}}",
+      "{{ancestor_artifact_path_authority:missing.json}}"
+    ].join("\n");
+
+    const result = renderPrompt(input);
+
+    expectTaskLocalArtifactAuthority(result.renderedMarkdown, input);
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_contract_artifact_authority",
       logicalIds: [],
-      contract: "ultrafuzz/generated-tests@3"
+      contract: "ultrafuzz/report@3"
     });
-
-    input.prompt = "Authorities:\n{{ancestor_generated_test_manifest_authorities}}";
-    expect(renderPrompt(input).renderedMarkdown).toBe("Authorities:\nNone declared by this topology.");
+    expect(result.artifactReferences).toContainEqual({
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: promptArtifactAuthorityPathSelectorId(["missing.json"]),
+      relativePaths: ["missing.json"]
+    });
   });
 
-  it("renders generated-test source authorities with exact logical id and relative/absolute manifest paths", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
-    tmpDirs.push(tmp);
-    const input = baseRenderInput(tmp);
-    input.graph.logicalNodes.push({
-      id: "aggregate-test-files",
-      dependsOn: ["boundary-tests"],
-      outputs: [],
-      artifactDir: path.join(input.run.artifactsDir, "aggregate-test-files")
-    });
-    input.node.logicalId = "aggregate-test-files";
-    input.node.concreteId = "aggregate-test-files";
-    input.node.artifactDir = path.join(input.run.artifactsDir, "aggregate-test-files");
-    input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
-    input.prompt = "Authorities:\n{{ancestor_generated_test_manifest_authorities}}";
-
-    const manifestPath = path.join(input.run.artifactsDir, "boundary-tests", "generated-tests.json");
-    const result = renderPrompt(input);
-
-    expect(result.renderedMarkdown).toBe(
-      `Authorities:\n- source node_id: \`boundary-tests\`; source_manifest_relative_path: ` +
-        `\`generated-tests.json\`; source_manifest_path: \`${manifestPath}\``
+  it("rejects unknown contracts in compact ancestor authority selectors", () => {
+    expect(() =>
+      validatePromptVariables("{{ancestor_contract_artifact_authority:ultrafuzz/not-a-registered-contract@1}}")
+    ).toThrow(/unknown ancestor artifact contract for sealed authority/u);
+    expect(() => validatePromptVariables("{{ancestor_contract_artifact_authority}}")).toThrow(
+      /requires an exact registered artifact contract/u
     );
-    expect(result.artifactReferences).toContainEqual({
-      kind: "ancestor_artifacts_by_contract",
-      logicalIds: ["boundary-tests"],
-      contract: "ultrafuzz/generated-tests@3"
-    });
   });
 
-  it("filters optional ancestor handoffs by exact declared output path", () => {
+  it("rejects missing or duplicate paths in compact ancestor path authority selectors", () => {
+    expect(() => validatePromptVariables("{{ancestor_artifact_path_authority}}")).toThrow(
+      /requires at least one exact declared output path/u
+    );
+    expect(() =>
+      validatePromptVariables("{{ancestor_artifact_path_authority:setup/base-test-setup.md,setup/base-test-setup.md}}")
+    ).toThrow(/duplicate ancestor_artifact_path_authority target/u);
+  });
+
+  it("keeps exact-path authority prose constant-size as the selected path group grows", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    input.prompt =
-      "Setup:\n{{ancestor_artifacts_by_path:setup/project-discovery.md,setup/base-test-setup.md,missing.json}}";
+    input.prompt = "Setup:\n{{ancestor_artifact_path_authority:reports/0000.json}}";
+    const onePath = renderPrompt(input);
+    const paths = Array.from({ length: 1_000 }, (_, index) => `reports/${String(index).padStart(4, "0")}.json`);
+    input.prompt = `Setup:\n{{ancestor_artifact_path_authority:${paths.join(",")}}}`;
+    const manyPaths = renderPrompt(input);
 
-    const result = renderPrompt(input);
-
-    expect(result.renderedMarkdown).toContain(path.join("project-discovery", "setup", "project-discovery.md"));
-    expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
-    expect(result.renderedMarkdown).not.toContain("references/expectations.json");
-    expect(result.renderedMarkdown).not.toContain("missing.json");
-    expect(result.artifactReferences).toContainEqual({
-      kind: "ancestor_artifacts_by_path",
-      logicalIds: ["base-test-setup", "project-discovery"],
-      relativePaths: ["setup/project-discovery.md", "setup/base-test-setup.md", "missing.json"]
+    expect(manyPaths.renderedMarkdown).toHaveLength(onePath.renderedMarkdown.length);
+    expectTaskLocalArtifactAuthority(manyPaths.renderedMarkdown, input);
+    expect(manyPaths.renderedMarkdown).not.toContain("reports/0000.json");
+    expect(manyPaths.artifactReferences).toContainEqual({
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: promptArtifactAuthorityPathSelectorId(paths),
+      relativePaths: paths
     });
-
-    input.prompt = "Optional:\n{{ancestor_artifacts_by_path:missing.json}}";
-    expect(renderPrompt(input).renderedMarkdown).toContain("None declared by this topology.");
   });
 
   it("does not ask agents to author runtime-owned workspace patch outputs", () => {
@@ -1092,6 +1384,7 @@ describe("prompt rendering", () => {
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes.push({
       id: "unrelated",
+      kind: "agentic",
       dependsOn: ["project-discovery"],
       outputs: [
         {

@@ -21,6 +21,7 @@ describe("audit profile catalog", () => {
     expect(Object.keys(catalog.profiles)).toEqual([
       "default",
       "exhaustive",
+      "full",
       "invariant-only",
       "low-cost",
       "smoke",
@@ -43,6 +44,9 @@ describe("audit profile catalog", () => {
       "id: stateful-invariant-campaign"
     );
     expect(packagedTopologyPath(auditProfile("default", catalog), catalog)).toBeUndefined();
+    const full = auditProfile("full", catalog);
+    expect(full.topologyPath).toBe("topologies/full.yml");
+    expect(fs.readFileSync(packagedTopologyPath(full, catalog)!, "utf8")).toContain("id: differential-oracle-planner");
     expect(auditProfile("exhaustive", catalog).settings.dynamic_strategies_enumerator).toBe("unlimited");
   });
 
@@ -156,7 +160,7 @@ profiles:
   });
 
   it("fails unknown names with the available profile vocabulary", () => {
-    expect(() => auditProfile("balanced")).toThrow(/available profiles: default, exhaustive, invariant-only/u);
+    expect(() => auditProfile("balanced")).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
   });
 
   it("ships every declared topology beside the built catalog", () => {

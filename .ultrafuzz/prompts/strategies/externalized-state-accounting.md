@@ -18,7 +18,15 @@ externalized-state accounting in systems whose economic ownership, solvency,
 share value, claim value, or withdrawal value depends on pending, durable, or
 externally represented state in addition to raw token or native balances.
 
+Investigate every distinct concrete, source-backed, reachable production bug
+within that scope. Begin with falsifiable hypotheses that name the accounting
+rule, reachable actor/state/action, and observable violation. A valid
+no-findings result is preferable to an unsupported claim when the hypotheses
+are refuted or remain unresolved.
+
 A property that holds is not a finding.
+You may use fuzzing when input discovery or sequence search helps with the proof.
+Test code is optional; adequate confirmation is mandatory.
 
 Read these handoff artifacts before investigating:
 
@@ -34,17 +42,21 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Use source analysis and concrete execution evidence to investigate each
-hypothesis. A compact Foundry test or proof of concept may support a candidate
-finding when useful, but test authoring is optional evidence rather than the
-objective.
+Use source analysis first. When runtime behavior is needed to confirm or refute
+a hypothesis, author only the minimal deterministic target-native test or proof
+of concept needed for that decision. Any executable evidence you author must
+compile and run successfully in the target's existing test stack before it can
+support a confirmed finding. Do not edit production contracts or repair
+unrelated tests to make optional evidence pass.
 
-If you author an optional PoC test, keep it under
+A source-complete static proof may confirm a finding only when it mechanically
+establishes the full reachable violation. Treat any claim that depends on
+runtime behavior but was not executed as unresolved, not as a finding.
+
+If runtime confirmation requires an optional PoC test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the
 `generated-tests/` directory under `{{artifact_dir}}`, and list that
-artifact-relative path in `{{artifact_dir}}/generated-tests.json`. When no
-optional PoC exists, write the empty bundle defined by the exact pinned
-generated-tests schema.
+artifact-relative path in `{{artifact_dir}}/generated-tests.json`.
 
 When gathering execution evidence, run one direct command at a time and let
 Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes,
@@ -166,7 +178,15 @@ actually authored. When no optional proof of concept exists, use the
 schema-defined empty/no-test representation. These relationships are contextual
 requirements beyond JSON Schema.
 
-Write only confirmed, structured findings to {{output_findings_path}} using the
-exact pinned `findings@2` schema in the central output contract. If no finding
-is confirmed, use only the empty form defined by the exact pinned schema in the
-central output contract.
+The primary result is `findings@2`. Always write confirmed, structured findings
+to {{output_findings_path}} using the exact pinned `findings@2` schema in the
+central output contract. If no finding is confirmed, write its exact
+schema-defined empty form; that is a valid no-findings result.
+
+Always write the `generated-tests@3` manifest to
+`{{artifact_dir}}/generated-tests.json` and the corresponding generated-test
+bundle. Populate it only with executable evidence this node authored, mirrored
+byte-for-byte beneath the `generated-tests` directory under `{{artifact_dir}}`.
+When no test or PoC was needed, select the exact pinned schema's empty bundle.
+Both the findings output and the empty-or-populated generated-test bundle are
+required on every outcome.

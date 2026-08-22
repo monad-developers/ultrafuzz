@@ -49,6 +49,20 @@ describe("validateTopology", () => {
     expect(validateTopology(topology).effectiveLoopCounts.strategy).toBe(1);
   });
 
+  it("normalizes the explicit group failure policy and rejects unknown policies", () => {
+    const topology = validTopology();
+    topology.groups = {
+      ...topology.groups,
+      strategies: { ...topology.groups?.strategies, defaults: { failure_policy: "continue" } }
+    };
+    expect(validateTopology(topology).topology.groups.strategies?.defaults?.failure_policy).toBe("continue");
+
+    topology.groups.strategies = {
+      defaults: { failure_policy: "ignore" as never }
+    };
+    expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+  });
+
   it("rejects duplicate IDs, unknown dependencies, duplicate dependencies, and cycles", () => {
     expect(() =>
       validateTopology(validTopology({ nodes: [...validTopology().nodes, validTopology().nodes[1]!] }))

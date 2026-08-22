@@ -179,7 +179,7 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
   }
   assertOnlyKeys(
     input,
-    ["loops", "timeout_seconds", "max_attempts", "model_profiles"],
+    ["loops", "timeout_seconds", "max_attempts", "model_profiles", "failure_policy"],
     `topology group \`${groupId}\` defaults`
   );
   return {
@@ -190,8 +190,22 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
     ...(input.max_attempts === undefined
       ? {}
       : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", groupId) }),
-    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", groupId, false)
+    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", groupId, false),
+    ...(input.failure_policy === undefined
+      ? {}
+      : { failure_policy: normalizeFailurePolicy(input.failure_policy, groupId) })
   };
+}
+
+function normalizeFailurePolicy(input: unknown, groupId: string): "halt" | "continue" {
+  if (input !== "halt" && input !== "continue") {
+    throw topologyError(
+      "INVALID_TOPOLOGY_SHAPE",
+      `Topology group \`${groupId}\` failure_policy must be halt or continue`,
+      { group: groupId }
+    );
+  }
+  return input;
 }
 
 function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {

@@ -23,6 +23,27 @@ Base Foundry setup:
 Property catalog:
 {{artifact_path:property-specification-fanin}}/properties.md
 
+Investigate every distinct concrete, source-backed, reachable production bug
+within the assigned round-trip partition. Begin with falsifiable hypotheses
+that name the expected invariant, the reachable triggering state and action,
+and the observable violation. A valid no-findings result is preferable to an
+unsupported claim when every hypothesis is refuted or remains unresolved.
+
+A property that holds is not a finding.
+You may use fuzzing when input discovery or sequence search helps with the proof.
+Test code is optional; adequate confirmation is mandatory.
+
+Use source analysis first. When runtime behavior is needed to confirm or refute
+a hypothesis, author only the minimal deterministic target-native test or proof
+of concept needed for that decision. Any executable evidence you author must
+compile and run successfully in the target's existing test stack before it can
+support a confirmed finding. Do not edit production contracts or repair
+unrelated tests to make optional evidence pass.
+
+A source-complete static proof may confirm a finding only when it mechanically
+establishes the full reachable violation. Treat any claim that depends on
+runtime behavior but was not executed as unresolved, not as a finding.
+
 For a round trip whose public economic policy promises conservation, a user
 must not be able to extract value by repeating the paired operations. Apply
 that oracle only after accounting for every source-backed transfer and value
@@ -61,24 +82,15 @@ runtime Strategy loop count is 1, cover every candidate in the stable list.
 Investigate each assigned workflow across its distinct scenarios, functions,
 and logic splits.
 
-A property that holds is not a finding.
 Successful round-trip checks, target coverage summaries, and no-defect
 observations are context, not findings; do not include them in the findings
 output. Report only a concrete, reproducible target defect that contradicts the
 source-backed economic policy and demonstrates a safety impact.
 
-Use source analysis and concrete execution evidence to investigate each
-hypothesis. A compact Foundry test or proof of concept may support a candidate
-finding when useful, but test authoring is optional evidence rather than the
-objective. Do not edit production contracts or repair unrelated tests to make
-an optional proof of concept pass.
-
-If you author an optional PoC test, keep it under
+If runtime confirmation requires an optional PoC test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath the
 `generated-tests/` directory under `{{artifact_dir}}`, and list that
-artifact-relative path in `{{artifact_dir}}/generated-tests.json`. When no
-optional PoC exists, write the empty bundle defined by the exact pinned
-generated-tests schema.
+artifact-relative path in `{{artifact_dir}}/generated-tests.json`.
 
 When gathering execution evidence, run one direct command at a time and let
 Ultrafuzz capture stdout and stderr. Do not use shell redirection, pipes,
@@ -90,10 +102,18 @@ generated-tests bundle and for writing or refreshing
 `{{output_findings_path}}`. Do not start a command that cannot finish within
 the configured reserve.
 
-Write only confirmed, structured findings to {{output_findings_path}} using the
-exact pinned `findings@2` schema in the central output contract. If no finding
-is confirmed, use only the empty form defined by the exact pinned schema in the
-central output contract.
+The primary result is `findings@2`. Always write confirmed, structured findings
+to {{output_findings_path}} using the exact pinned `findings@2` schema in the
+central output contract. If no finding is confirmed, write its exact
+schema-defined empty form; that is a valid no-findings result.
+
+Always write the `generated-tests@3` manifest to
+`{{artifact_dir}}/generated-tests.json` and the corresponding generated-test
+bundle. Populate it only with executable evidence this node authored, mirrored
+byte-for-byte beneath the `generated-tests` directory under `{{artifact_dir}}`.
+When no test or PoC was needed, select the exact pinned schema's empty bundle.
+Both the findings output and the empty-or-populated generated-test bundle are
+required on every outcome.
 
 Use only the authoritative report-bound note vocabulary:
 

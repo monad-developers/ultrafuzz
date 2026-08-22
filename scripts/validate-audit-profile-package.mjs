@@ -9,6 +9,7 @@ run("pnpm", ["--filter", "@ultrafuzz/prompts", "build"], root);
 
 const expectedConfigFiles = [
   "dist/audit-profiles.yml",
+  "dist/topologies/default.yml",
   "dist/topologies/full.yml",
   "dist/topologies/invariant-only.yml",
   "dist/topologies/smoke.yml"
@@ -28,10 +29,10 @@ for (const relativePath of expectedConfigFiles) {
   }
 }
 
-const canonicalFullTopology = path.join(root, ".ultrafuzz", "topology.yml");
-const packagedFullTopology = path.join(root, "packages", "config", "topologies", "full.yml");
-if (!fs.readFileSync(canonicalFullTopology).equals(fs.readFileSync(packagedFullTopology))) {
-  throw new Error("packages/config/topologies/full.yml must match .ultrafuzz/topology.yml");
+const canonicalDefaultTopology = path.join(root, ".ultrafuzz", "topology.yml");
+const packagedDefaultTopology = path.join(root, "packages", "config", "topologies", "default.yml");
+if (!fs.readFileSync(canonicalDefaultTopology).equals(fs.readFileSync(packagedDefaultTopology))) {
+  throw new Error("packages/config/topologies/default.yml must match .ultrafuzz/topology.yml");
 }
 
 function assertPackFiles(packageRoot, expected) {

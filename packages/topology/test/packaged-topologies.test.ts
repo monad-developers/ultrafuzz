@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,19 +14,47 @@ import { loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
-const ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES = [
-  "externalized-state-accounting",
-  "rounding-direction-audit",
-  "state-machine-boundaries",
-  "market-exhaustion-boundaries",
-  "lifecycle-view-boundaries",
+const PACKAGED_TOPOLOGY_IDS = ["default", "full", "smoke", "invariant-only"] as const;
+const DIRECT_BUG_FIRST_STRATEGIES = [
+  "boundary-tests",
+  "encode-decode",
+  "differential-library-tests",
   "round-trip",
-  "packed-action-parity"
-] as const;
-const ISSUE_5_REFINED_TEST_PRODUCERS = [
+  "workflow-property-based-tests",
+  "time-warp-sequences",
+  "expand-coverage",
   "admin-config-boundaries",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "amm-boundary-liquidity",
   "payable-fallback-accounting",
+  "packed-action-parity",
+  "batch-atomicity-unsupported-actions",
+  "router-exact-accounting",
+  "rounding-direction-audit",
+  "market-exhaustion-boundaries",
   "order-replacement-collateral",
+  "state-machine-boundaries",
+  "lifecycle-view-boundaries"
+] as const;
+const STATEFUL_SPECIALIST_STRATEGIES = [
+  "stateful-invariant-setup",
+  "stateful-invariant-handlers",
+  "stateful-invariant-coverage",
+  "stateful-invariant-implement-properties",
+  "stateful-invariant-campaign"
+] as const;
+const DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES = [
+  "differential-oracle-planner",
+  "reference-harness-author",
+  "reference-and-lane-auditor",
+  "differential-lane-author",
+  "differential-red-triage",
+  "differential-repair-and-report-review"
+] as const;
+const NONDEFAULT_SPECIALIST_STRATEGIES = [
+  ...STATEFUL_SPECIALIST_STRATEGIES,
+  ...DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES,
   "dynamic-strategy-generator"
 ] as const;
 
@@ -38,21 +66,35 @@ interface OutputRole {
 const FINDINGS_WITH_OPTIONAL_TESTS: OutputRole = { findings: 1, generatedTests: 1 };
 const FINDINGS_ONLY: OutputRole = { findings: 1, generatedTests: 0 };
 const NO_FINDINGS_NO_TESTS: OutputRole = { findings: 0, generatedTests: 0 };
+const NO_FINDINGS_WITH_GENERATED_TESTS: OutputRole = { findings: 0, generatedTests: 1 };
 
+const DEFAULT_PROFILE_ROLES: Record<string, OutputRole> = Object.fromEntries(
+  DIRECT_BUG_FIRST_STRATEGIES.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
+);
 const FULL_PROFILE_ROLES: Record<string, OutputRole> = {
-  ...Object.fromEntries(ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])),
-  ...Object.fromEntries(ISSUE_5_REFINED_TEST_PRODUCERS.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])),
-  "time-warp-sequences": FINDINGS_WITH_OPTIONAL_TESTS,
-  "boundary-tests": NO_FINDINGS_NO_TESTS,
-  "stateful-invariant-handlers": NO_FINDINGS_NO_TESTS
+  ...DEFAULT_PROFILE_ROLES,
+  "stateful-invariant-setup": FINDINGS_ONLY,
+  "stateful-invariant-handlers": FINDINGS_ONLY,
+  "stateful-invariant-coverage": FINDINGS_WITH_OPTIONAL_TESTS,
+  "stateful-invariant-implement-properties": FINDINGS_WITH_OPTIONAL_TESTS,
+  "stateful-invariant-campaign": FINDINGS_WITH_OPTIONAL_TESTS,
+  "differential-oracle-planner": NO_FINDINGS_NO_TESTS,
+  "reference-harness-author": NO_FINDINGS_WITH_GENERATED_TESTS,
+  "reference-and-lane-auditor": NO_FINDINGS_NO_TESTS,
+  "differential-lane-author": FINDINGS_WITH_OPTIONAL_TESTS,
+  "differential-red-triage": NO_FINDINGS_NO_TESTS,
+  "differential-repair-and-report-review": FINDINGS_WITH_OPTIONAL_TESTS,
+  "dynamic-strategy-generator": FINDINGS_WITH_OPTIONAL_TESTS
 };
 
 // Every shipped topology file must appear here with per-node output roles;
 // the role test fails when a topology file exists without a declaration.
 const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
+  "default.yml": DEFAULT_PROFILE_ROLES,
   "full.yml": FULL_PROFILE_ROLES,
   "invariant-only.yml": {
-    "stateful-invariant-handlers": NO_FINDINGS_NO_TESTS,
+    "stateful-invariant-setup": FINDINGS_ONLY,
+    "stateful-invariant-handlers": FINDINGS_ONLY,
     "stateful-invariant-coverage": FINDINGS_WITH_OPTIONAL_TESTS,
     "stateful-invariant-implement-properties": FINDINGS_WITH_OPTIONAL_TESTS,
     "stateful-invariant-campaign": FINDINGS_WITH_OPTIONAL_TESTS
@@ -68,7 +110,7 @@ const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
 
 describe("packaged topology collection", () => {
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
-    for (const name of ["full", "smoke", "invariant-only"]) {
+    for (const name of PACKAGED_TOPOLOGY_IDS) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -80,7 +122,7 @@ describe("packaged topology collection", () => {
   it("binds every packaged output to one current central contract and every JSON output to a registered schema", () => {
     const currentContracts = new Set<string>(ARTIFACT_CONTRACT_IDS);
     const nonJsonContracts = new Set<string>(NON_JSON_ARTIFACT_CONTRACT_IDS);
-    for (const name of ["full", "smoke", "invariant-only"]) {
+    for (const name of PACKAGED_TOPOLOGY_IDS) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -96,7 +138,10 @@ describe("packaged topology collection", () => {
     }
   });
 
-  it("keeps full and invariant profile handoffs aligned with the canonical producer shapes", () => {
+  it("keeps the packaged default byte-aligned and shared profile handoffs aligned with canonical producers", () => {
+    expect(readFileSync(path.join(TOPOLOGY_ROOT, "default.yml"))).toEqual(
+      readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"))
+    );
     const canonical = loadTopology(REPOSITORY_ROOT, {
       topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
       requirePromptFiles: true
@@ -134,7 +179,7 @@ describe("packaged topology collection", () => {
     );
 
     const targets: Array<readonly [string, string, Record<string, OutputRole>]> = [
-      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), FULL_PROFILE_ROLES],
+      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), DEFAULT_PROFILE_ROLES],
       ...packagedFiles.map((file) => [file, path.join(TOPOLOGY_ROOT, file), EXPECTED_ROLES_BY_TOPOLOGY[file]!] as const)
     ];
 
@@ -159,7 +204,7 @@ describe("packaged topology collection", () => {
         ).toHaveLength(role.generatedTests);
       }
 
-      if (expectedRoles === FULL_PROFILE_ROLES) {
+      if (expectedRoles === DEFAULT_PROFILE_ROLES || expectedRoles === FULL_PROFILE_ROLES) {
         expect(
           (nodeById.get("boundary-tests")?.outputs ?? []).map((output) => [
             output.path,
@@ -168,20 +213,74 @@ describe("packaged topology collection", () => {
           ]),
           `${name}:boundary-tests`
         ).toEqual([
-          ["boundary-recipes.md", "ultrafuzz/nonempty-markdown@1", true],
-          ["boundary-recipes.json", "ultrafuzz/boundary-recipes@1", false]
+          ["boundary-recipes.md", "ultrafuzz/nonempty-markdown@1", false],
+          ["boundary-recipes.json", "ultrafuzz/boundary-recipes@1", false],
+          ["findings.json", "ultrafuzz/findings@2", true],
+          ["generated-tests.json", "ultrafuzz/generated-tests@3", false]
         ]);
-        expect(contractsFor("time-warp-sequences"), `${name}:time-warp-sequences`).toEqual([
-          "ultrafuzz/findings@2",
-          "ultrafuzz/generated-tests@3"
-        ]);
-        for (const id of ISSUE_5_CONVERTED_BUG_SEARCH_STRATEGIES) {
-          expect(contractsFor(id), `${name}:${id} converted contracts`).toEqual(
-            expect.arrayContaining(["ultrafuzz/findings@2", "ultrafuzz/generated-tests@3"])
-          );
+        for (const id of DIRECT_BUG_FIRST_STRATEGIES) {
+          const outputs = nodeById.get(id)?.outputs ?? [];
+          expect(
+            outputs.filter((output) => output.contract === "ultrafuzz/findings@2"),
+            `${name}:${id} primary findings`
+          ).toEqual([
+            expect.objectContaining({ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true })
+          ]);
+          expect(
+            outputs.filter((output) => output.contract === "ultrafuzz/generated-tests@3"),
+            `${name}:${id} empty-capable generated-test transport`
+          ).toEqual([
+            expect.objectContaining({ path: "generated-tests.json", contract: "ultrafuzz/generated-tests@3" })
+          ]);
         }
       }
     }
+  });
+
+  it("keeps ordinary discovery direct-only while the full profile ships every specialist lane", () => {
+    const canonical = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
+      requirePromptFiles: true
+    });
+    const full = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: path.join(TOPOLOGY_ROOT, "full.yml"),
+      requirePromptFiles: true
+    });
+    const canonicalIds = new Set(canonical.nodes.map((node) => node.id));
+    const fullIds = new Set(full.nodes.map((node) => node.id));
+
+    expect(DIRECT_BUG_FIRST_STRATEGIES).toHaveLength(20);
+    for (const id of DIRECT_BUG_FIRST_STRATEGIES) {
+      expect(canonicalIds.has(id), `canonical:${id}`).toBe(true);
+      expect(fullIds.has(id), `full:${id}`).toBe(true);
+    }
+    expect(canonicalIds.has("differential-library-tests"), "the fast direct differential scout stays default").toBe(
+      true
+    );
+    expect(STATEFUL_SPECIALIST_STRATEGIES).toHaveLength(5);
+    expect(DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES).toHaveLength(6);
+    for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
+      expect(canonicalIds.has(id), `canonical excludes specialist ${id}`).toBe(false);
+      expect(fullIds.has(id), `full retains specialist ${id}`).toBe(true);
+    }
+
+    expect(canonical.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
+      ...DIRECT_BUG_FIRST_STRATEGIES
+    ]);
+    expect(full.groups.specialists?.defaults?.failure_policy).toBe("continue");
+    expect(full.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
+      ...DIRECT_BUG_FIRST_STRATEGIES,
+      "stateful-invariant-campaign",
+      "differential-repair-and-report-review",
+      "dynamic-strategy-generator"
+    ]);
+    for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
+      expect(full.nodes.find((node) => node.id === id)?.group, `full optional group:${id}`).toBe("specialists");
+    }
+    expect(full.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toEqual([
+      ...DIRECT_BUG_FIRST_STRATEGIES
+    ]);
+    expect(full.nodes.find((node) => node.id === "__finish__")?.depends_on).toEqual(["final-report"]);
   });
 
   it("keeps the invariant discovery and campaign chain while omitting unrelated strategies", () => {

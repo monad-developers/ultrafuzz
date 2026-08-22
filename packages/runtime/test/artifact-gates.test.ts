@@ -39,6 +39,7 @@ import {
   verifyRequiredArtifactsForAttempt as verifyRuntimeRequiredArtifactsForAttempt,
   type AuthenticatedArtifactGateSnapshots,
   type ArtifactGateAttemptAuthority,
+  type PlannedGraph,
   type PlannedGraphNode
 } from "../src/index.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
@@ -431,14 +432,18 @@ function writeMinimalPropertyFaninFixture(
   };
 }
 
-function writePlannedGraph(layout: ReturnType<typeof createRunLayout>, nodes: readonly PlannedGraphNode[]): void {
+function writePlannedGraph(
+  layout: ReturnType<typeof createRunLayout>,
+  nodes: readonly PlannedGraphNode[],
+  groups: Readonly<Record<string, unknown>> = {}
+): void {
   fs.writeFileSync(
     layout.graphPath,
     JSON.stringify({
       schema_version: "ultrafuzz.planned-graph.v4",
       graph_version: "4",
       topology_version: 2,
-      groups: {},
+      groups,
       nodes
     }),
     "utf8"
@@ -766,6 +771,7 @@ function smithersTaskForNode(input: {
         attemptId: input.attemptId,
         label: input.node.display_name,
         kind: "agentic",
+        ...(input.node.group === undefined ? {} : { group: input.node.group }),
         promptPath: input.node.prompt_path
       },
       dependencies: {
@@ -989,6 +995,7 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
 function currentNonProductionOutcome(id: string, sourceFindingId: string): Record<string, unknown> {
   return currentFinding(id, {
     title: "Non-production outcome",
+    dedupe_key: `dedupe-${id}`,
     triage_classification: "undetermined",
     recommended_next_action: "Review the campaign evidence.",
     lifecycle: {
@@ -1002,8 +1009,59 @@ function currentNonProductionOutcome(id: string, sourceFindingId: string): Recor
           relationship: "primary"
         }
       ],
-      strategy_hits: []
+      strategy_hits: [],
+      triage_classification: "undetermined",
+      triage_reason: "The campaign evidence does not establish a production vulnerability.",
+      demotion_reason: "The finding remains a non-production outcome.",
+      final_disposition: "non-production",
+      stages: [{ stage: "deduped", artifact_path: "deduped-findings.json", finding_id: id }]
     }
+  });
+}
+
+function writeBoundedReportDedupeAuthority(
+  layout: ReturnType<typeof createRunLayout>,
+  reportNode: PlannedGraphNode,
+  reportRows: readonly Record<string, unknown>[],
+  nodeId = "dedupe-findings"
+): void {
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: nodeId,
+    logical_id: nodeId,
+    artifact_dir: `artifacts/${nodeId}`,
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  if (!reportNode.depends_on.includes(nodeId)) reportNode.depends_on.push(nodeId);
+  const bindings = reportRows.map((row) => {
+    const lifecycle = row.lifecycle;
+    if (lifecycle === null || typeof lifecycle !== "object" || Array.isArray(lifecycle)) {
+      throw new Error("bounded report fixture row lacks a lifecycle record");
+    }
+    const dedupeKey = (lifecycle as Record<string, unknown>).dedupe_key;
+    return {
+      finding: {
+        schema_version: row.schema_version,
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        severity_guess: row.severity_guess,
+        confidence: row.confidence,
+        summary: row.summary,
+        dedupe_key: dedupeKey
+      },
+      lifecycle
+    };
+  });
+  writeDeclaredArtifactNode(layout, nodeId, dedupeNode.outputs, {
+    "deduped-findings.json": JSON.stringify(bindings.map((binding) => binding.finding)),
+    "finding-lifecycle-ledger.json": JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: bindings.map((binding) => binding.lifecycle)
+    })
   });
 }
 
@@ -2240,12 +2298,55 @@ test("triage gates preserve every deduped finding and upstream note", () => {
   );
 });
 
+test("dynamic strategy producers require exactly one complete six-contract output tuple", () => {
+  const tuple = [
+    boundOutput("dynamic/plan.json", "ultrafuzz/dynamic-strategy-plan@1", true),
+    boundOutput("dynamic/enumerators.json", "ultrafuzz/dynamic-enumerator-outputs@1"),
+    boundOutput("dynamic/selected.json", "ultrafuzz/selected-strategies@1"),
+    boundOutput("dynamic/generated-tests.json", "ultrafuzz/generated-tests@3"),
+    boundOutput("dynamic/findings.json", "ultrafuzz/findings@2"),
+    boundOutput("dynamic/provenance.json", "ultrafuzz/dynamic-strategy-provenance@1")
+  ];
+  for (const [label, outputs, expectedCount] of [
+    ["missing-selected", tuple.filter((output) => output.contract !== "ultrafuzz/selected-strategies@1"), 0],
+    [
+      "duplicate-selected",
+      [...tuple, boundOutput("dynamic/selected.duplicate.json", "ultrafuzz/selected-strategies@1")],
+      2
+    ]
+  ] as const) {
+    const layout = createRunLayout({ projectRoot: tempProject(), runId: `run-dynamic-tuple-${label}` });
+    const node: PlannedGraphNode = {
+      ...plannedNode([]),
+      id: `dynamic-tuple-${label}`,
+      logical_id: "dynamic-strategy-generator",
+      artifact_dir: `artifacts/dynamic-tuple-${label}`,
+      outputs: [...outputs]
+    };
+    const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(result.ok, false, label);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "DYNAMIC_STRATEGY_OUTPUT_TUPLE_INVALID" &&
+          new RegExp(`ultrafuzz/selected-strategies@1=${expectedCount}`, "u").test(diagnostic.message)
+      ),
+      `${label}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
 test("dynamic strategy sibling artifacts reconcile only through exact declared outputs", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-dynamic-strategy-reconciliation" });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-dynamic-strategy-reconciliation",
+    resolvedConfigToml: "dynamic_strategies_enumerator = 1\n"
+  });
   const artifactPaths = {
     plan: "dynamic/strategy-plan.current.json",
     enumerators: "dynamic/enumerator-outputs.current.json",
     selected: "dynamic/selected-strategies.current.json",
+    generatedTests: "dynamic/generated-tests.current.json",
     findings: "dynamic/findings.current.json",
     provenance: "dynamic/provenance.current.json"
   } as const;
@@ -2274,7 +2375,16 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
     selected_strategy_count: 1,
     selected_strategies: ["strategy-a"],
     rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }],
-    current_run_artifacts_considered: [],
+    current_run_artifacts_considered: [
+      {
+        path: "artifacts/boundary-attempt/declared/recipes.current.json",
+        relevance: "Mandatory boundary-recipe intake."
+      },
+      {
+        path: "artifacts/boundary-attempt/declared/findings.current.json",
+        relevance: "Existing boundary coverage."
+      }
+    ],
     excluded_context: excludedContext,
     timeout_seconds: null,
     finalization_reserve_seconds: null
@@ -2301,6 +2411,21 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
       }
     ]
   };
+  const generatedTestBytes = Buffer.from("contract StrategyATest {}\n", "utf8");
+  const generatedTests = {
+    schema_version: "ultrafuzz.generated-tests.v3",
+    run_id: layout.runId,
+    node_id: "dynamic-strategy-attempt",
+    framework: "foundry",
+    generated_tests: [
+      {
+        path: recommendationA.proposed_test_path,
+        size_bytes: generatedTestBytes.byteLength,
+        sha256: createHash("sha256").update(generatedTestBytes).digest("hex")
+      }
+    ],
+    support_files: []
+  };
   const findings = [
     currentFinding("dynamic-finding", {
       strategy: "dynamic-strategy-generator",
@@ -2311,7 +2436,10 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
   ];
   const provenance = {
     schema_version: "ultrafuzz.dynamic-strategy-provenance.v1",
-    current_run_artifacts: [],
+    current_run_artifacts: [
+      "artifacts/boundary-attempt/declared/recipes.current.json",
+      "artifacts/boundary-attempt/declared/findings.current.json"
+    ],
     agents: [{ agent_id: "enumerator-a", label: "Enumerator A", role: "strategy-enumerator" }],
     models: [],
     commands: [],
@@ -2329,31 +2457,82 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
     [artifactPaths.plan]: strategyPlan,
     [artifactPaths.enumerators]: enumeratorOutputs,
     [artifactPaths.selected]: selectedStrategies,
+    [artifactPaths.generatedTests]: generatedTests,
     [artifactPaths.findings]: findings,
     [artifactPaths.provenance]: provenance
+  };
+  const boundaryNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "boundary-attempt",
+    logical_id: "boundary-attempt",
+    artifact_dir: "artifacts/boundary-attempt",
+    outputs: [
+      boundOutput("declared/recipes.current.json", "ultrafuzz/boundary-recipes@1", true),
+      boundOutput("declared/findings.current.json", "ultrafuzz/findings@2")
+    ]
   };
   const node: PlannedGraphNode = {
     ...plannedNode([]),
     id: "dynamic-strategy-attempt",
     logical_id: "dynamic-strategy-attempt",
+    depends_on: [boundaryNode.id],
     artifact_dir: "artifacts/dynamic-strategy-attempt",
     outputs: [
       boundOutput(artifactPaths.plan, "ultrafuzz/dynamic-strategy-plan@1", true),
       boundOutput(artifactPaths.enumerators, "ultrafuzz/dynamic-enumerator-outputs@1"),
       boundOutput(artifactPaths.selected, "ultrafuzz/selected-strategies@1"),
+      boundOutput(artifactPaths.generatedTests, "ultrafuzz/generated-tests@3"),
       boundOutput(artifactPaths.findings, "ultrafuzz/findings@2"),
       boundOutput(artifactPaths.provenance, "ultrafuzz/dynamic-strategy-provenance@1")
     ]
   };
-  writePlannedGraph(layout, [node]);
-  const task = sealedTaskForNode(layout, node);
-  const tasks = [task];
+  writePlannedGraph(layout, [boundaryNode, node]);
+  const boundaryTask = sealedTaskForNode(layout, boundaryNode);
+  const task = sealedTaskForNode(layout, node, [boundaryTask]);
+  const tasks = [boundaryTask, task];
+  writeDeclaredArtifactNode(layout, boundaryTask.attemptId, boundaryNode.outputs, {
+    "declared/recipes.current.json": JSON.stringify({
+      schema_version: "ultrafuzz.boundary-recipes.v1",
+      recipes: [
+        {
+          id: "already-covered",
+          title: "Already covered boundary",
+          path: "src/Target.sol",
+          workflow: "target transition",
+          public_support: ["README.md"],
+          setup: [],
+          action_sequence: ["Call the target transition."],
+          oracle: "The documented transition is preserved.",
+          boundary_values: ["0"],
+          expected_classification_if_red: "production-bug",
+          preferred_downstream_lane: "dynamic-strategy",
+          finding_ids: ["boundary-covered"]
+        }
+      ],
+      deferred_or_spec_gated: [],
+      coverage_priorities: []
+    }),
+    "declared/findings.current.json": JSON.stringify([currentFinding("boundary-covered")])
+  });
   const artifactDir = task.artifactDir;
   const writeBaseline = (): void => {
     for (const [fileName, value] of Object.entries(baseline)) {
       fs.mkdirSync(path.dirname(path.join(artifactDir, fileName)), { recursive: true });
       fs.writeFileSync(path.join(artifactDir, fileName), JSON.stringify(value), "utf8");
     }
+    const generatedTestPath = path.join(artifactDir, recommendationA.proposed_test_path);
+    fs.mkdirSync(path.dirname(generatedTestPath), { recursive: true });
+    fs.writeFileSync(generatedTestPath, generatedTestBytes);
+  };
+  const authenticatedDynamicSnapshots = (): AuthenticatedArtifactGateSnapshots => {
+    const authenticated = authenticatedSnapshotsForNode(layout, node, task.attemptId);
+    return {
+      ...authenticated,
+      publications: new Map([
+        ...authenticated.publications,
+        [recommendationA.proposed_test_path, Buffer.from(generatedTestBytes)] as const
+      ])
+    };
   };
   const assertReconciliationFailure = (fileName: keyof typeof baseline, value: unknown, expected: RegExp): void => {
     writeBaseline();
@@ -2363,7 +2542,7 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
       node,
       task.attemptId,
       { task, tasks },
-      authenticatedSnapshotsForNode(layout, node, task.attemptId)
+      authenticatedDynamicSnapshots()
     );
     assert.equal(result.ok, false, fileName);
     assert.ok(
@@ -2383,19 +2562,114 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
     node.outputs,
     Object.fromEntries(Object.entries(baseline).map(([fileName, value]) => [fileName, JSON.stringify(value)]))
   );
+  writeBaseline();
   const valid = verifyRequiredArtifactsForAttempt(
     layout,
     node,
     task.attemptId,
     { task, tasks },
-    authenticatedSnapshotsForNode(layout, node, task.attemptId)
+    authenticatedDynamicSnapshots()
   );
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  writeBaseline();
+  fs.writeFileSync(
+    path.join(artifactDir, artifactPaths.provenance),
+    JSON.stringify({
+      ...provenance,
+      models: [{ agent_id: "enumerator-a", model: task.modelName!, backend: task.agentRef }]
+    }),
+    "utf8"
+  );
+  const currentModelAuthority = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedDynamicSnapshots()
+  );
+  assert.equal(currentModelAuthority.ok, true, JSON.stringify(currentModelAuthority.diagnostics));
+
+  writeBaseline();
+  const foreignAttemptPath = "artifacts/dynamic__model_9__attempt_9/provenance.json";
+  fs.writeFileSync(
+    path.join(artifactDir, artifactPaths.plan),
+    JSON.stringify({
+      ...strategyPlan,
+      current_run_artifacts_considered: [
+        { path: foreignAttemptPath, relevance: "Forged sibling-attempt substitution." },
+        strategyPlan.current_run_artifacts_considered[1]
+      ]
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(artifactDir, artifactPaths.provenance),
+    JSON.stringify({
+      ...provenance,
+      current_run_artifacts: [foreignAttemptPath, provenance.current_run_artifacts[1]]
+    }),
+    "utf8"
+  );
+  const foreignAttempt = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedDynamicSnapshots()
+  );
+  assert.equal(foreignAttempt.ok, false);
+  assert.ok(
+    foreignAttempt.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "dynamic-strategy-artifact-reconciliation" &&
+        /outside the authenticated ancestor publication authority/u.test(diagnostic.message)
+    ),
+    JSON.stringify(foreignAttempt.diagnostics)
+  );
+
+  assertReconciliationFailure(
+    artifactPaths.provenance,
+    {
+      ...provenance,
+      models: [{ agent_id: "enumerator-a", model: "model-from-sibling-attempt", backend: "foreign-backend" }]
+    },
+    /does not match authenticated current producer (?:model|agent)/u
+  );
+
+  fs.writeFileSync(layout.resolvedConfigPath, "dynamic_strategies_enumerator = 0\n", "utf8");
+  const policyDrift = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedDynamicSnapshots()
+  );
+  assert.equal(policyDrift.ok, false);
+  assert.ok(
+    policyDrift.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "dynamic-strategy-artifact-reconciliation" &&
+        /authenticated resolved policy|policy 0 forbids independent enumerator records/u.test(diagnostic.message)
+    ),
+    JSON.stringify(policyDrift.diagnostics)
+  );
+  fs.writeFileSync(layout.resolvedConfigPath, "dynamic_strategies_enumerator = 1\n", "utf8");
 
   assertReconciliationFailure(
     artifactPaths.plan,
     { ...strategyPlan, rejected_strategies: [] },
     /neither selected nor explicitly rejected/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.provenance,
+    { ...provenance, current_run_artifacts: provenance.current_run_artifacts.slice(0, 1) },
+    /ordered strategy-plan current_run_artifacts_considered path projection/u
+  );
+  assertReconciliationFailure(
+    artifactPaths.provenance,
+    { ...provenance, current_run_artifacts: [...provenance.current_run_artifacts].reverse() },
+    /ordered strategy-plan current_run_artifacts_considered path projection/u
   );
   assertReconciliationFailure(
     artifactPaths.selected,
@@ -2428,6 +2702,41 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
     { ...provenance, generated_files: [{ ...provenance.generated_files[0]!, strategy_id: "strategy-b" }] },
     /generated file.*unselected strategy/u
   );
+  assertReconciliationFailure(
+    artifactPaths.provenance,
+    {
+      ...provenance,
+      generated_files: [
+        { ...provenance.generated_files[0]!, source_path: "generated-tests/UnmanifestedStrategyA.t.sol" }
+      ]
+    },
+    /current-attempt generated-test manifest/u
+  );
+
+  writeBaseline();
+  fs.rmSync(path.join(artifactDir, artifactPaths.generatedTests));
+  fs.writeFileSync(path.join(artifactDir, "generated-tests.json"), JSON.stringify(generatedTests), "utf8");
+  const undeclaredGeneratedTestLookalike = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks },
+    authenticatedDynamicSnapshots()
+  );
+  assert.equal(undeclaredGeneratedTestLookalike.ok, false);
+  assert.ok(
+    undeclaredGeneratedTestLookalike.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_MISSING" &&
+        diagnostic.path === runArtifactPath(task.attemptId, artifactPaths.generatedTests)
+    ) &&
+      undeclaredGeneratedTestLookalike.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+          diagnostic.message.includes("dynamic generated-test manifest semantic context is unavailable")
+      ),
+    JSON.stringify(undeclaredGeneratedTestLookalike.diagnostics)
+  );
 
   writeBaseline();
   fs.rmSync(path.join(artifactDir, artifactPaths.provenance));
@@ -2437,7 +2746,7 @@ test("dynamic strategy sibling artifacts reconcile only through exact declared o
     node,
     task.attemptId,
     { task, tasks },
-    authenticatedSnapshotsForNode(layout, node, task.attemptId)
+    authenticatedDynamicSnapshots()
   );
   assert.equal(undeclaredLookalike.ok, false);
   assert.ok(
@@ -2574,6 +2883,465 @@ test("final report gates preserve severity records and ledger dispositions under
   );
 });
 
+test("bounded final report gates require one row for each direct authenticated dedupe finding", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-bounded-report-closure" });
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "bounded-dedupe-attempt",
+    logical_id: "bounded-dedupe-attempt",
+    artifact_dir: "artifacts/bounded-dedupe-attempt",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const reportNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "bounded-report-attempt",
+    logical_id: "bounded-report-attempt",
+    depends_on: [dedupeNode.id],
+    artifact_dir: "artifacts/bounded-report-attempt",
+    outputs: [
+      boundOutput("report.json", "ultrafuzz/report@3", true),
+      boundOutput("report.md", "ultrafuzz/nonempty-markdown@1")
+    ]
+  };
+  writePlannedGraph(layout, [dedupeNode, reportNode]);
+  const dedupeTask = sealedTaskForNode(layout, dedupeNode);
+  const reportTask = sealedTaskForNode(layout, reportNode, [dedupeTask]);
+  const tasks = [dedupeTask, reportTask];
+  const finding = currentFinding("bounded-finding", { dedupe_key: "bounded-root" });
+  const lifecycle = {
+    dedupe_key: "bounded-root",
+    source_artifacts: [
+      {
+        path: "findings.json",
+        node_id: "boundary-tests",
+        finding_id: "bounded-finding",
+        title: "Property failure",
+        relationship: "primary"
+      }
+    ],
+    strategy_hits: [],
+    stages: [
+      {
+        stage: "deduped",
+        artifact_path: "deduped-findings.json",
+        finding_id: "bounded-finding"
+      }
+    ]
+  };
+  writeDeclaredArtifactNode(layout, dedupeTask.attemptId, dedupeNode.outputs, {
+    "deduped-findings.json": JSON.stringify([finding]),
+    "finding-lifecycle-ledger.json": JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [lifecycle]
+    })
+  });
+  const writeReport = (nonProductionOutcomes: unknown[]) =>
+    writeDeclaredArtifactNode(layout, reportTask.attemptId, reportNode.outputs, {
+      "report.json": JSON.stringify(currentReport(layout.runId, { non_production_outcomes: nonProductionOutcomes })),
+      "report.md": "# Bounded final report\n"
+    });
+
+  writeReport([]);
+  const omitted = verifyRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks, admittedDependencyAttemptIds: [dedupeTask.attemptId] },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
+  assert.equal(omitted.ok, false);
+  assert.ok(
+    omitted.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "report-severity-classification-preservation" &&
+        /omits authenticated deduped finding/u.test(diagnostic.message)
+    ),
+    JSON.stringify(omitted.diagnostics)
+  );
+
+  const boundedOutcome = {
+    ...finding,
+    triage_classification: "false-positive",
+    recommended_next_action: "No production remediation is required.",
+    lifecycle: {
+      ...lifecycle,
+      triage_classification: "false-positive",
+      triage_reason: "The reported state is unreachable through the public path.",
+      demotion_reason: "The candidate is a false positive.",
+      final_disposition: "dropped"
+    }
+  };
+  writeReport([boundedOutcome]);
+  const preserved = verifyRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+});
+
+test("bounded final reports ignore unpaired direct findings and fail closed for malformed paired lifecycle authority", () => {
+  const unpairedLayout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-bounded-report-unpaired-findings"
+  });
+  const unpairedNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "direct-campaign-findings",
+    logical_id: "direct-campaign-findings",
+    artifact_dir: "artifacts/direct-campaign-findings",
+    outputs: [boundOutput("findings.json", "ultrafuzz/findings@2", true)]
+  };
+  const unpairedReportNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "bounded-report",
+    logical_id: "bounded-report",
+    depends_on: [unpairedNode.id],
+    artifact_dir: "artifacts/bounded-report",
+    outputs: [
+      boundOutput("report.json", "ultrafuzz/report@3", true),
+      boundOutput("report.md", "ultrafuzz/nonempty-markdown@1")
+    ]
+  };
+  writePlannedGraph(unpairedLayout, [unpairedNode, unpairedReportNode]);
+  const unpairedTask = sealedTaskForNode(unpairedLayout, unpairedNode);
+  const unpairedReportTask = sealedTaskForNode(unpairedLayout, unpairedReportNode, [unpairedTask]);
+  const unpairedTasks = [unpairedTask, unpairedReportTask];
+  writeDeclaredArtifactNode(unpairedLayout, unpairedTask.attemptId, unpairedNode.outputs, {
+    "findings.json": JSON.stringify([currentFinding("campaign-finding")])
+  });
+  writeDeclaredArtifactNode(unpairedLayout, unpairedReportTask.attemptId, unpairedReportNode.outputs, {
+    "report.json": JSON.stringify(currentReport(unpairedLayout.runId)),
+    "report.md": "# Bounded report\n"
+  });
+
+  const unpaired = verifyRequiredArtifactsForAttempt(
+    unpairedLayout,
+    unpairedReportNode,
+    unpairedReportTask.attemptId,
+    { task: unpairedReportTask, tasks: unpairedTasks },
+    authenticatedSnapshotsForNode(unpairedLayout, unpairedReportNode, unpairedReportTask.attemptId)
+  );
+  assert.equal(unpaired.ok, true, JSON.stringify(unpaired.diagnostics));
+
+  const malformedLayout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-bounded-report-malformed-paired-lifecycle"
+  });
+  const pairedNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "direct-dedupe-findings",
+    logical_id: "direct-dedupe-findings",
+    artifact_dir: "artifacts/direct-dedupe-findings",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  const pairedReportNode: PlannedGraphNode = {
+    ...unpairedReportNode,
+    depends_on: [pairedNode.id]
+  };
+  writePlannedGraph(malformedLayout, [pairedNode, pairedReportNode]);
+  const pairedTask = sealedTaskForNode(malformedLayout, pairedNode);
+  const pairedReportTask = sealedTaskForNode(malformedLayout, pairedReportNode, [pairedTask]);
+  const pairedTasks = [pairedTask, pairedReportTask];
+  writeDeclaredArtifactNode(malformedLayout, pairedTask.attemptId, pairedNode.outputs, {
+    "deduped-findings.json": "[]",
+    "finding-lifecycle-ledger.json": "{}"
+  });
+  writeDeclaredArtifactNode(malformedLayout, pairedReportTask.attemptId, pairedReportNode.outputs, {
+    "report.json": JSON.stringify(currentReport(malformedLayout.runId)),
+    "report.md": "# Bounded report\n"
+  });
+
+  const malformed = verifyRequiredArtifactsForAttempt(
+    malformedLayout,
+    pairedReportNode,
+    pairedReportTask.attemptId,
+    { task: pairedReportTask, tasks: pairedTasks },
+    authenticatedSnapshotsForNode(malformedLayout, pairedReportNode, pairedReportTask.attemptId)
+  );
+  assert.equal(malformed.ok, false);
+  assert.ok(
+    malformed.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+        /finding-lifecycle-ledger@1 validation/u.test(diagnostic.message)
+    ),
+    JSON.stringify(malformed.diagnostics)
+  );
+});
+
+test("dedupe lifecycle accepts an authenticated empty direct findings producer set", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-empty-dedupe-intake" });
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "dedupe-findings",
+    logical_id: "dedupe-findings",
+    artifact_dir: "artifacts/dedupe-findings",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  writePlannedGraph(layout, [node]);
+  const task = sealedTaskForNode(layout, node);
+  writeDeclaredArtifactNode(layout, task.attemptId, node.outputs, {
+    "deduped-findings.json": "[]",
+    "finding-lifecycle-ledger.json": JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: []
+    })
+  });
+
+  const result = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    task.attemptId,
+    { task, tasks: [task] },
+    authenticatedSnapshotsForNode(layout, node, task.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+function optionalFindingsDedupeFixture(
+  runId: string,
+  options: { optional: boolean; verified: boolean }
+): {
+  layout: ReturnType<typeof createRunLayout>;
+  rawNode: PlannedGraphNode;
+  rawTask: SmithersTaskManifestTask;
+  dedupeTask: SmithersTaskManifestTask;
+  dedupeNode: PlannedGraphNode;
+  tasks: SmithersTaskManifestTask[];
+} {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId });
+  const rawNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "optional-findings",
+    logical_id: "optional-findings",
+    ...(options.optional ? { group: "specialists" } : {}),
+    artifact_dir: "artifacts/optional-findings",
+    outputs: [boundOutput("findings.json", "ultrafuzz/findings@2", true)]
+  };
+  const dedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "dedupe-findings",
+    logical_id: "dedupe-findings",
+    depends_on: [rawNode.id],
+    artifact_dir: "artifacts/dedupe-findings",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  writePlannedGraph(
+    layout,
+    [rawNode, dedupeNode],
+    options.optional ? { specialists: { defaults: { failure_policy: "continue" } } } : {}
+  );
+  const rawTask = sealedTaskForNode(layout, rawNode);
+  const dedupeBase = sealedTaskForNode(layout, dedupeNode, [rawTask]);
+  const dedupeTask: SmithersTaskManifestTask = {
+    ...dedupeBase,
+    optionalDependencyArtifactDirs: options.optional ? [rawTask.artifactDir] : []
+  };
+  const tasks = [rawTask, dedupeTask];
+
+  if (options.verified) {
+    writeDeclaredArtifactNode(layout, rawTask.attemptId, rawNode.outputs, {
+      "findings.json": JSON.stringify([currentFinding("optional-finding", { strategy: "optional-findings" })])
+    });
+    writeDeclaredArtifactNode(layout, dedupeTask.attemptId, dedupeNode.outputs, {
+      "deduped-findings.json": JSON.stringify([
+        currentFinding("optional-finding", {
+          strategy: "optional-findings",
+          dedupe_key: "optional-finding-root"
+        })
+      ]),
+      "finding-lifecycle-ledger.json": JSON.stringify({
+        schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+        records: [
+          {
+            dedupe_key: "optional-finding-root",
+            source_artifacts: [
+              {
+                path: "artifacts/optional-findings/findings.json",
+                node_id: "optional-findings",
+                finding_id: "optional-finding",
+                title: "Property failure",
+                relationship: "primary"
+              }
+            ],
+            strategy_hits: [{ strategy: "optional-findings", attempt_index: 0 }],
+            stages: [
+              {
+                stage: "raw",
+                artifact_path: "artifacts/optional-findings/findings.json",
+                finding_id: "optional-finding"
+              },
+              {
+                stage: "deduped",
+                artifact_path: "deduped-findings.json",
+                finding_id: "optional-finding"
+              }
+            ]
+          }
+        ]
+      })
+    });
+  } else {
+    // Preserve otherwise complete failed-attempt leftovers so the consumer
+    // fixture can seal its own causal manifest. Marker absence, rather than a
+    // coincidentally missing producer manifest, is the authority distinction
+    // under test.
+    writeDeclaredArtifactNode(layout, rawTask.attemptId, rawNode.outputs, {
+      "findings.json": "[]"
+    });
+    fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${rawTask.attemptId}.json`));
+    updateNodeState(layout, rawTask.attemptId, { status: "failed" });
+    writeDeclaredArtifactNode(layout, dedupeTask.attemptId, dedupeNode.outputs, {
+      "deduped-findings.json": "[]",
+      "finding-lifecycle-ledger.json": JSON.stringify({
+        schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+        records: []
+      })
+    });
+  }
+  writeSealedFixtureTaskAuthority(layout, [rawNode, dedupeNode], tasks);
+  return { layout, rawNode, rawTask, dedupeTask, dedupeNode, tasks };
+}
+
+test("host semantic intake excludes markerless optional findings and includes verified optional findings", () => {
+  for (const verified of [false, true]) {
+    const fixture = optionalFindingsDedupeFixture(`run-optional-findings-${verified ? "verified" : "markerless"}`, {
+      optional: true,
+      verified
+    });
+    const result = verifyRuntimeRequiredArtifactsForAttempt(
+      fixture.layout,
+      fixture.dedupeNode,
+      fixture.dedupeTask.attemptId,
+      {
+        task: fixture.dedupeTask,
+        tasks: fixture.tasks,
+        admittedDependencyAttemptIds: verified ? [fixture.rawTask.attemptId] : []
+      },
+      authenticatedSnapshotsForNode(fixture.layout, fixture.dedupeNode, fixture.dedupeTask.attemptId)
+    );
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  }
+});
+
+test("host semantic intake keeps an omitted optional producer excluded after its retry succeeds", () => {
+  const fixture = optionalFindingsDedupeFixture("run-optional-findings-late-success", {
+    optional: true,
+    verified: false
+  });
+  writeDeclaredArtifactNode(fixture.layout, fixture.rawTask.attemptId, fixture.rawNode.outputs, {
+    "findings.json": JSON.stringify([currentFinding("late-optional-finding", { strategy: "optional-findings" })])
+  });
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    fixture.layout,
+    fixture.dedupeNode,
+    fixture.dedupeTask.attemptId,
+    { task: fixture.dedupeTask, tasks: fixture.tasks, admittedDependencyAttemptIds: [] },
+    authenticatedSnapshotsForNode(fixture.layout, fixture.dedupeNode, fixture.dedupeTask.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("host semantic intake fails closed for required markerless and present malformed optional findings", () => {
+  const required = optionalFindingsDedupeFixture("run-required-markerless-findings", {
+    optional: false,
+    verified: false
+  });
+  const requiredResult = verifyRuntimeRequiredArtifactsForAttempt(
+    required.layout,
+    required.dedupeNode,
+    required.dedupeTask.attemptId,
+    { task: required.dedupeTask, tasks: required.tasks },
+    authenticatedSnapshotsForNode(required.layout, required.dedupeNode, required.dedupeTask.attemptId)
+  );
+  assert.equal(requiredResult.ok, false);
+  assert.ok(
+    requiredResult.diagnostics.some((diagnostic) => /finalized .* authority is invalid/iu.test(diagnostic.message)),
+    JSON.stringify(requiredResult.diagnostics)
+  );
+
+  const malformed = optionalFindingsDedupeFixture("run-optional-malformed-marker-findings", {
+    optional: true,
+    verified: false
+  });
+  writeJsonDurable(
+    path.join(malformed.layout.root, ".ultrafuzz-verification", `${malformed.rawTask.attemptId}.json`),
+    {}
+  );
+  const malformedResult = verifyRuntimeRequiredArtifactsForAttempt(
+    malformed.layout,
+    malformed.dedupeNode,
+    malformed.dedupeTask.attemptId,
+    {
+      task: malformed.dedupeTask,
+      tasks: malformed.tasks,
+      admittedDependencyAttemptIds: [malformed.rawTask.attemptId]
+    },
+    authenticatedSnapshotsForNode(malformed.layout, malformed.dedupeNode, malformed.dedupeTask.attemptId)
+  );
+  assert.equal(malformedResult.ok, false);
+  assert.ok(
+    malformedResult.diagnostics.some((diagnostic) => /finalized .* authority is invalid/iu.test(diagnostic.message)),
+    JSON.stringify(malformedResult.diagnostics)
+  );
+});
+
+for (const markerAuthority of ["dangling leaf", "symlinked root"] as const) {
+  test(`host semantic intake fails closed for optional findings behind a ${markerAuthority}`, () => {
+    const fixture = optionalFindingsDedupeFixture(`run-optional-${markerAuthority.replaceAll(" ", "-")}-findings`, {
+      optional: true,
+      verified: false
+    });
+    const markerRoot = path.join(fixture.layout.root, ".ultrafuzz-verification");
+    const producerMarker = path.join(markerRoot, `${fixture.rawTask.attemptId}.json`);
+    if (markerAuthority === "dangling leaf") {
+      fs.symlinkSync("missing-optional-marker.json", producerMarker);
+    } else {
+      const realMarkerRoot = path.join(fixture.layout.root, "verification-authority-real");
+      fs.renameSync(markerRoot, realMarkerRoot);
+      fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+    }
+
+    const result = verifyRuntimeRequiredArtifactsForAttempt(
+      fixture.layout,
+      fixture.dedupeNode,
+      fixture.dedupeTask.attemptId,
+      {
+        task: fixture.dedupeTask,
+        tasks: fixture.tasks,
+        admittedDependencyAttemptIds: [fixture.rawTask.attemptId]
+      },
+      authenticatedSnapshotsForNode(fixture.layout, fixture.dedupeNode, fixture.dedupeTask.attemptId)
+    );
+
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some((diagnostic) =>
+        /finalized .* authority is invalid|verification marker root is unsafe/iu.test(diagnostic.message)
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+  });
+}
+
 test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });
   const artifactPaths = {
@@ -2586,10 +3354,18 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
     severityStrategies: "review-three/strategies.json",
     severityLifecycle: "review-three/lifecycle.json"
   } as const;
+  const rawNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "boundary-tests",
+    logical_id: "boundary-tests",
+    artifact_dir: "artifacts/boundary-tests",
+    outputs: [boundOutput("findings.json", "ultrafuzz/findings@2", true)]
+  };
   const dedupeNode: PlannedGraphNode = {
     ...plannedNode([]),
     id: "review-stage-one-attempt",
     logical_id: "review-stage-one-attempt",
+    depends_on: [rawNode.id],
     artifact_dir: "artifacts/review-stage-one-attempt",
     outputs: [
       boundOutput(artifactPaths.dedupedFindings, "ultrafuzz/findings@2", true),
@@ -2620,11 +3396,15 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
       boundOutput(artifactPaths.severityLifecycle, "ultrafuzz/finding-lifecycle-ledger@1")
     ]
   };
-  writePlannedGraph(layout, [dedupeNode, triageNode, severityNode]);
-  const dedupeTask = sealedTaskForNode(layout, dedupeNode);
+  writePlannedGraph(layout, [rawNode, dedupeNode, triageNode, severityNode]);
+  const rawTask = sealedTaskForNode(layout, rawNode);
+  const dedupeTask = sealedTaskForNode(layout, dedupeNode, [rawTask]);
   const triageTask = sealedTaskForNode(layout, triageNode, [dedupeTask]);
   const severityTask = sealedTaskForNode(layout, severityNode, [triageTask]);
-  const tasks = [dedupeTask, triageTask, severityTask];
+  const tasks = [rawTask, dedupeTask, triageTask, severityTask];
+  writeDeclaredArtifactNode(layout, rawTask.attemptId, rawNode.outputs, {
+    "findings.json": JSON.stringify([currentFinding("finding-lifecycle", { strategy: "boundary-tests" })])
+  });
   const dedupedFinding = currentFinding("finding-lifecycle", {
     dedupe_key: "root-lifecycle",
     strategy: "boundary-tests"
@@ -2641,7 +3421,7 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
   const sourceArtifact = {
     path: "artifacts/boundary-tests/findings.json",
     node_id: "boundary-tests",
-    finding_id: "raw-finding",
+    finding_id: "finding-lifecycle",
     title: "Property failure",
     relationship: "primary"
   };
@@ -2670,6 +3450,71 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
     authenticatedSnapshotsForNode(layout, dedupeNode, dedupeTask.attemptId)
   );
   assert.equal(validDedupe.ok, true, JSON.stringify(validDedupe.diagnostics));
+
+  const dedupeLedgerPath = path.join(dedupeTask.artifactDir, artifactPaths.dedupeLifecycle);
+  const assertRawClosureFailure = (record: typeof dedupeRecord, message: RegExp): void => {
+    fs.writeFileSync(
+      dedupeLedgerPath,
+      JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [record] })
+    );
+    const result = verifyRequiredArtifactsForAttempt(
+      layout,
+      dedupeNode,
+      dedupeTask.attemptId,
+      { task: dedupeTask, tasks },
+      authenticatedSnapshotsForNode(layout, dedupeNode, dedupeTask.attemptId)
+    );
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.details?.gate === "finding-lifecycle-review-stage-reconciliation" &&
+          message.test(diagnostic.message)
+      ),
+      JSON.stringify(result.diagnostics)
+    );
+  };
+  assertRawClosureFailure(
+    {
+      ...dedupeRecord,
+      source_artifacts: [],
+      stages: [{ stage: "deduped", artifact_path: dedupedPath, finding_id: "finding-lifecycle" }]
+    },
+    /must appear exactly once; found 0/u
+  );
+  assertRawClosureFailure(
+    {
+      ...dedupeRecord,
+      source_artifacts: [sourceArtifact, sourceArtifact],
+      stages: [
+        { stage: "raw", artifact_path: sourceArtifact.path, finding_id: sourceArtifact.finding_id },
+        { stage: "raw", artifact_path: sourceArtifact.path, finding_id: sourceArtifact.finding_id },
+        { stage: "deduped", artifact_path: dedupedPath, finding_id: "finding-lifecycle" }
+      ]
+    },
+    /must appear exactly once; found 2/u
+  );
+  const lookalikeSource = {
+    ...sourceArtifact,
+    node_id: "boundary-tests-lookalike",
+    path: "artifacts/boundary-tests-lookalike/findings.json"
+  };
+  assertRawClosureFailure(
+    {
+      ...dedupeRecord,
+      source_artifacts: [sourceArtifact, lookalikeSource],
+      stages: [
+        { stage: "raw", artifact_path: sourceArtifact.path, finding_id: sourceArtifact.finding_id },
+        { stage: "raw", artifact_path: lookalikeSource.path, finding_id: lookalikeSource.finding_id },
+        { stage: "deduped", artifact_path: dedupedPath, finding_id: "finding-lifecycle" }
+      ]
+    },
+    /unknown raw finding identity/u
+  );
+  fs.writeFileSync(
+    dedupeLedgerPath,
+    JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [dedupeRecord] })
+  );
 
   const triagedFinding = {
     ...dedupedFinding,
@@ -5435,6 +6280,15 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
   writePlannedGraph(layout, [referenceNode, discoveryNode, lensNode, currentNode, unrelatedNode]);
 
   const referenceArtifactDir = getNodeArtifactDir(layout, referenceNode.id, { create: true });
+  const referenceManifestBytes = fs.readFileSync(path.join(referenceArtifactDir, "artifact-manifest.json"));
+  const referenceArtifactManifestAuthorities = [
+    {
+      attemptId: referenceNode.id,
+      artifactDir: referenceArtifactDir,
+      sizeBytes: referenceManifestBytes.byteLength,
+      sha256: createHash("sha256").update(referenceManifestBytes).digest("hex")
+    }
+  ];
   const discoveryTaskWithReferenceVerifier = smithersTaskForNode({
     layout,
     node: discoveryNode,
@@ -5444,6 +6298,7 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
   });
   const discoveryTask: SmithersTaskManifestTask = {
     ...discoveryTaskWithReferenceVerifier,
+    referenceArtifactManifestAuthorities,
     dependencySmithersNodeIds: [],
     metadata: {
       ...discoveryTaskWithReferenceVerifier.metadata,
@@ -5453,27 +6308,31 @@ test("property fan-in authenticates every sealed model-fanout lens attempt indep
       }
     }
   };
-  const lensTasks = lensAttempts.map((attemptId, modelIndex) =>
-    smithersTaskForNode({
+  const lensTasks = lensAttempts.map((attemptId, modelIndex) => ({
+    ...smithersTaskForNode({
       layout,
       node: lensNode,
       attemptId,
       dependencies: [discoveryNode.id],
       dependencyArtifactDirs: [referenceArtifactDir, discoveryTask.artifactDir],
       modelIndex
-    })
-  );
-  const currentTask = smithersTaskForNode({
-    layout,
-    node: currentNode,
-    attemptId: currentNode.id,
-    dependencies: lensAttempts,
-    dependencyArtifactDirs: [
-      referenceArtifactDir,
-      discoveryTask.artifactDir,
-      ...lensTasks.map((task) => task.artifactDir)
-    ]
-  });
+    }),
+    referenceArtifactManifestAuthorities
+  }));
+  const currentTask = {
+    ...smithersTaskForNode({
+      layout,
+      node: currentNode,
+      attemptId: currentNode.id,
+      dependencies: lensAttempts,
+      dependencyArtifactDirs: [
+        referenceArtifactDir,
+        discoveryTask.artifactDir,
+        ...lensTasks.map((task) => task.artifactDir)
+      ]
+    }),
+    referenceArtifactManifestAuthorities
+  };
   const unrelatedTask = smithersTaskForNode({
     layout,
     node: unrelatedNode,
@@ -7628,6 +8487,56 @@ test("producer-free final reports require the exact not-planned implementation c
   );
 });
 
+test("final reports treat markerless optional implementation, campaign, and coverage producers as absent", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-markerless-optional-report-tracks" });
+  const optionalNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "optional-invariant-track",
+    logical_id: "optional-invariant-track",
+    group: "specialists",
+    artifact_dir: "artifacts/optional-invariant-track",
+    outputs: [
+      boundOutput("implemented-properties.json", "ultrafuzz/implemented-properties@3", true),
+      boundOutput("campaign-summary.json", "ultrafuzz/campaign-summary@2"),
+      boundOutput("coverage-evidence.json", "ultrafuzz/coverage-evidence@1")
+    ]
+  };
+  const reportNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "final-report",
+    logical_id: "final-report",
+    depends_on: [optionalNode.id],
+    artifact_dir: "artifacts/final-report",
+    outputs: [
+      boundOutput("report.md", "ultrafuzz/nonempty-markdown@1", true),
+      boundOutput("report.json", "ultrafuzz/report@3")
+    ]
+  };
+  writePlannedGraph(layout, [optionalNode, reportNode], {
+    specialists: { defaults: { failure_policy: "continue" } }
+  });
+  const optionalTask = sealedTaskForNode(layout, optionalNode);
+  const reportBase = sealedTaskForNode(layout, reportNode, [optionalTask]);
+  const reportTask: SmithersTaskManifestTask = {
+    ...reportBase,
+    optionalDependencyArtifactDirs: [optionalTask.artifactDir]
+  };
+  const tasks = [optionalTask, reportTask];
+  writeArtifactFile(layout, reportTask.attemptId, "report.md", "# Ultrafuzz report\n");
+  writeArtifactFile(layout, reportTask.attemptId, "report.json", JSON.stringify(currentReport(layout.runId)));
+  writeSealedFixtureTaskAuthority(layout, [optionalNode, reportNode], tasks);
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks, admittedDependencyAttemptIds: [] },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("final report gate joins the default recon-only campaign backend", () => {
   const layout = createRunLayout({
     projectRoot: tempProject(),
@@ -7706,6 +8615,9 @@ test("final report gate joins the default recon-only campaign backend", () => {
       })
     )
   );
+  writeBoundedReportDedupeAuthority(layout, node, [
+    currentNonProductionOutcome("finding-property", "finding-property")
+  ]);
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
@@ -7732,6 +8644,7 @@ test("final report gate joins the default recon-only campaign backend", () => {
     });
 
   writeArtifact(layout, node.id, "report.json", JSON.stringify(renamedReport()));
+  writeBoundedReportDedupeAuthority(layout, node, [currentNonProductionOutcome("NP-01", "finding-property")]);
   const missingSourceId = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(missingSourceId.ok, false, JSON.stringify(missingSourceId.diagnostics));
   assert.ok(
@@ -7800,6 +8713,9 @@ test("final report gate joins the default recon-only campaign backend", () => {
       })
     )
   );
+  writeBoundedReportDedupeAuthority(layout, node, [
+    currentNonProductionOutcome("finding-property", "finding-property")
+  ]);
   const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(mismatch.ok, false);
   assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
@@ -7892,6 +8808,7 @@ test("final report gate rejects backend provenance borrowed from an unrelated ca
     );
 
   writeArtifact(layout, node.id, "report.json", report(["recon"]));
+  writeBoundedReportDedupeAuthority(layout, node, [currentNonProductionOutcome("failure-1", "failure-1")]);
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
   // A backend recorded for another canonical finding cannot be borrowed merely
@@ -8085,6 +9002,9 @@ test("final report gate rejects legacy report shapes without rewriting them and 
       })
     )
   );
+  writeBoundedReportDedupeAuthority(currentLayout, node, [
+    currentNonProductionOutcome("finding-property", "finding-property")
+  ]);
   const completeJoin = verifyRequiredArtifactsForAttempt(currentLayout, node, node.id);
   assert.equal(completeJoin.ok, true, JSON.stringify(completeJoin.diagnostics));
 
@@ -8347,6 +9267,48 @@ test("dependency gates reject reused descendants after an ancestor manifest chan
     reason_code: "CAUSAL_MANIFEST_MISMATCH",
     reason: "node consumer cannot reuse descendants after a prerequisite manifest changed",
     blocked_by: ["reused"]
+  });
+});
+
+test("dependency gates settle optional specialist failures without suppressing strict direct failures", () => {
+  const direct = { ...plannedNode(["result.md"]), id: "direct", group: "strategies", depends_on: [] };
+  const specialist = { ...plannedNode(["result.md"]), id: "specialist", group: "specialists", depends_on: [] };
+  const consumer = {
+    ...plannedNode(["result.md"]),
+    id: "consumer",
+    group: "review",
+    depends_on: [direct.id, specialist.id]
+  };
+  const graph = {
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
+    topology_version: 2,
+    groups: {
+      strategies: {},
+      specialists: { defaults: { failure_policy: "continue" as const } },
+      review: {}
+    },
+    nodes: [direct, specialist, consumer]
+  } satisfies PlannedGraph;
+  const state = createInitialRunState({
+    runId: "optional-specialist-dependency",
+    graphFingerprint: "graph",
+    configFingerprint: "c".repeat(64),
+    nodes: [
+      { id: direct.id, status: "succeeded" },
+      { id: specialist.id, status: "failed" },
+      { id: consumer.id, status: "pending" }
+    ]
+  });
+
+  assert.deepEqual(dependencyGateForNode(consumer, state, undefined, graph), { ok: true });
+
+  state.nodes[direct.id]!.status = "failed";
+  assert.deepEqual(dependencyGateForNode(consumer, state, undefined, graph), {
+    ok: false,
+    reason_code: "DEPENDENCY_NOT_SATISFIED",
+    reason: "node consumer cannot run until dependencies succeed or are compatibly reused",
+    blocked_by: [direct.id]
   });
 });
 
@@ -13155,6 +14117,18 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   );
 
   writeArtifact(layout, reportNode.id, "report.md", scopedMarkdown);
+  const coverageProseLifecycle = {
+    dedupe_key: "root-coverage-prose",
+    source_artifacts: [],
+    strategy_hits: [{ strategy: "stateful-invariant-coverage", attempt_index: 0 }],
+    stages: [
+      {
+        stage: "deduped",
+        artifact_path: "deduped-findings.json",
+        finding_id: "finding-coverage-prose"
+      }
+    ]
+  };
   const coverageProseIssue = {
     ...currentFinding("M-01", {
       title: "[M-01] - Property failure",
@@ -13178,22 +14152,33 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
       detection_rates: [{ strategy: "stateful-invariant-coverage", detections: 1, configured_loops: 1 }]
     },
     lifecycle: {
-      dedupe_key: "root-coverage-prose",
-      source_artifacts: [],
-      strategy_hits: [{ strategy: "stateful-invariant-coverage", attempt_index: 0 }],
+      ...coverageProseLifecycle,
       triage_classification: "true-positive",
       triage_reason: "public path is reachable",
       canonical_severity: "Medium",
-      final_disposition: "promoted",
-      stages: [
-        {
-          stage: "severity-classified",
-          artifact_path: "severity-classified-findings.json",
-          finding_id: "finding-coverage-prose"
-        }
-      ]
+      final_disposition: "promoted"
     }
   };
+  const coverageDedupeNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "coverage-report-dedupe",
+    logical_id: "coverage-report-dedupe",
+    artifact_dir: "artifacts/coverage-report-dedupe",
+    outputs: [
+      boundOutput("deduped-findings.json", "ultrafuzz/findings@2", true),
+      boundOutput("finding-lifecycle-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1")
+    ]
+  };
+  writeDeclaredArtifactNode(layout, coverageDedupeNode.id, coverageDedupeNode.outputs, {
+    "deduped-findings.json": JSON.stringify([
+      currentFinding("finding-coverage-prose", { dedupe_key: "root-coverage-prose" })
+    ]),
+    "finding-lifecycle-ledger.json": JSON.stringify({
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: [coverageProseLifecycle]
+    })
+  });
+  reportNode.depends_on.push(coverageDedupeNode.id);
   writeArtifact(
     layout,
     reportNode.id,

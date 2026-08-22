@@ -9,7 +9,7 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
-import type { PlannedGraph } from "./types.js";
+import type { PlannedGraph, PlannedGraphNode } from "./types.js";
 
 export interface WorkflowControlTask {
   attemptId: string;
@@ -119,7 +119,11 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
 
     const graphNode = graphById.get(concreteNodeId);
     const dependencies = graphNode?.depends_on ?? [];
-    if (dependencies.some((dependency) => !dependencySatisfied(state.nodes[dependency]))) {
+    if (
+      dependencies.some(
+        (dependency) => !dependencySatisfied(state.nodes[dependency], graphById.get(dependency), input.graph.groups)
+      )
+    ) {
       provisional.set(nodeId, waitState("dependency", "dependency-complete"));
       continue;
     }
@@ -266,8 +270,18 @@ function isDispatchableControlNode(
   return materializedTaskIds.length === 0 || materializedTaskIds.includes(nodeId) || nodeId !== concreteNodeId;
 }
 
-function dependencySatisfied(node: NodeState | undefined): boolean {
-  return node !== undefined && ["succeeded", "reused-from-prior-run"].includes(node.status);
+function dependencySatisfied(
+  node: NodeState | undefined,
+  planned: PlannedGraphNode | undefined,
+  groups: PlannedGraph["groups"]
+): boolean {
+  if (node === undefined) return false;
+  if (["succeeded", "reused-from-prior-run"].includes(node.status)) return true;
+  return (
+    planned?.group !== undefined &&
+    groups[planned.group]?.defaults?.failure_policy === "continue" &&
+    ["failed", "timed-out", "canceled", "invalidated", "skipped"].includes(node.status)
+  );
 }
 
 function clearWait(node: NodeState): void {

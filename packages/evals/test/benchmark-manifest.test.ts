@@ -28,8 +28,14 @@ import {
   validateEvalJsonSchema
 } from "../src/eval-schema-registry.js";
 import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
-import { benchmarkModelProfileOverrides, benchmarkTopologyTransform } from "../src/runner.js";
+import {
+  assertPackagedBenchmarkPrelaunchPolicy,
+  benchmarkModelProfileOverrides,
+  benchmarkTopologyTransform,
+  runtimeRowLauncher
+} from "../src/runner.js";
 import { evalSuiteInputDocument } from "../src/suite.js";
+import { testRow } from "./helpers.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json");
@@ -421,12 +427,87 @@ describe("public benchmark manifests", () => {
     for (const variant of suite.variants) {
       expect(variant.workflow_input).toMatchObject({
         excluded_strategy_families: [],
-        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+        benchmark_execution: {
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
       });
     }
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toEqual({
       topologyTransform: { strategyLoops: 1, excludedNodeIds: [] }
     });
+    expect(
+      benchmarkModelProfileOverrides(
+        { workflow_input: suite.variants[0]?.workflow_input },
+        suite.model_profiles[suite.run.runner_model_profile]
+      )
+    ).toEqual({
+      runtimeOverrides: {
+        auditProfile: "full",
+        forbidModelFallback: true
+      }
+    });
+  });
+
+  it("attests the effective full topology and rejects overrides before launch", async () => {
+    const cohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
+    const variant = suite.variants[0]!;
+    const runnerProfile = suite.model_profiles[variant.runner_model_profile!];
+    const runtimeOverrides = benchmarkModelProfileOverrides(
+      { workflow_input: variant.workflow_input },
+      runnerProfile
+    ).runtimeOverrides;
+    const project = mkdtempSync(path.join(tmpdir(), "ultrafuzz-full-policy-"));
+    const row = testRow(suite, {
+      target: { ...suite.targets[0]!, path: project, ground_truth_path: path.join(project, "ground-truth.yml") },
+      variant: { ...variant },
+      workflow_input: variant.workflow_input,
+      runner_model_profile: variant.runner_model_profile!
+    });
+
+    await expect(
+      assertPackagedBenchmarkPrelaunchPolicy({ row, projectRoot: project, runtimeOverrides, env: {} })
+    ).resolves.toBeUndefined();
+
+    const variantOverrideRow = {
+      ...row,
+      variant: {
+        ...row.variant,
+        topology: "packages/config/topologies/default.yml",
+        topology_path: path.join(REPOSITORY_ROOT, "packages/config/topologies/default.yml")
+      }
+    };
+    await expect(
+      runtimeRowLauncher({ row: variantOverrideRow, runId: "variant-override", suite, env: {} })
+    ).rejects.toMatchObject({ code: "EVAL_BENCHMARK_EXECUTION_INVALID" });
+
+    fs.mkdirSync(path.join(project, ".ultrafuzz"), { recursive: true });
+    fs.copyFileSync(
+      path.join(REPOSITORY_ROOT, "packages/config/topologies/default.yml"),
+      path.join(project, ".ultrafuzz/topology.yml")
+    );
+    fs.writeFileSync(
+      path.join(project, "ultrafuzz.toml"),
+      'schema_version = "ultrafuzz.config.v2"\naudit_profile = "default"\ntopology_path = ".ultrafuzz/topology.yml"\n',
+      "utf8"
+    );
+    await expect(runtimeRowLauncher({ row, runId: "target-config-override", suite, env: {} })).rejects.toMatchObject({
+      code: "EVAL_BENCHMARK_EXECUTION_INVALID",
+      message: expect.stringContaining("effective audit profile, catalog digest, and topology digest")
+    });
+    fs.copyFileSync(
+      path.join(REPOSITORY_ROOT, "packages/config/topologies/full.yml"),
+      path.join(project, ".ultrafuzz/topology.yml")
+    );
+    await expect(
+      runtimeRowLauncher({ row, runId: "byte-identical-target-config-override", suite, env: {} })
+    ).rejects.toMatchObject({
+      code: "EVAL_BENCHMARK_EXECUTION_INVALID",
+      message: expect.stringContaining("originate from the current packaged policy")
+    });
+    expect(fs.existsSync(path.join(project, ".ultrafuzz/runs"))).toBe(false);
   });
 
   it("derives exact topology exclusions from the canonical lane flags", () => {

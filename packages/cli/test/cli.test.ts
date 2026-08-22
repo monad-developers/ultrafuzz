@@ -749,7 +749,65 @@ test("report render gives producers the exact canonical Markdown without host re
   assert.deepEqual(fs.readFileSync(markdownPath), before);
 });
 
-function sealVerifiedFinalReport(runRoot: string): void {
+const CANONICAL_DEDUPE_KEY = "dedupe-M-01";
+
+/** The exact lifecycle record the bounded dedupe producer publishes for the canonical finding. */
+function canonicalLifecycleRecord(): Record<string, unknown> {
+  return {
+    dedupe_key: CANONICAL_DEDUPE_KEY,
+    source_artifacts: [],
+    strategy_hits: [],
+    stages: [{ stage: "deduped", artifact_path: "findings.json", finding_id: "M-01" }],
+    triage_classification: "true-positive",
+    triage_reason: "The source-backed transition reproduces on the current revision.",
+    canonical_severity: "Medium",
+    final_disposition: "promoted"
+  };
+}
+
+/** The deduped finding the report row must preserve field for field. */
+function canonicalDedupedFinding(): Record<string, unknown> {
+  const { lifecycle: _lifecycle, ...finding } = currentReportIssue();
+  return { ...finding, dedupe_key: CANONICAL_DEDUPE_KEY, triage_classification: "true-positive" };
+}
+
+/** The promoted report row authorized by the canonical deduped finding and its lifecycle record. */
+function canonicalPromotedIssue(): Record<string, unknown> {
+  return { ...canonicalDedupedFinding(), lifecycle: canonicalLifecycleRecord() };
+}
+
+/**
+ * Seal the bounded dedupe authority the final report is required to preserve,
+ * then seal the report itself. A report row is only authorized when a finalized
+ * direct `findings@2` producer and its paired lifecycle ledger publish it, so
+ * report fixtures must seal both producers even when the bundle is empty.
+ */
+function sealVerifiedFinalReport(
+  runRoot: string,
+  dedupedFindings: Record<string, unknown>[] = [],
+  lifecycleRecords: Record<string, unknown>[] = []
+): void {
+  const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const dedupeNodes = graph.nodes.filter((node) => node.logical_id === "dedupe-findings");
+  if (dedupeNodes.length === 0) {
+    assert.deepEqual(
+      [dedupedFindings, lifecycleRecords],
+      [[], []],
+      "bounded dedupe fixtures require a planned dedupe-findings producer"
+    );
+    sealVerifiedNodeOutputs(runRoot, "final-report");
+    return;
+  }
+  assert.equal(dedupeNodes.length, 1, "report fixtures require at most one planned dedupe-findings attempt");
+  const dedupeDir = path.join(layout.artifactsDir, dedupeNodes[0]!.id);
+  fs.mkdirSync(dedupeDir, { recursive: true });
+  fs.writeFileSync(path.join(dedupeDir, "findings.json"), `${JSON.stringify(dedupedFindings, null, 2)}\n`, "utf8");
+  writeJsonRecord(path.join(dedupeDir, "finding-lifecycle-ledger.json"), {
+    schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+    records: lifecycleRecords
+  });
+  sealVerifiedNodeOutputs(runRoot, "dedupe-findings");
   sealVerifiedNodeOutputs(runRoot, "final-report");
 }
 
@@ -765,12 +823,18 @@ function sealVerifiedNodeOutputs(
   const workflowRunId = runMetadata.workflow.run_id;
   const agentTaskId = `node:${attemptId}`;
   const verifierTaskId = `verify:${attemptId}`;
+  // Only already-sealed prerequisite attempts carry a manifest authority; meta
+  // roots and unsealed siblings are not prerequisite manifests.
+  const prerequisiteNodeIds = plannedNode.depends_on.filter((dependency) =>
+    fs.existsSync(path.join(layout.artifactsDir, dependency, "artifact-manifest.json"))
+  );
 
   writeArtifactManifest({
     layout,
     nodeId: attemptId,
     include: publications.map((publication) => publication.path),
     outputs: plannedNode.outputs,
+    prerequisiteNodeIds,
     provenance: {
       producer_node_id: attemptId,
       logical_node_id: plannedNode.logical_id,
@@ -902,9 +966,54 @@ function accountingMismatchCount(value: Record<string, unknown>): number {
   );
 }
 
-async function createReportRun(project: string, runId: string): Promise<{ run_id: string; run_root: string }> {
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+/**
+ * Plan a report run whose `final-report` node consumes a finalized bounded
+ * dedupe producer, so promoted report rows have an authenticated source.
+ */
+function writeBoundedDedupeReportTopology(project: string): void {
   writeReportTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  const reportNode = `  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+`;
+  assert.equal(topology.includes(reportNode), true, "report fixtures require the canonical final-report node");
+  fs.writeFileSync(
+    topologyPath,
+    topology.replace(
+      reportNode,
+      `  - id: dedupe-findings
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/finding-lifecycle-ledger@1
+  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - dedupe-findings
+`
+    ),
+    "utf8"
+  );
+}
+
+async function createReportRun(
+  project: string,
+  runId: string,
+  writeTopology: (project: string) => void = writeReportTopology
+): Promise<{ run_id: string; run_root: string }> {
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeTopology(project);
   const run = await cli(project, ["run", "--run-id", runId, "--json"], fakeSmithersEnv(project));
   assert.equal(run.code, 0, `${run.stderr}\n${run.stdout}`);
   return parseJson(run).data as { run_id: string; run_root: string };
@@ -1766,13 +1875,13 @@ test("report does not synthesize missing Markdown", async () => {
 
 test("report accepts canonical severity and complete proof without rewriting either artifact", async () => {
   const project = tempProject();
-  const runData = await createReportRun(project, "report-canonical-severity");
+  const runData = await createReportRun(project, "report-canonical-severity", writeBoundedDedupeReportTopology);
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
   const markdownPath = path.join(reportDir, "report.md");
   fs.mkdirSync(reportDir, { recursive: true });
-  writeCanonicalReportPair(reportDir, currentReport(runData.run_id, [currentReportIssue()]));
-  sealVerifiedFinalReport(runData.run_root);
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id, [canonicalPromotedIssue()]));
+  sealVerifiedFinalReport(runData.run_root, [canonicalDedupedFinding()], [canonicalLifecycleRecord()]);
   const reportSnapshot = snapshotFinalReport(reportDir);
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;

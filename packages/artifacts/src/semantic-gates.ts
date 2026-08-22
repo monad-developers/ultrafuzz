@@ -49,6 +49,13 @@ export interface SemanticPropertyLensContext {
   document: unknown;
 }
 
+/** Trusted raw findings from one exact finalized producer declaration. */
+export interface SemanticRawFindingArtifactContext {
+  nodeId: string;
+  path: string;
+  findings: unknown;
+}
+
 export interface SemanticReviewStageContext {
   stage: "dedupe" | "triage" | "severity-classification";
   findingsArtifactPath: string;
@@ -57,13 +64,43 @@ export interface SemanticReviewStageContext {
   strategyDetections?: unknown;
   upstreamLifecycleLedger?: unknown;
   upstreamStrategyDetections?: unknown;
+  rawFindingArtifacts?: readonly SemanticRawFindingArtifactContext[];
 }
 
 export interface SemanticDynamicStrategyArtifactsContext {
   strategyPlan?: unknown;
   enumeratorOutputs?: unknown;
+  /** Exact schema-validated generated-test manifest from the current producer attempt. */
+  generatedTests?: unknown;
   findings?: unknown;
   provenance?: unknown;
+  /** Authenticated value from the run's resolved configuration. */
+  dynamicStrategiesEnumeratorPolicy?: number | "unlimited";
+  /** Exact finalized ancestor declarations for boundary-recipe JSON artifacts. */
+  boundaryRecipeArtifacts?: readonly SemanticDynamicStrategyAncestorArtifactContext[];
+  /** Exact finalized ancestor findings declarations used to remove already-covered recipes. */
+  ancestorFindingArtifacts?: readonly SemanticDynamicStrategyAncestorArtifactContext[];
+  /** Sealed identity of the exact producer attempt whose sibling bundle is being verified. */
+  currentAttempt?: SemanticDynamicStrategyAttemptContext;
+  /** Run-relative paths from exact verifier-authenticated ancestor publications. */
+  authenticatedCurrentRunArtifactPaths?: readonly string[];
+}
+
+/** Trusted current producer identity selected from the sealed task declaration. */
+export interface SemanticDynamicStrategyAttemptContext {
+  attemptId: string;
+  logicalNodeId: string;
+  agentRef: string;
+  modelName?: string;
+}
+
+/** One schema-validated finalized ancestor selected only through its sealed output declaration. */
+export interface SemanticDynamicStrategyAncestorArtifactContext {
+  attemptId: string;
+  logicalNodeId: string;
+  path: string;
+  contract: string;
+  document: unknown;
 }
 
 /** Trusted identity for one exact output declaration selected by the runtime host. */
@@ -731,17 +768,52 @@ function reportSeverityClassificationPreservationIssues(
 ): SemanticGateIssue[] {
   const upstreamValue = context.artifactSet!.severityClassifiedFindings;
   // `null` is a trusted host sentinel for a topology that deliberately omits
-  // severity classification. A planned-but-missing producer never receives it.
-  if (upstreamValue === null) return [];
-  const upstream = Array.isArray(upstreamValue) ? upstreamValue : [];
+  // severity classification. Bounded reports still close over the exact
+  // authenticated dedupe population; they do not get a lifecycle-free pass.
+  if (upstreamValue === null) return reportBoundedDedupePreservationIssues(document, context);
+  if (!Array.isArray(upstreamValue)) {
+    return [
+      issue("$context.artifactSet.severityClassifiedFindings", "Authenticated severity-classified findings are invalid")
+    ];
+  }
+  const upstream = upstreamValue;
   const ledger = context.artifactSet!.findingLifecycleLedger;
+  if (!isRecord(ledger)) {
+    return [issue("$context.artifactSet.findingLifecycleLedger", "Authenticated severity lifecycle ledger is invalid")];
+  }
   const ledgerRecords = arrayAt(ledger, ["records"]);
-  const ledgerByKey = new Map(
-    ledgerRecords.flatMap((record) => {
-      const key = stringField(record, "dedupe_key");
-      return key === undefined ? [] : [[key, record] as const];
-    })
-  );
+  const issues: SemanticGateIssue[] = [];
+  if (ledgerRecords.length !== upstream.length) {
+    issues.push(
+      issue(
+        "$context.artifactSet.findingLifecycleLedger.records",
+        `Severity lifecycle record count ${ledgerRecords.length} does not match classified finding count ${upstream.length}`
+      )
+    );
+  }
+  const ledgerByKey = new Map<string, unknown>();
+  for (const [index, record] of ledgerRecords.entries()) {
+    const key = stringField(record, "dedupe_key");
+    if (key === undefined) {
+      issues.push(
+        issue(
+          `$context.artifactSet.findingLifecycleLedger.records[${index}].dedupe_key`,
+          "Authenticated severity lifecycle record lacks a dedupe key"
+        )
+      );
+      continue;
+    }
+    if (ledgerByKey.has(key)) {
+      issues.push(
+        issue(
+          `$context.artifactSet.findingLifecycleLedger.records[${index}].dedupe_key`,
+          `Authenticated severity lifecycle repeats dedupe key ${JSON.stringify(key)}`
+        )
+      );
+    } else {
+      ledgerByKey.set(key, record);
+    }
+  }
   const reportRows = [
     ...arrayAt(document, ["issues"]).map((row, index) => ({
       row,
@@ -756,11 +828,18 @@ function reportSeverityClassificationPreservationIssues(
       index
     }))
   ];
+  if (reportRows.length !== upstream.length) {
+    issues.push(
+      issue("$", `Report row count ${reportRows.length} does not preserve classified finding count ${upstream.length}`)
+    );
+  }
   const reportByKey = new Map<string, (typeof reportRows)[number]>();
-  const issues: SemanticGateIssue[] = [];
   for (const entry of reportRows) {
     const key = stringField(at(entry.row, ["lifecycle"]), "dedupe_key");
-    if (key === undefined) continue;
+    if (key === undefined) {
+      issues.push(issue(`${entry.path}.lifecycle.dedupe_key`, "Report row lacks an authenticated lifecycle key"));
+      continue;
+    }
     if (reportByKey.has(key)) {
       issues.push(issue(`${entry.path}.lifecycle.dedupe_key`, `Duplicate report lifecycle key ${JSON.stringify(key)}`));
     } else {
@@ -847,17 +926,17 @@ function reportSeverityClassificationPreservationIssues(
       );
       continue;
     }
+    if (stringField(ledgerRecords[upstreamIndex], "dedupe_key") !== dedupeKey) {
+      issues.push(
+        issue(
+          `$context.artifactSet.findingLifecycleLedger.records[${upstreamIndex}].dedupe_key`,
+          "Severity lifecycle changed or reordered the classified finding key"
+        )
+      );
+    }
     const disposition = stringField(lifecycle, "final_disposition");
     const reportEntry = reportByKey.get(dedupeKey);
-    if (disposition === "dropped") {
-      if (reportEntry !== undefined) {
-        issues.push(
-          issue(reportEntry.path, `Dropped lifecycle record ${JSON.stringify(dedupeKey)} appears in the report`)
-        );
-      }
-      continue;
-    }
-    if (disposition !== "promoted" && disposition !== "non-production") {
+    if (disposition !== "promoted" && disposition !== "non-production" && disposition !== "dropped") {
       issues.push(
         issue(
           `$context.findingLifecycleLedger.records`,
@@ -872,13 +951,19 @@ function reportSeverityClassificationPreservationIssues(
       );
       continue;
     }
-    if (reportEntry.kind !== disposition) {
-      issues.push(issue(reportEntry.path, `Report placement does not match lifecycle disposition ${disposition}`));
+    const expectedKind = disposition === "promoted" ? "promoted" : "non-production";
+    if (reportEntry.kind !== expectedKind) {
+      issues.push(
+        issue(
+          reportEntry.path,
+          `Report placement does not match lifecycle disposition ${disposition}; expected ${expectedKind}`
+        )
+      );
     }
-    if (disposition === "non-production" && reportEntry.index <= previousNonProductionIndex) {
+    if (expectedKind === "non-production" && reportEntry.index <= previousNonProductionIndex) {
       issues.push(issue(reportEntry.path, "Report reordered non-production severity-classified findings"));
     }
-    if (disposition === "non-production") previousNonProductionIndex = reportEntry.index;
+    if (expectedKind === "non-production") previousNonProductionIndex = reportEntry.index;
     if (!isDeepStrictEqual(at(reportEntry.row, ["lifecycle"]), lifecycle)) {
       issues.push(
         issue(`${reportEntry.path}.lifecycle`, "Report lifecycle does not exactly copy the severity ledger record")
@@ -904,6 +989,301 @@ function reportSeverityClassificationPreservationIssues(
   for (const [key, entry] of reportByKey) {
     if (!upstreamKeys.has(key)) {
       issues.push(issue(entry.path, `Report row has no severity-classified source for ${JSON.stringify(key)}`));
+    }
+  }
+  for (const key of ledgerByKey.keys()) {
+    if (!upstreamKeys.has(key)) {
+      issues.push(
+        issue(
+          "$context.artifactSet.findingLifecycleLedger.records",
+          `Severity lifecycle row has no classified finding source for ${JSON.stringify(key)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
+const BOUNDED_REPORT_LIFECYCLE_OWNED_FIELDS = new Set([
+  "triage_classification",
+  "triage_reason",
+  "demotion_reason",
+  "canonical_severity",
+  "final_disposition"
+]);
+
+function reportBoundedDedupePreservationIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const upstreamValue = context.artifactSet!.dedupedFindings;
+  const ledgerValue = context.artifactSet!.findingLifecycleLedger;
+  const reportRows = [
+    ...arrayAt(document, ["issues"]).map((row, index) => ({
+      row,
+      path: `$.issues[${index}]`,
+      kind: "promoted" as const,
+      index
+    })),
+    ...arrayAt(document, ["non_production_outcomes"]).map((row, index) => ({
+      row,
+      path: `$.non_production_outcomes[${index}]`,
+      kind: "non-production" as const,
+      index
+    }))
+  ];
+
+  // A producer-free topology has no records to classify, but it also cannot
+  // authorize agent-authored report rows. A declared-but-missing producer is
+  // rejected by the runtime before it can produce this paired null sentinel.
+  if (upstreamValue === null && ledgerValue === null) {
+    return reportRows.length === 0 ? [] : [issue("$", "Bounded report rows have no authenticated deduped source")];
+  }
+  if (!Array.isArray(upstreamValue)) {
+    return [issue("$context.artifactSet.dedupedFindings", "Authenticated bounded deduped findings are invalid")];
+  }
+  if (!isRecord(ledgerValue)) {
+    return [
+      issue("$context.artifactSet.findingLifecycleLedger", "Authenticated bounded dedupe lifecycle ledger is invalid")
+    ];
+  }
+
+  const upstream = upstreamValue;
+  const ledgerRecords = arrayAt(ledgerValue, ["records"]);
+  const issues: SemanticGateIssue[] = [];
+  if (ledgerRecords.length !== upstream.length) {
+    issues.push(
+      issue(
+        "$context.artifactSet.findingLifecycleLedger.records",
+        `Bounded dedupe lifecycle record count ${ledgerRecords.length} does not match deduped finding count ${upstream.length}`
+      )
+    );
+  }
+
+  const ledgerByKey = new Map<string, unknown>();
+  for (const [index, record] of ledgerRecords.entries()) {
+    const key = stringField(record, "dedupe_key");
+    if (key === undefined) continue;
+    if (ledgerByKey.has(key)) {
+      issues.push(
+        issue(
+          `$context.artifactSet.findingLifecycleLedger.records[${index}].dedupe_key`,
+          `Authenticated bounded lifecycle repeats dedupe key ${JSON.stringify(key)}`
+        )
+      );
+    } else {
+      ledgerByKey.set(key, record);
+    }
+  }
+
+  const reportByKey = new Map<string, (typeof reportRows)[number]>();
+  for (const entry of reportRows) {
+    const key = stringField(at(entry.row, ["lifecycle"]), "dedupe_key");
+    if (key === undefined) continue;
+    if (reportByKey.has(key)) {
+      issues.push(issue(`${entry.path}.lifecycle.dedupe_key`, `Duplicate report lifecycle key ${JSON.stringify(key)}`));
+    } else {
+      reportByKey.set(key, entry);
+    }
+  }
+
+  const severityRank = new Map([
+    ["High", 0],
+    ["Medium", 1],
+    ["Low", 2]
+  ]);
+  const expectedPromoted: Array<{ key: string; finding: Readonly<Record<string, unknown>>; sourceIndex: number }> = [];
+  const expectedNonProductionKeys: string[] = [];
+  const upstreamKeys = new Set<string>();
+
+  for (const [sourceIndex, finding] of upstream.entries()) {
+    if (!isRecord(finding)) {
+      issues.push(
+        issue(`$context.artifactSet.dedupedFindings[${sourceIndex}]`, "Authenticated bounded finding is invalid")
+      );
+      continue;
+    }
+    const dedupeKey = stringField(finding, "dedupe_key");
+    if (dedupeKey === undefined) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dedupedFindings[${sourceIndex}].dedupe_key`,
+          "Authenticated bounded finding lacks a dedupe key"
+        )
+      );
+      continue;
+    }
+    if (upstreamKeys.has(dedupeKey)) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dedupedFindings[${sourceIndex}].dedupe_key`,
+          `Authenticated bounded findings repeat dedupe key ${JSON.stringify(dedupeKey)}`
+        )
+      );
+      continue;
+    }
+    upstreamKeys.add(dedupeKey);
+
+    const lifecycle = ledgerByKey.get(dedupeKey);
+    if (!isRecord(lifecycle)) {
+      issues.push(
+        issue(
+          "$context.artifactSet.findingLifecycleLedger.records",
+          `Bounded dedupe lifecycle lacks finding key ${JSON.stringify(dedupeKey)}`
+        )
+      );
+      continue;
+    }
+    if (stringField(ledgerRecords[sourceIndex], "dedupe_key") !== dedupeKey) {
+      issues.push(
+        issue(
+          `$context.artifactSet.findingLifecycleLedger.records[${sourceIndex}].dedupe_key`,
+          "Bounded dedupe lifecycle changed or reordered the deduped finding key"
+        )
+      );
+    }
+
+    const reportEntry = reportByKey.get(dedupeKey);
+    if (reportEntry === undefined) {
+      issues.push(issue("$", `Bounded report omits authenticated deduped finding ${JSON.stringify(dedupeKey)}`));
+      continue;
+    }
+    if (!isRecord(reportEntry.row)) continue;
+    const reportLifecycle = at(reportEntry.row, ["lifecycle"]);
+    if (!isRecord(reportLifecycle)) continue;
+    issues.push(
+      ...lifecycleRecordPreservationIssues(
+        reportLifecycle,
+        lifecycle,
+        BOUNDED_REPORT_LIFECYCLE_OWNED_FIELDS,
+        `${reportEntry.path}.lifecycle`
+      )
+    );
+
+    const classification = stringField(reportLifecycle, "triage_classification");
+    const expectedDisposition =
+      classification === "true-positive"
+        ? "promoted"
+        : classification === "false-positive"
+          ? "dropped"
+          : classification === undefined
+            ? undefined
+            : "non-production";
+    if (expectedDisposition === undefined) {
+      issues.push(
+        issue(
+          `${reportEntry.path}.lifecycle.triage_classification`,
+          "Bounded lifecycle must classify every authenticated deduped finding"
+        )
+      );
+    }
+    if (stringField(reportLifecycle, "triage_reason") === undefined) {
+      issues.push(issue(`${reportEntry.path}.lifecycle.triage_reason`, "Bounded lifecycle lacks a triage reason"));
+    }
+    if (stringField(reportLifecycle, "final_disposition") !== expectedDisposition) {
+      issues.push(
+        issue(
+          `${reportEntry.path}.lifecycle.final_disposition`,
+          `Bounded lifecycle disposition must be ${expectedDisposition ?? "derived from a valid classification"}`
+        )
+      );
+    }
+    if (expectedDisposition === "promoted") {
+      if (reportEntry.kind !== "promoted") {
+        issues.push(issue(reportEntry.path, "Bounded promoted finding must appear in report issues"));
+      }
+      const severity = stringField(reportEntry.row, "severity");
+      if (stringField(reportLifecycle, "canonical_severity") !== severity || !severityRank.has(severity ?? "")) {
+        issues.push(
+          issue(
+            `${reportEntry.path}.lifecycle.canonical_severity`,
+            "Bounded promoted lifecycle severity must equal the report finding severity"
+          )
+        );
+      }
+      expectedPromoted.push({ key: dedupeKey, finding, sourceIndex });
+    } else {
+      if (reportEntry.kind !== "non-production") {
+        issues.push(issue(reportEntry.path, "Bounded non-promoted finding must appear in non-production outcomes"));
+      }
+      if (reportLifecycle.canonical_severity !== undefined) {
+        issues.push(
+          issue(
+            `${reportEntry.path}.lifecycle.canonical_severity`,
+            "Bounded non-promoted lifecycle cannot carry canonical severity"
+          )
+        );
+      }
+      if (stringField(reportLifecycle, "demotion_reason") === undefined) {
+        issues.push(
+          issue(`${reportEntry.path}.lifecycle.demotion_reason`, "Bounded non-promoted lifecycle lacks demotion")
+        );
+      }
+      expectedNonProductionKeys.push(dedupeKey);
+    }
+    if (stringField(reportEntry.row, "triage_classification") !== classification) {
+      issues.push(
+        issue(
+          `${reportEntry.path}.triage_classification`,
+          "Bounded report classification differs from its lifecycle record"
+        )
+      );
+    }
+
+    for (const field of Object.keys(finding)) {
+      if (expectedDisposition === "promoted" && (field === "id" || field === "title")) continue;
+      if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
+        issues.push(
+          issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)
+        );
+      }
+    }
+  }
+
+  expectedPromoted.sort((left, right) => {
+    const leftRank = severityRank.get(stringField(reportByKey.get(left.key)?.row, "severity") ?? "") ?? 3;
+    const rightRank = severityRank.get(stringField(reportByKey.get(right.key)?.row, "severity") ?? "") ?? 3;
+    return leftRank - rightRank || left.sourceIndex - right.sourceIndex;
+  });
+  const actualPromoted = reportRows.filter((entry) => entry.kind === "promoted");
+  const severityCounters = new Map([
+    ["High", 0],
+    ["Medium", 0],
+    ["Low", 0]
+  ]);
+  for (const [index, expected] of expectedPromoted.entries()) {
+    const actual = actualPromoted[index];
+    if (actual === undefined) continue;
+    if (stringField(at(actual.row, ["lifecycle"]), "dedupe_key") !== expected.key) {
+      issues.push(issue(actual.path, "Bounded report issues are not stable-sorted High, Medium, then Low"));
+      continue;
+    }
+    const severity = stringField(actual.row, "severity") ?? "";
+    const prior = severityCounters.get(severity);
+    if (prior === undefined) continue;
+    const count = prior + 1;
+    severityCounters.set(severity, count);
+    const expectedId = `${severity[0]}-${String(count).padStart(2, "0")}`;
+    if (stringField(actual.row, "id") !== expectedId) {
+      issues.push(issue(`${actual.path}.id`, `Bounded report production issue must use canonical ID ${expectedId}`));
+    }
+    const title = (stringField(expected.finding, "title") ?? "")
+      .replace(/^\s*\[[HML]-\d{2,}\]\s*-\s*/iu, "")
+      .replace(/\s+/gu, " ")
+      .trim();
+    if (stringField(actual.row, "title") !== `[${expectedId}] - ${title}` || title === "") {
+      issues.push(issue(`${actual.path}.title`, "Bounded report production issue has a noncanonical title"));
+    }
+  }
+
+  const actualNonProductionKeys = reportRows
+    .filter((entry) => entry.kind === "non-production")
+    .flatMap((entry) => stringField(at(entry.row, ["lifecycle"]), "dedupe_key") ?? []);
+  if (!isDeepStrictEqual(actualNonProductionKeys, expectedNonProductionKeys)) {
+    issues.push(issue("$.non_production_outcomes", "Bounded report reordered non-promoted deduped findings"));
+  }
+  for (const [key, entry] of reportByKey) {
+    if (!upstreamKeys.has(key)) {
+      issues.push(
+        issue(entry.path, `Bounded report row has no authenticated deduped source for ${JSON.stringify(key)}`)
+      );
     }
   }
   return issues;
@@ -979,6 +1359,249 @@ function expectedFindingStage(
   return { stage, artifact_path: artifactPath, finding_id: findingId };
 }
 
+function rawFindingLifecycleIdentity(input: {
+  path: string;
+  nodeId: string;
+  findingId: string;
+  title: string;
+}): string {
+  return JSON.stringify([input.path, input.nodeId, input.findingId, input.title]);
+}
+
+function rawFindingLifecycleClosureIssues(
+  records: readonly unknown[],
+  review: SemanticReviewStageContext
+): SemanticGateIssue[] {
+  const artifacts = review.rawFindingArtifacts;
+  if (artifacts === undefined) {
+    return [issue("$", "Trusted raw findings context is unavailable for dedupe lifecycle closure")];
+  }
+
+  const issues: SemanticGateIssue[] = [];
+  const expected = new Map<string, number>();
+  for (const [artifactIndex, artifact] of artifacts.entries()) {
+    if (!Array.isArray(artifact.findings)) {
+      issues.push(issue("$", `Trusted raw findings artifact ${artifactIndex} is not an array`));
+      continue;
+    }
+    for (const [findingIndex, finding] of artifact.findings.entries()) {
+      const findingId = stringField(finding, "id");
+      const title = stringField(finding, "title");
+      if (findingId === undefined || title === undefined) {
+        issues.push(
+          issue("$", `Trusted raw finding ${artifactIndex}:${findingIndex} lacks the schema-required id or title`)
+        );
+        continue;
+      }
+      const identity = rawFindingLifecycleIdentity({
+        path: artifact.path,
+        nodeId: artifact.nodeId,
+        findingId,
+        title
+      });
+      expected.set(identity, (expected.get(identity) ?? 0) + 1);
+    }
+  }
+
+  const actual = new Map<string, { count: number; paths: string[] }>();
+  for (const [recordIndex, record] of records.entries()) {
+    for (const [sourceIndex, source] of arrayAt(record, ["source_artifacts"]).entries()) {
+      const artifactPath = stringField(source, "path");
+      const nodeId = stringField(source, "node_id");
+      const findingId = stringField(source, "finding_id");
+      const title = stringField(source, "title");
+      if (artifactPath === undefined || nodeId === undefined || findingId === undefined || title === undefined)
+        continue;
+      const identity = rawFindingLifecycleIdentity({ path: artifactPath, nodeId, findingId, title });
+      const entry = actual.get(identity) ?? { count: 0, paths: [] };
+      entry.count += 1;
+      entry.paths.push(`$.records[${recordIndex}].source_artifacts[${sourceIndex}]`);
+      actual.set(identity, entry);
+    }
+  }
+
+  for (const [identity, expectedCount] of expected) {
+    const entry = actual.get(identity);
+    if (entry?.count === expectedCount) continue;
+    issues.push(
+      issue(
+        entry?.paths[0] ?? "$.records",
+        `Raw finding lifecycle identity ${identity} must appear ${expectedCount === 1 ? "exactly once" : `exactly ${expectedCount} times`}; found ${entry?.count ?? 0}`
+      )
+    );
+  }
+  for (const [identity, entry] of actual) {
+    if (expected.has(identity)) continue;
+    issues.push(
+      issue(entry.paths[0] ?? "$.records", `Lifecycle ledger contains unknown raw finding identity ${identity}`)
+    );
+  }
+  return issues;
+}
+
+function distinctStringsInOrder(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function dedupeLifecycleRelationshipIssues(
+  record: Readonly<Record<string, unknown>>,
+  finding: Readonly<Record<string, unknown>>,
+  recordPath: string
+): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  const sources = arrayAt(record, ["source_artifacts"]);
+  const primarySources = sources
+    .map((source, index) => ({ source, index }))
+    .filter(({ source }) => stringField(source, "relationship") === "primary");
+  if (primarySources.length !== 1) {
+    issues.push(
+      issue(
+        `${recordPath}.source_artifacts`,
+        `Dedupe lifecycle record requires exactly one primary raw finding; found ${primarySources.length}`
+      )
+    );
+  } else {
+    const primary = primarySources[0]!;
+    for (const field of ["finding_id", "title"] as const) {
+      const outputField = field === "finding_id" ? "id" : field;
+      const expected = stringField(finding, outputField);
+      if (expected !== undefined && stringField(primary.source, field) !== expected) {
+        issues.push(
+          issue(
+            `${recordPath}.source_artifacts[${primary.index}].${field}`,
+            `Primary raw finding ${field} must equal the kept finding ${outputField}`
+          )
+        );
+      }
+    }
+  }
+
+  const expectedDuplicateIds = distinctStringsInOrder(
+    sources.flatMap((source) =>
+      stringField(source, "relationship") === "duplicate"
+        ? stringField(source, "finding_id") === undefined
+          ? []
+          : [stringField(source, "finding_id")!]
+        : []
+    )
+  );
+  const actualDuplicateIds = stringArray(record.duplicate_finding_ids);
+  if (!isDeepStrictEqual(actualDuplicateIds, expectedDuplicateIds)) {
+    issues.push(
+      issue(
+        `${recordPath}.duplicate_finding_ids`,
+        `duplicate_finding_ids must exactly project duplicate source relationships: expected ${JSON.stringify(expectedDuplicateIds)}, received ${JSON.stringify(actualDuplicateIds)}`
+      )
+    );
+  }
+
+  const familyVariants = arrayAt(finding, ["family_variants"]);
+  const keptId = stringField(finding, "id");
+  const keptTitle = stringField(finding, "title");
+  const keptDedupeKey = stringField(finding, "dedupe_key");
+  const expectedFamilyVariantKeys = familyVariants.flatMap((variant) => {
+    const key = stringField(variant, "dedupe_key");
+    return key === undefined ? [] : [key];
+  });
+  const actualFamilyVariantKeys = stringArray(record.family_variant_keys);
+  if (!isDeepStrictEqual(actualFamilyVariantKeys, expectedFamilyVariantKeys)) {
+    issues.push(
+      issue(
+        `${recordPath}.family_variant_keys`,
+        `family_variant_keys must exactly preserve kept finding family variants: expected ${JSON.stringify(expectedFamilyVariantKeys)}, received ${JSON.stringify(actualFamilyVariantKeys)}`
+      )
+    );
+  }
+
+  const variantsByIdentity = new Map<string, string>();
+  const familyVariantIndexesByIdentity = new Map<string, number>();
+  const familyVariantIndexesByKey = new Map<string, number>();
+  for (const [variantIndex, variant] of familyVariants.entries()) {
+    const id = stringField(variant, "id");
+    const title = stringField(variant, "title");
+    const key = stringField(variant, "dedupe_key");
+    if (id !== undefined && title !== undefined && key !== undefined) {
+      const identity = JSON.stringify([id, title]);
+      if (id === keptId && title === keptTitle) {
+        issues.push(
+          issue(
+            `${recordPath}.family_variant_keys`,
+            `Kept family variant at finding family_variants[${variantIndex}] reuses the kept root id/title identity ${semanticExpectationPreview([id, title])}`
+          )
+        );
+      }
+      if (key === keptDedupeKey) {
+        issues.push(
+          issue(
+            `${recordPath}.family_variant_keys`,
+            `Kept family variant at finding family_variants[${variantIndex}] reuses the kept root dedupe_key ${semanticExpectationPreview(key)}`
+          )
+        );
+      }
+
+      const priorIdentityIndex = familyVariantIndexesByIdentity.get(identity);
+      if (priorIdentityIndex === undefined) {
+        familyVariantIndexesByIdentity.set(identity, variantIndex);
+        variantsByIdentity.set(identity, key);
+      } else {
+        issues.push(
+          issue(
+            `${recordPath}.family_variant_keys`,
+            `Kept family variant at finding family_variants[${variantIndex}] repeats id/title identity ${semanticExpectationPreview([id, title])} first declared at finding family_variants[${priorIdentityIndex}]`
+          )
+        );
+      }
+
+      const priorKeyIndex = familyVariantIndexesByKey.get(key);
+      if (priorKeyIndex === undefined) {
+        familyVariantIndexesByKey.set(key, variantIndex);
+      } else {
+        issues.push(
+          issue(
+            `${recordPath}.family_variant_keys`,
+            `Kept family variant at finding family_variants[${variantIndex}] repeats dedupe_key ${semanticExpectationPreview(key)} first declared at finding family_variants[${priorKeyIndex}]`
+          )
+        );
+      }
+    }
+  }
+  const matchedFamilyVariantKeys = new Set<string>();
+  for (const [sourceIndex, source] of sources.entries()) {
+    if (stringField(source, "relationship") !== "family-variant") continue;
+    const id = stringField(source, "finding_id");
+    const title = stringField(source, "title");
+    const key =
+      id === undefined || title === undefined ? undefined : variantsByIdentity.get(JSON.stringify([id, title]));
+    if (key === undefined) {
+      issues.push(
+        issue(
+          `${recordPath}.source_artifacts[${sourceIndex}].relationship`,
+          "Family-variant source must match a kept finding family variant by exact id and title"
+        )
+      );
+      continue;
+    }
+    matchedFamilyVariantKeys.add(key);
+  }
+  for (const [variantIndex, variant] of familyVariants.entries()) {
+    const key = stringField(variant, "dedupe_key");
+    if (key !== undefined && !matchedFamilyVariantKeys.has(key)) {
+      issues.push(
+        issue(
+          `${recordPath}.family_variant_keys`,
+          `Kept family variant ${JSON.stringify(key)} lacks a family-variant raw source relationship at finding family_variants[${variantIndex}]`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function lifecycleReviewStageIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const review = context.artifactSet!.reviewStage!;
   const findings = Array.isArray(review.findings) ? review.findings : [];
@@ -1008,6 +1631,9 @@ function lifecycleReviewStageIssues(document: unknown, context: SemanticGateCont
       )
     );
   }
+  if (review.stage === "dedupe") {
+    issues.push(...rawFindingLifecycleClosureIssues(records, review));
+  }
 
   for (let index = 0; index < Math.min(records.length, findings.length); index += 1) {
     const record = records[index];
@@ -1025,6 +1651,7 @@ function lifecycleReviewStageIssues(document: unknown, context: SemanticGateCont
       if (arrayAt(record, ["source_artifacts"]).length === 0) {
         issues.push(issue(`${recordPath}.source_artifacts`, "Dedupe lifecycle record requires a source artifact"));
       }
+      issues.push(...dedupeLifecycleRelationshipIssues(record, finding, recordPath));
       for (const field of LIFECYCLE_LATER_STAGE_FIELDS) {
         if (record[field] !== undefined) {
           issues.push(
@@ -2294,8 +2921,32 @@ function differentialBindingPaths(bindings: readonly SemanticDifferentialArtifac
   return bindings.map((binding) => binding.path);
 }
 
-function exactArrayIssue(pathValue: string, actual: unknown, expected: unknown, message: string): SemanticGateIssue[] {
-  return isDeepStrictEqual(actual, expected) ? [] : [issue(pathValue, message)];
+const MAX_SEMANTIC_EXPECTATION_PREVIEW_CHARACTERS = 4_096;
+
+function semanticExpectationPreview(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return String(value);
+  if (serialized.length <= MAX_SEMANTIC_EXPECTATION_PREVIEW_CHARACTERS) return serialized;
+  return `${serialized.slice(0, MAX_SEMANTIC_EXPECTATION_PREVIEW_CHARACTERS)}...[truncated; ${serialized.length} characters]`;
+}
+
+function exactArrayIssue(
+  pathValue: string,
+  actual: unknown,
+  expected: unknown,
+  message: string,
+  options: { includeValues?: boolean } = {}
+): SemanticGateIssue[] {
+  return isDeepStrictEqual(actual, expected)
+    ? []
+    : [
+        issue(
+          pathValue,
+          options.includeValues === true
+            ? `${message}; expected ${semanticExpectationPreview(expected)}; received ${semanticExpectationPreview(actual)}`
+            : message
+        )
+      ];
 }
 
 function requiredBindingIssue(
@@ -2314,13 +2965,14 @@ function bindingForExactPath(
   if (typeof artifactPath !== "string") return { issues: [issue(pathValue, `${label} path is unavailable`)] };
   const matches = bindings.filter((binding) => binding.path === artifactPath);
   if (matches.length !== 1) {
+    const declaredPaths = bindings.map((binding) => binding.path);
     return {
       issues: [
         issue(
           pathValue,
           matches.length === 0
-            ? `${label} does not name an exact declared artifact`
-            : `${label} ambiguously names more than one declared artifact`
+            ? `${label} does not name an exact declared artifact; expected one of ${semanticExpectationPreview(declaredPaths)}; received ${semanticExpectationPreview(artifactPath)}`
+            : `${label} ambiguously names more than one declared artifact; declared candidates ${semanticExpectationPreview(declaredPaths)}; received ${semanticExpectationPreview(artifactPath)}`
         )
       ]
     };
@@ -2353,7 +3005,8 @@ function referenceHarnessPlanReconciliationIssues(
       "$.source_plan_artifacts",
       at(document, ["source_plan_artifacts"]),
       differentialBindingPaths(plans),
-      "Harness source_plan_artifacts must exactly preserve declared plan paths and order"
+      "Harness source_plan_artifacts must exactly preserve declared plan paths and order",
+      { includeValues: true }
     )
   ];
   const surfaceIds = new Set(
@@ -2433,7 +3086,8 @@ function auditedDifferentialHandoffReconciliationIssues(
       "$.source_plan_artifacts",
       at(document, ["source_plan_artifacts"]),
       differentialBindingPaths(plans),
-      "Auditor source_plan_artifacts must exactly preserve declared plan paths and order"
+      "Auditor source_plan_artifacts must exactly preserve declared plan paths and order",
+      { includeValues: true }
     ),
     ...exactArrayIssue(
       "$.source_harness_artifacts",
@@ -2457,10 +3111,10 @@ function auditedDifferentialHandoffReconciliationIssues(
       const leftPriority = priorityRank.get(stringField(left.row, "red_seeking_priority") ?? "") ?? 3;
       const rightPriority = priorityRank.get(stringField(right.row, "red_seeking_priority") ?? "") ?? 3;
       if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-      if (left.binding.path !== right.binding.path) return left.binding.path < right.binding.path ? -1 : 1;
+      if (left.binding.path !== right.binding.path) return left.binding.path.localeCompare(right.binding.path);
       const leftLaneId = stringField(left.row, "lane_id") ?? "";
       const rightLaneId = stringField(right.row, "lane_id") ?? "";
-      return leftLaneId === rightLaneId ? 0 : leftLaneId < rightLaneId ? -1 : 1;
+      return leftLaneId.localeCompare(rightLaneId);
     })
     .flatMap(({ row }) => stringField(row, "lane_id") ?? []);
   if (new Set(plannedIds).size !== plannedIds.length) {
@@ -3127,25 +3781,45 @@ function differentialGapReviewLaneReconciliationIssues(
   const resultCoordinates = resultRows.map((row) => JSON.stringify(gapCoordinate(row)));
   const missing = readyRows.filter((row) => !resultCoordinates.includes(JSON.stringify(gapCoordinate(row))));
   const actualMissing = arrayAt(document, ["missing_lane_work_orders"]).map(gapCoordinate);
-  if (!isDeepStrictEqual(actualMissing, missing.map(gapCoordinate))) {
-    issues.push(
-      issue(
-        "$.missing_lane_work_orders",
-        "Missing-lane work orders must cover exactly the audited ready lanes without a declared result"
-      )
-    );
-  }
+  issues.push(
+    ...exactArrayIssue(
+      "$.missing_lane_work_orders",
+      actualMissing,
+      missing.map(gapCoordinate),
+      "Missing-lane work orders must cover exactly the audited ready lanes without a declared result",
+      { includeValues: true }
+    )
+  );
   const incomplete = resultRows.filter((row) =>
     ["compile_or_harness_defect", "no_assigned_lane"].includes(String(row.status))
   );
   const actualIncomplete = arrayAt(document, ["incomplete_campaign_work_orders"]).map(gapCoordinate);
-  if (!isDeepStrictEqual(actualIncomplete, incomplete.map(gapCoordinate))) {
-    issues.push(
-      issue(
-        "$.incomplete_campaign_work_orders",
-        "Incomplete-campaign work orders must cover exactly compile/harness defects and no-assignment results"
-      )
-    );
+  issues.push(
+    ...exactArrayIssue(
+      "$.incomplete_campaign_work_orders",
+      actualIncomplete,
+      incomplete.map(gapCoordinate),
+      "Incomplete-campaign work orders must cover exactly compile/harness defects and no-assignment results",
+      { includeValues: true }
+    )
+  );
+  const declaredAuditorPaths = auditedBindings.map((binding) => binding.path);
+  for (const key of ["missing_lane_work_orders", "incomplete_campaign_work_orders"] as const) {
+    for (const [index, row] of arrayAt(document, [key]).entries()) {
+      const artifactPath = stringField(row, "source_auditor_artifact");
+      if (
+        artifactPath !== undefined &&
+        declaredAuditorPaths.filter((candidate) => candidate === artifactPath).length === 1
+      ) {
+        continue;
+      }
+      issues.push(
+        issue(
+          `$.${key}[${index}].source_auditor_artifact`,
+          `Work-order source_auditor_artifact must name exactly one declared audited-lanes artifact; declared ${semanticExpectationPreview(declaredAuditorPaths)}`
+        )
+      );
+    }
   }
   const expectedGreen = resultBindings.flatMap((binding) => {
     const row = binding.document;
@@ -3226,14 +3900,15 @@ function differentialReportReviewReconciliationIssues(
     ...arrayAt(gapDocument, ["missing_lane_work_orders"]),
     ...arrayAt(gapDocument, ["incomplete_campaign_work_orders"])
   ];
-  if (!isDeepStrictEqual(at(document, ["missing_or_deferred_lanes"]), expectedMissing)) {
-    issues.push(
-      issue(
-        "$.missing_or_deferred_lanes",
-        "Report review must exactly preserve all missing and incomplete lane work orders from gap review"
-      )
-    );
-  }
+  issues.push(
+    ...exactArrayIssue(
+      "$.missing_or_deferred_lanes",
+      at(document, ["missing_or_deferred_lanes"]),
+      expectedMissing,
+      "Report review must exactly preserve all missing and incomplete lane work orders from gap review",
+      { includeValues: true }
+    )
+  );
   const expectedReady = [...productionIdentities, ...repairedIdentities];
   if (!isDeepStrictEqual(arrayAt(document, ["report_rows_ready"]).map(reportRowIdentity), expectedReady)) {
     issues.push(
@@ -3280,6 +3955,98 @@ function dynamicModelJoinIssues(document: unknown): SemanticGateIssue[] {
   });
 }
 
+function dynamicStrategyProvenanceAuthorityIssues(
+  artifacts: SemanticDynamicStrategyArtifactsContext
+): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  const currentAttempt = artifacts.currentAttempt;
+  if (
+    !isRecord(currentAttempt) ||
+    stringField(currentAttempt, "attemptId") === undefined ||
+    stringField(currentAttempt, "logicalNodeId") === undefined ||
+    stringField(currentAttempt, "agentRef") === undefined ||
+    (currentAttempt.modelName !== undefined && stringField(currentAttempt, "modelName") === undefined)
+  ) {
+    return [
+      issue(
+        "$context.artifactSet.dynamicStrategyArtifacts.currentAttempt",
+        "Authenticated current dynamic producer identity is invalid"
+      )
+    ];
+  }
+
+  const authenticatedPaths = artifacts.authenticatedCurrentRunArtifactPaths;
+  if (
+    !Array.isArray(authenticatedPaths) ||
+    authenticatedPaths.some((path) => typeof path !== "string" || path.length === 0)
+  ) {
+    return [
+      issue(
+        "$context.artifactSet.dynamicStrategyArtifacts.authenticatedCurrentRunArtifactPaths",
+        "Authenticated current-run artifact path authority is invalid"
+      )
+    ];
+  }
+  const allowedPaths = new Set<string>();
+  for (const [index, artifactPath] of authenticatedPaths.entries()) {
+    if (allowedPaths.has(artifactPath)) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dynamicStrategyArtifacts.authenticatedCurrentRunArtifactPaths[${index}]`,
+          `Authenticated current-run artifact path authority repeats ${JSON.stringify(artifactPath)}`
+        )
+      );
+    }
+    allowedPaths.add(artifactPath);
+  }
+
+  for (const [index, artifactPath] of stringArray(at(artifacts.provenance, ["current_run_artifacts"])).entries()) {
+    if (!allowedPaths.has(artifactPath)) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dynamicStrategyArtifacts.provenance.current_run_artifacts[${index}]`,
+          `Dynamic provenance current-run artifact is outside the authenticated ancestor publication authority for ${JSON.stringify(currentAttempt.attemptId)}: ${JSON.stringify(artifactPath)}`
+        )
+      );
+    }
+  }
+
+  const models = arrayAt(artifacts.provenance, ["models"]);
+  const modelName = stringField(currentAttempt, "modelName");
+  const agentRef = stringField(currentAttempt, "agentRef")!;
+  if (modelName === undefined) {
+    if (models.length > 0) {
+      issues.push(
+        issue(
+          "$context.artifactSet.dynamicStrategyArtifacts.provenance.models",
+          `Dynamic provenance models must be empty because authenticated producer ${JSON.stringify(currentAttempt.attemptId)} has no model name`
+        )
+      );
+    }
+    return issues;
+  }
+
+  for (const [index, model] of models.entries()) {
+    if (stringField(model, "model") !== modelName) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dynamicStrategyArtifacts.provenance.models[${index}].model`,
+          `Dynamic provenance model does not match authenticated current producer model ${JSON.stringify(modelName)}`
+        )
+      );
+    }
+    if (stringField(model, "backend") !== agentRef) {
+      issues.push(
+        issue(
+          `$context.artifactSet.dynamicStrategyArtifacts.provenance.models[${index}].backend`,
+          `Dynamic provenance backend does not match authenticated current producer agent ${JSON.stringify(agentRef)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function dynamicRecommendationUniquenessIssues(document: unknown): SemanticGateIssue[] {
   return arrayAt(document, ["enumerators"]).flatMap((entry, enumeratorIndex) =>
     projectedUniquenessIssues([
@@ -3309,6 +4076,170 @@ function dynamicRecommendationProjection(value: unknown): Readonly<Record<string
   return Object.fromEntries(dynamicRecommendationFields.map((field) => [field, value[field]]));
 }
 
+const DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX = "boundary-recipe-";
+const DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID = "boundary-recipe-coordinator";
+
+function isDynamicStrategiesEnumeratorPolicy(value: unknown): value is number | "unlimited" {
+  return value === "unlimited" || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+}
+
+function dynamicBoundaryRecipeQueueIds(artifacts: SemanticDynamicStrategyArtifactsContext): string[] {
+  const coveredFindingIdsByAttempt = new Map<string, Set<string>>();
+  for (const binding of artifacts.ancestorFindingArtifacts ?? []) {
+    const covered = coveredFindingIdsByAttempt.get(binding.attemptId) ?? new Set<string>();
+    for (const finding of arrayAt(binding.document, [])) {
+      const findingId = stringField(finding, "id");
+      if (findingId !== undefined) covered.add(findingId);
+    }
+    coveredFindingIdsByAttempt.set(binding.attemptId, covered);
+  }
+  const seen = new Set<string>();
+  const queue: string[] = [];
+  const boundaryArtifacts = [...(artifacts.boundaryRecipeArtifacts ?? [])].sort((left, right) =>
+    left.path.localeCompare(right.path)
+  );
+  for (const artifact of boundaryArtifacts) {
+    const coveredFindingIds = coveredFindingIdsByAttempt.get(artifact.attemptId) ?? new Set<string>();
+    for (const recipe of arrayAt(artifact.document, ["recipes"])) {
+      if (stringField(recipe, "expected_classification_if_red") !== "production-bug") continue;
+      if (stringArray(at(recipe, ["finding_ids"])).some((findingId) => coveredFindingIds.has(findingId))) continue;
+      const recipeId = stringField(recipe, "id");
+      if (recipeId === undefined) continue;
+      // Attempt IDs are authenticated safe IDs and therefore cannot contain
+      // the ':' separator. Namespacing the public queue identity prevents two
+      // looped producers that reuse a recipe ID from collapsing into one
+      // strategy while retaining a deterministic, human-readable ID.
+      const strategyId = `${DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX}${artifact.attemptId}:${recipeId}`;
+      if (seen.has(strategyId)) continue;
+      seen.add(strategyId);
+      queue.push(strategyId);
+    }
+  }
+  return queue;
+}
+
+function dynamicBoundaryRecipeCoordinatorIssues(
+  document: unknown,
+  artifacts: SemanticDynamicStrategyArtifactsContext
+): SemanticGateIssue[] {
+  const issues: SemanticGateIssue[] = [];
+  const policy = artifacts.dynamicStrategiesEnumeratorPolicy;
+  if (!isDynamicStrategiesEnumeratorPolicy(policy)) {
+    return [issue("$", "Trusted dynamic_strategies_enumerator policy is invalid")];
+  }
+  if (at(artifacts.strategyPlan, ["dynamic_strategies_enumerator"]) !== policy) {
+    issues.push(
+      issue(
+        "$.strategies",
+        `Strategy-plan dynamic_strategies_enumerator does not equal the authenticated resolved policy ${JSON.stringify(policy)}`
+      )
+    );
+  }
+
+  const enumerators = arrayAt(artifacts.enumeratorOutputs, ["enumerators"]);
+  const coordinatorIndexes = enumerators.flatMap((enumerator, index) =>
+    stringField(enumerator, "enumerator_id") === DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID ? [index] : []
+  );
+  const expectedQueueIds = dynamicBoundaryRecipeQueueIds(artifacts);
+  const coordinatorRequired = expectedQueueIds.length > 0;
+  if (coordinatorIndexes.length !== (coordinatorRequired ? 1 : 0)) {
+    issues.push(
+      issue(
+        "$.strategies",
+        coordinatorRequired
+          ? `Mandatory boundary-recipe queue requires exactly one ${DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID} enumerator record`
+          : `The ${DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID} enumerator record is unauthorized when the mandatory boundary-recipe queue is empty`
+      )
+    );
+  }
+  if (coordinatorIndexes.length > 0 && coordinatorIndexes[0] !== 0) {
+    issues.push(issue("$.strategies", `${DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID} must be the first enumerator record`));
+  }
+
+  const coordinator = coordinatorIndexes.length === 0 ? undefined : enumerators[coordinatorIndexes[0]!];
+  const coordinatorRecommendationIds = arrayAt(coordinator, ["recommendations"]).flatMap(
+    (recommendation) => stringField(recommendation, "strategy_id") ?? []
+  );
+  issues.push(
+    ...exactArrayIssue(
+      "$.strategies",
+      coordinatorRecommendationIds,
+      expectedQueueIds,
+      "Boundary-recipe coordinator recommendations must exactly equal the mandatory queue in first-distinct recipe order",
+      { includeValues: true }
+    )
+  );
+
+  const independentEnumerators = enumerators.filter(
+    (enumerator) => stringField(enumerator, "enumerator_id") !== DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID
+  );
+  if (policy !== "unlimited" && independentEnumerators.length > policy) {
+    issues.push(
+      issue(
+        "$.strategies",
+        policy === 0
+          ? "Resolved dynamic_strategies_enumerator policy 0 forbids independent enumerator records"
+          : `Independent enumerator record count ${independentEnumerators.length} exceeds the authenticated resolved policy ${policy}`
+      )
+    );
+  }
+  for (const [enumeratorIndex, enumerator] of enumerators.entries()) {
+    if (stringField(enumerator, "enumerator_id") === DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID) continue;
+    for (const [recommendationIndex, recommendation] of arrayAt(enumerator, ["recommendations"]).entries()) {
+      const strategyId = stringField(recommendation, "strategy_id");
+      if (strategyId?.startsWith(DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX) !== true) continue;
+      issues.push(
+        issue(
+          `$.strategies`,
+          `Independent enumerator at index ${enumeratorIndex} cannot own reserved boundary-recipe strategy ${JSON.stringify(strategyId)} (recommendation ${recommendationIndex})`
+        )
+      );
+    }
+  }
+
+  const selectedIds = new Set(stringArray(at(artifacts.strategyPlan, ["selected_strategies"])));
+  const rejectedIds = new Set(
+    arrayAt(artifacts.strategyPlan, ["rejected_strategies"]).flatMap((row) => stringField(row, "strategy_id") ?? [])
+  );
+  for (const strategyId of expectedQueueIds) {
+    if (selectedIds.has(strategyId) !== rejectedIds.has(strategyId)) continue;
+    issues.push(
+      issue(
+        "$.strategies",
+        selectedIds.has(strategyId)
+          ? `Queued boundary recipe is both selected and rejected ${JSON.stringify(strategyId)}`
+          : `Queued boundary recipe has no selected or rejected disposition ${JSON.stringify(strategyId)}`
+      )
+    );
+  }
+
+  for (const [selectedIndex, selected] of arrayAt(document, ["strategies"]).entries()) {
+    const strategyId = stringField(selected, "strategy_id");
+    if (strategyId?.startsWith(DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX) !== true) continue;
+    if (!isDeepStrictEqual(stringArray(at(selected, ["enumerator_ids"])), [DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID])) {
+      issues.push(
+        issue(
+          `$.strategies[${selectedIndex}].enumerator_ids`,
+          `Selected boundary-recipe strategy must be attributed only to ${DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID} ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+  for (const [findingIndex, finding] of arrayAt(artifacts.findings, []).entries()) {
+    const strategyId = stringField(finding, "dynamic_strategy_id");
+    if (strategyId?.startsWith(DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX) !== true) continue;
+    if (stringField(finding, "enumerator_id") !== DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID) {
+      issues.push(
+        issue(
+          "$.strategies",
+          `Boundary-recipe finding at index ${findingIndex} must be attributed to ${DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID} ${JSON.stringify(strategyId)}`
+        )
+      );
+    }
+  }
+  return issues;
+}
+
 function dynamicStrategyArtifactReconciliationIssues(
   document: unknown,
   context: SemanticGateContext
@@ -3328,7 +4259,10 @@ function dynamicStrategyArtifactReconciliationIssues(
   const planSelectedCount = numberField(artifacts.strategyPlan, "selected_strategy_count");
   const rejectedRows = arrayAt(artifacts.strategyPlan, ["rejected_strategies"]);
   const rejectedIds = rejectedRows.flatMap((row) => stringField(row, "strategy_id") ?? []);
-  const issues: SemanticGateIssue[] = [];
+  const issues: SemanticGateIssue[] = [
+    ...dynamicBoundaryRecipeCoordinatorIssues(document, artifacts),
+    ...dynamicStrategyProvenanceAuthorityIssues(artifacts)
+  ];
 
   if (!isDeepStrictEqual(selectedIds, planSelectedIds)) {
     issues.push(
@@ -3346,6 +4280,20 @@ function dynamicStrategyArtifactReconciliationIssues(
       )
     );
   }
+
+  const consideredArtifactPaths = arrayAt(artifacts.strategyPlan, ["current_run_artifacts_considered"]).flatMap(
+    (entry) => stringField(entry, "path") ?? []
+  );
+  const provenanceArtifactPaths = stringArray(at(artifacts.provenance, ["current_run_artifacts"]));
+  issues.push(
+    ...exactArrayIssue(
+      "$.strategies",
+      provenanceArtifactPaths,
+      consideredArtifactPaths,
+      "Dynamic provenance current_run_artifacts must exactly equal the ordered strategy-plan current_run_artifacts_considered path projection",
+      { includeValues: true }
+    )
+  );
 
   const recommendationsById = new Map<string, Array<{ enumeratorId: string; recommendation: unknown }>>();
   for (const enumerator of arrayAt(artifacts.enumeratorOutputs, ["enumerators"])) {
@@ -3407,6 +4355,16 @@ function dynamicStrategyArtifactReconciliationIssues(
       }
     }
   }
+  const expectedRejectedIds = [...recommendationsById.keys()].filter((strategyId) => !selectedIdSet.has(strategyId));
+  issues.push(
+    ...exactArrayIssue(
+      "$.strategies",
+      rejectedIds,
+      expectedRejectedIds,
+      "Strategy-plan rejected IDs must be the exact complement of selected IDs within distinct enumerator recommendations, in first-source order",
+      { includeValues: true }
+    )
+  );
 
   for (const [selectedIndex, selectedRow] of selectedRows.entries()) {
     const strategyId = stringField(selectedRow, "strategy_id");
@@ -3474,6 +4432,23 @@ function dynamicStrategyArtifactReconciliationIssues(
       );
     }
   }
+
+  const manifestPaths = [
+    ...arrayAt(artifacts.generatedTests, ["generated_tests"]),
+    ...arrayAt(artifacts.generatedTests, ["support_files"])
+  ].flatMap((entry) => stringField(entry, "path") ?? []);
+  const provenancePaths = arrayAt(artifacts.provenance, ["generated_files"]).flatMap(
+    (entry) => stringField(entry, "source_path") ?? []
+  );
+  issues.push(
+    ...exactArrayIssue(
+      "$.strategies",
+      [...provenancePaths].sort(),
+      [...manifestPaths].sort(),
+      "Dynamic provenance generated-file source paths must exactly equal the current-attempt generated-test manifest runnable and support paths",
+      { includeValues: true }
+    )
+  );
   return issues;
 }
 
@@ -6242,8 +7217,14 @@ const gateSpecifications = {
     [
       "artifactSet.dynamicStrategyArtifacts.strategyPlan",
       "artifactSet.dynamicStrategyArtifacts.enumeratorOutputs",
+      "artifactSet.dynamicStrategyArtifacts.generatedTests",
       "artifactSet.dynamicStrategyArtifacts.findings",
-      "artifactSet.dynamicStrategyArtifacts.provenance"
+      "artifactSet.dynamicStrategyArtifacts.provenance",
+      "artifactSet.dynamicStrategyArtifacts.dynamicStrategiesEnumeratorPolicy",
+      "artifactSet.dynamicStrategyArtifacts.boundaryRecipeArtifacts",
+      "artifactSet.dynamicStrategyArtifacts.ancestorFindingArtifacts",
+      "artifactSet.dynamicStrategyArtifacts.currentAttempt",
+      "artifactSet.dynamicStrategyArtifacts.authenticatedCurrentRunArtifactPaths"
     ],
     dynamicStrategyArtifactReconciliationIssues
   ),

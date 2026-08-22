@@ -49,7 +49,8 @@ export interface PackagedTopologyDefinition {
 }
 
 const PACKAGED_TOPOLOGY_DESCRIPTIONS = {
-  full: "The complete production audit graph copied to projects by ultrafuzz init.",
+  default: "The canonical bug-first direct-discovery graph copied to projects by ultrafuzz init.",
+  full: "The complete production audit graph with direct discovery and specialist lanes.",
   smoke: "The bounded CI graph with context, four parallel strategies, dedupe, and reporting.",
   "invariant-only": "The focused property discovery, stateful-invariant campaign, review, and reporting graph."
 } as const;

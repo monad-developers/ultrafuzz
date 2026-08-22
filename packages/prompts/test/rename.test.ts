@@ -37,7 +37,7 @@ describe("prompt ID rename sync", () => {
         {
           path: "review/dedupe-findings.mdx",
           contents:
-            "---\nid: dedupe-findings\n---\nUse {{ancestor_artifacts:boundary-tests}} and {{artifact_path:boundary-tests}}/generated-tests.json"
+            "---\nid: dedupe-findings\n---\nUse {{artifact_handoff:boundary-tests}} and {{artifact_path:boundary-tests}}/generated-tests.json"
         }
       ],
       concreteNodes: [
@@ -63,7 +63,7 @@ describe("prompt ID rename sync", () => {
     expect(result.promptFiles[0]?.path).toBe("strategies/edge-tests.mdx");
     expect(result.promptFiles[0]?.contents).toContain("id: edge-tests");
     expect(result.promptFiles[0]?.contents).toContain("{{artifact_path:edge-tests}}/edge-tests.json");
-    expect(result.promptFiles[1]?.contents).toContain("{{ancestor_artifacts:edge-tests}}");
+    expect(result.promptFiles[1]?.contents).toContain("{{artifact_handoff:edge-tests}}");
     expect(result.concreteIdMap).toEqual({ "boundary-tests-0": "edge-tests-0" });
     expect(result.concreteNodes[0]?.artifactDir).toBe("/runs/run-1/artifacts/edge-tests-0");
     expect(result.concreteNodes[1]?.dependsOn).toEqual(["edge-tests-0"]);

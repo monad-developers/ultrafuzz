@@ -180,13 +180,24 @@ const selectedDynamicStrategyFixture = {
   validation_plan: ["Run the focused command."]
 };
 
+const dynamicStrategyCurrentAttemptFixture = {
+  attemptId: "dynamic-strategy-attempt",
+  logicalNodeId: "dynamic-strategy-generator",
+  agentRef: "CodexAgent"
+};
+
 const dynamicStrategyArtifactContext: SemanticGateContext = {
   artifactSet: {
     dynamicStrategyArtifacts: {
       strategyPlan: {
+        dynamic_strategies_enumerator: 1,
         selected_strategy_count: 1,
         selected_strategies: ["strategy-a"],
-        rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }]
+        rejected_strategies: [{ strategy_id: "strategy-b", reason: "Lower priority." }],
+        current_run_artifacts_considered: [
+          { path: "artifacts/inputs/project-discovery.md", relevance: "Project context." },
+          { path: "artifacts/inputs/findings.json", relevance: "Existing coverage." }
+        ]
       },
       enumeratorOutputs: {
         enumerators: [
@@ -200,7 +211,19 @@ const dynamicStrategyArtifactContext: SemanticGateContext = {
         ]
       },
       findings: [{ dynamic_strategy_id: "strategy-a", enumerator_id: "enumerator-a" }],
-      provenance: { generated_files: [{ strategy_id: "strategy-a" }] }
+      generatedTests: {
+        generated_tests: [{ path: "generated-tests/StrategyA.t.sol" }],
+        support_files: []
+      },
+      provenance: {
+        current_run_artifacts: ["artifacts/inputs/project-discovery.md", "artifacts/inputs/findings.json"],
+        generated_files: [{ strategy_id: "strategy-a", source_path: "generated-tests/StrategyA.t.sol" }]
+      },
+      dynamicStrategiesEnumeratorPolicy: 1,
+      boundaryRecipeArtifacts: [],
+      ancestorFindingArtifacts: [],
+      currentAttempt: dynamicStrategyCurrentAttemptFixture,
+      authenticatedCurrentRunArtifactPaths: ["artifacts/inputs/project-discovery.md", "artifacts/inputs/findings.json"]
     }
   }
 };
@@ -2976,10 +2999,18 @@ test("every contextual registration executes real positive and negative checks",
           records: [
             {
               dedupe_key: "root-a",
-              source_artifacts: [{ path: "raw/findings.json", finding_id: "raw-a" }],
+              source_artifacts: [
+                {
+                  path: "raw/findings.json",
+                  node_id: "boundary-tests",
+                  finding_id: "raw-a",
+                  title: "Raw A",
+                  relationship: "primary"
+                }
+              ],
               stages: [
                 { stage: "raw", artifact_path: "raw/findings.json", finding_id: "raw-a" },
-                { stage: "deduped", artifact_path: "/artifacts/deduped-findings.json", finding_id: "finding-a" }
+                { stage: "deduped", artifact_path: "/artifacts/deduped-findings.json", finding_id: "raw-a" }
               ]
             }
           ]
@@ -2988,10 +3019,18 @@ test("every contextual registration executes real positive and negative checks",
           records: [
             {
               dedupe_key: "root-a",
-              source_artifacts: [{ path: "raw/findings.json", finding_id: "raw-a" }],
+              source_artifacts: [
+                {
+                  path: "raw/findings.json",
+                  node_id: "boundary-tests",
+                  finding_id: "raw-a",
+                  title: "Raw A",
+                  relationship: "primary"
+                }
+              ],
               stages: [
                 { stage: "raw", artifact_path: "raw/findings.json", finding_id: "raw-a" },
-                { stage: "deduped", artifact_path: "/artifacts/rewritten.json", finding_id: "finding-a" }
+                { stage: "deduped", artifact_path: "/artifacts/rewritten.json", finding_id: "raw-a" }
               ]
             }
           ]
@@ -3001,7 +3040,14 @@ test("every contextual registration executes real positive and negative checks",
             reviewStage: {
               stage: "dedupe",
               findingsArtifactPath: "/artifacts/deduped-findings.json",
-              findings: [{ id: "finding-a", dedupe_key: "root-a" }]
+              findings: [{ id: "raw-a", title: "Raw A", dedupe_key: "root-a" }],
+              rawFindingArtifacts: [
+                {
+                  nodeId: "boundary-tests",
+                  path: "raw/findings.json",
+                  findings: [{ id: "raw-a", title: "Raw A" }]
+                }
+              ]
             }
           }
         }
@@ -3437,6 +3483,697 @@ test("every contextual registration executes real positive and negative checks",
   }
 });
 
+test("strict final reports preserve dropped false positives as exactly one non-production row", () => {
+  const finding = {
+    id: "finding-a",
+    title: "Finding A",
+    summary: "Authenticated severity-classified source summary.",
+    severity_guess: "Low",
+    severity: "Low",
+    dedupe_key: "root-a",
+    triage_classification: "false-positive"
+  };
+  const lifecycle = {
+    dedupe_key: "root-a",
+    source_artifacts: [],
+    strategy_hits: [],
+    triage_classification: "false-positive",
+    triage_reason: "The reported precondition cannot occur.",
+    demotion_reason: "The candidate is a false positive.",
+    final_disposition: "dropped",
+    stages: [{ stage: "severity-classified", artifact_path: "severity-classified-findings.json" }]
+  };
+  const context = {
+    artifactSet: {
+      severityClassifiedFindings: [finding],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const row = { ...finding, lifecycle };
+
+  assert.equal(
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [row] },
+      context
+    }).status,
+    "passed"
+  );
+
+  const omitted = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [] },
+    context
+  });
+  assert.equal(omitted.status, "failed");
+  assert.ok(
+    omitted.status === "failed" &&
+      omitted.issues.some(
+        (entry) => entry.path === "$" && /omits lifecycle record "root-a" with disposition dropped/u.test(entry.message)
+      )
+  );
+
+  const duplicated = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [row, structuredClone(row)] },
+    context
+  });
+  assert.equal(duplicated.status, "failed");
+  assert.ok(
+    duplicated.status === "failed" &&
+      duplicated.issues.some(
+        (entry) =>
+          entry.path === "$.non_production_outcomes[1].lifecycle.dedupe_key" &&
+          /Duplicate report lifecycle key "root-a"/u.test(entry.message)
+      )
+  );
+});
+
+test("strict final-report closure rejects dropped rows in issues and mismatched lifecycle populations", () => {
+  const finding = { id: "finding-a", title: "Finding A", severity: "Low", dedupe_key: "root-a" };
+  const lifecycle = { dedupe_key: "root-a", final_disposition: "dropped" };
+  const context = {
+    artifactSet: {
+      severityClassifiedFindings: [finding],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const misplaced = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [{ ...finding, lifecycle }], non_production_outcomes: [] },
+    context
+  });
+  assert.equal(misplaced.status, "failed");
+  assert.ok(
+    misplaced.status === "failed" &&
+      misplaced.issues.some((entry) => entry.path === "$.issues[0]" && /expected non-production/u.test(entry.message))
+  );
+
+  const extraLifecycle = { dedupe_key: "root-b", final_disposition: "dropped" };
+  const mismatched = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [{ ...finding, lifecycle }] },
+    context: {
+      artifactSet: {
+        ...context.artifactSet,
+        findingLifecycleLedger: { records: [lifecycle, extraLifecycle] }
+      }
+    }
+  });
+  assert.equal(mismatched.status, "failed");
+  assert.ok(
+    mismatched.status === "failed" &&
+      mismatched.issues.some((entry) =>
+        /lifecycle row has no classified finding source for "root-b"/u.test(entry.message)
+      )
+  );
+});
+
+test("bounded final reports close over every authenticated deduped finding", () => {
+  const finding = {
+    id: "finding-a",
+    title: "Finding A",
+    summary: "Authenticated source summary.",
+    severity_guess: "Medium",
+    dedupe_key: "root-a"
+  };
+  const lifecycle = {
+    dedupe_key: "root-a",
+    finding_id: "finding-a",
+    source_artifacts: [
+      {
+        path: "artifacts/boundary/findings.json",
+        node_id: "boundary-tests",
+        finding_id: "finding-a",
+        title: "Finding A",
+        relationship: "primary"
+      }
+    ],
+    stages: [{ stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-a" }]
+  };
+  const context = {
+    artifactSet: {
+      severityClassifiedFindings: null,
+      dedupedFindings: [finding],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const droppedRow = {
+    ...finding,
+    triage_classification: "false-positive",
+    lifecycle: {
+      ...lifecycle,
+      triage_classification: "false-positive",
+      triage_reason: "The source-backed precondition cannot occur.",
+      demotion_reason: "The candidate is a false positive.",
+      final_disposition: "dropped"
+    }
+  };
+
+  const omitted = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [] },
+    context
+  });
+  assert.equal(omitted.status, "failed");
+  assert.ok(
+    omitted.status === "failed" &&
+      omitted.issues.some((entry) => /omits authenticated deduped finding "root-a"/u.test(entry.message))
+  );
+
+  assert.equal(
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [droppedRow] },
+      context
+    }).status,
+    "passed"
+  );
+
+  const rewrittenLifecycle = structuredClone(droppedRow);
+  rewrittenLifecycle.lifecycle.source_artifacts[0]!.node_id = "lookalike-producer";
+  const rewritten = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [rewrittenLifecycle] },
+    context
+  });
+  assert.equal(rewritten.status, "failed");
+  assert.ok(
+    rewritten.status === "failed" &&
+      rewritten.issues.some((entry) => /did not preserve upstream field "source_artifacts"/u.test(entry.message))
+  );
+
+  const droppedOmission = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [] },
+    context
+  });
+  assert.equal(droppedOmission.status, "failed", "a dropped false positive still requires one report row");
+});
+
+test("differential reconciliation diagnostics expose exact expected machine-derived values", () => {
+  for (const [gate, document, current] of [
+    ["reference-harness-plan-reconciliation", emptyReferenceHarness, differentialHarnessBinding],
+    ["audited-differential-handoff-reconciliation", emptyAuditedDifferentialLanes, differentialAuditBinding]
+  ] as const) {
+    const result = executeSemanticGate(gate, {
+      document: { ...document, source_plan_artifacts: ["/absolute/lookalike/differential-plan.json"] },
+      context: {
+        artifactSet: {
+          differentialArtifacts: {
+            current,
+            plans: [differentialPlanBinding],
+            ...(gate === "audited-differential-handoff-reconciliation"
+              ? { harnesses: [differentialHarnessBinding] }
+              : {})
+          }
+        }
+      }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(
+      result.status === "failed" &&
+        result.issues.some(
+          (entry) =>
+            entry.path === "$.source_plan_artifacts" &&
+            entry.message.includes(`expected [${JSON.stringify(differentialPlanPath)}]`) &&
+            entry.message.includes('received ["/absolute/lookalike/differential-plan.json"]')
+        )
+    );
+  }
+
+  const greenResult = {
+    lane_id: "lane-green",
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: differentialAuditPath,
+    status: "green",
+    focused_command: "forge test --match-contract LaneGreen",
+    matched_test_count: 1
+  };
+  const syntheticWorkOrder = {
+    lane_id: null,
+    attempt_index: 0,
+    auditor_attempt_index: 0,
+    source_auditor_artifact: "artifacts/reference-and-lane-auditor",
+    summary: "Invented attempt-directory requirement.",
+    evidence_paths: []
+  };
+  const gap = executeSemanticGate("differential-gap-review-lane-reconciliation", {
+    document: {
+      ...emptyGapReview,
+      lane_results_seen: [greenResult],
+      incomplete_campaign_work_orders: [syntheticWorkOrder],
+      green_suite_evidence: [
+        {
+          lane_id: greenResult.lane_id,
+          attempt_index: greenResult.attempt_index,
+          auditor_attempt_index: greenResult.auditor_attempt_index,
+          source_auditor_artifact: greenResult.source_auditor_artifact,
+          command: greenResult.focused_command,
+          matched_test_count: greenResult.matched_test_count
+        }
+      ]
+    },
+    context: {
+      artifactSet: {
+        differentialArtifacts: {
+          auditedLanes: [differentialAuditBinding],
+          laneResults: [
+            differentialBinding(
+              "artifacts/differential-lane-author/green-result.json",
+              "ultrafuzz/differential-lane-result@1",
+              "differential-lane-author",
+              greenResult
+            )
+          ]
+        }
+      }
+    }
+  });
+  assert.equal(gap.status, "failed");
+  assert.ok(
+    gap.status === "failed" &&
+      gap.issues.some(
+        (entry) =>
+          entry.path === "$.incomplete_campaign_work_orders" &&
+          entry.message.includes("expected []") &&
+          entry.message.includes("artifacts/reference-and-lane-auditor")
+      ) &&
+      gap.issues.some(
+        (entry) =>
+          entry.path === "$.incomplete_campaign_work_orders[0].source_auditor_artifact" &&
+          /must name exactly one declared audited-lanes artifact/u.test(entry.message)
+      )
+  );
+
+  const expectedWorkOrder = noAssignedGapReview.incomplete_campaign_work_orders[0]!;
+  const report = executeSemanticGate("differential-report-review-reconciliation", {
+    document: {
+      campaign_status: "incomplete",
+      production_bug_reds: [],
+      harness_or_reference_repairs: [],
+      missing_or_deferred_lanes: [],
+      report_rows_ready: []
+    },
+    context: {
+      artifactSet: {
+        differentialArtifacts: {
+          registries: [differentialRegistryBinding],
+          triages: [differentialTriageABinding, differentialTriageBBinding],
+          repairSummaries: [
+            differentialBinding(
+              "repair-summary.json",
+              "ultrafuzz/differential-repair-summary@1",
+              "differential-repair-and-report-review",
+              emptyRepairSummary
+            )
+          ],
+          gapReviews: [
+            differentialBinding(
+              "gap-review.json",
+              "ultrafuzz/differential-gap-review@1",
+              "differential-repair-and-report-review",
+              noAssignedGapReview
+            )
+          ],
+          findings: [
+            differentialBinding("findings.json", "ultrafuzz/findings@2", "differential-repair-and-report-review", [])
+          ]
+        }
+      }
+    }
+  });
+  assert.equal(report.status, "failed");
+  assert.ok(
+    report.status === "failed" &&
+      report.issues.some(
+        (entry) =>
+          entry.path === "$.missing_or_deferred_lanes" &&
+          entry.message.includes(`expected [${JSON.stringify(expectedWorkOrder)}]`) &&
+          entry.message.includes("received []")
+      )
+  );
+});
+
+test("dedupe lifecycle closure reconciles each trusted raw finding identity exactly once", () => {
+  const source = (nodeId: string, artifactPath: string, relationship: "primary" | "duplicate") => ({
+    path: artifactPath,
+    node_id: nodeId,
+    finding_id: "raw-shared",
+    title: "Shared raw title",
+    relationship
+  });
+  const alpha = source("strategy-alpha", "artifacts/strategy-alpha/findings.json", "primary");
+  const beta = source("strategy-beta", "artifacts/strategy-beta/findings.json", "duplicate");
+  const dedupedStage = { stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "raw-shared" };
+  const documentFor = (sources: Array<ReturnType<typeof source>>) => ({
+    records: [
+      {
+        dedupe_key: "root-a",
+        source_artifacts: sources,
+        duplicate_finding_ids: [
+          ...new Set(sources.filter((entry) => entry.relationship === "duplicate").map((entry) => entry.finding_id))
+        ],
+        stages: [
+          ...sources.map((entry) => ({
+            stage: "raw",
+            artifact_path: entry.path,
+            finding_id: entry.finding_id
+          })),
+          dedupedStage
+        ]
+      }
+    ]
+  });
+  const context: SemanticGateContext = {
+    artifactSet: {
+      reviewStage: {
+        stage: "dedupe",
+        findingsArtifactPath: "deduped-findings.json",
+        findings: [{ id: "raw-shared", title: "Shared raw title", dedupe_key: "root-a" }],
+        rawFindingArtifacts: [
+          {
+            nodeId: "strategy-alpha",
+            path: "artifacts/strategy-alpha/findings.json",
+            findings: [{ id: "raw-shared", title: "Shared raw title" }]
+          },
+          {
+            nodeId: "strategy-beta",
+            path: "artifacts/strategy-beta/findings.json",
+            findings: [{ id: "raw-shared", title: "Shared raw title" }]
+          }
+        ]
+      }
+    }
+  };
+  const execute = (document: unknown, candidateContext: SemanticGateContext = context) =>
+    executeSemanticGate("finding-lifecycle-review-stage-reconciliation", {
+      document,
+      context: candidateContext
+    });
+
+  assert.equal(execute(documentFor([alpha, beta])).status, "passed");
+
+  const omitted = execute(documentFor([alpha]));
+  assert.equal(omitted.status, "failed");
+  assert.ok(
+    omitted.status === "failed" &&
+      omitted.issues.some((entry) => /strategy-beta.*must appear exactly once; found 0/u.test(entry.message))
+  );
+
+  const duplicate = execute(documentFor([alpha, alpha, beta]));
+  assert.equal(duplicate.status, "failed");
+  assert.ok(
+    duplicate.status === "failed" &&
+      duplicate.issues.some((entry) => /strategy-alpha.*must appear exactly once; found 2/u.test(entry.message))
+  );
+
+  const unknownSource = source("strategy-lookalike", "artifacts/strategy-lookalike/findings.json", "duplicate");
+  const unknown = execute(documentFor([alpha, beta, unknownSource]));
+  assert.equal(unknown.status, "failed");
+  assert.ok(
+    unknown.status === "failed" &&
+      unknown.issues.some((entry) => /unknown raw finding identity.*strategy-lookalike/u.test(entry.message))
+  );
+
+  const unavailable = structuredClone(context);
+  delete unavailable.artifactSet!.reviewStage!.rawFindingArtifacts;
+  const missingAuthority = execute(documentFor([alpha, beta]), unavailable);
+  assert.equal(missingAuthority.status, "failed");
+  assert.ok(
+    missingAuthority.status === "failed" &&
+      missingAuthority.issues.some((entry) => /Trusted raw findings context is unavailable/u.test(entry.message))
+  );
+
+  assert.equal(
+    execute(
+      { records: [] },
+      {
+        artifactSet: {
+          reviewStage: {
+            stage: "dedupe",
+            findingsArtifactPath: "deduped-findings.json",
+            findings: [],
+            rawFindingArtifacts: []
+          }
+        }
+      }
+    ).status,
+    "passed"
+  );
+});
+
+test("dedupe lifecycle relationships reconcile the kept, duplicate, and family identities", () => {
+  interface LifecycleSource {
+    path: string;
+    node_id: string;
+    finding_id: string;
+    title: string;
+    relationship: "primary" | "duplicate" | "family-variant";
+  }
+  interface FamilyVariant {
+    id: string;
+    title: string;
+    summary: string;
+    dedupe_key: string;
+  }
+  const sources: LifecycleSource[] = [
+    {
+      path: "artifacts/strategy-a/findings.json",
+      node_id: "strategy-a",
+      finding_id: "kept-a",
+      title: "Kept finding",
+      relationship: "primary"
+    },
+    {
+      path: "artifacts/strategy-b/findings.json",
+      node_id: "strategy-b",
+      finding_id: "duplicate-b",
+      title: "Equivalent finding",
+      relationship: "duplicate"
+    },
+    {
+      path: "artifacts/strategy-c/findings.json",
+      node_id: "strategy-c",
+      finding_id: "variant-c",
+      title: "Variant finding",
+      relationship: "family-variant"
+    },
+    {
+      path: "artifacts/strategy-d/findings.json",
+      node_id: "strategy-d",
+      finding_id: "variant-d",
+      title: "Second variant finding",
+      relationship: "family-variant"
+    }
+  ];
+  const familyVariants: FamilyVariant[] = [
+    {
+      id: "variant-c",
+      title: "Variant finding",
+      summary: "The same root at another boundary.",
+      dedupe_key: "root-a/variant-c"
+    },
+    {
+      id: "variant-d",
+      title: "Second variant finding",
+      summary: "The same root with a second distinct reproduction shape.",
+      dedupe_key: "root-a/variant-d"
+    }
+  ];
+  const recordFor = (
+    candidateSources: readonly LifecycleSource[],
+    candidateVariantKeys: readonly string[],
+    duplicateFindingIds: readonly string[] = ["duplicate-b"]
+  ) => ({
+    dedupe_key: "root-a",
+    source_artifacts: candidateSources.map((source) => ({ ...source })),
+    duplicate_finding_ids: [...duplicateFindingIds],
+    family_variant_keys: [...candidateVariantKeys],
+    stages: [
+      ...candidateSources.map((source) => ({
+        stage: "raw",
+        artifact_path: source.path,
+        finding_id: source.finding_id
+      })),
+      { stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "kept-a" }
+    ]
+  });
+  const contextFor = (
+    candidateSources: readonly LifecycleSource[],
+    candidateVariants: readonly FamilyVariant[]
+  ): SemanticGateContext => ({
+    artifactSet: {
+      reviewStage: {
+        stage: "dedupe",
+        findingsArtifactPath: "deduped-findings.json",
+        findings: [
+          {
+            id: "kept-a",
+            title: "Kept finding",
+            dedupe_key: "root-a",
+            family_variants: candidateVariants.map((variant) => ({ ...variant }))
+          }
+        ],
+        rawFindingArtifacts: candidateSources.map((source) => ({
+          nodeId: source.node_id,
+          path: source.path,
+          findings: [{ id: source.finding_id, title: source.title }]
+        }))
+      }
+    }
+  });
+  const record = recordFor(
+    sources,
+    familyVariants.map((variant) => variant.dedupe_key)
+  );
+  const context = contextFor(sources, familyVariants);
+  const execute = (candidate: unknown, gateContext: SemanticGateContext = context) =>
+    executeSemanticGate("finding-lifecycle-review-stage-reconciliation", { document: candidate, context: gateContext });
+
+  assert.equal(execute({ records: [record] }).status, "passed");
+
+  const duplicateLabeledPrimary = structuredClone(record);
+  duplicateLabeledPrimary.source_artifacts[1]!.relationship = "primary";
+  const primaryDrift = execute({ records: [duplicateLabeledPrimary] });
+  assert.equal(primaryDrift.status, "failed");
+  assert.ok(
+    primaryDrift.status === "failed" &&
+      primaryDrift.issues.some((entry) => /requires exactly one primary raw finding; found 2/u.test(entry.message)) &&
+      primaryDrift.issues.some((entry) => /duplicate_finding_ids must exactly project/u.test(entry.message))
+  );
+
+  const wrongPrimary = structuredClone(record);
+  wrongPrimary.source_artifacts[0]!.relationship = "duplicate";
+  wrongPrimary.source_artifacts[1]!.relationship = "primary";
+  wrongPrimary.duplicate_finding_ids = ["kept-a"];
+  const keptIdentityDrift = execute({ records: [wrongPrimary] });
+  assert.equal(keptIdentityDrift.status, "failed");
+  assert.ok(
+    keptIdentityDrift.status === "failed" &&
+      keptIdentityDrift.issues.some((entry) =>
+        /Primary raw finding finding_id must equal the kept finding id/u.test(entry.message)
+      )
+  );
+
+  const missingFamilyRelationship = structuredClone(record);
+  missingFamilyRelationship.source_artifacts[2]!.relationship = "duplicate";
+  missingFamilyRelationship.duplicate_finding_ids = ["duplicate-b", "variant-c"];
+  const familyDrift = execute({ records: [missingFamilyRelationship] });
+  assert.equal(familyDrift.status, "failed");
+  assert.ok(
+    familyDrift.status === "failed" &&
+      familyDrift.issues.some((entry) => /lacks a family-variant raw source relationship/u.test(entry.message))
+  );
+
+  const rootIdentitySources = structuredClone(sources);
+  rootIdentitySources[2]!.finding_id = "kept-a";
+  rootIdentitySources[2]!.title = "Kept finding";
+  const rootIdentityVariants = structuredClone(familyVariants);
+  rootIdentityVariants[0]!.id = "kept-a";
+  rootIdentityVariants[0]!.title = "Kept finding";
+  const rootIdentityReuse = execute(
+    {
+      records: [
+        recordFor(
+          rootIdentitySources,
+          rootIdentityVariants.map((variant) => variant.dedupe_key)
+        )
+      ]
+    },
+    contextFor(rootIdentitySources, rootIdentityVariants)
+  );
+  assert.equal(rootIdentityReuse.status, "failed");
+  assert.deepEqual(
+    rootIdentityReuse.status === "failed"
+      ? rootIdentityReuse.issues.filter((entry) => entry.message.includes("reuses the kept root"))
+      : [],
+    [
+      {
+        path: "$.records[0].family_variant_keys",
+        message:
+          'Kept family variant at finding family_variants[0] reuses the kept root id/title identity ["kept-a","Kept finding"]'
+      }
+    ]
+  );
+
+  const rootKeyVariants = structuredClone(familyVariants);
+  rootKeyVariants[0]!.dedupe_key = "root-a";
+  const rootKeyReuse = execute(
+    {
+      records: [
+        recordFor(
+          sources,
+          rootKeyVariants.map((variant) => variant.dedupe_key)
+        )
+      ]
+    },
+    contextFor(sources, rootKeyVariants)
+  );
+  assert.equal(rootKeyReuse.status, "failed");
+  assert.deepEqual(
+    rootKeyReuse.status === "failed"
+      ? rootKeyReuse.issues.filter((entry) => entry.message.includes("reuses the kept root"))
+      : [],
+    [
+      {
+        path: "$.records[0].family_variant_keys",
+        message: 'Kept family variant at finding family_variants[0] reuses the kept root dedupe_key "root-a"'
+      }
+    ]
+  );
+
+  const repeatedIdentitySources = structuredClone(sources);
+  repeatedIdentitySources[3]!.finding_id = "variant-c";
+  repeatedIdentitySources[3]!.title = "Variant finding";
+  const repeatedIdentityVariants = structuredClone(familyVariants);
+  repeatedIdentityVariants[1]!.id = "variant-c";
+  repeatedIdentityVariants[1]!.title = "Variant finding";
+  const repeatedIdentity = execute(
+    {
+      records: [
+        recordFor(
+          repeatedIdentitySources,
+          repeatedIdentityVariants.map((variant) => variant.dedupe_key)
+        )
+      ]
+    },
+    contextFor(repeatedIdentitySources, repeatedIdentityVariants)
+  );
+  assert.equal(repeatedIdentity.status, "failed");
+  assert.deepEqual(
+    repeatedIdentity.status === "failed"
+      ? repeatedIdentity.issues.filter((entry) => /repeats (?:id\/title identity|dedupe_key)/u.test(entry.message))
+      : [],
+    [
+      {
+        path: "$.records[0].family_variant_keys",
+        message:
+          'Kept family variant at finding family_variants[1] repeats id/title identity ["variant-c","Variant finding"] first declared at finding family_variants[0]'
+      }
+    ]
+  );
+
+  const repeatedKeyVariants = structuredClone(familyVariants);
+  repeatedKeyVariants[1]!.dedupe_key = "root-a/variant-c";
+  const repeatedKey = execute(
+    {
+      records: [
+        recordFor(
+          sources,
+          repeatedKeyVariants.map((variant) => variant.dedupe_key)
+        )
+      ]
+    },
+    contextFor(sources, repeatedKeyVariants)
+  );
+  assert.equal(repeatedKey.status, "failed");
+  assert.deepEqual(
+    repeatedKey.status === "failed"
+      ? repeatedKey.issues.filter((entry) => /repeats (?:id\/title identity|dedupe_key)/u.test(entry.message))
+      : [],
+    [
+      {
+        path: "$.records[0].family_variant_keys",
+        message:
+          'Kept family variant at finding family_variants[1] repeats dedupe_key "root-a/variant-c" first declared at finding family_variants[0]'
+      }
+    ]
+  );
+});
+
 test("semantic gate diagnostics are deterministically capped", () => {
   const document = Array.from({ length: MAX_SEMANTIC_GATE_ISSUES + 2 }, () => ({ id: "duplicate" }));
   const result = executeSemanticGate("findings-id-uniqueness", { document });
@@ -3666,6 +4403,36 @@ test("differential lane selection uses exact current coordinates across every de
     wrongAuditorAttempt.status === "failed" &&
       wrongAuditorAttempt.issues.some((entry) => entry.path === "$.auditor_attempt_index")
   );
+
+  const wrongAuditorPath = "artifacts/not-declared/audited-differential-lanes.json";
+  const wrongAuditorSource = executeSemanticGate("differential-lane-result-handoff-reconciliation", {
+    document: {
+      lane_id: null,
+      attempt_index: 0,
+      auditor_attempt_index: 0,
+      source_auditor_artifact: wrongAuditorPath,
+      status: "no_assigned_lane"
+    },
+    context: {
+      artifactSet: {
+        differentialArtifacts: {
+          current: currentLane,
+          auditedLanes: [emptyAuditBinding, assignedAuditBinding]
+        }
+      }
+    }
+  });
+  assert.equal(wrongAuditorSource.status, "failed");
+  assert.ok(
+    wrongAuditorSource.status === "failed" &&
+      wrongAuditorSource.issues.some(
+        (entry) =>
+          entry.path === "$.source_auditor_artifact" &&
+          entry.message.includes(emptyAuditPath) &&
+          entry.message.includes(assignedAuditPath) &&
+          entry.message.includes(wrongAuditorPath)
+      )
+  );
 });
 
 test("audited differential dispositions preserve stable candidate order", () => {
@@ -3749,6 +4516,113 @@ test("audited differential dispositions preserve stable candidate order", () => 
   assert.equal(reordered.status, "failed");
   assert.ok(
     reordered.status === "failed" && reordered.issues.some((entry) => entry.path === "$.rejected_or_narrowed_lanes")
+  );
+});
+
+test("audited differential candidate order uses locale comparison for mixed-case plan paths and lane IDs", () => {
+  const upperPlanPath = "artifacts/Planner-Z/differential-plan.json";
+  const lowerPlanPath = "artifacts/planner-a/differential-plan.json";
+  const harnessPath = "artifacts/harness-0/reference-harness.json";
+  const auditPath = "artifacts/auditor-0/audited-differential-lanes.json";
+  const plannedLane = (laneId: string, surfaceId: string) => ({
+    lane_id: laneId,
+    planner_attempt_index: 0,
+    surface_id: surfaceId,
+    intended_t_sol_path: `test/foundry/differential/${laneId}.t.sol`,
+    focused_command: `forge test --match-path test/foundry/differential/${laneId}.t.sol`,
+    public_evidence_paths: [`docs/${surfaceId}.md`],
+    observable_equality_assertions: ["returns match"],
+    oracle_type: "independent_reference",
+    calibration_bucket: "red_seeking_adversarial",
+    red_seeking_priority: "high"
+  });
+  const upperPlan = {
+    planner_attempt_index: 0,
+    candidate_surfaces: [
+      { surface_id: "surface-Z", public_evidence_paths: ["docs/surface-Z.md"] },
+      { surface_id: "surface-a", public_evidence_paths: ["docs/surface-a.md"] }
+    ],
+    assigned_differential_lanes: [plannedLane("lane-Z", "surface-Z"), plannedLane("lane-a", "surface-a")]
+  };
+  const lowerPlan = {
+    planner_attempt_index: 0,
+    candidate_surfaces: [{ surface_id: "surface-M", public_evidence_paths: ["docs/surface-M.md"] }],
+    assigned_differential_lanes: [plannedLane("lane-M", "surface-M")]
+  };
+  const orderedAudit = {
+    auditor_attempt_index: 0,
+    source_plan_artifacts: [upperPlanPath, lowerPlanPath],
+    source_harness_artifacts: [harnessPath],
+    surface_audits: [
+      { surface_id: "surface-Z", public_evidence_paths: ["docs/surface-Z.md"] },
+      { surface_id: "surface-a", public_evidence_paths: ["docs/surface-a.md"] },
+      { surface_id: "surface-M", public_evidence_paths: ["docs/surface-M.md"] }
+    ],
+    ready_lanes: [],
+    rejected_or_narrowed_lanes: ["lane-M", "lane-a", "lane-Z"].map((laneId) => ({
+      lane_id: laneId,
+      disposition: "rejected",
+      reason: "Not assigned to this attempt."
+    }))
+  };
+  const context: SemanticGateContext = {
+    artifactSet: {
+      differentialArtifacts: {
+        current: differentialBinding(
+          auditPath,
+          "ultrafuzz/audited-differential-lanes@1",
+          "reference-and-lane-auditor",
+          {},
+          "auditor-0"
+        ),
+        plans: [
+          differentialBinding(
+            upperPlanPath,
+            "ultrafuzz/differential-plan@1",
+            "differential-oracle-planner",
+            upperPlan,
+            "Planner-Z"
+          ),
+          differentialBinding(
+            lowerPlanPath,
+            "ultrafuzz/differential-plan@1",
+            "differential-oracle-planner",
+            lowerPlan,
+            "planner-a"
+          )
+        ],
+        harnesses: [
+          differentialBinding(
+            harnessPath,
+            "ultrafuzz/reference-harness@1",
+            "reference-harness-author",
+            { harness_author_attempt_index: 0 },
+            "harness-0"
+          )
+        ]
+      }
+    }
+  };
+
+  assert.equal(
+    executeSemanticGate("audited-differential-handoff-reconciliation", { document: orderedAudit, context }).status,
+    "passed"
+  );
+  const asciiOrdered = executeSemanticGate("audited-differential-handoff-reconciliation", {
+    document: {
+      ...orderedAudit,
+      rejected_or_narrowed_lanes: ["lane-Z", "lane-a", "lane-M"].map((laneId) => ({
+        lane_id: laneId,
+        disposition: "rejected",
+        reason: "ASCII comparator order."
+      }))
+    },
+    context
+  });
+  assert.equal(asciiOrdered.status, "failed");
+  assert.ok(
+    asciiOrdered.status === "failed" &&
+      asciiOrdered.issues.some((entry) => entry.path === "$.rejected_or_narrowed_lanes")
   );
 });
 
@@ -4142,6 +5016,499 @@ test("differential report review preserves production-red and final-finding iden
   );
 });
 
+test("dynamic strategy reconciliation accepts the mandatory boundary coordinator when enumerator count is zero", () => {
+  const strategyId = "boundary-recipe-boundary-attempt:zero-length-calldata";
+  const enumeratorId = "boundary-recipe-coordinator";
+  const recommendation = {
+    ...dynamicRecommendationFixture,
+    strategy_id: strategyId,
+    title: "Zero-length calldata boundary"
+  };
+  const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+    document: {
+      strategies: [
+        {
+          ...recommendation,
+          enumerator_ids: [enumeratorId],
+          validation_plan: ["Run the focused boundary-recipe command."]
+        }
+      ]
+    },
+    context: {
+      artifactSet: {
+        dynamicStrategyArtifacts: {
+          strategyPlan: {
+            dynamic_strategies_enumerator: 0,
+            selected_strategy_count: 1,
+            selected_strategies: [strategyId],
+            rejected_strategies: []
+          },
+          enumeratorOutputs: {
+            enumerators: [{ enumerator_id: enumeratorId, recommendations: [recommendation] }]
+          },
+          findings: [{ dynamic_strategy_id: strategyId, enumerator_id: enumeratorId }],
+          generatedTests: { generated_tests: [], support_files: [] },
+          provenance: { generated_files: [{ strategy_id: strategyId }] },
+          dynamicStrategiesEnumeratorPolicy: 0,
+          boundaryRecipeArtifacts: [
+            {
+              attemptId: "boundary-attempt",
+              logicalNodeId: "boundary-tests",
+              path: "artifacts/boundary-attempt/boundary-recipes.json",
+              contract: "ultrafuzz/boundary-recipes@1",
+              document: {
+                recipes: [
+                  {
+                    id: "zero-length-calldata",
+                    expected_classification_if_red: "production-bug"
+                  }
+                ]
+              }
+            }
+          ],
+          ancestorFindingArtifacts: [],
+          currentAttempt: dynamicStrategyCurrentAttemptFixture,
+          authenticatedCurrentRunArtifactPaths: []
+        }
+      }
+    }
+  });
+
+  assert.equal(result.status, "passed");
+});
+
+test("dynamic boundary coordinator enforcement rejects policy, ownership, queue, disposition, and attribution drift", () => {
+  const coordinatorId = "boundary-recipe-coordinator";
+  const strategyId = "boundary-recipe-boundary-attempt:alpha";
+  const recommendation = {
+    ...dynamicRecommendationFixture,
+    strategy_id: strategyId,
+    title: "Alpha boundary"
+  };
+  interface MutableCoordinatorArtifacts {
+    strategyPlan: {
+      dynamic_strategies_enumerator: number | "unlimited";
+      selected_strategy_count: number;
+      selected_strategies: string[];
+      rejected_strategies: Array<{ strategy_id: string; reason: string }>;
+    };
+    enumeratorOutputs: {
+      enumerators: Array<{ enumerator_id: string; recommendations: Array<Record<string, unknown>> }>;
+    };
+    findings: Array<Record<string, unknown>>;
+    generatedTests: { generated_tests: Array<Record<string, unknown>>; support_files: Array<Record<string, unknown>> };
+    provenance: { generated_files: Array<Record<string, unknown>> };
+    dynamicStrategiesEnumeratorPolicy: number | "unlimited";
+    boundaryRecipeArtifacts: Array<{
+      attemptId: string;
+      logicalNodeId: string;
+      path: string;
+      contract: string;
+      document: unknown;
+    }>;
+    ancestorFindingArtifacts: Array<{
+      attemptId: string;
+      logicalNodeId: string;
+      path: string;
+      contract: string;
+      document: unknown;
+    }>;
+    currentAttempt: typeof dynamicStrategyCurrentAttemptFixture;
+    authenticatedCurrentRunArtifactPaths: string[];
+  }
+  const baselineArtifacts: MutableCoordinatorArtifacts = {
+    strategyPlan: {
+      dynamic_strategies_enumerator: 0,
+      selected_strategy_count: 1,
+      selected_strategies: [strategyId],
+      rejected_strategies: []
+    },
+    enumeratorOutputs: {
+      enumerators: [{ enumerator_id: coordinatorId, recommendations: [recommendation] }]
+    },
+    findings: [{ dynamic_strategy_id: strategyId, enumerator_id: coordinatorId }],
+    generatedTests: { generated_tests: [], support_files: [] },
+    provenance: { generated_files: [{ strategy_id: strategyId }] },
+    dynamicStrategiesEnumeratorPolicy: 0,
+    boundaryRecipeArtifacts: [
+      {
+        attemptId: "boundary-attempt",
+        logicalNodeId: "boundary-tests",
+        path: "artifacts/boundary-attempt/boundary-recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        document: {
+          recipes: [{ id: "alpha", expected_classification_if_red: "production-bug" }]
+        }
+      }
+    ],
+    ancestorFindingArtifacts: [],
+    currentAttempt: dynamicStrategyCurrentAttemptFixture,
+    authenticatedCurrentRunArtifactPaths: []
+  };
+  const baselineDocument = {
+    strategies: [{ ...recommendation, enumerator_ids: [coordinatorId], validation_plan: ["Validate alpha."] }]
+  };
+  const cases: Array<{
+    name: string;
+    mutate: (artifacts: MutableCoordinatorArtifacts, document: typeof baselineDocument) => void;
+    message: RegExp;
+  }> = [
+    {
+      name: "resolved policy drift",
+      mutate: (artifacts) => {
+        artifacts.strategyPlan.dynamic_strategies_enumerator = 1;
+      },
+      message: /authenticated resolved policy/u
+    },
+    {
+      name: "missing coordinator",
+      mutate: (artifacts) => {
+        artifacts.enumeratorOutputs.enumerators = [];
+      },
+      message: /requires exactly one boundary-recipe-coordinator/u
+    },
+    {
+      name: "unauthorized coordinator",
+      mutate: (artifacts) => {
+        artifacts.boundaryRecipeArtifacts = [];
+      },
+      message: /unauthorized when the mandatory boundary-recipe queue is empty/u
+    },
+    {
+      name: "misordered coordinator",
+      mutate: (artifacts) => {
+        artifacts.dynamicStrategiesEnumeratorPolicy = 1;
+        artifacts.strategyPlan.dynamic_strategies_enumerator = 1;
+        artifacts.enumeratorOutputs.enumerators.unshift({
+          enumerator_id: "independent-a",
+          recommendations: []
+        });
+      },
+      message: /must be the first enumerator record/u
+    },
+    {
+      name: "independent enumerator at zero",
+      mutate: (artifacts) => {
+        artifacts.enumeratorOutputs.enumerators.push({
+          enumerator_id: "independent-a",
+          recommendations: []
+        });
+      },
+      message: /policy 0 forbids independent enumerator records/u
+    },
+    {
+      name: "positive enumerator limit",
+      mutate: (artifacts) => {
+        artifacts.dynamicStrategiesEnumeratorPolicy = 1;
+        artifacts.strategyPlan.dynamic_strategies_enumerator = 1;
+        artifacts.enumeratorOutputs.enumerators.push(
+          { enumerator_id: "independent-a", recommendations: [] },
+          { enumerator_id: "independent-b", recommendations: [] }
+        );
+      },
+      message: /exceeds the authenticated resolved policy 1/u
+    },
+    {
+      name: "independent boundary ownership",
+      mutate: (artifacts) => {
+        artifacts.dynamicStrategiesEnumeratorPolicy = 1;
+        artifacts.strategyPlan.dynamic_strategies_enumerator = 1;
+        artifacts.enumeratorOutputs.enumerators.push({
+          enumerator_id: "independent-a",
+          recommendations: [recommendation]
+        });
+      },
+      message: /cannot own reserved boundary-recipe strategy/u
+    },
+    {
+      name: "missing coordinator recommendation",
+      mutate: (artifacts) => {
+        artifacts.enumeratorOutputs.enumerators[0]!.recommendations = [];
+      },
+      message: /must exactly equal the mandatory queue/u
+    },
+    {
+      name: "extra coordinator recommendation",
+      mutate: (artifacts) => {
+        artifacts.enumeratorOutputs.enumerators[0]!.recommendations.push({
+          ...recommendation,
+          strategy_id: "boundary-recipe-extra"
+        });
+      },
+      message: /must exactly equal the mandatory queue/u
+    },
+    {
+      name: "missing recipe disposition",
+      mutate: (artifacts) => {
+        artifacts.strategyPlan.selected_strategy_count = 0;
+        artifacts.strategyPlan.selected_strategies = [];
+      },
+      message: /has no selected or rejected disposition/u
+    },
+    {
+      name: "selected attribution",
+      mutate: (_artifacts, document) => {
+        document.strategies[0]!.enumerator_ids = ["independent-a"];
+      },
+      message: /must be attributed only to boundary-recipe-coordinator/u
+    },
+    {
+      name: "finding attribution",
+      mutate: (artifacts) => {
+        artifacts.findings[0]!.enumerator_id = "independent-a";
+      },
+      message: /finding.*must be attributed to boundary-recipe-coordinator/u
+    }
+  ];
+
+  for (const fixture of cases) {
+    const artifacts = structuredClone(baselineArtifacts);
+    const document = structuredClone(baselineDocument);
+    fixture.mutate(artifacts, document);
+    const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+      document,
+      context: { artifactSet: { dynamicStrategyArtifacts: artifacts } }
+    });
+    assert.equal(result.status, "failed", fixture.name);
+    assert.ok(
+      result.status === "failed" && result.issues.some((entry) => fixture.message.test(entry.message)),
+      `${fixture.name}: ${JSON.stringify(result)}`
+    );
+  }
+});
+
+test("dynamic boundary queue honors ancestor finding coverage and unlimited or positive policy semantics", () => {
+  const context = structuredClone(dynamicStrategyArtifactContext);
+  const artifacts = context.artifactSet!.dynamicStrategyArtifacts!;
+  artifacts.dynamicStrategiesEnumeratorPolicy = "unlimited";
+  (artifacts.strategyPlan as Record<string, unknown>).dynamic_strategies_enumerator = "unlimited";
+  (artifacts.enumeratorOutputs as { enumerators: unknown[] }).enumerators.push(
+    { enumerator_id: "independent-empty-a", recommendations: [] },
+    { enumerator_id: "independent-empty-b", recommendations: [] },
+    { enumerator_id: "independent-empty-c", recommendations: [] }
+  );
+  artifacts.boundaryRecipeArtifacts = [
+    {
+      attemptId: "boundary-z",
+      logicalNodeId: "boundary-z",
+      path: "artifacts/z/boundary-recipes.json",
+      contract: "ultrafuzz/boundary-recipes@1",
+      document: {
+        recipes: [
+          {
+            id: "covered",
+            finding_ids: ["finding-covered"],
+            expected_classification_if_red: "production-bug"
+          }
+        ]
+      }
+    }
+  ];
+  artifacts.ancestorFindingArtifacts = [
+    {
+      attemptId: "boundary-z",
+      logicalNodeId: "boundary-z",
+      path: "artifacts/z/findings.json",
+      contract: "ultrafuzz/findings@2",
+      document: [{ id: "finding-covered" }]
+    }
+  ];
+
+  const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+    document: { strategies: [structuredClone(selectedDynamicStrategyFixture)] },
+    context
+  });
+  assert.equal(result.status, "passed", JSON.stringify(result));
+
+  const finiteContext = structuredClone(context);
+  const finiteArtifacts = finiteContext.artifactSet!.dynamicStrategyArtifacts!;
+  finiteArtifacts.dynamicStrategiesEnumeratorPolicy = 4;
+  (finiteArtifacts.strategyPlan as Record<string, unknown>).dynamic_strategies_enumerator = 4;
+  assert.equal(
+    executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+      document: { strategies: [structuredClone(selectedDynamicStrategyFixture)] },
+      context: finiteContext
+    }).status,
+    "passed"
+  );
+});
+
+test("dynamic boundary coordinator recommendations follow declared artifact path and recipe order", () => {
+  const recommendationFor = (attemptId: string, recipeId: string) => ({
+    ...dynamicRecommendationFixture,
+    strategy_id: `boundary-recipe-${attemptId}:${recipeId}`,
+    title: `Boundary ${recipeId}`
+  });
+  const recommendationA = recommendationFor("boundary-a", "a");
+  const recommendationZ = recommendationFor("boundary-z", "z");
+  const artifacts = {
+    strategyPlan: {
+      dynamic_strategies_enumerator: 0,
+      selected_strategy_count: 0,
+      selected_strategies: [],
+      rejected_strategies: [
+        { strategy_id: recommendationA.strategy_id, reason: "Already validated elsewhere." },
+        { strategy_id: recommendationZ.strategy_id, reason: "Already validated elsewhere." }
+      ]
+    },
+    enumeratorOutputs: {
+      enumerators: [
+        {
+          enumerator_id: "boundary-recipe-coordinator",
+          recommendations: [recommendationA, recommendationZ]
+        }
+      ]
+    },
+    findings: [],
+    generatedTests: { generated_tests: [], support_files: [] },
+    provenance: { generated_files: [] },
+    dynamicStrategiesEnumeratorPolicy: 0 as const,
+    boundaryRecipeArtifacts: [
+      {
+        attemptId: "boundary-z",
+        logicalNodeId: "boundary-z",
+        path: "artifacts/z/boundary-recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        document: { recipes: [{ id: "z", expected_classification_if_red: "production-bug" }] }
+      },
+      {
+        attemptId: "boundary-a",
+        logicalNodeId: "boundary-a",
+        path: "artifacts/a/boundary-recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        document: { recipes: [{ id: "a", expected_classification_if_red: "production-bug" }] }
+      }
+    ],
+    ancestorFindingArtifacts: [],
+    currentAttempt: dynamicStrategyCurrentAttemptFixture,
+    authenticatedCurrentRunArtifactPaths: []
+  };
+  assert.equal(
+    executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+      document: { strategies: [] },
+      context: { artifactSet: { dynamicStrategyArtifacts: artifacts } }
+    }).status,
+    "passed"
+  );
+
+  const reordered = structuredClone(artifacts);
+  reordered.enumeratorOutputs.enumerators[0]!.recommendations.reverse();
+  reordered.strategyPlan.rejected_strategies.reverse();
+  const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+    document: { strategies: [] },
+    context: { artifactSet: { dynamicStrategyArtifacts: reordered } }
+  });
+  assert.equal(result.status, "failed");
+  assert.ok(
+    result.status === "failed" &&
+      result.issues.some(
+        (entry) =>
+          /mandatory queue in first-distinct recipe order/u.test(entry.message) &&
+          entry.message.includes(
+            'expected ["boundary-recipe-boundary-a:a","boundary-recipe-boundary-z:z"]; received ["boundary-recipe-boundary-z:z","boundary-recipe-boundary-a:a"]'
+          )
+      ),
+    JSON.stringify(result)
+  );
+});
+
+test("dynamic boundary queue joins coverage by exact producer attempt and namespaces repeated recipe IDs", () => {
+  const recommendationFor = (attemptId: string) => ({
+    ...dynamicRecommendationFixture,
+    strategy_id: `boundary-recipe-${attemptId}:shared`,
+    title: `Shared boundary from ${attemptId}`
+  });
+  const recommendationB = recommendationFor("boundary-b");
+  const artifacts = {
+    strategyPlan: {
+      dynamic_strategies_enumerator: 0,
+      selected_strategy_count: 0,
+      selected_strategies: [],
+      rejected_strategies: [
+        { strategy_id: recommendationB.strategy_id, reason: "Producer B remains queued and was reviewed." }
+      ]
+    },
+    enumeratorOutputs: {
+      enumerators: [
+        {
+          enumerator_id: "boundary-recipe-coordinator",
+          recommendations: [recommendationB]
+        }
+      ]
+    },
+    findings: [],
+    generatedTests: { generated_tests: [], support_files: [] },
+    provenance: { generated_files: [] },
+    dynamicStrategiesEnumeratorPolicy: 0 as const,
+    boundaryRecipeArtifacts: [
+      {
+        attemptId: "boundary-a",
+        logicalNodeId: "boundary-loop",
+        path: "artifacts/a/boundary-recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        document: {
+          recipes: [
+            {
+              id: "shared",
+              finding_ids: ["finding-shared"],
+              expected_classification_if_red: "production-bug"
+            }
+          ]
+        }
+      },
+      {
+        attemptId: "boundary-b",
+        logicalNodeId: "boundary-loop",
+        path: "artifacts/b/boundary-recipes.json",
+        contract: "ultrafuzz/boundary-recipes@1",
+        document: {
+          recipes: [
+            {
+              id: "shared",
+              finding_ids: ["finding-shared"],
+              expected_classification_if_red: "production-bug"
+            }
+          ]
+        }
+      }
+    ],
+    ancestorFindingArtifacts: [
+      {
+        attemptId: "boundary-a",
+        logicalNodeId: "boundary-loop",
+        path: "artifacts/a/findings.json",
+        contract: "ultrafuzz/findings@2",
+        document: [{ id: "finding-shared" }]
+      }
+    ],
+    currentAttempt: dynamicStrategyCurrentAttemptFixture,
+    authenticatedCurrentRunArtifactPaths: []
+  };
+  assert.equal(
+    executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+      document: { strategies: [] },
+      context: { artifactSet: { dynamicStrategyArtifacts: artifacts } }
+    }).status,
+    "passed"
+  );
+
+  const bothQueued = structuredClone(artifacts);
+  bothQueued.ancestorFindingArtifacts = [];
+  const recommendationA = recommendationFor("boundary-a");
+  bothQueued.enumeratorOutputs.enumerators[0]!.recommendations = [recommendationA, recommendationB];
+  bothQueued.strategyPlan.rejected_strategies = [
+    { strategy_id: recommendationA.strategy_id, reason: "Producer A was reviewed." },
+    { strategy_id: recommendationB.strategy_id, reason: "Producer B was reviewed." }
+  ];
+  assert.equal(
+    executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+      document: { strategies: [] },
+      context: { artifactSet: { dynamicStrategyArtifacts: bothQueued } }
+    }).status,
+    "passed"
+  );
+});
+
 test("dynamic strategy reconciliation rejects every shape-valid sibling join drift", () => {
   interface MutableDynamicContext {
     artifactSet: {
@@ -4150,6 +5517,7 @@ test("dynamic strategy reconciliation rejects every shape-valid sibling join dri
           selected_strategy_count: number;
           selected_strategies: string[];
           rejected_strategies: Array<{ strategy_id: string; reason: string }>;
+          current_run_artifacts_considered: Array<{ path: string; relevance: string }>;
         };
         enumeratorOutputs: {
           enumerators: Array<{
@@ -4158,7 +5526,11 @@ test("dynamic strategy reconciliation rejects every shape-valid sibling join dri
           }>;
         };
         findings: Array<Record<string, unknown>>;
-        provenance: { generated_files: Array<Record<string, unknown>> };
+        generatedTests: {
+          generated_tests: Array<Record<string, unknown>>;
+          support_files: Array<Record<string, unknown>>;
+        };
+        provenance: { current_run_artifacts: string[]; generated_files: Array<Record<string, unknown>> };
       };
     };
   }
@@ -4240,6 +5612,66 @@ test("dynamic strategy reconciliation rejects every shape-valid sibling join dri
         context.artifactSet.dynamicStrategyArtifacts.provenance.generated_files[0]!.strategy_id = "strategy-b";
       },
       message: /generated file.*unselected strategy/u
+    },
+    {
+      name: "missing considered artifact",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.current_run_artifacts.pop();
+      },
+      message: /ordered strategy-plan current_run_artifacts_considered path projection/u
+    },
+    {
+      name: "extra considered artifact",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.current_run_artifacts.push(
+          "artifacts/inputs/extra.json"
+        );
+      },
+      message: /ordered strategy-plan current_run_artifacts_considered path projection/u
+    },
+    {
+      name: "reordered considered artifacts",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.current_run_artifacts.reverse();
+      },
+      message: /ordered strategy-plan current_run_artifacts_considered path projection/u
+    },
+    {
+      name: "duplicate considered artifact",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.strategyPlan.current_run_artifacts_considered.push({
+          path: "artifacts/inputs/project-discovery.md",
+          relevance: "Duplicated context."
+        });
+      },
+      message: /ordered strategy-plan current_run_artifacts_considered path projection/u
+    },
+    {
+      name: "provenance path",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.generated_files[0]!.source_path =
+          "generated-tests/Other.t.sol";
+      },
+      message: /current-attempt generated-test manifest/u
+    },
+    {
+      name: "manifest path",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.generatedTests.support_files.push({
+          path: "generated-tests/Helper.sol"
+        });
+      },
+      message: /current-attempt generated-test manifest/u
+    },
+    {
+      name: "duplicate provenance path",
+      mutate: (context) => {
+        context.artifactSet.dynamicStrategyArtifacts.provenance.generated_files.push({
+          strategy_id: "strategy-a",
+          source_path: "generated-tests/StrategyA.t.sol"
+        });
+      },
+      message: /current-attempt generated-test manifest/u
     }
   ];
 
@@ -4254,6 +5686,94 @@ test("dynamic strategy reconciliation rejects every shape-valid sibling join dri
       fixture.name
     );
   }
+
+  const reorderedContext = structuredClone(dynamicStrategyArtifactContext) as MutableDynamicContext;
+  reorderedContext.artifactSet.dynamicStrategyArtifacts.enumeratorOutputs.enumerators[0]!.recommendations.push({
+    ...dynamicRecommendationFixture,
+    strategy_id: "strategy-c",
+    title: "Strategy C"
+  });
+  reorderedContext.artifactSet.dynamicStrategyArtifacts.strategyPlan.rejected_strategies = [
+    { strategy_id: "strategy-c", reason: "Lower priority." },
+    { strategy_id: "strategy-b", reason: "Lower priority." }
+  ];
+  const reorderedComplement = executeSemanticGate("dynamic-strategy-artifact-reconciliation", {
+    document: { strategies: [structuredClone(selectedDynamicStrategyFixture)] },
+    context: reorderedContext
+  });
+  assert.equal(reorderedComplement.status, "failed");
+  assert.ok(
+    reorderedComplement.status === "failed" &&
+      reorderedComplement.issues.some(
+        (entry) =>
+          /exact complement/u.test(entry.message) &&
+          entry.message.includes('expected ["strategy-b","strategy-c"]') &&
+          entry.message.includes('received ["strategy-c","strategy-b"]')
+      )
+  );
+});
+
+test("dynamic strategy provenance accepts only authenticated ancestor paths and the current producer model", () => {
+  const validContext = structuredClone(dynamicStrategyArtifactContext);
+  const validArtifacts = validContext.artifactSet!.dynamicStrategyArtifacts!;
+  validArtifacts.currentAttempt = {
+    ...dynamicStrategyCurrentAttemptFixture,
+    modelName: "gpt-current"
+  };
+  const validProvenance = validArtifacts.provenance as {
+    current_run_artifacts: string[];
+    generated_files: Array<Record<string, unknown>>;
+    agents: Array<{ agent_id: string; label: string; role: string }>;
+    models: Array<{ agent_id: string; model: string; backend: string }>;
+  };
+  validProvenance.agents = [{ agent_id: "enumerator-a", label: "Enumerator A", role: "strategy-enumerator" }];
+  validProvenance.models = [{ agent_id: "enumerator-a", model: "gpt-current", backend: "CodexAgent" }];
+  const document = { strategies: [structuredClone(selectedDynamicStrategyFixture)] };
+  assert.equal(
+    executeSemanticGate("dynamic-strategy-artifact-reconciliation", { document, context: validContext }).status,
+    "passed"
+  );
+
+  const assertAuthorityFailure = (context: SemanticGateContext, expected: RegExp): void => {
+    const result = executeSemanticGate("dynamic-strategy-artifact-reconciliation", { document, context });
+    assert.equal(result.status, "failed", JSON.stringify(result));
+    assert.ok(
+      result.status === "failed" && result.issues.some((entry) => expected.test(entry.message)),
+      JSON.stringify(result)
+    );
+  };
+
+  const foreignAttempt = structuredClone(validContext);
+  const foreignArtifacts = foreignAttempt.artifactSet!.dynamicStrategyArtifacts!;
+  const foreignPath = "artifacts/dynamic__model_9__attempt_9/provenance.json";
+  (
+    foreignArtifacts.strategyPlan as {
+      current_run_artifacts_considered: Array<{ path: string; relevance: string }>;
+    }
+  ).current_run_artifacts_considered[0]!.path = foreignPath;
+  (foreignArtifacts.provenance as { current_run_artifacts: string[] }).current_run_artifacts[0] = foreignPath;
+  assertAuthorityFailure(foreignAttempt, /outside the authenticated ancestor publication authority/u);
+
+  const foreignModel = structuredClone(validContext);
+  (
+    foreignModel.artifactSet!.dynamicStrategyArtifacts!.provenance as {
+      models: Array<{ agent_id: string; model: string; backend: string }>;
+    }
+  ).models[0]!.model = "model-from-sibling-attempt";
+  assertAuthorityFailure(foreignModel, /does not match authenticated current producer model/u);
+
+  const foreignBackend = structuredClone(validContext);
+  (
+    foreignBackend.artifactSet!.dynamicStrategyArtifacts!.provenance as {
+      models: Array<{ agent_id: string; model: string; backend: string }>;
+    }
+  ).models[0]!.backend = "foreign-backend";
+  assertAuthorityFailure(foreignBackend, /does not match authenticated current producer agent/u);
+
+  const modelWithoutAuthority = structuredClone(validContext);
+  delete (modelWithoutAuthority.artifactSet!.dynamicStrategyArtifacts!.currentAttempt as { modelName?: string })
+    .modelName;
+  assertAuthorityFailure(modelWithoutAuthority, /models must be empty.*has no model name/u);
 });
 
 test("attempt source-event joins accept only declared host-side validation failures from NodeFinished", () => {

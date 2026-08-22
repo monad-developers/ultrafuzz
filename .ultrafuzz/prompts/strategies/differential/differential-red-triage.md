@@ -15,9 +15,11 @@ triage attempt's conclusions, and do not treat one attempt as consensus.
 
 Build the semantic red registry from current lane validation output:
 
-{{artifact_handoff:differential-lane-author}}
+{{ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1}}
 
-Flatten every lane result in declared handoff order: first all semantic reds in
+Read the sealed manifest definition instead of expecting an expanded lane-result
+path array. Flatten every selected lane result in the selector's required
+run-relative `localeCompare` order: first all semantic reds in
 their lane-row order, then all compile/harness defects in their lane-row order.
 Copy each failure packet and its `stable_failure_hash` exactly. Do not omit,
 invent, reorder, summarize, recompute, normalize, or convert an upstream value.

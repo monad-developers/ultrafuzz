@@ -16,7 +16,7 @@ interface FileIdentity {
 interface SmithersExecutableIdentity {
   runner: FileIdentity;
   interpreter: FileIdentity & { runtime: "bun" | "other" };
-  bunStartup?: Readonly<{ confinement: FileIdentity; config: FileIdentity }>;
+  bunStartup?: Readonly<{ confinement: FileIdentity; config: FileIdentity; environment: FileIdentity }>;
 }
 type Forbidden = Readonly<{ lexical: string; real: string }>;
 
@@ -144,7 +144,11 @@ export function acquireSmithersExecutableAnchor(
     const bunControls =
       capability.bunStartup === undefined
         ? undefined
-        : { confinement: bunModuleConfinement!, config: path.join(path.dirname(bunModuleConfinement!), "bunfig.toml") };
+        : {
+            confinement: bunModuleConfinement!,
+            config: path.join(path.dirname(bunModuleConfinement!), "bunfig.toml"),
+            environment: path.join(path.dirname(bunModuleConfinement!), "bun-empty.env")
+          };
     if (bunControls !== undefined)
       for (const [name, identity] of Object.entries(capability.bunStartup!))
         assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
@@ -152,6 +156,7 @@ export function acquireSmithersExecutableAnchor(
       capability.interpreter.runtime === "bun"
         ? [
             `--config=${bunControls!.config}`,
+            `--env-file=${bunControls!.environment}`,
             "--no-env-file",
             "--no-install",
             "--no-addons",
@@ -211,7 +216,12 @@ function verifiedBunStartupControls(
     throw new Error("Bun workflow runner startup controls must share its sealed snapshot");
   return {
     confinement,
-    config: verifiedRegularFile(path.join(controls, "bunfig.toml"), false, "Bun workflow runner config")
+    config: verifiedRegularFile(path.join(controls, "bunfig.toml"), false, "Bun workflow runner config"),
+    environment: verifiedRegularFile(
+      path.join(controls, "bun-empty.env"),
+      false,
+      "Bun workflow runner empty environment"
+    )
   };
 }
 

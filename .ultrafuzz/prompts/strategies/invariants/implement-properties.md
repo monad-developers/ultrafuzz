@@ -30,7 +30,9 @@ Read the current invariant suite handoffs before editing:
 
 {{artifact_path:stateful-invariant-handlers}}/handler-coverage-inventory.md
 
-{{artifact_path:stateful-invariant-coverage}}/coverage-report.md
+Read the admitted prior Recon coverage reports through this compact authority:
+
+{{ancestor_artifact_path_authority:coverage-report.md}}
 
 Use this resolved implementation priority threshold:
 
@@ -86,6 +88,20 @@ cannot be lost during priority filtering.
      repair the handler and rerun its bounded smoke when any entry is missing.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
+   - Every expected value or state transition must come from an independent
+     oracle grounded in public specifications, source-declared invariants, or
+     an independently derived accounting equation. Never call, copy,
+     translate, simplify, or re-derive the implementation under test as the
+     oracle for its own behavior. When no independent expected value exists,
+     record the property as blocked instead of implementing a self-comparison.
+   - Require non-vacuity evidence for every `implemented` property: Recon must
+     discover its public assertion entrypoint, a relevant handler must have a
+     realistic path that reaches and completes a meaningful protocol action,
+     and the assertion must read the resulting target state or accounting
+     observation. A constant-true assertion, an assertion over an empty target
+     set, a property reachable only after all handlers return at guards, or a
+     property whose relevant actions never complete is not implemented; repair
+     the suite or record the property as blocked with the concrete reason.
    - Every assertion observes state after a directly invoked protocol action;
      preserve any target revert, panic, or out-of-gas failure as Recon evidence
      and connect it to the selected property when the catalog requires it.
@@ -101,6 +117,10 @@ cannot be lost during priority filtering.
    - Keep setup and handler changes minimal and realistic.
    - Do not weaken existing assertions or hide failures with broad
      precondition skips.
+   - Never convert a source-backed safety assertion into a `require`, handler
+     guard, or other precondition that prevents the backend from observing the
+     violating post-state. Preconditions may admit valid actions; they may not
+     assume the property under test.
    - Do not edit production contracts except interfaces that are genuinely
      required by the test harness.
    - Keep generated or changed invariant files in the test tree and include
@@ -135,6 +155,9 @@ cannot be lost during priority filtering.
      discoverable and rerun the smoke. If it still cannot be admitted, mark
      that property `blocked` with the omitted entrypoint and diagnostic; never
      report an omitted property as implemented.
+   - Do not treat the one-action deployment smoke or a green assertion alone as
+     anti-vacuity proof. Preserve the handler reachability and target-state
+     evidence that makes each implemented observation meaningful.
    - If dependencies or repository layout block compilation, record the exact
      blocker and leave the implemented files and artifacts in a reviewable
      state.

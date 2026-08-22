@@ -122,6 +122,9 @@ workflow_input:
   excluded_strategy_families: [stateful-invariant, differential, dynamic-strategy]
   benchmark_execution:
     workflow_profile: smoke-benchmark-v1
+    audit_profile: smoke
+    audit_profile_catalog_digest: <64-lowercase-hex catalog digest>
+    topology_digest: <64-lowercase-hex packaged smoke topology digest>
     selected_strategy_ids:
       - time-warp-sequences
       - external-dependency-boundaries
@@ -134,6 +137,15 @@ workflow_input:
 Missing fields, extra fields, duplicate array entries, wrong lane constants,
 reserved operator keys, and historical version literals fail validation. There
 is no alias conversion, compatibility fallback, or repair pass.
+The checked-in benchmark adapter preserves that released full-lane shape. The
+launcher derives the current packaged `full` policy from `benchmark_lane: full`;
+it refuses to launch public variants that declare a topology override. Before
+`startRun`, it resolves the target's effective policy, requires the topology to
+originate from that audit profile, and refuses any audit-profile, catalog, or
+topology digest mismatch. The run journal captures that actual origin and
+policy, and public-history publication checks every launched record against the
+candidate checkout's packaged policy, so a stale or target-local override
+cannot silently replace the packaged graph.
 
 ### Held-out benchmark paths
 
@@ -334,7 +346,8 @@ strategy families. The full lane selects every checked-in EVMBench target, pins
 GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
 `max`, sets the same
 one strategy loop, and explicitly leaves all three disable flags off so the
-complete topology is included. Both currently declare one trial per variant and use
+packaged `full` audit profile and its complete specialist topology are included.
+Both currently declare one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
 runner variant. Repository variables may override the smoke OpenAI model and
 reasoning level, while full workflow dispatch inputs may override any full-lane

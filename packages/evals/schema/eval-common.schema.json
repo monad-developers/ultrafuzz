@@ -962,6 +962,9 @@
         "config_fingerprint": { "$ref": "#/$defs/sha256" },
         "audit_profile": { "$ref": "#/$defs/nonEmptyString" },
         "audit_profile_catalog_digest": { "$ref": "#/$defs/sha256" },
+        "topology_path_origin": {
+          "enum": ["project-default", "audit-profile", "project-config", "runtime-override"]
+        },
         "topology_digest": { "$ref": "#/$defs/sha256" },
         "prompt_digest": { "$ref": "#/$defs/sha256" },
         "candidate_label": { "$ref": "#/$defs/nonEmptyString" },

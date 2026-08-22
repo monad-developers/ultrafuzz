@@ -118,61 +118,6 @@ function validatePromptVariable(
     }
     return;
   }
-
-  if (variable.name === "ancestor_artifacts") {
-    const producers =
-      variable.argument === undefined || variable.argument.trim().length === 0
-        ? node.depends_on
-        : variable.argument
-            .split(",")
-            .map((part) => part.trim())
-            .filter(Boolean);
-    if (producers.length === 0) {
-      throw topologyError("INVALID_PROMPT_ARTIFACT_REFERENCE", "ancestor_artifacts found no producer nodes", {
-        nodeId: node.id,
-        variable: variable.raw
-      });
-    }
-    for (const producerId of producers) {
-      if (!isSafeId(producerId)) {
-        throw topologyError("INVALID_PROMPT_ARTIFACT_REFERENCE", `Invalid producer id \`${producerId}\``, {
-          nodeId: node.id,
-          referenced: producerId
-        });
-      }
-      const producer = validateAncestorReference(node, producerId, nodeById);
-      if (producer.outputs.length === 0) {
-        throw topologyError(
-          "INVALID_PROMPT_ARTIFACT_REFERENCE",
-          `ancestor_artifacts producer \`${producerId}\` has no outputs`,
-          { nodeId: node.id, referenced: producerId }
-        );
-      }
-    }
-    return;
-  }
-
-  if (
-    variable.name === "ancestor_generated_test_manifests" ||
-    variable.name === "ancestor_generated_test_manifest_authorities"
-  ) {
-    // A findings-only topology is valid: when no ancestor declares the
-    // `ultrafuzz/generated-tests@3` contract, rendering emits the explicit
-    // no-match sentinel (mirroring `ancestor_artifacts_by_path`) instead of
-    // failing. Reserve the hard failure for genuine misconfiguration: the
-    // variable used on a node with no ancestor artifact producers at all.
-    const ancestorProducers = [...nodeById.values()].filter(
-      (candidate) =>
-        candidate.id !== node.id && isAncestor(node, candidate.id, nodeById, new Set()) && candidate.outputs.length > 0
-    );
-    if (ancestorProducers.length === 0) {
-      throw topologyError(
-        "INVALID_PROMPT_ARTIFACT_REFERENCE",
-        "generated-test ancestor manifest references require at least one ancestor artifact producer",
-        { nodeId: node.id, variable: variable.raw }
-      );
-    }
-  }
 }
 
 function extractPromptVariablesForNode(node: NormalizedTopologyNode, promptText: string): PromptVariableReference[] {

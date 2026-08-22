@@ -11,10 +11,43 @@ The declared outputs are `deduped-findings.json`, `strategy-detections.json`,
 and `finding-lifecycle-ledger.json`. Do not write prompt-only `findings.json`,
 `duplicates.json`, or alternate compatibility handoffs.
 
-Inspect every rendered strategy input before deduping. The list is derived from
-the effective topology and includes every direct producer's declared handoffs:
+Inspect every findings artifact selected by this sealed JSON authority before
+deduping. It selects every ancestor that declares
+`ultrafuzz/findings@2` without expanding an unbounded source table into this
+prompt:
 
-{{ancestor_artifacts}}
+{{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}
+
+For each selected output, its source `node_id` is the producer task's exact
+`logical_node_id`, and its ledger `path` is the artifact path relative to the run
+root. Do not use the absolute source path or output-relative filename by
+itself. Every raw finding object from every selected source artifact must
+appear exactly once across all lifecycle `source_artifacts`, identified by the
+exact tuple `(path, node_id, finding_id, title)`. A kept root uses `primary`; an
+equivalent raw duplicate uses `duplicate`; and a proven same-root variant uses
+`family-variant`. An empty findings artifact contributes no source rows. Do not
+omit, invent, repeat, rename, or silently discard a raw candidate.
+
+Each lifecycle record has exactly one `primary` source, whose exact
+`finding_id` and `title` are the kept finding's `id` and `title`.
+`duplicate_finding_ids` is the first-distinct-appearance projection of the
+`finding_id` values from that record's `duplicate` sources. Every
+`family-variant` source matches a kept `family_variants` entry by exact `id`
+and `title`, and `family_variant_keys` is exactly the kept finding's
+`family_variants[*].dedupe_key` array in authored order. Use the schema-admitted
+absent or empty form only when the corresponding projection is empty.
+
+Select generated-test manifests through this sealed JSON authority:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}
+
+Join a findings output to a generated-test manifest only when both selected
+outputs belong to producer objects with the exact same `attempt_id`,
+`logical_node_id`, and `artifact_dir`. Read the manifest from that producer
+output's exact declared `path`. Never hardcode `generated-tests.json`, join by
+filename, logical node, or authority-array position, or borrow a manifest from
+another attempt. A findings producer that declares no generated-test output
+has no manifest; do not substitute another producer's manifest.
 
 Boundary-recipe artifacts (`boundary-recipes.md`, `boundary-recipes.json`) are
 unvalidated hypothesis context only and must never contribute rows to
@@ -23,14 +56,14 @@ unvalidated hypothesis context only and must never contribute rows to
 Optional native-validation context, filtered from all ancestors without
 rendering setup patches or unrelated setup outputs:
 
-{{ancestor_artifacts_by_path:setup/project-discovery.md,setup/base-test-setup.md}}
+{{ancestor_artifact_path_authority:setup/project-discovery.md,setup/base-test-setup.md}}
 
-When this list includes project-discovery or base-test setup handoffs, read them
+When this authority selects project-discovery or base-test setup handoffs, read them
 before validation so the repository's checked-in test framework and native test
 root determine the runner. A bounded topology may intentionally omit those
 handoffs. When they are absent, do not treat the omission as an error and do not
 run native tests during dedupe; perform one model-only consolidation pass over
-the rendered finding inputs instead.
+the selected finding inputs instead.
 
 When native validation context is present, validate only focused generated
 tests or reproducers that contribute to the dedupe result. Dispatch each
@@ -49,7 +82,7 @@ base setup, and the generated-test manifest:
 Strategy workspaces are isolated from this node. Never assume a generated test
 already exists in the dedupe workspace and never validate a stale same-named
 workspace file. Before focused validation, require the strategy-owned
-`generated-tests.json` to validate against the exact pinned
+manifest selected by the exact producer join above to validate against the exact pinned
 `{{schema_path}}/generated-tests.schema.json`. That schema alone defines the
 manifest version, fields, types, enums, required members, and empty bundle.
 Treat the schema-defined runnable and support entries together as the complete bundle, copy
@@ -90,7 +123,9 @@ that producer's findings. When a finding arrives without a runnable reproducer
 bundle, validate it through a model-only consistency review of its recorded
 evidence — executed commands, observed and expected values, source fragments,
 and affected paths — against the target source; record that no reproducer
-bundle was provided; and keep, merge, or drop the finding on that evidence.
+bundle was provided; and classify every raw candidate exactly once as the
+`primary`, an equivalent `duplicate`, or a proven same-root `family-variant`.
+Never silently drop a candidate.
 Treat focused validation as blocked only when a manifest lists a companion
 that fails the checks above, never merely because a manifest is empty or
 because a findings-only producer declares none.
