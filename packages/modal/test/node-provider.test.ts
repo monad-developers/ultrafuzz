@@ -431,6 +431,40 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("keeps repaired presentation prompts out of dependency handoff identity and bytes", async () => {
+    const fixture = createProjectFixture();
+    const baseline = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const dependency = fixture.input.dependency_artifact_dirs[0]!;
+    fs.writeFileSync(path.join(fixture.root, dependency, "prompt.rendered.md"), "sealed presentation copy\n");
+    let repaired: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dependency-presentation-test-"));
+    try {
+      repaired = await createModalNodeHandoffArchive(fixture.root, {
+        ...fixture.input,
+        project_content_sha256: undefined,
+        project_archive_sha256: undefined
+      });
+      expect(repaired.contentSha256).toBe(baseline.contentSha256);
+      await extractSafeTarArchive(repaired.path, extracted, { gzip: true, label: "cloud handoff test" });
+      expect(fs.existsSync(path.join(extracted, dependency, "prompt.rendered.md"))).toBe(false);
+      expect(fs.readFileSync(path.join(extracted, dependency, "declared.txt"), "utf8")).toContain(dependency);
+      fs.rmSync(path.join(fixture.root, dependency, "prompt.rendered.md"));
+      fs.symlinkSync(path.join(fixture.root, "source.txt"), path.join(fixture.root, dependency, "prompt.rendered.md"));
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          project_content_sha256: undefined,
+          project_archive_sha256: undefined
+        })
+      ).rejects.toThrow(/dependency presentation file is unsafe/u);
+    } finally {
+      fs.rmSync(extracted, { recursive: true, force: true });
+      repaired?.cleanup();
+      baseline.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("hands a relocated worker the reference artifact tree and the digest-bound planner catalog", async () => {
     const fixture = createProjectFixture();
     const referenceDir = `${fixture.input.run_root}/artifacts/reference-vulnerability-database`;

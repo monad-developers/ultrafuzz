@@ -842,7 +842,9 @@ export async function createModalNodeHandoffArchive(
       copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
     }
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
-      copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
+      copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)), {
+        excludedRootFileNames: CLOUD_DEPENDENCY_PRESENTATION_FILES
+      });
     }
     // Reference trees and the run-root planner catalog are explicit cloud inputs: the threat-model
     // and goal-plan postprocessors verify both against the pinned database, and neither is an
@@ -891,6 +893,7 @@ const CLOUD_HANDOFF_EXPLICIT_FILES = [
   ".ultrafuzz/schema/goal-plan.schema.json",
   ".smithers/package.json"
 ] as const;
+const CLOUD_DEPENDENCY_PRESENTATION_FILES: ReadonlySet<string> = new Set(["prompt.rendered.md"]);
 
 /**
  * Hashes the semantic inputs that become the relocated project, independent of tar metadata.
@@ -916,10 +919,14 @@ export function modalNodeHandoffContentFingerprint(
     updateContentFingerprint(hash, `git:${label}`, Buffer.from(value));
   }
 
-  const overlays: Array<{ label: string; relative: string; kind: "file" | "tree" }> = [
+  const overlays: Array<{ label: string; relative: string; kind: "file" | "tree" | "dependency-tree" }> = [
     { label: "workflow", relative: input.workflow_path, kind: "file" as const },
     { label: "prompt", relative: input.prompt_path, kind: "file" as const },
-    ...input.dependency_artifact_dirs.map((relative) => ({ label: "dependency", relative, kind: "tree" as const })),
+    ...input.dependency_artifact_dirs.map((relative) => ({
+      label: "dependency",
+      relative,
+      kind: "dependency-tree" as const
+    })),
     ...(input.reference_artifact_dirs ?? []).map((relative) => ({
       label: "reference",
       relative,
@@ -941,7 +948,15 @@ export function modalNodeHandoffContentFingerprint(
     const source = checkedPath(root, overlay.relative, `${overlay.label} content`);
     updateContentFingerprint(hash, `overlay:${overlay.label}`, Buffer.from(overlay.relative));
     if (overlay.kind === "file") hashContentFile(hash, root, source, overlay.relative);
-    else hashContentTree(hash, root, source, overlay.relative);
+    else {
+      hashContentTree(
+        hash,
+        root,
+        source,
+        overlay.relative,
+        overlay.kind === "dependency-tree" ? { excludedRootFileNames: CLOUD_DEPENDENCY_PRESENTATION_FILES } : undefined
+      );
+    }
   }
   hashPromptSchemaBundle(hash, root, options.materialized === true);
   return hash.digest("hex");
@@ -968,7 +983,13 @@ function hashPromptSchemaBundle(hash: Hash, root: string, materialized: boolean)
   }
 }
 
-function hashContentTree(hash: Hash, root: string, directory: string, relative: string): void {
+function hashContentTree(
+  hash: Hash,
+  root: string,
+  directory: string,
+  relative: string,
+  options: { excludedRootFileNames?: ReadonlySet<string> } = {}
+): void {
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory) {
     throw new Error("cloud handoff content tree is unsafe");
@@ -980,6 +1001,13 @@ function hashContentTree(hash: Hash, root: string, directory: string, relative: 
   for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const child = path.join(directory, entry.name);
     const childRelative = path.posix.join(relative.split(path.sep).join("/"), entry.name);
+    if (options.excludedRootFileNames?.has(entry.name) === true) {
+      const childStat = fs.lstatSync(child);
+      if (!entry.isFile() || entry.isSymbolicLink() || childStat.nlink !== 1) {
+        throw new Error("cloud handoff dependency presentation file is unsafe");
+      }
+      continue;
+    }
     if (entry.isDirectory() && !entry.isSymbolicLink()) hashContentTree(hash, root, child, childRelative);
     else if (entry.isFile() && !entry.isSymbolicLink()) hashContentFile(hash, root, child, childRelative);
     else throw new Error("cloud handoff content tree excludes links and special files");
@@ -2176,7 +2204,11 @@ function copyDependencyVerificationMarkers(
   }
 }
 
-function copyTreeChecked(source: string, destination: string): void {
+function copyTreeChecked(
+  source: string,
+  destination: string,
+  options: { excludedRootFileNames?: ReadonlySet<string> } = {}
+): void {
   const stat = fs.lstatSync(source);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("cloud handoff source must be a directory");
@@ -2185,6 +2217,13 @@ function copyTreeChecked(source: string, destination: string): void {
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
     const childSource = path.join(source, entry.name);
     const childDestination = path.join(destination, entry.name);
+    if (options.excludedRootFileNames?.has(entry.name) === true) {
+      const childStat = fs.lstatSync(childSource);
+      if (!entry.isFile() || entry.isSymbolicLink() || childStat.nlink !== 1) {
+        throw new Error("cloud handoff dependency presentation file is unsafe");
+      }
+      continue;
+    }
     if (entry.isDirectory()) {
       copyTreeChecked(childSource, childDestination);
     } else if (entry.isFile()) {
