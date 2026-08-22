@@ -16,6 +16,7 @@ import {
 import type { parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
+const TRUSTED_MOUNT_ROOT = "/data";
 const DURABLE_WORKSPACE_DIRECTORY = "workspace";
 const DURABLE_INPUT_DIRECTORY = "input";
 const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
@@ -70,6 +71,18 @@ interface DurableCheckpointIndex {
 
 export interface DurableNodeWorkspace {
   projectRoot: string;
+  /**
+   * The canonical attempt root `resolveDurableDataRoot` already validated, for worker-owned
+   * filesystem work.
+   *
+   * A trusted provider mount such as Modal filesystem-v2's `/data` is an alias, so the lexical
+   * `--data-root` and this canonical root differ only in that provider-owned prefix. Every
+   * worker-owned staging, lock, archive, publication, and sync operation runs against this root so
+   * the unweakened destination guard, which requires `realpath(target) === path.resolve(target)`,
+   * accepts ordinary directories below the mount while still rejecting any alias injected under it.
+   * Controller-facing identifiers stay lexical; see `initializeDurableNodeWorkspace`.
+   */
+  attemptRoot: string;
   checkpointIndex: string;
   input: ReturnType<typeof parseModalNodeWorkerInput>;
   hasCompletedCheckpoint: boolean;
@@ -87,6 +100,7 @@ async function main(): Promise<void> {
     durableWorkspace = await initializeDurableNodeWorkspace(dataRoot, archivePath, requestedInput);
     const input = durableWorkspace.input;
     const projectRoot = durableWorkspace.projectRoot;
+    const attemptRoot = durableWorkspace.attemptRoot;
     if (!durableWorkspace.hasCompletedCheckpoint) {
       durableWorkspace.recordCheckpoint("prepared");
     }
@@ -108,8 +122,8 @@ async function main(): Promise<void> {
     );
     const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
-    cleanupStalePublicationDirectories(dataRoot);
-    publishing = path.join(dataRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
+    cleanupStalePublicationDirectories(attemptRoot);
+    publishing = path.join(attemptRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
     fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
@@ -157,11 +171,11 @@ async function main(): Promise<void> {
           DURABLE_CHECKPOINT_DIRECTORY,
           `${completedCheckpoint.checkpoint_id}.json`
         ),
-        durable_checkpoint_index: durableWorkspace.checkpointIndex
+        durable_checkpoint_index: path.posix.join(dataRoot, DURABLE_CHECKPOINT_DIRECTORY, DURABLE_CHECKPOINT_INDEX)
       })}\n`,
       { mode: 0o600 }
     );
-    const publicationLock = path.join(dataRoot, ".result-publishing.lock");
+    const publicationLock = path.join(attemptRoot, ".result-publishing.lock");
     let lockFd: number | undefined;
     let lockIdentity: { dev: number; ino: number } | undefined;
     try {
@@ -187,8 +201,8 @@ async function main(): Promise<void> {
       fs.writeFileSync(lockFd, `${process.pid}\n`);
       const lockStat = fs.fstatSync(lockFd);
       lockIdentity = { dev: lockStat.dev, ino: lockStat.ino };
-      replacePublishedFile(artifactArchive, path.join(dataRoot, "artifacts.tgz"));
-      replacePublishedFile(path.join(publishing, "result.json"), path.join(dataRoot, "result.json"));
+      replacePublishedFile(artifactArchive, path.join(attemptRoot, "artifacts.tgz"));
+      replacePublishedFile(path.join(publishing, "result.json"), path.join(attemptRoot, "result.json"));
     } finally {
       if (lockFd !== undefined) {
         fs.closeSync(lockFd);
@@ -208,7 +222,7 @@ async function main(): Promise<void> {
     }
     fs.rmSync(publishing, { recursive: true, force: true });
     publishing = undefined;
-    syncDurableData(dataRoot);
+    syncDurableData(attemptRoot);
   } catch (error) {
     if (durableWorkspace !== undefined) {
       try {
@@ -708,18 +722,24 @@ function isMissingWorkflowRun(error: unknown): boolean {
 export async function initializeDurableNodeWorkspace(
   dataRoot: string,
   archivePath: string,
-  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>,
+  trustedMountRoot = TRUSTED_MOUNT_ROOT
 ): Promise<DurableNodeWorkspace> {
   const descriptorFreeInput = { ...requestedInput } as Record<string, unknown>;
   delete descriptorFreeInput.execution_snapshot_source_root;
   requestedInput = parseModalNodeWorkerInput(descriptorFreeInput);
-  const root = resolveDurableDataRoot(dataRoot);
+  const root = resolveDurableDataRoot(dataRoot, trustedMountRoot);
   const projectRoot = path.join(root, DURABLE_WORKSPACE_DIRECTORY);
   const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
   const handoffArchive = path.join(handoffDirectory, "project.tgz");
   const durableRequest = path.join(handoffDirectory, "request.json");
   const checkpointsDirectory = path.join(root, DURABLE_CHECKPOINT_DIRECTORY);
   const checkpointIndex = path.join(checkpointsDirectory, DURABLE_CHECKPOINT_INDEX);
+  // The controller validates the published result, its durable checkpoint, and the checkpoint index
+  // against the lexical data root it dispatched, so those recorded identifiers stay lexical even
+  // though every path above is the canonical one the trusted-mount check produced.
+  const workspaceIdentity = path.posix.join(dataRoot, DURABLE_WORKSPACE_DIRECTORY);
+  const handoffArchiveIdentity = path.posix.join(dataRoot, DURABLE_INPUT_DIRECTORY, "project.tgz");
 
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.mkdirSync(handoffDirectory, { recursive: true, mode: 0o700 });
@@ -781,10 +801,10 @@ export async function initializeDurableNodeWorkspace(
   const index = loadDurableCheckpointIndex(checkpointIndex, {
     storageLineage,
     logicalDispatchFingerprint,
-    projectRoot,
+    projectRoot: workspaceIdentity,
     runRoot: input.run_root,
     executionSnapshotRoot: input.execution_snapshot_root,
-    handoffArchive,
+    handoffArchive: handoffArchiveIdentity,
     archiveSha256: projectArchiveSha256
   });
   const restoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
@@ -798,6 +818,7 @@ export async function initializeDurableNodeWorkspace(
   const hasCompletedCheckpoint = index.checkpoints.some((checkpoint) => checkpoint.stage === "completed");
   return {
     projectRoot,
+    attemptRoot: root,
     checkpointIndex,
     input,
     hasCompletedCheckpoint,
@@ -814,10 +835,10 @@ export async function initializeDurableNodeWorkspace(
         created_at: createdAt,
         storage_lineage: storageLineage,
         logical_dispatch_fingerprint: logicalDispatchFingerprint,
-        workspace_path: projectRoot,
+        workspace_path: workspaceIdentity,
         run_root: input.run_root,
         execution_snapshot_root: input.execution_snapshot_root,
-        handoff_archive: handoffArchive,
+        handoff_archive: handoffArchiveIdentity,
         project_archive_sha256: projectArchiveSha256,
         ...(restoredFrom === undefined ? {} : { restored_from: restoredFrom }),
         ...(error === undefined ? {} : { error: describeCheckpointError(error) })
@@ -828,7 +849,7 @@ export async function initializeDurableNodeWorkspace(
         sequence,
         stage,
         created_at: createdAt,
-        manifest: manifestPath
+        manifest: path.posix.join(dataRoot, DURABLE_CHECKPOINT_DIRECTORY, `${checkpointId}.json`)
       });
       writeJsonAtomic(checkpointIndex, index);
       return checkpoint;
@@ -1068,7 +1089,7 @@ function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof
   });
 }
 
-export function resolveDurableDataRoot(dataRoot: string, trustedMountRoot = "/data"): string {
+export function resolveDurableDataRoot(dataRoot: string, trustedMountRoot = TRUSTED_MOUNT_ROOT): string {
   const root = path.resolve(dataRoot);
   if (root === path.parse(root).root) throw new Error("cloud durable data root is unsafe");
   const mount = path.resolve(trustedMountRoot);
