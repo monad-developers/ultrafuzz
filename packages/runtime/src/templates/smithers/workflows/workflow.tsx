@@ -947,9 +947,20 @@ function hydrateSelectedTaskHandoff(spec: ReturnType<typeof cloudSelectedTaskHan
     workspacePath: relocatedHandoffPath(spec.workspacePath, "task workspace"),
     artifactRelativeDir: spec.artifactDir,
     artifactDir: relocatedHandoffPath(spec.artifactDir, "task artifact directory"),
-    dependencyArtifactDirs: [...spec.dependencyArtifactDirs],
-    referenceArtifactDirs: [...spec.referenceArtifactDirs],
-    ...(spec.vulnerabilityDatabase === undefined ? {} : { vulnerabilityDatabase: spec.vulnerabilityDatabase }),
+    dependencyArtifactDirs: spec.dependencyArtifactDirs.map((directory) =>
+      relocatedHandoffPath(directory, "dependency artifact directory")
+    ),
+    referenceArtifactDirs: spec.referenceArtifactDirs.map((directory) =>
+      relocatedHandoffPath(directory, "reference artifact directory")
+    ),
+    ...(spec.vulnerabilityDatabase === undefined
+      ? {}
+      : {
+          vulnerabilityDatabase: {
+            ...spec.vulnerabilityDatabase,
+            catalogPath: relocatedHandoffPath(spec.vulnerabilityDatabase.catalogPath, "vulnerability database catalog")
+          }
+        }),
     runRoot: spec.runRoot,
     workflowPath: spec.workflowPath,
     sourceProjectRoot: spec.sourceProjectRoot,

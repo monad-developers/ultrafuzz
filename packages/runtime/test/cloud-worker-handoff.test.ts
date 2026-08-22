@@ -83,6 +83,43 @@ test("a relocated cloud worker runs its dispatched attempt without controller-ow
   }
 });
 
+test("a relocated cloud worker resolves dependency handoff directories under its own root", async () => {
+  const fixture = await cloudFixture();
+  const sandboxInput = dispatchedInput(fixture, "join");
+  const worker = relocateWorker(fixture);
+  const captured: HarnessTaskSpecSummary[] = [];
+  try {
+    await renderGeneratedWorkflow({
+      workflowPath: path.join(worker, path.relative(fixture.project, fixture.compiled.workflowPath)),
+      cwd: worker,
+      forbidDynamicMaterialization: true,
+      workflowInput: {
+        cloud_worker: true,
+        task_id: sandboxInput.task_id,
+        attempt_id: sandboxInput.attempt_id,
+        execution_generation: sandboxInput.execution_generation,
+        selected_task: sandboxInput.selected_task,
+        tasks: []
+      },
+      captureTaskSpecs: captured
+    });
+
+    const selected = captured.find((task) => task.attemptId === "join");
+    assert.ok(selected, "the worker must retain the selected downstream task");
+    assert.ok(selected.dependencyArtifactDirs.length > 0, "the downstream fixture must have a handoff");
+    for (const dependency of selected.dependencyArtifactDirs) {
+      assert.equal(path.isAbsolute(dependency), true, `dependency must be absolute: ${dependency}`);
+      assert.equal(
+        dependency.startsWith(`${worker}${path.sep}`),
+        true,
+        `dependency must resolve under the relocated worker: ${dependency}`
+      );
+    }
+  } finally {
+    fs.rmSync(worker, { recursive: true, force: true });
+  }
+});
+
 /**
  * Rejection cases for a runtime-generated dynamic attempt.
  *
