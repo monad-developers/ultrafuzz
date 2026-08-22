@@ -26,6 +26,7 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
+import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
@@ -1296,8 +1297,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     projectRoot: project,
     runId: "missing-cloud-recon",
     env: {
+      ...Object.fromEntries(effectiveRouteEnvironment("CodexAgent", process.env).map(([name]) => [name, undefined])),
       PATH: path.join(project, "controller-empty-bin"),
-      OPENAI_BASE_URL: undefined,
       MODAL_TOKEN_ID: "provider-one",
       MODAL_TOKEN_SECRET: "provider-two"
     },
