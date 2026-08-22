@@ -886,7 +886,13 @@ function createDeterministicGitBaseline(projectRoot: string, scratchRoot: string
   );
   const gitRoot = path.join(projectRoot, ".git");
   fs.writeFileSync(path.join(gitRoot, "config"), DETERMINISTIC_GIT_CONFIG, { mode: 0o600 });
-  execFileSync(gitExecutable, ["add", "--all", "--", "."], { cwd: projectRoot, env: environment, stdio: "ignore" });
+  // The staging tree is the extracted committed tree, so ignore rules carried in
+  // it must not drop committed paths from the reconstructed baseline.
+  execFileSync(gitExecutable, ["add", "--all", "--force", "--", "."], {
+    cwd: projectRoot,
+    env: environment,
+    stdio: "ignore"
+  });
   const tree = execFileSync(gitExecutable, ["write-tree"], {
     cwd: projectRoot,
     env: environment,

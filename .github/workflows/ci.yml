@@ -24,7 +24,7 @@ jobs:
   draft-and-build-gates:
     name: "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -67,6 +67,10 @@ jobs:
       - name: Run PR runtime smoke tests
         if: github.event_name == 'pull_request'
         run: pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt
+
+      - name: Run PR CLI status contract smoke tests
+        if: github.event_name == 'pull_request'
+        run: pnpm --filter @ultrafuzz/cli test:pr-smoke:prebuilt
 
   release-validation:
     name: Full release validation (${{ matrix.description }})

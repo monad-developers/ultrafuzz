@@ -7,6 +7,7 @@ import {
   SMITHERS_RUN_STATUSES,
   assertNoSymlinkComponents,
   assertPathInside,
+  isTerminalRunStatus,
   layoutForRunRoot,
   queryEvents,
   replayEvents,
@@ -39,6 +40,18 @@ import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type Smither
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
+
+const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota"
+]);
+
+export function isLiveWorkflowRunStatus(status: string): boolean {
+  return LIVE_WORKFLOW_RUN_STATUSES.has(status);
+}
 
 export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -194,11 +207,7 @@ export async function getRunHealth(input: {
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
     const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-    syncDiagnostics.push(
-      ...(sync.ok
-        ? sync.diagnostics
-        : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })))
-    );
+    syncDiagnostics.push(...sync.diagnostics);
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",
@@ -248,8 +257,14 @@ export async function getRunHealth(input: {
   const state = readRunState(evidence.layout);
   const metadata = readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId);
   const auditProfile = metadata.audit_profile;
+  const lifecycleDivergence = workflowLifecycleDivergenceDiagnostic(
+    state.status,
+    health.workflow_status,
+    evidence.layout.statePath
+  );
+  const diagnostics = [...syncDiagnostics, ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence])];
   return runtimeResult<RunHealthValue>(
-    true,
+    !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
     {
       ...base,
       workflow_run_id: evidence.smithersRunId,
@@ -264,8 +279,29 @@ export async function getRunHealth(input: {
         nowMs: Date.now()
       })
     },
-    syncDiagnostics
+    diagnostics
   );
+}
+
+function workflowLifecycleDivergenceDiagnostic(
+  runStatus: RunState["status"],
+  workflowStatus: string,
+  statePath: string
+): RuntimeDiagnostic | undefined {
+  if (!isTerminalRunStatus(runStatus) || !isLiveWorkflowRunStatus(workflowStatus)) return undefined;
+  return {
+    code: "RUN_WORKFLOW_STATUS_DIVERGED",
+    message:
+      `Ultrafuzz run is terminal ${runStatus} while the workflow runner reports ${workflowStatus}; ` +
+      "workflow work may still be active and cannot finalize coherently until the lifecycle state is reconciled",
+    severity: "warning",
+    source: "runtime",
+    path: statePath,
+    details: {
+      run_status: runStatus,
+      workflow_status: workflowStatus
+    }
+  };
 }
 
 export async function queryRunEvents(input: {

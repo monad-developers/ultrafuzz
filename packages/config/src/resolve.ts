@@ -183,7 +183,7 @@ export function serializeResolvedConfigToml(
     });
   }
   pushTable(lines, "retry", {
-    same_agent_attempts: clone.retry.sameAgentAttempts,
+    same_agent_attempts: omitProfileSettings ? undefined : clone.retry.sameAgentAttempts,
     agents: clone.retry.agents.length === 0 ? undefined : clone.retry.agents
   });
   for (const [id, agent] of Object.entries(clone.agents)) {
@@ -233,6 +233,7 @@ function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfil
   if (settings.dynamic_strategies_enumerator !== undefined) {
     config.dynamicStrategiesEnumerator = settings.dynamic_strategies_enumerator;
   }
+  if (settings.same_agent_attempts !== undefined) config.retry.sameAgentAttempts = settings.same_agent_attempts;
   if (settings.max_parallel_agents !== undefined) config.run.maxParallelAgents = settings.max_parallel_agents;
   if (settings.max_parallel_nodes !== undefined) config.run.maxParallelNodes = settings.max_parallel_nodes;
   if (settings.default_timeout_seconds !== undefined) {
@@ -255,6 +256,7 @@ export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfi
   return {
     strategy_loops: config.strategyLoops ?? 1,
     dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
+    same_agent_attempts: config.retry.sameAgentAttempts,
     max_parallel_agents: config.run.maxParallelAgents,
     max_parallel_nodes: config.run.maxParallelNodes,
     default_timeout_seconds: config.run.defaultTimeoutSeconds,
@@ -304,6 +306,7 @@ function applyLayerSettingOrigins(
   const runtimeLayer = layer as RuntimeConfigOverrides;
   if (layer.strategyLoops !== undefined) origins.strategy_loops = origin;
   if (layer.dynamicStrategiesEnumerator !== undefined) origins.dynamic_strategies_enumerator = origin;
+  if (layer.retry?.sameAgentAttempts !== undefined) origins.same_agent_attempts = origin;
   if (layer.run?.maxParallelAgents !== undefined || runtimeLayer.maxParallelAgents !== undefined) {
     origins.max_parallel_agents = origin;
   }
@@ -803,7 +806,12 @@ function isModelProfileSchemaIssue(issue: ZodIssue): boolean {
 }
 
 function isRetrySchemaIssue(issue: ZodIssue): boolean {
-  return issue.path[0] === "retry";
+  return (
+    issue.path[0] === "retry" ||
+    (issue.path[0] === "auditProfileResolution" &&
+      (issue.path[1] === "settings" || issue.path[1] === "effectiveSettings") &&
+      issue.path[2] === "same_agent_attempts")
+  );
 }
 
 function sameDiagnosticIdentity(left: ConfigDiagnostic, right: ConfigDiagnostic): boolean {

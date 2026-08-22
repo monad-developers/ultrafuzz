@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import YAML from "yaml";
 import { z } from "zod/v4";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 
 export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_AUDIT_PROFILE_ID = "default" as const;
@@ -14,6 +15,7 @@ export type DynamicStrategiesEnumerator = number | "unlimited";
 export interface AuditProfileSettings {
   strategy_loops?: number;
   dynamic_strategies_enumerator?: DynamicStrategiesEnumerator;
+  same_agent_attempts?: number;
   max_parallel_agents?: number;
   max_parallel_nodes?: number;
   default_timeout_seconds?: number;
@@ -66,6 +68,7 @@ const settingsSchema = z
   .strictObject({
     strategy_loops: positiveIntegerSchema.optional(),
     dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
+    same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
     max_parallel_nodes: positiveIntegerSchema.optional(),
     default_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),

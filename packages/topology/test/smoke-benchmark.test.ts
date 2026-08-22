@@ -39,7 +39,6 @@ describe("packaged smoke topology", () => {
     expect(topology.nodes.find((node) => node.id === VALIDATION_NODE_ID)).toEqual(
       expect.objectContaining({
         prompt: "smoke/json-validation-correction.md",
-        max_attempts: 1,
         depends_on: ["__start__"],
         outputs: [expect.objectContaining({ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true })]
       })
@@ -74,12 +73,7 @@ describe("packaged smoke topology", () => {
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
     expect(executable).toHaveLength(8);
-    expect(executable.find((node) => node.logicalId === VALIDATION_NODE_ID)?.retryPolicy.maxAttempts).toBe(1);
-    expect(
-      executable
-        .filter((node) => node.logicalId !== VALIDATION_NODE_ID)
-        .every((node) => node.retryPolicy.maxAttempts === 2)
-    ).toBe(true);
+    expect(executable.every((node) => node.retryPolicy.maxAttempts === 1)).toBe(true);
     expect(executable.every((node) => node.modelFanout[0]?.modelProfileId === "default")).toBe(true);
     expect(executable.every((node) => node.modelFanout[0]?.reasoningEffort === "high")).toBe(true);
   });

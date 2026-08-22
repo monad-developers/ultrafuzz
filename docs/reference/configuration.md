@@ -51,7 +51,7 @@ reasoning = "xhigh"
 timeout_seconds = 3600
 
 [retry]
-same_agent_attempts = 1
+same_agent_attempts = 3
 
 [permissions]
 trust_model = "skip-permissions"
@@ -232,6 +232,9 @@ agents = ["sol-xhigh", "gpt55-xhigh"]
 ```
 
 `same_agent_attempts` is a positive integer counting the first primary attempt.
+The shipped `default` profile uses three attempts. `smoke` and `low-cost` use
+one, the maximum-effort `exhaustive` profile uses five, and `invariant-only` inherits three.
+An explicit project `[retry]` value still overrides the selected audit profile.
 The optional `agents` array contains unique existing model-profile IDs. Its
 first entry is the default primary profile; later entries each receive one
 fallback attempt in order. Neither `same_agent_attempts` nor the expanded

@@ -24,8 +24,7 @@ describe("audit profile catalog", () => {
       "full",
       "invariant-only",
       "low-cost",
-      "smoke",
-      "thorough"
+      "smoke"
     ]);
     expect(catalog.digest).toMatch(/^[0-9a-f]{64}$/u);
 
@@ -33,6 +32,7 @@ describe("audit profile catalog", () => {
     expect(smoke.topologyPath).toBe("topologies/smoke.yml");
     expect(smoke.settings.strategy_loops).toBe(1);
     expect(smoke.settings.dynamic_strategies_enumerator).toBe(0);
+    expect(smoke.settings.same_agent_attempts).toBe(1);
     const smokePath = packagedTopologyPath(smoke, catalog);
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
@@ -47,7 +47,11 @@ describe("audit profile catalog", () => {
     const full = auditProfile("full", catalog);
     expect(full.topologyPath).toBe("topologies/full.yml");
     expect(fs.readFileSync(packagedTopologyPath(full, catalog)!, "utf8")).toContain("id: differential-oracle-planner");
-    expect(auditProfile("exhaustive", catalog).settings.dynamic_strategies_enumerator).toBe("unlimited");
+    expect(auditProfile("low-cost", catalog).settings.same_agent_attempts).toBe(1);
+    expect(auditProfile("exhaustive", catalog).settings).toMatchObject({
+      dynamic_strategies_enumerator: "unlimited",
+      same_agent_attempts: 5
+    });
   });
 
   it("resolves the reserved default profile as the unmodified project workflow", () => {
@@ -67,6 +71,48 @@ describe("audit profile catalog", () => {
     expect(resolved.value.auditProfileResolution.declaredTopologyPath).toBeUndefined();
     expect(resolved.value.auditProfileResolution.settings).toEqual({});
     expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([]);
+    expect(resolved.value.retry.sameAgentAttempts).toBe(3);
+    expect(resolved.value.auditProfileResolution.effectiveSettings.same_agent_attempts).toBe(3);
+    expect(resolved.value.auditProfileResolution.settingOrigins.same_agent_attempts).toBe("default");
+  });
+
+  it.each([
+    ["smoke", 1, "audit-profile"],
+    ["low-cost", 1, "audit-profile"],
+    ["default", 3, "default"],
+    ["invariant-only", 3, "default"],
+    ["exhaustive", 5, "audit-profile"]
+  ] as const)("resolves the %s retry budget to %i attempts", (profile, attempts, origin) => {
+    const resolved = resolveConfig({ env: {}, runtimeOverrides: { auditProfile: profile } });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.retry.sameAgentAttempts).toBe(attempts);
+    expect(resolved.value.auditProfileResolution.effectiveSettings.same_agent_attempts).toBe(attempts);
+    expect(resolved.value.auditProfileResolution.settingOrigins.same_agent_attempts).toBe(origin);
+  });
+
+  it("does not freeze an audit profile retry budget into scaffolded project config", () => {
+    const exhaustive = resolveConfig({ env: {}, runtimeOverrides: { auditProfile: "exhaustive" } });
+    expect(exhaustive.ok).toBe(true);
+    if (!exhaustive.ok) return;
+
+    const scaffolded = serializeResolvedConfigToml(exhaustive.value, {
+      omitAuditProfileManagedSettings: true
+    });
+    expect(scaffolded).not.toContain("same_agent_attempts");
+
+    const parsed = parseProjectConfigToml(scaffolded);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const switched = resolveConfig({
+      env: {},
+      projectConfig: parsed.value,
+      runtimeOverrides: { auditProfile: "smoke" }
+    });
+    expect(switched.ok).toBe(true);
+    if (!switched.ok) return;
+    expect(switched.value.retry.sameAgentAttempts).toBe(1);
+    expect(switched.value.auditProfileResolution.settingOrigins.same_agent_attempts).toBe("audit-profile");
   });
 
   it("fails closed when the catalog omits the reserved default profile", () => {
@@ -159,9 +205,12 @@ profiles:
     expect(serializeResolvedConfigToml(resolved.value)).toContain('dynamic_strategies_enumerator = "unlimited"');
   });
 
-  it("fails unknown names with the available profile vocabulary", () => {
-    expect(() => auditProfile("balanced")).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
-  });
+  it.each(["balanced", "fuzz-only", "thorough"])(
+    "rejects removed profile %s with the available profile vocabulary",
+    (profile) => {
+      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
+    }
+  );
 
   it("ships every declared topology beside the built catalog", () => {
     const catalog = loadAuditProfileCatalog();
@@ -181,6 +230,9 @@ strategy_loops = 2
 
 [run]
 max_parallel_agents = 6
+
+[retry]
+same_agent_attempts = 2
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -197,10 +249,12 @@ max_parallel_agents = 6
     expect(resolved.value.dynamicStrategiesEnumerator).toBe(1);
     expect(resolved.value.run.maxParallelAgents).toBe(6);
     expect(resolved.value.run.maxParallelNodes).toBe(7);
+    expect(resolved.value.retry.sameAgentAttempts).toBe(2);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 3 });
     expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([
       "max_parallel_agents",
       "max_parallel_nodes",
+      "same_agent_attempts",
       "strategy_loops"
     ]);
     expect(resolved.value.auditProfileResolution.effectiveSettings).toMatchObject({
@@ -208,6 +262,7 @@ max_parallel_agents = 6
       dynamic_strategies_enumerator: 1,
       max_parallel_agents: 6,
       max_parallel_nodes: 7,
+      same_agent_attempts: 2,
       triage_quorum: 2,
       triage_panel_size: 3
     });
@@ -216,6 +271,7 @@ max_parallel_agents = 6
       dynamic_strategies_enumerator: "audit-profile",
       max_parallel_agents: "project-config",
       max_parallel_nodes: "runtime-override",
+      same_agent_attempts: "project-config",
       triage_quorum: "audit-profile",
       triage_panel_size: "audit-profile"
     });

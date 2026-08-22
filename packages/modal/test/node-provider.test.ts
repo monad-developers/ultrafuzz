@@ -651,6 +651,45 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("preserves committed paths matched by gitignore and still excludes untracked ignored files", async () => {
+    for (const baseline of ["deterministic", "recorded"] as const) {
+      const fixture = createProjectFixture({
+        trackedIgnored: true,
+        ...(baseline === "recorded" ? { recordedSource: true } : {})
+      });
+      let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+      const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-tracked-ignored-handoff-"));
+      try {
+        if (baseline === "recorded") {
+          execFileSync("git", ["update-ref", fixture.input.source_ref!, fixture.governedCommit], {
+            cwd: fixture.root
+          });
+        }
+        const committedPaths = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+          cwd: fixture.root,
+          encoding: "utf8"
+        });
+        expect(committedPaths).toContain("tracked-ignored.txt");
+
+        archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+        await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "tracked ignored handoff test" });
+
+        expect(fs.readFileSync(path.join(extracted, "tracked-ignored.txt"), "utf8")).toBe("committed but ignored\n");
+        expect(
+          execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: extracted, encoding: "utf8" })
+        ).toBe(committedPaths);
+        expect(execFileSync("git", ["status", "--porcelain=v1"], { cwd: extracted, encoding: "utf8" })).not.toContain(
+          "tracked-ignored.txt"
+        );
+        expect(fs.existsSync(path.join(extracted, "untracked-ignored.txt"))).toBe(false);
+      } finally {
+        archive?.cleanup();
+        fs.rmSync(extracted, { recursive: true, force: true });
+        fixture.cleanup();
+      }
+    }
+  });
+
   it("preserves pinned source identity and fails closed without its ref", async () => {
     const fixture = createProjectFixture({ pinnedSubmodules: true });
     const pinnedCommit = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -2931,6 +2970,8 @@ function createProjectFixture(
     referenceDependencyAttemptIds?: readonly string[];
     agentCredentialEnv?: readonly string[];
     operatorPrompt?: string;
+    trackedIgnored?: boolean;
+    recordedSource?: boolean;
   } = {}
 ) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
@@ -3008,12 +3049,27 @@ function createProjectFixture(
   fs.writeFileSync(path.join(root, workspaceDir, "local.txt"), "excluded\n");
   fs.writeFileSync(path.join(root, runRoot, "logs", "local.log"), "excluded\n");
   if (options.committedSymlink === true) fs.symlinkSync("source.txt", path.join(root, "source-link.txt"));
+  if (options.trackedIgnored === true) {
+    fs.writeFileSync(path.join(root, ".gitignore"), "tracked-ignored.txt\nuntracked-ignored.txt\n");
+    fs.writeFileSync(path.join(root, "tracked-ignored.txt"), "committed but ignored\n");
+    fs.writeFileSync(path.join(root, "untracked-ignored.txt"), "untracked and ignored\n");
+  }
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
-  execFileSync("git", ["add", "source.txt", ...(options.committedSymlink === true ? ["source-link.txt"] : [])], {
-    cwd: root
-  });
+  execFileSync(
+    "git",
+    [
+      "add",
+      "source.txt",
+      ...(options.committedSymlink === true ? ["source-link.txt"] : []),
+      ...(options.trackedIgnored === true ? [".gitignore"] : [])
+    ],
+    { cwd: root }
+  );
+  if (options.trackedIgnored === true) {
+    execFileSync("git", ["add", "--force", "tracked-ignored.txt"], { cwd: root });
+  }
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   const parentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   if (options.divergentSource === true) {
@@ -3033,11 +3089,13 @@ function createProjectFixture(
   const governedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const governedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
   const sourceRevision =
-    options.divergentSource === true || options.pinnedSubmodules === true ? governedCommit : undefined;
+    options.divergentSource === true || options.pinnedSubmodules === true || options.recordedSource === true
+      ? governedCommit
+      : undefined;
   const sourceRef =
     options.pinnedSubmodules === true
       ? "refs/heads/ultrafuzz-pinned"
-      : options.divergentSource === true
+      : options.divergentSource === true || options.recordedSource === true
         ? "refs/ultrafuzz/runs/run-one/source"
         : undefined;
   const consumerAgentCredentialEnv = [...(options.agentCredentialEnv ?? [AGENT_ENV])];
