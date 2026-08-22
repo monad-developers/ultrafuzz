@@ -5,6 +5,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
+import {
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+  type SmithersTaskManifestOutput,
+  type SmithersTaskManifestTask
+} from "@ultrafuzz/artifacts";
 import { BUN_MODULE_CONFINEMENT_SOURCE } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,6 +19,9 @@ import {
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider,
   ModalNodeCleanupRefusedError,
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  modalNodeLifecycleTimeoutMs,
+  modalNodeLifecycleTimeoutSeconds,
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
@@ -31,7 +40,7 @@ import {
   workflowCommandArguments
 } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
-import { currentArtifactBinding } from "./current-artifact-fixtures.js";
+import { currentArtifactBinding, currentTaskOutputBinding } from "./current-artifact-fixtures.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
 const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
@@ -141,6 +150,23 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
   });
 
+  it("adds one bounded cloud lifecycle reserve without changing the inner timeout", () => {
+    const innerTimeoutSeconds = 1_800;
+    const lifecycleTimeoutSeconds = modalNodeLifecycleTimeoutSeconds(innerTimeoutSeconds);
+
+    expect(MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(1_800);
+    expect(lifecycleTimeoutSeconds).toBe(3_600);
+    expect(modalNodeLifecycleTimeoutMs(innerTimeoutSeconds)).toBe(3_600_000);
+    expect(lifecycleTimeoutSeconds - MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(innerTimeoutSeconds);
+    const lifecycleStartedAt = 1_000_000;
+    const innerStartedAt = lifecycleStartedAt + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS * 1000;
+    const lifecycleDeadline = lifecycleStartedAt + modalNodeLifecycleTimeoutMs(innerTimeoutSeconds);
+    expect(lifecycleDeadline - innerStartedAt).toBe(innerTimeoutSeconds * 1000);
+    expect(modalNodeLifecycleTimeoutSeconds(84_600)).toBe(86_400);
+    expect(() => modalNodeLifecycleTimeoutSeconds(0)).toThrow(/inner timeout/u);
+    expect(() => modalNodeLifecycleTimeoutSeconds(84_601)).toThrow(/inner timeout/u);
+  });
+
   it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
     const fixture = createProjectFixture();
     try {
@@ -203,6 +229,390 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("stages the exact verified publication closure and excludes dependency directory extras", async () => {
+    const fixture = createProjectFixture();
+    const dependency = fixture.input.dependency_artifact_dirs[0]!;
+    const dependencyRoot = path.join(fixture.root, dependency);
+    const companionPath = "companions/nested.txt";
+    const companionContents = "authenticated companion\n";
+    fs.mkdirSync(path.join(dependencyRoot, "companions"), { recursive: true });
+    fs.writeFileSync(path.join(dependencyRoot, companionPath), companionContents);
+    fs.writeFileSync(path.join(dependencyRoot, "undeclared-secret.txt"), "must stay local\n");
+    const markerPath = path.join(
+      fixture.root,
+      fixture.input.run_root,
+      ".ultrafuzz-verification",
+      `${path.basename(dependency)}.json`
+    );
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+      publications: Array<{ path: string; sha256: string }>;
+    };
+    marker.publications.push({ path: companionPath, sha256: sha256Hex(companionContents) });
+    const markerBytes = Buffer.from(`${JSON.stringify(marker)}\n`);
+    fs.writeFileSync(markerPath, markerBytes);
+    refreshDependencyVerificationAuthority(fixture, path.basename(dependency));
+
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-publications-test-"));
+    try {
+      execFileSync("tar", ["-xzf", archive.path, "-C", extracted]);
+      expect(fs.readFileSync(path.join(extracted, dependency, "declared.txt"), "utf8")).toContain(dependency);
+      expect(fs.readFileSync(path.join(extracted, dependency, companionPath), "utf8")).toBe(companionContents);
+      expect(fs.existsSync(path.join(extracted, dependency, "undeclared-secret.txt"))).toBe(false);
+      expect(
+        fs.readFileSync(
+          path.join(extracted, fixture.input.run_root, ".ultrafuzz-verification", `${path.basename(dependency)}.json`)
+        )
+      ).toEqual(markerBytes);
+    } finally {
+      archive.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("stages each authenticated publication before reading the next one", async () => {
+    const fixture = createProjectFixture();
+    const dependency = fixture.input.dependency_artifact_dirs[0]!;
+    const dependencyRoot = path.join(fixture.root, dependency);
+    const publicationPaths = ["companions/a-first.bin", "companions/b-second.bin"];
+    fs.mkdirSync(path.join(dependencyRoot, "companions"), { recursive: true });
+    for (const [index, relativePath] of publicationPaths.entries()) {
+      fs.writeFileSync(path.join(dependencyRoot, relativePath), Buffer.alloc(1024, index + 1));
+    }
+    const markerPath = path.join(
+      fixture.root,
+      fixture.input.run_root,
+      ".ultrafuzz-verification",
+      `${path.basename(dependency)}.json`
+    );
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as {
+      publications: Array<{ path: string; sha256: string }>;
+    };
+    for (const relativePath of publicationPaths) {
+      marker.publications.push({
+        path: relativePath,
+        sha256: sha256Hex(fs.readFileSync(path.join(dependencyRoot, relativePath)))
+      });
+    }
+    fs.writeFileSync(markerPath, `${JSON.stringify(marker)}\n`);
+    refreshDependencyVerificationAuthority(fixture, path.basename(dependency));
+
+    const events: string[] = [];
+    const originalOpenSync = fs.openSync.bind(fs);
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation((filePath, flags, mode) => {
+      const openedPath = String(filePath);
+      const relativePath = publicationPaths.find((candidate) =>
+        openedPath.endsWith(path.join("companions", path.basename(candidate)))
+      );
+      if (relativePath !== undefined) events.push(`read:${relativePath}`);
+      return originalOpenSync(filePath, flags, mode);
+    });
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((filePath, data, options) => {
+      originalWriteFileSync(filePath, data, options);
+      const absolute = path.resolve(String(filePath));
+      const relativePath = publicationPaths.find(
+        (candidate) =>
+          absolute !== path.join(dependencyRoot, candidate) && absolute.endsWith(path.join(dependency, candidate))
+      );
+      if (relativePath !== undefined) events.push(`stage:${relativePath}`);
+    });
+    let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      expect(events).toEqual([
+        `read:${publicationPaths[0]}`,
+        `stage:${publicationPaths[0]}`,
+        `read:${publicationPaths[1]}`,
+        `stage:${publicationPaths[1]}`
+      ]);
+    } finally {
+      writeSpy.mockRestore();
+      openSpy.mockRestore();
+      archive?.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("stages a sealed reference dependency only through its controller manifest closure", async () => {
+    const fixture = createProjectFixture({ referenceDependencyAttemptIds: ["dependency-one"] });
+    const reference = fixture.input.dependency_artifact_dirs[0]!;
+    fs.writeFileSync(path.join(fixture.root, reference, "undeclared-secret.txt"), "must stay local\n");
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    try {
+      const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
+      expect(entries).toContain(`./${reference}/declared.txt`);
+      expect(entries).toContain(`./${reference}/references/manifest.json`);
+      expect(entries).toContain(`./${reference}/artifact-manifest.json`);
+      expect(entries).not.toContain(`./${reference}/undeclared-secret.txt`);
+      expect(entries).not.toContain(
+        `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(reference)}.json`
+      );
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("binds a reference dependency outer manifest to its sealed byte authority", async () => {
+    const fixture = createProjectFixture({ referenceDependencyAttemptIds: ["dependency-one"] });
+    const referenceManifest = path.join(
+      fixture.root,
+      fixture.input.dependency_artifact_dirs[0]!,
+      "artifact-manifest.json"
+    );
+    fs.appendFileSync(referenceManifest, " ");
+    try {
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /reference artifact manifest does not match the sealed task authority/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("omits only markerless optional dependency roots from the handoff archive", async () => {
+    const fixture = createProjectFixture({ optionalDependencyAttemptIds: ["dependency-one"] });
+    const [markerlessOptional, requiredDependency] = fixture.input.dependency_artifact_dirs;
+    const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+    fs.rmSync(path.join(markerRoot, `${path.basename(markerlessOptional!)}.json`));
+    fixture.input.dependency_verification_authorities = fixture.input.dependency_verification_authorities.filter(
+      (authority) => authority.attempt_id !== path.basename(markerlessOptional!)
+    );
+
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    try {
+      const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
+      expect(entries).not.toContain(`./${markerlessOptional}/`);
+      expect(entries).not.toContain(`./${markerlessOptional}/declared.txt`);
+      expect(entries).not.toContain(
+        `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(markerlessOptional!)}.json`
+      );
+      expect(entries).toContain(`./${requiredDependency}/`);
+      expect(entries).toContain(`./${requiredDependency}/declared.txt`);
+      expect(entries).toContain(
+        `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(requiredDependency!)}.json`
+      );
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when an optional dependency marker is present but invalid", async () => {
+    const fixture = createProjectFixture({ optionalDependencyAttemptIds: ["dependency-one"] });
+    const optionalDependency = fixture.input.dependency_artifact_dirs[0]!;
+    fs.writeFileSync(
+      path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        `${path.basename(optionalDependency)}.json`
+      ),
+      "{}\n"
+    );
+    refreshDependencyVerificationAuthority(fixture, path.basename(optionalDependency));
+    try {
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /dependency verification marker is schema-invalid/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects optional dependency roots outside the declared dependency set", () => {
+    const fixture = createProjectFixture();
+    try {
+      expect(() =>
+        parseModalNodeSandboxInput({
+          ...fixture.input,
+          optional_dependency_artifact_dirs: [`${fixture.input.run_root}/artifacts/undeclared`]
+        })
+      ).toThrow(/cloud node input is invalid/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("binds the cloud task identity and dependency sets to the sealed task declaration", async () => {
+    const fixture = createProjectFixture();
+    const [firstDependency] = fixture.input.dependency_artifact_dirs;
+    try {
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          task_id: "node:dependency-one"
+        })
+      ).rejects.toThrow(/does not identify exactly one sealed task/u);
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          dependency_artifact_dirs: fixture.input.dependency_artifact_dirs.slice(1)
+        })
+      ).rejects.toThrow(/dependency artifact directories do not match the sealed task/u);
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          optional_dependency_artifact_dirs: [firstDependency!]
+        })
+      ).rejects.toThrow(/optional dependency artifact directories do not match the sealed task/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("joins verifier marker authorities exactly to sealed agentic dependencies", async () => {
+    const fixture = createProjectFixture();
+    const [first, second] = fixture.input.dependency_verification_authorities;
+    const alteredDigest = `${first!.marker_sha256[0] === "0" ? "1" : "0"}${first!.marker_sha256.slice(1)}`;
+    const cases: Array<{ authorities: ModalNodeSandboxInput["dependency_verification_authorities"]; message: RegExp }> =
+      [
+        {
+          authorities: [second!],
+          message: /required cloud dependency has no verifier marker authority/u
+        },
+        {
+          authorities: [
+            ...fixture.input.dependency_verification_authorities,
+            { ...first!, marker_sha256: alteredDigest }
+          ],
+          message: /repeat a producer attempt/u
+        },
+        {
+          authorities: [
+            ...fixture.input.dependency_verification_authorities,
+            { attempt_id: "unrelated", marker_sha256: "a".repeat(64), size_bytes: 1 }
+          ],
+          message: /extra or unknown producer attempt/u
+        },
+        {
+          authorities: [{ ...first!, marker_sha256: alteredDigest }, second!],
+          message: /does not match verifier authority/u
+        },
+        {
+          authorities: [{ ...first!, size_bytes: first!.size_bytes + 1 }, second!],
+          message: /does not match verifier authority/u
+        }
+      ];
+    try {
+      for (const candidate of cases) {
+        await expect(
+          createModalNodeHandoffArchive(fixture.root, {
+            ...fixture.input,
+            dependency_verification_authorities: candidate.authorities
+          })
+        ).rejects.toThrow(candidate.message);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("requires optional marker presence to agree with its verifier authority", async () => {
+    const fixture = createProjectFixture({ optionalDependencyAttemptIds: ["dependency-one"] });
+    const optionalAttempt = "dependency-one";
+    const withoutOptionalAuthority = fixture.input.dependency_verification_authorities.filter(
+      (authority) => authority.attempt_id !== optionalAttempt
+    );
+    try {
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          dependency_verification_authorities: withoutOptionalAuthority
+        })
+      ).rejects.toThrow(/optional dependency marker appeared/u);
+      fs.rmSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", `${optionalAttempt}.json`));
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /dependency verification marker is unavailable/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("forbids verifier marker authority rows for sealed reference dependencies", async () => {
+    const fixture = createProjectFixture({ referenceDependencyAttemptIds: ["dependency-one"] });
+    try {
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          dependency_verification_authorities: [
+            ...fixture.input.dependency_verification_authorities,
+            { attempt_id: "dependency-one", marker_sha256: "a".repeat(64), size_bytes: 1 }
+          ]
+        })
+      ).rejects.toThrow(/reference dependency must not have a verifier marker authority/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects credential, resource, and task-owned path substitution against the sealed task", async () => {
+    const fixture = createProjectFixture();
+    const cases: Array<{ input: ModalNodeSandboxInput; message: RegExp }> = [
+      {
+        input: { ...fixture.input, agent_credential_env: ["AWS_SESSION_TOKEN"] },
+        message: /credential environment does not match the sealed task/u
+      },
+      {
+        input: {
+          ...fixture.input,
+          resources: { ...fixture.input.resources, memory_mib: fixture.input.resources.memory_mib + 1 }
+        },
+        message: /resources do not match the sealed task/u
+      },
+      {
+        input: { ...fixture.input, artifact_dir: fixture.input.dependency_artifact_dirs[0]! },
+        message: /artifact directory does not match the sealed task/u
+      },
+      {
+        input: { ...fixture.input, workspace_dir: fixture.input.dependency_artifact_dirs[0]! },
+        message: /workspace directory does not match the sealed task/u
+      },
+      {
+        input: { ...fixture.input, prompt_path: fixture.input.workflow_path },
+        message: /rendered prompt path does not match the sealed task/u
+      },
+      {
+        input: {
+          ...fixture.input,
+          workflow_path: `${fixture.input.execution_snapshot_root}/controls/ultrafuzz.toml`
+        },
+        message: /workflow path does not match the sealed task/u
+      }
+    ];
+    try {
+      for (const candidate of cases) {
+        await expect(createModalNodeHandoffArchive(fixture.root, candidate.input)).rejects.toThrow(candidate.message);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("binds operator instructions to sealed workflow input while allowing a recovery generation selector", async () => {
+    const fixture = createProjectFixture({ operatorPrompt: "Prioritize authorization boundaries" });
+    let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          operator_prompt: "Substituted instructions"
+        })
+      ).rejects.toThrow(/operator prompt does not match the sealed workflow input/u);
+      archive = await createModalNodeHandoffArchive(fixture.root, {
+        ...fixture.input,
+        execution_generation: "reset-one"
+      });
+      expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    } finally {
+      archive?.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects tracked and untracked source changes recorded by cloud governance", async () => {
     for (const kind of ["tracked", "untracked"] as const) {
       const fixture = createProjectFixture({ governanceDirty: true });
@@ -258,6 +668,45 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       );
     } finally {
       fixture.cleanup();
+    }
+  });
+
+  it("preserves committed paths matched by gitignore and still excludes untracked ignored files", async () => {
+    for (const baseline of ["deterministic", "recorded"] as const) {
+      const fixture = createProjectFixture({
+        trackedIgnored: true,
+        ...(baseline === "recorded" ? { recordedSource: true } : {})
+      });
+      let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+      const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-tracked-ignored-handoff-"));
+      try {
+        if (baseline === "recorded") {
+          execFileSync("git", ["update-ref", fixture.input.source_ref!, fixture.governedCommit], {
+            cwd: fixture.root
+          });
+        }
+        const committedPaths = execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+          cwd: fixture.root,
+          encoding: "utf8"
+        });
+        expect(committedPaths).toContain("tracked-ignored.txt");
+
+        archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+        await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "tracked ignored handoff test" });
+
+        expect(fs.readFileSync(path.join(extracted, "tracked-ignored.txt"), "utf8")).toBe("committed but ignored\n");
+        expect(
+          execFileSync("git", ["ls-tree", "-r", "--name-only", "HEAD"], { cwd: extracted, encoding: "utf8" })
+        ).toBe(committedPaths);
+        expect(execFileSync("git", ["status", "--porcelain=v1"], { cwd: extracted, encoding: "utf8" })).not.toContain(
+          "tracked-ignored.txt"
+        );
+        expect(fs.existsSync(path.join(extracted, "untracked-ignored.txt"))).toBe(false);
+      } finally {
+        archive?.cleanup();
+        fs.rmSync(extracted, { recursive: true, force: true });
+        fixture.cleanup();
+      }
     }
   });
 
@@ -579,7 +1028,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
-        /dependency verification marker directory is not an anchored run path/u
+        /dependency verification marker is unavailable/u
       );
     } finally {
       fixture.cleanup();
@@ -595,9 +1044,38 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       fs.symlinkSync("dependency-two.json", marker);
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
-        /cloud handoff file must be a regular unlinked file/u
+        /dependency verification marker is unavailable/u
       );
     } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a verified publication replaced by a symlink after descriptor open", async () => {
+    const fixture = createProjectFixture();
+    const publication = path.join(fixture.root, fixture.input.dependency_artifact_dirs[0]!, "declared.txt");
+    const retained = `${publication}.retained`;
+    const outside = path.join(fixture.root, "outside-secret.txt");
+    fs.writeFileSync(outside, "must never cross the cloud boundary\n");
+    const originalOpen = fs.openSync.bind(fs);
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation((filePath, flags, mode) => {
+      const descriptor = originalOpen(filePath, flags, mode);
+      if (!swapped && String(filePath).endsWith("/declared.txt")) {
+        swapped = true;
+        fs.renameSync(publication, retained);
+        fs.symlinkSync(outside, publication);
+      }
+      return descriptor;
+    });
+    try {
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /verified dependency publication .* bounded singly linked regular file/u
+      );
+      expect(swapped).toBe(true);
+      expect(fs.readFileSync(outside, "utf8")).toBe("must never cross the cloud boundary\n");
+    } finally {
+      openSpy.mockRestore();
       fixture.cleanup();
     }
   });
@@ -1156,7 +1634,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "partial-handoff");
     const requestPath = path.join(volumeRoot, "input", "request.json");
     fs.mkdirSync(path.dirname(requestPath), { recursive: true });
-    const malformed = '{"schema_version":"ultrafuzz.modal.node.v1",\n';
+    const malformed = '{"schema_version":"ultrafuzz.modal.node.v2",\n';
     fs.writeFileSync(requestPath, malformed);
     try {
       await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).rejects.toThrow(
@@ -1410,6 +1888,27 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("binds durable recovery to the exact dependency verifier authorities", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "dependency-verifier-authority");
+    const [first, ...rest] = fixture.input.dependency_verification_authorities;
+    const alteredDigest = `${first!.marker_sha256[0] === "0" ? "1" : "0"}${first!.marker_sha256.slice(1)}`;
+    try {
+      await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      await expect(
+        initializeDurableNodeWorkspace(volumeRoot, archive.path, {
+          ...fixture.input,
+          dependency_verification_authorities: [{ ...first!, marker_sha256: alteredDigest }, ...rest]
+        })
+      ).rejects.toThrow(/durable workspace request does not match/u);
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects a sealed module mutated between durable worker attempts", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -1565,6 +2064,15 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         })
       ).resolves.toMatchObject({ status: "finished" });
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
+      expect(client.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          command: ["sleep", String(60 + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS)],
+          timeoutMs: (60 + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS) * 1000
+        })
+      );
+      expect(fixture.input.resources.timeout_seconds).toBe(60);
       expect(sandbox.exec).not.toHaveBeenCalled();
       expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
     } finally {
@@ -2175,7 +2683,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
   });
 
   it("binds Moonshot fallback credentials into the canonical Kimi API-key secret", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({ agentCredentialEnv: ["KIMI_API_KEY"] });
     const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
@@ -2187,7 +2695,6 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         MOONSHOT_API_KEY: "moonshot-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -2206,7 +2713,14 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
   });
 
   it("binds only the compiled task's scoped allowlist entries into its Modal secret", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({
+      agentCredentialEnv: [
+        "AWS_SESSION_TOKEN",
+        "FOUNDRY_PROFILE",
+        "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+        "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"
+      ]
+    });
     const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
@@ -2222,12 +2736,6 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "AWS_SESSION_TOKEN,CUSTOM_SHARED_TOKEN"
       }
     });
-    fixture.input.agent_credential_env = [
-      "AWS_SESSION_TOKEN",
-      "FOUNDRY_PROFILE",
-      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-      "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"
-    ];
     try {
       await expect(
         provider.run({
@@ -2251,7 +2759,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
   });
 
   it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({ agentCredentialEnv: ["KIMI_API_KEY", "MOONSHOT_API_KEY"] });
     const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
@@ -2263,7 +2771,6 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         KIMI_API_KEY: "kimi-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -2282,7 +2789,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
   });
 
   it("binds a compiled Moonshot fallback list into Kimi Code's canonical API-key secret", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({ agentCredentialEnv: ["KIMI_API_KEY", "MOONSHOT_API_KEY"] });
     const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
@@ -2294,7 +2801,6 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         MOONSHOT_API_KEY: "moonshot-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -2313,7 +2819,9 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
   });
 
   it("forwards optional Kimi API base URLs into cloud-node workers", async () => {
-    const fixture = createProjectFixture();
+    const fixture = createProjectFixture({
+      agentCredentialEnv: ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]
+    });
     const result = createResultArchive(fixture.input.execution_snapshot_root);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
@@ -2326,7 +2834,6 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         KIMI_BASE_URL: "https://kimi.example.invalid/v1"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"];
     try {
       await expect(
         provider.run({
@@ -2488,6 +2995,12 @@ function createProjectFixture(
     committedSymlink?: boolean;
     governanceDirty?: boolean;
     divergentSource?: boolean;
+    optionalDependencyAttemptIds?: readonly string[];
+    referenceDependencyAttemptIds?: readonly string[];
+    agentCredentialEnv?: readonly string[];
+    operatorPrompt?: string;
+    trackedIgnored?: boolean;
+    recordedSource?: boolean;
   } = {}
 ) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
@@ -2495,6 +3008,15 @@ function createProjectFixture(
   const runRoot = ".ultrafuzz/runs/run-one";
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
   const dependencyArtifactDirs = [`${runRoot}/artifacts/dependency-one`, `${runRoot}/artifacts/dependency-two`];
+  const optionalDependencyArtifactDirs = dependencyArtifactDirs.filter((directory) =>
+    (options.optionalDependencyAttemptIds ?? []).includes(path.basename(directory))
+  );
+  const referenceDependencyArtifactDirs = dependencyArtifactDirs.filter((directory) =>
+    (options.referenceDependencyAttemptIds ?? []).includes(path.basename(directory))
+  );
+  if (optionalDependencyArtifactDirs.some((directory) => referenceDependencyArtifactDirs.includes(directory))) {
+    throw new Error("fixture reference dependencies cannot be optional");
+  }
   const workspaceDir = `${runRoot}/workspaces/attempt-one`;
   const pendingSnapshotRoot = path.join(root, runRoot, "smithers", "execution-snapshots", "pending");
   const workflowRelativePath = ".smithers/workflows/ultrafuzz-run-one.tsx";
@@ -2511,12 +3033,13 @@ function createProjectFixture(
   }
   const markerRoot = path.join(root, runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(markerRoot, { recursive: true });
+  const dependencyVerificationAuthorities: ModalNodeSandboxInput["dependency_verification_authorities"] = [];
   for (const dependency of dependencyArtifactDirs) {
+    if (referenceDependencyArtifactDirs.includes(dependency)) continue;
     const relativePath = "declared.txt";
     const artifactPath = path.join(root, dependency, relativePath);
     const sha256 = sha256Hex(fs.readFileSync(artifactPath, "utf8"));
-    fs.writeFileSync(
-      path.join(markerRoot, `${path.basename(dependency)}.json`),
+    const markerContents = Buffer.from(
       `${JSON.stringify({
         schema_version: "ultrafuzz.artifact-verification.v2",
         attempt_id: path.basename(dependency),
@@ -2532,6 +3055,12 @@ function createProjectFixture(
         publications: [{ path: relativePath, sha256 }]
       })}\n`
     );
+    fs.writeFileSync(path.join(markerRoot, `${path.basename(dependency)}.json`), markerContents);
+    dependencyVerificationAuthorities.push({
+      attempt_id: path.basename(dependency),
+      marker_sha256: sha256Hex(markerContents),
+      size_bytes: markerContents.byteLength
+    });
   }
   fs.writeFileSync(path.join(markerRoot, "unrelated.json"), "{}\n");
   fs.mkdirSync(path.join(root, runRoot, "artifacts", "unrelated"), { recursive: true });
@@ -2549,12 +3078,27 @@ function createProjectFixture(
   fs.writeFileSync(path.join(root, workspaceDir, "local.txt"), "excluded\n");
   fs.writeFileSync(path.join(root, runRoot, "logs", "local.log"), "excluded\n");
   if (options.committedSymlink === true) fs.symlinkSync("source.txt", path.join(root, "source-link.txt"));
+  if (options.trackedIgnored === true) {
+    fs.writeFileSync(path.join(root, ".gitignore"), "tracked-ignored.txt\nuntracked-ignored.txt\n");
+    fs.writeFileSync(path.join(root, "tracked-ignored.txt"), "committed but ignored\n");
+    fs.writeFileSync(path.join(root, "untracked-ignored.txt"), "untracked and ignored\n");
+  }
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
-  execFileSync("git", ["add", "source.txt", ...(options.committedSymlink === true ? ["source-link.txt"] : [])], {
-    cwd: root
-  });
+  execFileSync(
+    "git",
+    [
+      "add",
+      "source.txt",
+      ...(options.committedSymlink === true ? ["source-link.txt"] : []),
+      ...(options.trackedIgnored === true ? [".gitignore"] : [])
+    ],
+    { cwd: root }
+  );
+  if (options.trackedIgnored === true) {
+    execFileSync("git", ["add", "--force", "tracked-ignored.txt"], { cwd: root });
+  }
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   const parentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   if (options.divergentSource === true) {
@@ -2573,6 +3117,210 @@ function createProjectFixture(
   }
   const governedCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   const governedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
+  const sourceRevision =
+    options.divergentSource === true || options.pinnedSubmodules === true || options.recordedSource === true
+      ? governedCommit
+      : undefined;
+  const sourceRef =
+    options.pinnedSubmodules === true
+      ? "refs/heads/ultrafuzz-pinned"
+      : options.divergentSource === true || options.recordedSource === true
+        ? "refs/ultrafuzz/runs/run-one/source"
+        : undefined;
+  const consumerAgentCredentialEnv = [...(options.agentCredentialEnv ?? [AGENT_ENV])];
+
+  const dependencyOutput = {
+    path: "declared.txt",
+    ...currentArtifactBinding("ultrafuzz/text@1"),
+    primary: true
+  };
+  const consumerOutput = {
+    path: "result.txt",
+    ...currentArtifactBinding("ultrafuzz/text@1"),
+    primary: true
+  };
+  const referenceManifestOutput = {
+    path: "references/manifest.json",
+    ...currentArtifactBinding("ultrafuzz/reference-manifest@1"),
+    primary: false
+  };
+  const graph = {
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
+    topology_version: 2,
+    groups:
+      optionalDependencyArtifactDirs.length === 0
+        ? {}
+        : { optional: { label: "Optional dependencies", defaults: { failure_policy: "continue" } } },
+    nodes: [
+      ...dependencyArtifactDirs.map((directory) => {
+        const id = path.basename(directory);
+        const isReference = referenceDependencyArtifactDirs.includes(directory);
+        return {
+          id,
+          logical_id: id,
+          display_name: id,
+          kind: isReference ? "reference" : "agentic",
+          ...(optionalDependencyArtifactDirs.includes(directory) ? { group: "optional" } : {}),
+          depends_on: [],
+          artifact_dir: `artifacts/${id}`,
+          outputs: isReference ? [dependencyOutput, referenceManifestOutput] : [dependencyOutput],
+          prompt_id: id,
+          prompt_path: isReference ? "" : `fixtures/${id}.md`,
+          ...(isReference
+            ? {
+                reference: "fixture-reference",
+                reference_revision: {
+                  provider: "github",
+                  repo: "owner/repo",
+                  commit: "b".repeat(40),
+                  paths: ["declared.txt"]
+                }
+              }
+            : {}),
+          loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+          model_fanout: [],
+          ...(isReference ? {} : { workflow: { node_id: `node:${id}`, task_node_ids: [`node:${id}`] } })
+        };
+      }),
+      {
+        id: "attempt-one",
+        logical_id: "attempt-one",
+        display_name: "attempt-one",
+        kind: "agentic",
+        depends_on: dependencyArtifactDirs.map((directory) => path.basename(directory)),
+        artifact_dir: "artifacts/attempt-one",
+        outputs: [consumerOutput],
+        prompt_id: "attempt-one",
+        prompt_path: "fixtures/attempt-one.md",
+        loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+        model_fanout: [],
+        workflow: { node_id: "node:attempt-one", task_node_ids: ["node:attempt-one"] }
+      }
+    ]
+  };
+  const graphContents = `${JSON.stringify(graph)}\n`;
+  fs.mkdirSync(path.join(root, runRoot), { recursive: true });
+  fs.writeFileSync(path.join(root, runRoot, "graph.json"), graphContents);
+
+  const referenceArtifactManifestAuthorities: NonNullable<
+    SmithersTaskManifestTask["referenceArtifactManifestAuthorities"]
+  > = [];
+  for (const directory of referenceDependencyArtifactDirs) {
+    const dependencyRoot = path.join(root, directory);
+    const attemptId = path.basename(directory);
+    const referenceManifestRelativePath = "references/manifest.json";
+    const referenceManifestContents = `${JSON.stringify({
+      schema_version: "ultrafuzz.reference-manifest.v1",
+      reference: "fixture-reference"
+    })}\n`;
+    fs.mkdirSync(path.join(dependencyRoot, "references"), { recursive: true });
+    fs.writeFileSync(path.join(dependencyRoot, referenceManifestRelativePath), referenceManifestContents);
+    const provenance = {
+      producer_node_id: attemptId,
+      run_id: "run-one",
+      logical_node_id: attemptId,
+      origin: "pinned-reference",
+      metadata: {
+        reference: "fixture-reference",
+        repo: "owner/repo",
+        commit: "b".repeat(40),
+        reference_artifact: path.join(dependencyRoot, "declared.txt"),
+        manifest_artifact: path.join(dependencyRoot, referenceManifestRelativePath)
+      }
+    };
+    const referenceFiles = ["declared.txt", referenceManifestRelativePath].map((relativePath) => {
+      const contents = fs.readFileSync(path.join(dependencyRoot, relativePath));
+      return {
+        path: relativePath,
+        size_bytes: contents.byteLength,
+        sha256: sha256Hex(contents),
+        provenance
+      };
+    });
+    const artifactManifestContents = Buffer.from(
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-manifest.v3",
+        run_id: "run-one",
+        node_id: attemptId,
+        producer_node_id: attemptId,
+        created_at: "2026-01-01T00:00:00.000Z",
+        files: referenceFiles,
+        output_contracts: [dependencyOutput, referenceManifestOutput],
+        prerequisite_manifests: [],
+        provenance
+      })}\n`
+    );
+    fs.writeFileSync(path.join(dependencyRoot, "artifact-manifest.json"), artifactManifestContents);
+    referenceArtifactManifestAuthorities.push({
+      attemptId,
+      artifactDir: dependencyRoot,
+      sizeBytes: artifactManifestContents.byteLength,
+      sha256: sha256Hex(artifactManifestContents)
+    });
+  }
+
+  const producerTasks = dependencyArtifactDirs
+    .filter((directory) => !referenceDependencyArtifactDirs.includes(directory))
+    .map((directory) => {
+      const attemptId = path.basename(directory);
+      return fixtureSmithersTask({
+        root,
+        runRoot,
+        attemptId,
+        sourceRevision,
+        sourceRef,
+        outputs: [
+          {
+            path: "declared.txt",
+            ...currentTaskOutputBinding("ultrafuzz/text@1"),
+            primary: true
+          }
+        ],
+        ...(optionalDependencyArtifactDirs.includes(directory) ? { group: "optional" } : {})
+      });
+    });
+  const consumerTask = fixtureSmithersTask({
+    root,
+    runRoot,
+    attemptId: "attempt-one",
+    dependencies: dependencyArtifactDirs.map((directory) => path.basename(directory)),
+    dependencySmithersNodeIds: dependencyArtifactDirs
+      .filter((directory) => !referenceDependencyArtifactDirs.includes(directory))
+      .map((directory) => `verify:${path.basename(directory)}`),
+    dependencyArtifactDirs: dependencyArtifactDirs.map((directory) => path.join(root, directory)),
+    optionalDependencyArtifactDirs: optionalDependencyArtifactDirs.map((directory) => path.join(root, directory)),
+    ...(referenceArtifactManifestAuthorities.length === 0 ? {} : { referenceArtifactManifestAuthorities }),
+    sourceRevision,
+    sourceRef,
+    renderedPromptPath: path.join(root, mutablePromptPath),
+    agentCredentialEnv: consumerAgentCredentialEnv,
+    outputs: [
+      {
+        path: "result.txt",
+        ...currentTaskOutputBinding("ultrafuzz/text@1"),
+        primary: true
+      }
+    ]
+  });
+  const tasks = [...producerTasks, consumerTask];
+  const taskManifestContents = `${JSON.stringify({
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    run_id: "run-one",
+    smithers_run_id: "workflow-one",
+    workflow_name: "fixture-workflow",
+    ...(sourceRevision === undefined ? {} : { source_revision: sourceRevision, source_ref: sourceRef }),
+    pinned_submodules: null,
+    tasks
+  })}\n`;
+  const workflowInputContents = `${JSON.stringify({
+    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+    ultrafuzz_run_id: "run-one",
+    ...(options.operatorPrompt === undefined ? {} : { operator_prompt: options.operatorPrompt }),
+    tasks: [{ id: "node:attempt-one", prompt_path: promptRelativePath }]
+  })}\n`;
+  fs.mkdirSync(path.join(root, runRoot, "smithers"), { recursive: true });
+  fs.writeFileSync(path.join(root, runRoot, "smithers", "input.json"), workflowInputContents);
 
   const snapshotFiles = new Map<string, string>([
     [workflowRelativePath, "export default { sealed: true };\n"],
@@ -2580,6 +3328,7 @@ function createProjectFixture(
     ["tsconfig.json", "{}\n"],
     ["controls/bunfig.toml", "\n"],
     ["controls/bun-module-confinement.js", BUN_MODULE_CONFINEMENT_SOURCE],
+    ["controls/tasks.json", taskManifestContents],
     ["controls/ultrafuzz.toml", '[models]\ndefault = "sealed"\n'],
     [
       "controls/data-governance.json",
@@ -2670,23 +3419,30 @@ function createProjectFixture(
     .filter(([relativePath]) => relativePath !== workflowRelativePath)
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([relativePath, contents]) => ({
-      source_path: path.join(root, relativePath),
+      source_path:
+        relativePath === promptRelativePath ? path.join(root, mutablePromptPath) : path.join(root, relativePath),
       snapshot_path: relativePath,
       sha256: sha256Hex(contents),
       size_bytes: Buffer.byteLength(contents)
     }));
   const workflowContents = snapshotFiles.get(workflowRelativePath)!;
   const workflowSeal = { sha256: sha256Hex(workflowContents), size_bytes: Buffer.byteLength(workflowContents) };
+  const graphSeal = { sha256: sha256Hex(graphContents), size_bytes: Buffer.byteLength(graphContents) };
+  const taskSeal = {
+    sha256: sha256Hex(taskManifestContents),
+    size_bytes: Buffer.byteLength(taskManifestContents)
+  };
+  const inputSeal = { sha256: sha256Hex(workflowInputContents), size_bytes: Buffer.byteLength(workflowInputContents) };
   const controlSeal = `${JSON.stringify({
     schema_version: "ultrafuzz.workflow-control-integrity.v2",
     run_id: "run-one",
     files: {
-      graph: workflowSeal,
+      graph: graphSeal,
       expanded_graph: workflowSeal,
       graph_fingerprint: workflowSeal,
       config: workflowSeal,
-      tasks: workflowSeal,
-      input: workflowSeal,
+      tasks: taskSeal,
+      input: inputSeal,
       workflow: workflowSeal,
       evidence_workflow: workflowSeal
     },
@@ -2695,9 +3451,11 @@ function createProjectFixture(
       run_id: "run-one",
       graph_fingerprint: "0".repeat(64),
       config_fingerprint: "1".repeat(64),
-      expected_state_node_ids: [],
-      expected_task_attempt_ids: [],
-      expected_task_node_ids: []
+      expected_state_node_ids: graph.nodes.map((node) => node.id).sort(),
+      expected_task_attempt_ids: tasks.map((task) => task.attemptId).sort(),
+      expected_task_node_ids: tasks
+        .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+        .sort()
     }
   })}\n`;
   const snapshotGeneration = sha256Hex(controlSeal);
@@ -2709,10 +3467,11 @@ function createProjectFixture(
   const workflowPath = `${executionSnapshotRoot}/${workflowRelativePath}`;
   const promptPath = `${executionSnapshotRoot}/${promptRelativePath}`;
   const input: ModalNodeSandboxInput = {
-    schema_version: "ultrafuzz.modal.node.v1",
+    schema_version: "ultrafuzz.modal.node.v2",
     run_id: "run-one",
     task_id: "node:attempt-one",
     attempt_id: "attempt-one",
+    ...(sourceRevision === undefined ? {} : { source_revision: sourceRevision, source_ref: sourceRef }),
     execution_generation: "base",
     execution_snapshot_root: executionSnapshotRoot,
     workflow_path: workflowPath,
@@ -2721,12 +3480,15 @@ function createProjectFixture(
     artifact_dir: artifactDir,
     workspace_dir: workspaceDir,
     dependency_artifact_dirs: dependencyArtifactDirs,
+    optional_dependency_artifact_dirs: optionalDependencyArtifactDirs,
+    dependency_verification_authorities: dependencyVerificationAuthorities,
     resources: {
       cpu: 2,
       memory_mib: 4096,
       timeout_seconds: 60
     },
-    agent_credential_env: [AGENT_ENV]
+    agent_credential_env: consumerAgentCredentialEnv,
+    ...(options.operatorPrompt === undefined ? {} : { operator_prompt: options.operatorPrompt })
   };
   return {
     root,
@@ -2738,6 +3500,149 @@ function createProjectFixture(
     cleanup: () => {
       makeFixtureTreeWritable(temporaryRoot);
       fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+  };
+}
+
+function refreshDependencyVerificationAuthority(
+  fixture: ReturnType<typeof createProjectFixture>,
+  attemptId: string
+): void {
+  const markerContents = fs.readFileSync(
+    path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", `${attemptId}.json`)
+  );
+  const authority = {
+    attempt_id: attemptId,
+    marker_sha256: sha256Hex(markerContents),
+    size_bytes: markerContents.byteLength
+  };
+  const index = fixture.input.dependency_verification_authorities.findIndex(
+    (candidate) => candidate.attempt_id === attemptId
+  );
+  if (index === -1) fixture.input.dependency_verification_authorities.push(authority);
+  else fixture.input.dependency_verification_authorities[index] = authority;
+}
+
+function fixtureSmithersTask(input: {
+  root: string;
+  runRoot: string;
+  attemptId: string;
+  outputs: SmithersTaskManifestOutput[];
+  dependencies?: string[];
+  dependencySmithersNodeIds?: string[];
+  dependencyArtifactDirs?: string[];
+  optionalDependencyArtifactDirs?: string[];
+  referenceArtifactManifestAuthorities?: NonNullable<SmithersTaskManifestTask["referenceArtifactManifestAuthorities"]>;
+  sourceRevision?: string;
+  sourceRef?: string;
+  renderedPromptPath?: string;
+  agentCredentialEnv?: string[];
+  group?: string;
+}): SmithersTaskManifestTask {
+  const dependencies = input.dependencies ?? [];
+  const dependencySmithersNodeIds =
+    input.dependencySmithersNodeIds ?? dependencies.map((attemptId) => `verify:${attemptId}`);
+  const workspacePath = path.join(input.root, input.runRoot, "workspaces", input.attemptId);
+  const artifactDir = path.join(input.root, input.runRoot, "artifacts", input.attemptId);
+  const resources = { cpu: 2, memoryMiB: 4096, timeoutSeconds: 60 };
+  const agentChain = [
+    {
+      profileId: "fixture-model",
+      agentRef: "CodexAgent",
+      modelName: "gpt-fixture",
+      reasoningEffort: "high",
+      role: "primary" as const
+    }
+  ];
+  return {
+    attemptId: input.attemptId,
+    concreteNodeId: input.attemptId,
+    logicalNodeId: input.attemptId,
+    preparationSmithersNodeId: `prepare:${input.attemptId}`,
+    smithersNodeId: `node:${input.attemptId}`,
+    verifierSmithersNodeId: `verify:${input.attemptId}`,
+    agentRef: "CodexAgent",
+    agentChain,
+    modelName: "gpt-fixture",
+    reasoningEffort: "high",
+    ...(input.sourceRevision === undefined
+      ? {}
+      : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! }),
+    dependencies,
+    dependencySmithersNodeIds,
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs: input.dependencyArtifactDirs ?? [],
+    ...(input.referenceArtifactManifestAuthorities === undefined ||
+    input.referenceArtifactManifestAuthorities.length === 0
+      ? {}
+      : { referenceArtifactManifestAuthorities: input.referenceArtifactManifestAuthorities }),
+    optionalDependencyArtifactDirs: input.optionalDependencyArtifactDirs ?? [],
+    ...(input.renderedPromptPath === undefined ? {} : { renderedPromptPath: input.renderedPromptPath }),
+    execution: {
+      mode: "cloud",
+      provider: "modal",
+      resources,
+      modal: {
+        app: "fixture-modal-app",
+        image: "fixture-modal-image",
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+      },
+      agentCredentialEnv: input.agentCredentialEnv ?? [AGENT_ENV]
+    },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: {
+        ultrafuzzRunId: "run-one",
+        smithersWorkflowName: "fixture-workflow",
+        graphVersion: "4",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: input.attemptId,
+        logicalNodeId: input.attemptId,
+        attemptId: input.attemptId,
+        label: input.attemptId,
+        kind: "agentic",
+        promptPath: `fixtures/${input.attemptId}.md`,
+        ...(input.group === undefined ? {} : { group: input.group })
+      },
+      dependencies: {
+        concreteNodeIds: dependencies,
+        attemptIds: dependencies,
+        smithersNodeIds: dependencySmithersNodeIds
+      },
+      loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+      model: {
+        profileId: "fixture-model",
+        agentRef: "CodexAgent",
+        modelName: "gpt-fixture",
+        reasoningEffort: "high",
+        modelIndex: 0,
+        attemptIndex: 0,
+        agentChain
+      },
+      workspace: {
+        primitive: "worktree",
+        path: workspacePath,
+        repoPath: input.root,
+        trustModel: "skip-permissions",
+        ...(input.sourceRevision === undefined
+          ? {}
+          : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! })
+      },
+      artifacts: {
+        dir: artifactDir,
+        outputs: input.outputs,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "cloud", provider: "modal", resources }
     }
   };
 }
@@ -2784,7 +3689,7 @@ function makeFixtureTreeWritable(root: string): void {
   }
 }
 
-function sha256Hex(contents: string): string {
+function sha256Hex(contents: string | Buffer): string {
   return crypto.createHash("sha256").update(contents).digest("hex");
 }
 

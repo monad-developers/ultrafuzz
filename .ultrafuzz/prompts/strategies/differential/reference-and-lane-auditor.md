@@ -12,19 +12,35 @@ against public sources before any lane author trusts them.
 
 Inputs:
 
-Plan:
-{{artifact_handoff:differential-oracle-planner}}
-
-Harness summary:
-{{artifact_handoff:reference-harness-author}}
-
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
 
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not edit repository source files; write only the required artifacts. Do not assume the reference, production, or tests are correct. Reject or narrow any lane whose strict oracle depends on guessed behavior, private layout, production internals, gas-shaped logic, or unstated preconditions.
+Sealed JSON authority for every declared ancestor differential plan:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1}}
+
+Sealed JSON authority for every declared ancestor reference harness:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/reference-harness@1}}
+
+Read each manifest definition instead of expecting expanded path arrays in this
+prompt. Derive each selected artifact path relative to the run root and retain
+the selector's required `localeCompare` order.
+
+Do not edit repository source files; write only the required artifacts. Do not
+assume the reference, production, or tests are correct. Reject or narrow any
+lane whose strict oracle depends on guessed behavior, private layout,
+production internals, gas-shaped logic, or unstated preconditions.
+
+Audit oracle independence explicitly. A reference is independent only when its
+expected values and transitions derive solely from cited public sources.
+Reject or narrow a lane if its reference copies, translates, simplifies, or
+calls the production algorithm, control flow, constants, storage
+representation, or helper logic. Shared public input types and documented
+constants are permitted only when their public source is cited.
 
 When carrying forward a lane, require its `focused_command` to be an unchanged
 direct `forge` invocation from `PATH`. A command containing substitution, shell
@@ -48,9 +64,10 @@ Preserve that stable candidate order within both `ready_lanes` and
 reports `validation.passed: true` and one of that harness's reference models
 lists the lane's unchanged `surface_id` in `covered_surfaces`.
 
-Set `source_plan_artifacts` and `source_harness_artifacts` to the exact declared
-handoff paths in declared order. Every planned lane must appear exactly once as
-ready, rejected, or explicitly narrowed. A ready row must preserve the complete
+Set `source_plan_artifacts` and `source_harness_artifacts` to exactly their
+distinct manifest-derived run-relative path arrays; use the corresponding
+manifest-derived absolute paths for reading only. Every planned lane must appear exactly once as ready,
+rejected, or explicitly narrowed. A ready row must preserve the complete
 planner lane payload byte-for-JSON-value, adding only its attempt/auditor,
 harness-attempt, and exact source-artifact coordinates. Preserve every planned
 surface ID and its public evidence paths in `surface_audits`; do not accept a

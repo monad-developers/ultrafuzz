@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -18,6 +19,7 @@ import {
   aggregateEvalHistoryBenchmarkRuns,
   aggregateEvalHistoryModelPerformanceCost,
   assertPublicBenchmarkGeneration,
+  assertPublicBenchmarkRunPolicy,
   createEvalHistoryObservations,
   emptyEvalHistory,
   evalHistoryZodSchema,
@@ -35,6 +37,7 @@ import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } fro
 import { safeEvalId } from "../src/utils.js";
 import {
   cleanRecoveryEquivalence,
+  currentEvalRunRecord,
   currentRunExpansion,
   recoveryEquivalenceSummary,
   testReportAuthority,
@@ -1445,6 +1448,125 @@ describe("longitudinal eval history", () => {
     expect(() =>
       assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "ultrafuzz-bench", "smoke", suite, duplicate)
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" }));
+  });
+
+  it("requires every public full row to attest its actual packaged run policy before publication", () => {
+    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench", "cohort.json"));
+    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json"));
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
+    const matrix = publicMatrix(suite);
+    const catalog = loadAuditProfileCatalog(path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml"));
+    const topologyDigest = packagedTopologyDigest(auditProfile("full", catalog), catalog);
+    expect(topologyDigest).toMatch(/^[0-9a-f]{64}$/u);
+    if (topologyDigest === undefined) throw new Error("missing packaged full topology");
+    const records = matrix.map((row) =>
+      currentEvalRunRecord({
+        row,
+        runRoot: path.join("/tmp/public-runs", row.id),
+        evalRunId: "eval-full",
+        overrides: {
+          audit_profile: "full",
+          audit_profile_catalog_digest: catalog.digest,
+          topology_path_origin: "audit-profile",
+          topology_digest: topologyDigest
+        }
+      })
+    );
+
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records
+      })
+    ).not.toThrow();
+
+    for (const overrides of [
+      { audit_profile: "default" },
+      { audit_profile_catalog_digest: "0".repeat(64) },
+      { topology_path_origin: "project-config" as const },
+      { topology_digest: "0".repeat(64) }
+    ]) {
+      const mismatched = records.map((record, index) => (index === 0 ? { ...record, ...overrides } : record));
+      expect(() =>
+        assertPublicBenchmarkRunPolicy({
+          benchmarkPolicyRoot: REPOSITORY_ROOT,
+          evalRunId: "eval-full",
+          lane: "full",
+          matrix,
+          records: mismatched
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+    }
+
+    const staleMismatch = { ...records[0]!, topology_digest: "0".repeat(64) };
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [staleMismatch, ...records]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [...records, staleMismatch]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    const staleFailed = {
+      ...records[0]!,
+      status: "failed" as const,
+      launcher: { ...records[0]!.launcher, status: "failed" as const }
+    };
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [staleFailed, ...records]
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [...records, staleFailed]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    const wrongIdentity = records.map((record, index) =>
+      index === 0 ? { ...record, target_id: "another-target" } : record
+    );
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: wrongIdentity
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: records.slice(1)
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
   });
 
   it("renders deterministic linked SVGs and marks missing efficiency unavailable", () => {

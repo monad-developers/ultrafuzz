@@ -1,4 +1,5 @@
 export * from "./artifact-gates.js";
+export * from "./artifact-verification-authority.js";
 export * from "./aggregation-semantic-context.js";
 export * from "./audit-contracts.js";
 export * from "./clean.js";
@@ -13,6 +14,7 @@ export * from "./model-pricing.js";
 export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./pinned-submodules.js";
+export * from "./prompt-artifact-authority.js";
 export * from "./references.js";
 export * from "./retry-chain.js";
 export * from "./run-progress.js";

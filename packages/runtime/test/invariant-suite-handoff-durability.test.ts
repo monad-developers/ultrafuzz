@@ -378,11 +378,16 @@ function loadWorkflowHelpers(
     },
     invariantSuiteHandoffRecordPath: (task: TaskSpecLike) =>
       path.join(task.runRoot, "invariant-suite-handoffs", task.attemptId, "handoff.json"),
+    // This harness predates optional dependency lanes. Every fixture dependency
+    // is required, so the production admission helper projects the full set.
+    admittedDependencyArtifactDirs: (task: TaskSpecLike) => task.dependencyArtifactDirs,
     // Collaborators of resetTaskArtifactsForRetry that are out of scope here.
     resetTaskArtifactContents: () => undefined,
     restoreInvariantSuiteWorkspaceSnapshot: () => undefined,
     restoreWorkspacePatchPreparation: () => undefined,
     prepareArtifactMirror: () => undefined,
+    materializePromptArtifactAuthority: () => undefined,
+    materializeFinalReportRunMetadataAuthority: () => undefined,
     INVARIANT_TEST_ROOT_NAMES: ["test", "tests"] as const,
     invariantTestRoots: () => [] as readonly string[],
     // The discovery helpers capture through the template's bounded git wrapper (#323). Standing in for

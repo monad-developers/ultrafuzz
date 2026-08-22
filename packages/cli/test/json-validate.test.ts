@@ -774,7 +774,7 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
     fs.writeFileSync(
       nodeInput,
       `${JSON.stringify({
-        schema_version: "ultrafuzz.modal.node.v1",
+        schema_version: "ultrafuzz.modal.node.v2",
         run_id: "run-1",
         task_id: "task-1",
         attempt_id: "attempt-1",
@@ -785,6 +785,7 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
         artifact_dir: ".ultrafuzz/runs/run-1/artifacts/attempt-1",
         workspace_dir: ".ultrafuzz/runs/run-1/workspaces/attempt-1",
         dependency_artifact_dirs: [],
+        dependency_verification_authorities: [],
         resources: { cpu: 1, memory_mib: 1_024, timeout_seconds: 60 },
         agent_credential_env: ["OPENAI_API_KEY"]
       })}\n`,

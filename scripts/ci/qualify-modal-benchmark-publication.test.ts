@@ -14,7 +14,8 @@ const successfulJobs = [
   {
     jobs: [
       { name: "launch", conclusion: "success" },
-      { name: "collect", conclusion: "success" }
+      { name: "collect", conclusion: "success" },
+      { name: "monitor_full", conclusion: "skipped" }
     ]
   }
 ];
@@ -35,7 +36,7 @@ describe("trusted Modal benchmark publication qualification", () => {
     expect(
       qualifyModalBenchmarkPublication(
         event({ event: "workflow_dispatch" }),
-        successfulJobs,
+        fullSuccessfulJobs(),
         artifacts("full"),
         repository
       )
@@ -58,7 +59,8 @@ describe("trusted Modal benchmark publication qualification", () => {
       {
         jobs: [
           { name: "launch", conclusion: "skipped" },
-          { name: "collect", conclusion: "skipped" }
+          { name: "collect", conclusion: "skipped" },
+          { name: "monitor_full", conclusion: "skipped" }
         ]
       }
     ];
@@ -72,13 +74,28 @@ describe("trusted Modal benchmark publication qualification", () => {
           {
             jobs: [
               { name: "launch", conclusion: "success" },
-              { name: "collect", conclusion: "failure" }
+              { name: "collect", conclusion: "failure" },
+              { name: "monitor_full", conclusion: "skipped" }
             ]
           }
         ],
         artifacts("smoke"),
         repository
       )
+    ).toEqual(expect.objectContaining({ eligible: false }));
+  });
+
+  it("requires the staged monitor only for the full lane", () => {
+    expect(
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("full"),
+        repository
+      )
+    ).toEqual(expect.objectContaining({ eligible: false }));
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), fullSuccessfulJobs(), artifacts("smoke"), repository)
     ).toEqual(expect.objectContaining({ eligible: false }));
   });
 
@@ -150,6 +167,18 @@ describe("trusted Modal benchmark publication qualification", () => {
     }
   });
 });
+
+function fullSuccessfulJobs() {
+  return [
+    {
+      jobs: [
+        { name: "launch", conclusion: "success" },
+        { name: "collect", conclusion: "success" },
+        { name: "monitor_full", conclusion: "success" }
+      ]
+    }
+  ];
+}
 
 function artifacts(mode: "smoke" | "full", overrides: { expired?: boolean; runAttempt?: number } = {}) {
   const attempt = overrides.runAttempt ?? runAttempt;

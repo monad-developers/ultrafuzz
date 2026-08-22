@@ -566,6 +566,9 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     ULTRAFUZZ_TRUSTED_BIN: trustedBin
   };
   const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
+  const sealedTaskManifest = executionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
+  assert.ok(sealedTaskManifest !== undefined);
+  assert.equal(fs.realpathSync(sealedTaskManifest.sourcePath), fs.realpathSync(compiled.tasksPath));
   const pinnedPaths = executionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
@@ -597,7 +600,7 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     verifiedControl.executionFiles
       .filter((file) => file.snapshotPath.startsWith("controls/bun"))
       .map((file) => file.snapshotPath),
-    ["controls/bun-module-confinement.js", "controls/bunfig.toml"]
+    ["controls/bun-empty.env", "controls/bun-module-confinement.js", "controls/bunfig.toml"]
   );
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
@@ -605,7 +608,12 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     snapshot: verifiedControl
   });
   assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
+  assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bun-empty.env"), "utf8"), "\n");
   assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
+  assert.deepEqual(
+    parseSmithersTaskManifestBytes(fs.readFileSync(path.join(materialized.root, "controls", "tasks.json"))),
+    parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath))
+  );
   assert.equal(
     sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
     expectation.manifest_sha256
@@ -660,6 +668,9 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
     cloudPlan.value!.layout,
     executionEnvironment
   );
+  const sealedCloudTaskManifest = cloudExecutionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
+  assert.ok(sealedCloudTaskManifest !== undefined);
+  assert.equal(fs.realpathSync(sealedCloudTaskManifest.sourcePath), fs.realpathSync(cloudCompiled.tasksPath));
   const cloudPinnedPaths = cloudExecutionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);

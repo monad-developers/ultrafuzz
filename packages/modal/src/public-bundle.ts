@@ -5,9 +5,9 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractSchemaBinding,
-  assertRegularFileInside,
   executeOfflineSchemaSemanticGates,
   parseStrictJsonBytes,
+  readSinglyLinkedRegularFileSnapshotInside,
   validateRegisteredJsonSchema,
   type TerminalReport
 } from "@ultrafuzz/artifacts";
@@ -19,7 +19,7 @@ import {
   publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
-import { projectCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
@@ -56,6 +56,17 @@ export interface PublicBenchmarkBundleSource {
   source: string;
   /** Immutable bytes captured by a stronger source authority, when available. */
   immutableContents?: Buffer;
+  /** Filesystem identity bound to immutableContents when this module captured the source. */
+  immutableSourceIdentity?: PublicBenchmarkBundleSourceIdentity;
+}
+
+interface PublicBenchmarkBundleSourceIdentity {
+  dev: string;
+  ino: string;
+  nlink: string;
+  size: string;
+  mtimeNs: string;
+  ctimeNs: string;
 }
 
 export function createPublicBenchmarkBundle(input: {
@@ -77,10 +88,7 @@ export function createPublicBenchmarkBundle(input: {
 }): PublicBenchmarkBundle {
   const forbiddenSecretValues = [...new Set(input.forbiddenSecretValues ?? [])].filter((value) => value.length > 0);
   const files = input.files.map((entry) => {
-    const contents =
-      entry.immutableContents === undefined
-        ? readRegularFileNoFollow(entry.root, entry.source)
-        : Buffer.from(entry.immutableContents);
+    const contents = readPublicBenchmarkBundleSource(entry);
     if (contents.byteLength > MAX_FILE_BYTES) throw new Error(`public benchmark file is too large: ${entry.path}`);
     assertPublicBenchmarkFileContainsNoSecrets(entry.path, contents, forbiddenSecretValues);
     return {
@@ -131,6 +139,83 @@ export function createPublicBenchmarkBundle(input: {
   return bundle;
 }
 
+/**
+ * Capture an allowlisted source once and bind its immutable bytes to the
+ * singly-linked inode that supplied them. Bundle creation revalidates this
+ * binding, so replacement or in-place mutation after selection is fatal.
+ */
+export function capturePublicBenchmarkBundleSource(
+  source: Pick<PublicBenchmarkBundleSource, "path" | "root" | "source">
+): PublicBenchmarkBundleSource {
+  const before = publicBenchmarkBundleSourceIdentity(source.source);
+  const immutableContents = readRegularFileNoFollow(source.root, source.source);
+  const after = publicBenchmarkBundleSourceIdentity(source.source);
+  if (!samePublicBenchmarkBundleSourceIdentity(before, after) || after.size !== String(immutableContents.byteLength)) {
+    throw new Error(`public benchmark source changed while it was captured: ${source.source}`);
+  }
+  return {
+    ...source,
+    immutableContents: Buffer.from(immutableContents),
+    immutableSourceIdentity: after
+  };
+}
+
+function readPublicBenchmarkBundleSource(entry: PublicBenchmarkBundleSource): Buffer {
+  if (entry.immutableContents === undefined) {
+    if (entry.immutableSourceIdentity !== undefined) {
+      throw new Error(`public benchmark source identity has no immutable contents: ${entry.source}`);
+    }
+    return readRegularFileNoFollow(entry.root, entry.source);
+  }
+  if (entry.immutableSourceIdentity !== undefined) {
+    let current: PublicBenchmarkBundleSource;
+    try {
+      current = capturePublicBenchmarkBundleSource(entry);
+    } catch (error) {
+      throw new Error(`public benchmark source changed after immutable capture: ${entry.source}`, { cause: error });
+    }
+    if (
+      !samePublicBenchmarkBundleSourceIdentity(entry.immutableSourceIdentity, current.immutableSourceIdentity!) ||
+      !entry.immutableContents.equals(current.immutableContents!)
+    ) {
+      throw new Error(`public benchmark source changed after immutable capture: ${entry.source}`);
+    }
+  }
+  return Buffer.from(entry.immutableContents);
+}
+
+function publicBenchmarkBundleSourceIdentity(source: string): PublicBenchmarkBundleSourceIdentity {
+  const stat = fs.lstatSync(source, { bigint: true });
+  if (stat.isSymbolicLink()) {
+    throw new Error(`public benchmark source cannot be a symlink: ${source}`);
+  }
+  if (!stat.isFile() || stat.nlink !== 1n) {
+    throw new Error(`public benchmark source must be a singly linked regular file: ${source}`);
+  }
+  return {
+    dev: String(stat.dev),
+    ino: String(stat.ino),
+    nlink: String(stat.nlink),
+    size: String(stat.size),
+    mtimeNs: String(stat.mtimeNs),
+    ctimeNs: String(stat.ctimeNs)
+  };
+}
+
+function samePublicBenchmarkBundleSourceIdentity(
+  left: PublicBenchmarkBundleSourceIdentity,
+  right: PublicBenchmarkBundleSourceIdentity
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
 function assertPublicBenchmarkFileContainsNoSecrets(
   bundlePath: string,
   contents: Buffer,
@@ -146,8 +231,7 @@ function assertPublicBenchmarkFileContainsNoSecrets(
 }
 
 function readRegularFileNoFollow(root: string, source: string): Buffer {
-  assertRegularFileInside(root, source, "public benchmark bundle source");
-  return readRegularFilePathNoFollow(source, MAX_FILE_BYTES, `public benchmark file is too large: ${source}`);
+  return readSinglyLinkedRegularFileSnapshotInside(root, source, MAX_FILE_BYTES, "public benchmark bundle source");
 }
 
 function readRegularFilePathNoFollow(filePath: string, maxBytes: number, tooLargeMessage: string): Buffer {
@@ -374,9 +458,11 @@ function parseTerminalReports(
     const markdownPath = `reports/${rowId}/report.md`;
     const markdown = contentsByPath.get(markdownPath);
     if (markdown === undefined) throw new Error(`public benchmark bundle is missing ${markdownPath}`);
-    const projection = projectCanonicalFinalReport(report);
+    const projection = projectPublicCanonicalFinalReport(report);
     if (!isDeepStrictEqual(projection.report, report)) {
-      throw new Error(`public benchmark row ${rowId} report.json is not the canonical final-report projection`);
+      throw new Error(
+        `public benchmark row ${rowId} report.json is not the privacy-safe public final-report projection`
+      );
     }
     if (!markdown.equals(Buffer.from(projection.markdown, "utf8"))) {
       throw new Error(`public benchmark row ${rowId} report.md is not the canonical projection of report.json`);

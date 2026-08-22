@@ -465,28 +465,32 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_PERSIST_FAILED")]);
   }
 
-  return runtimeResult(true, {
-    run_id: runId,
-    run_root: layout.root,
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    ...(sourceRevision === undefined
-      ? {}
-      : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
-    graph,
-    expanded_graph: expandedGraph,
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    prompt_digest: promptDigest,
-    data_governance: governanceReference,
-    controller_source_digest: controllerSource.digest,
-    output_root: outputRoot,
-    state_nodes: stateNodes,
-    resolved_config: resolved.config,
-    validation: validation.value,
-    layout,
-    rendered_prompts: renderedPrompts
-  });
+  return runtimeResult(
+    true,
+    {
+      run_id: runId,
+      run_root: layout.root,
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      ...(sourceRevision === undefined
+        ? {}
+        : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
+      graph,
+      expanded_graph: expandedGraph,
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
+      prompt_digest: promptDigest,
+      data_governance: governanceReference,
+      controller_source_digest: controllerSource.digest,
+      output_root: outputRoot,
+      state_nodes: stateNodes,
+      resolved_config: resolved.config,
+      validation: validation.value,
+      layout,
+      rendered_prompts: renderedPrompts
+    },
+    preMaterializeDiagnostics
+  );
 }
 
 function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
@@ -815,6 +819,7 @@ function toPlannedGraphNode(
     logical_id: node.logicalId,
     display_name: node.label,
     kind: node.kind,
+    ...(node.group === undefined ? {} : { group: node.group }),
     depends_on: node.dependsOn.filter((dependency) => nodeById.get(dependency)?.kind !== "meta"),
     artifact_dir: node.artifactDir,
     ...(node.timeoutSeconds === undefined ? {} : { timeout_seconds: node.timeoutSeconds }),
@@ -981,6 +986,7 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
     ).sort();
     nodes.set(node.logical_id, {
       id: node.logical_id,
+      kind: previous?.kind === "reference" ? "reference" : node.kind,
       dependsOn: dependencies,
       outputs: node.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);

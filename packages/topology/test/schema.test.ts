@@ -118,7 +118,13 @@ describe("expanded graph schema", () => {
         review: {
           label: "Review",
           color: "#0f766e",
-          defaults: { loops: 1, timeout_seconds: 60, max_attempts: 2, model_profiles: ["default"] }
+          defaults: {
+            loops: 1,
+            timeout_seconds: 60,
+            max_attempts: 2,
+            model_profiles: ["default"],
+            failure_policy: "continue"
+          }
         }
       },
       fingerprintInputs: {
@@ -140,6 +146,7 @@ describe("expanded graph schema", () => {
     const invalidDocuments = [
       { ...valid, groups: { review: { label: "Review", legacy: true } } },
       { ...valid, groups: { review: { defaults: { model_profiles: [1] } } } },
+      { ...valid, groups: { review: { defaults: { failure_policy: "ignore" } } } },
       { ...valid, fingerprintInputs: { config: { legacy: true } } },
       { ...valid, fingerprintInputs: { promptDigests: { "../escape.md": "b".repeat(64) } } },
       { ...valid, fingerprintInputs: { config: "not-a-digest" } },

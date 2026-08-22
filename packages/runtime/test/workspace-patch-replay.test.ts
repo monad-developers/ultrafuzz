@@ -175,6 +175,74 @@ function loadMaterializer(
     slice("decodeStrictUtf8Snapshot"),
     slice("parseStrictJsonSnapshot"),
     slice("firstDependencyRequiringReplay"),
+    // The production helper receives this projection from the sealed dependency
+    // admission established during input verification. Rebuild the same minimal
+    // projection from the real fixture files so these replay tests keep exercising
+    // their regular-file, immutable-snapshot, UTF-8, and strict-JSON boundaries.
+    `function assertDependencyArtifactAdmissionCurrent(task) {
+      const directories = [...task.dependencyArtifactDirs];
+      const snapshotsByProducerAttempt = new Map(
+        directories.map((dependency) => {
+          const patchCandidate = path.join(dependency, "workspace.patch");
+          const manifestCandidate = path.join(dependency, "workspace-patch.json");
+          const patchPresent = pathEntryExists(patchCandidate);
+          const manifestPresent = pathEntryExists(manifestCandidate);
+          if (patchPresent !== manifestPresent) {
+            throw new Error(\`artifact-contract failure: workspace patch handoff is incomplete \${dependency}\`);
+          }
+          const artifacts = new Map();
+          if (patchPresent && manifestPresent) {
+            const patchPath = resolveRegularArtifactFile(
+              dependency,
+              patchCandidate,
+              "artifact-contract failure: workspace patch is not a regular file"
+            );
+            const manifestPath = resolveRegularArtifactFile(
+              dependency,
+              manifestCandidate,
+              "artifact-contract failure: workspace patch manifest is not a regular file"
+            );
+            const manifestSnapshot = readBoundedRegularArtifactSnapshot(
+              dependency,
+              manifestPath,
+              "artifact-contract failure: workspace patch manifest is not a regular file",
+              MAX_VERIFIED_ARTIFACT_BYTES,
+              true
+            );
+            let manifest;
+            try {
+              manifest = parseStrictJsonSnapshot(
+                manifestSnapshot,
+                \`artifact-contract failure: workspace patch manifest is malformed \${manifestPath}\`
+              );
+            } catch (error) {
+              throw new Error(
+                \`artifact-contract failure: workspace patch manifest is malformed \${manifestPath}\`,
+                { cause: error }
+              );
+            }
+            artifacts.set("workspace.patch", {
+              contract: "ultrafuzz/text@1",
+              value: decodeStrictUtf8Snapshot(
+                readBoundedRegularArtifactSnapshot(
+                  dependency,
+                  patchPath,
+                  "artifact-contract failure: workspace patch is not a regular file",
+                  MAX_VERIFIED_ARTIFACT_BYTES
+                ),
+                \`artifact-contract failure: workspace patch is malformed \${patchPath}\`
+              )
+            });
+            artifacts.set("workspace-patch.json", {
+              contract: "ultrafuzz/workspace-patch@1",
+              value: manifest
+            });
+          }
+          return [path.basename(dependency), { artifacts }];
+        })
+      );
+      return { directories, snapshotsByProducerAttempt };
+    }`,
     slice("materializeWorkspacePatchDependencies"),
     "\nreturn materializeWorkspacePatchDependencies;"
   ].join("\n");

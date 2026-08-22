@@ -16,7 +16,13 @@ You are one fresh-context lane author attempt. Your attempt index is `{{attempt_
 Read the audited lanes and select exactly one `ready_lanes` entry whose
 `attempt_index` and `auditor_attempt_index` both equal `{{attempt_index}}`:
 
-{{artifact_handoff:reference-and-lane-auditor}}
+Sealed JSON authority for every declared ancestor audited-lanes artifact:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1}}
+
+Read the manifest definition instead of expecting an expanded path array in
+this prompt. Derive each selected auditor artifact path relative to the run
+root and retain the selector's required `localeCompare` order.
 
 If more than one audited lane entry matches this attempt after reading all
 auditor artifacts, do not choose arbitrarily and do not claim
@@ -45,6 +51,11 @@ For the selected lane, author exactly the intended `.t.sol` file and any lane-lo
 - public revert behavior when the public source defines it.
 
 Do not compare private storage layout, packed fields, gas-shaped internals, assembly behavior, or production implementation-private state.
+Use only the audited independent reference oracle named by the lane. If the
+authored lane reveals that the reference copies, translates, simplifies, or
+calls production implementation logic, stop and packet a reference defect; do
+not treat agreement or disagreement with that non-independent model as
+production evidence.
 
 Before running the focused command, verify local test dependencies described by
 the base setup or `foundry.toml` exist in this isolated workspace. If a required
@@ -54,9 +65,9 @@ test dependencies as lane compile or harness defects, and do not edit
 production contracts just to satisfy test imports.
 
 When locating artifact inputs or test files, stay inside the current Workspace
-and the explicit artifact paths above. Do not search from filesystem root and do
-not suppress errors with shell redirection. Use the literal artifact paths from
-this prompt, the Read tool, `rg --files`, or unredirected `find test/foundry
+and the manifest-derived artifact paths above. Do not search from filesystem
+root and do not suppress errors with shell redirection. Use the exact selected
+artifact paths, the Read tool, `rg --files`, or unredirected `find test/foundry
 -type f` scoped to workspace directories.
 
 Run `forge --version` as a separate Bash call before the focused command. If
@@ -79,8 +90,10 @@ the final write, run the exact `ultrafuzz json validate` command rendered for
 this artifact in the central output contract.
 
 Bind both current attempt coordinates to `{{attempt_index}}`. Copy the selected
-lane payload and its source artifacts exactly; the top-level lane identity,
-command, and source coordinates must refer to that same payload. A frozen red
+lane payload and its source artifacts exactly. Set `source_auditor_artifact` to
+the exact manifest-derived run-relative auditor path that supplied the selected
+row; an absolute handoff path is invalid. The top-level lane identity, command,
+and source coordinates must refer to that same payload. A frozen red
 must retain the exact public-oracle and pre-repair evidence used to compute its
 stable hash. A compile or harness defect must retain its typed category,
 summary, and evidence paths. These are contextual and cross-artifact

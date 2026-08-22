@@ -32,7 +32,7 @@ Read the implementation summary:
 
 Read the prior Recon coverage campaign:
 
-{{artifact_path:stateful-invariant-coverage}}/coverage-report.md
+{{ancestor_artifact_path_authority:coverage-report.md}}
 
 Use this configured invariant testing fuzzer timeout:
 
@@ -64,6 +64,25 @@ Use this configured invariant testing fuzzer timeout:
      protocol action uses a typed direct call with checked return values and a
      documented precondition; repair the handler and rerun the smoke when the
      audit cannot explain its failure behavior.
+   - Enforce anti-vacuity before accepting a green or usable campaign. Confirm
+     that Recon discovers every implemented property entrypoint and that actual
+     campaign evidence includes at least one relevant handler reaching and
+     completing a meaningful state-changing protocol action. Deployment-only
+     execution, zero admitted properties, all handlers returning at guards,
+     empty target selections, harness-side preprocessing failures, or zero
+     completed protocol mutations make the campaign blocked or its results
+     unusable, never green. Do not add synthetic actions or weaken guards or
+     properties to manufacture activity.
+   - Recheck oracle independence before campaign execution. Expected values and
+     transitions must be derived from public specifications, source-declared
+     invariants, or independent accounting equations. Never call, copy,
+     translate, simplify, or re-derive the implementation under test as its own
+     oracle; block the affected property when no independent oracle is
+     available.
+   - Reject any inherited change that converts a source-backed safety assertion
+     into a `require`, handler guard, or other precondition that prevents Recon
+     from observing the violating post-state. Preconditions may admit valid
+     actions; they may not assume the property under test.
    - Record every reached protocol revert, panic, or out-of-gas failure as a
      raw backend failure with its entrypoint, sequence, precondition evidence,
      and exact property IDs when the failure exercises an implemented catalog

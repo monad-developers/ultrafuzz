@@ -14,6 +14,11 @@ import {
   type AuditProfileSettings
 } from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
+import {
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
+  MODAL_SANDBOX_MAX_LIFETIME_SECONDS
+} from "./execution.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
 import { resolvedConfigZodSchema } from "./resolved-config-schema.js";
@@ -441,6 +446,35 @@ function validateExecutionConfig(config: ResolvedConfig, env: Record<string, str
       )
     );
     return diagnostics;
+  }
+  if (config.execution.provider === "modal") {
+    const timeoutEntries: Array<{ timeoutSeconds: number; path: string[] }> = [
+      {
+        timeoutSeconds: config.execution.resources.timeoutSeconds,
+        path: ["execution", "resources", "timeout_seconds"]
+      },
+      ...Object.entries(config.execution.nodes).flatMap(([nodeId, override]) =>
+        override.resources.timeoutSeconds === undefined
+          ? []
+          : [
+              {
+                timeoutSeconds: override.resources.timeoutSeconds,
+                path: ["execution", "nodes", nodeId, "resources", "timeout_seconds"]
+              }
+            ]
+      )
+    ];
+    for (const entry of timeoutEntries) {
+      if (entry.timeoutSeconds <= MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS) continue;
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          `Modal cloud timeout_seconds must be at most ${MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS} so the ${MODAL_NODE_LIFECYCLE_RESERVE_SECONDS}-second lifecycle reserve stays within Modal's ${MODAL_SANDBOX_MAX_LIFETIME_SECONDS}-second maximum sandbox lifetime`,
+          entry.path,
+          "validation"
+        )
+      );
+    }
   }
   provider.credentialEnv.forEach((name, index) => {
     const value = env[name];

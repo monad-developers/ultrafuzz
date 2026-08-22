@@ -9,10 +9,8 @@ You are one fresh reference harness author attempt. The topology runs this
 logical node as `{{strategy_loop_count}}` independent attempts. Your attempt
 index is `{{attempt_index}}`.
 
-Author only test-owned reference and harness files for these handoff artifacts:
-
-Differential plan:
-{{artifact_handoff:differential-oracle-planner}}
+Author only test-owned reference and harness files for the sealed differential
+plan artifacts and bounded target context below.
 
 Base Foundry setup:
 {{artifact_handoff:base-test-setup}}
@@ -20,11 +18,18 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Copy `source_plan_artifacts` from the exact declared plan handoffs, in declared
-order. Every `covered_surfaces` entry must be an unchanged `surface_id` from
-those plans. Do not search for same-named files, invent paths or surfaces,
-rewrite attempt coordinates, accept legacy aliases, or convert an upstream
-value to another spelling.
+Sealed JSON authority for every declared ancestor differential plan:
+
+{{ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1}}
+
+Read the manifest definition instead of expecting an expanded path array in
+this prompt. Set `source_plan_artifacts` to the distinct selected plan paths
+relative to the run root, in the selector's required `localeCompare` order.
+Use each manifest-derived absolute plan path for reading only; it is not a
+valid value for `source_plan_artifacts`. Every `covered_surfaces` entry must be an unchanged
+`surface_id` from those plans. Do not search for same-named files, invent paths
+or surfaces, rewrite attempt coordinates, accept legacy aliases, or convert an
+upstream value to another spelling.
 
 Write normally under `test/foundry/differential/**`, plus test-only scripts or helpers needed for deployment. Do not edit production contracts. Do not copy production internals into the reference.
 Write generated Foundry test contracts as `.t.sol` files under `test/foundry/differential/**` so Ultrafuzz can collect them for review and aggregation. Non-test helper libraries may use `.sol` beside those tests when the `.t.sol` files import them.
@@ -35,6 +40,14 @@ Build deliberately simple reference models:
 - public interfaces, public docs, public tests, and the property catalog are valid sources;
 - production internals, packed storage, assembly, gas-shaped data structures, private layout comparisons, and hidden bit tricks are forbidden;
 - if a behavior cannot be modeled honestly from public sources, leave a reference gap instead of guessing.
+
+Every oracle must be independent of the production implementation. Derive the
+reference's expected values and transitions solely from the cited public
+sources. Copying, translating, simplifying, or calling the production
+algorithm, control flow, constants, storage representation, or helper logic is
+not an independent oracle and must be recorded as a reference gap rather than
+authored as a model. Shared public input types and documented constants are
+permitted only when their public source is cited.
 
 Validate only the reference/harness surface you authored. Compiler errors are harness defects to record, not reasons to broaden scope.
 

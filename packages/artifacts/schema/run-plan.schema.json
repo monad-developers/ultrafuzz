@@ -455,35 +455,10 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "logicalIds"],
+          "required": ["kind", "logicalIds", "selectorId", "relativePaths"],
           "properties": {
             "kind": {
-              "const": "ancestor_artifacts"
-            },
-            "logicalIds": {
-              "oneOf": [
-                {
-                  "const": "direct"
-                },
-                {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "$ref": "#/$defs/safeId"
-                  }
-                }
-              ]
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "logicalIds", "relativePaths"],
-          "properties": {
-            "kind": {
-              "const": "ancestor_artifacts_by_path"
+              "const": "ancestor_artifact_path_authority"
             },
             "logicalIds": {
               "type": "array",
@@ -492,9 +467,13 @@
                 "$ref": "#/$defs/safeId"
               }
             },
+            "selectorId": {
+              "$ref": "#/$defs/sha256"
+            },
             "relativePaths": {
               "type": "array",
               "minItems": 1,
+              "maxItems": 4096,
               "uniqueItems": true,
               "items": {
                 "type": "string",
@@ -510,11 +489,10 @@
           "required": ["kind", "logicalIds", "contract"],
           "properties": {
             "kind": {
-              "const": "ancestor_artifacts_by_contract"
+              "const": "ancestor_contract_artifact_authority"
             },
             "logicalIds": {
               "type": "array",
-              "minItems": 1,
               "uniqueItems": true,
               "items": {
                 "$ref": "#/$defs/safeId"

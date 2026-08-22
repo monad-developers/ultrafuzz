@@ -24,6 +24,7 @@ import {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   createEventRecord,
   layoutForRunRoot,
+  promptArtifactAuthorityPathSelectorId,
   replayEvents,
   VALIDATOR_BUILD_IDENTITY,
   type RunState,
@@ -1948,6 +1949,8 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
     tasks?: Array<{
       attemptId?: string;
       logicalNodeId?: string;
+      dependencyArtifactDirs?: string[];
+      optionalDependencyArtifactDirs?: string[];
       metadata?: {
         artifacts?: {
           outputs?: Array<{
@@ -1977,10 +1980,21 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
   });
   if (snapshots.some((snapshot) => snapshot === undefined)) return;
   const verified = snapshots.filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== undefined);
+  const optionalAttemptIds = new Set(
+    (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory))
+  );
+  const admittedDependencyAttemptIds = (task.dependencyArtifactDirs ?? [])
+    .map((directory) => path.basename(directory))
+    .filter(
+      (dependencyAttemptId) =>
+        !optionalAttemptIds.has(dependencyAttemptId) ||
+        fs.existsSync(path.join(runRoot, ".ultrafuzz-verification", `${dependencyAttemptId}.json`))
+    );
   const marker = {
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
     attempt_id: attemptId,
     node_id: task.logicalNodeId,
+    admitted_dependency_attempt_ids: admittedDependencyAttemptIds,
     artifacts: verified.map(({ output, sha256 }) => ({
       path: output.path,
       contract: output.contract,
@@ -2045,6 +2059,68 @@ nodes:
     REPORT_VOCABULARY_PROMPT_REFERENCES,
     "utf8"
   );
+}
+
+function writeOptionalSpecialistTopology(
+  project: string,
+  options: { specialistCommand?: string; blockingCommand?: string } = {}
+): void {
+  const requiredCommands = (command: string | undefined): string =>
+    command === undefined ? "" : `\n    required_commands: [${command}]`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  core:
+    label: Core
+  specialists:
+    label: Optional specialists
+    defaults:
+      failure_policy: continue
+  review:
+    label: Review
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: direct-strategy
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: core${requiredCommands(options.blockingCommand)}
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: optional-specialist
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: specialists${requiredCommands(options.specialistCommand)}
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: final-report
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: review
+    depends_on: [direct-strategy, optional-specialist]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [final-report]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
 }
 
 async function compileInvariantCampaignBudgetFixture(input: {
@@ -7714,6 +7790,103 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
   }
 });
 
+test("compileSmithersWorkflow seals digest-only reference artifact-manifest authorities", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({ projectRoot: project, runId: "reference-manifest-authority", env: {} });
+    assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+    const referenceArtifactDir = path.join(plan.value!.run_root, "artifacts", "reference-properties-example");
+    const outerManifestPath = path.join(referenceArtifactDir, "artifact-manifest.json");
+    const originalBytes = fs.readFileSync(outerManifestPath);
+    const originalSha256 = crypto.createHash("sha256").update(originalBytes).digest("hex");
+    const { compileSmithersWorkflow } = await import("../src/smithers.js");
+    const compiled = compileSmithersWorkflow({
+      projectRoot: project,
+      config: plan.value!.resolved_config,
+      graph: plan.value!.expanded_graph,
+      runLayout: plan.value!.layout,
+      workflowName: "ultrafuzz-reference-manifest-authority",
+      renderedPrompts: plan.value!.rendered_prompts
+    });
+    const sealedDocument = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
+      tasks: Array<{
+        attemptId: string;
+        referenceArtifactManifestAuthorities?: Array<{
+          attemptId: string;
+          artifactDir: string;
+          sizeBytes: number;
+          sha256: string;
+        }>;
+      }>;
+    };
+    const consumer = sealedDocument.tasks.find((task) => task.attemptId === "project-discovery");
+    assert.deepEqual(consumer?.referenceArtifactManifestAuthorities, [
+      {
+        attemptId: "reference-properties-example",
+        artifactDir: referenceArtifactDir,
+        sizeBytes: originalBytes.byteLength,
+        sha256: originalSha256
+      }
+    ]);
+
+    fs.writeFileSync(outerManifestPath, '{"rewritten":true}\n', "utf8");
+    const sealedAfterRewrite = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as typeof sealedDocument;
+    assert.deepEqual(
+      sealedAfterRewrite.tasks.find((task) => task.attemptId === "project-discovery")
+        ?.referenceArtifactManifestAuthorities,
+      consumer?.referenceArtifactManifestAuthorities
+    );
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
+test("plan rejects compact authority selection of a pinned reference ancestor", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  const promptPath = path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
+  fs.writeFileSync(
+    promptPath,
+    fs
+      .readFileSync(promptPath, "utf8")
+      .replace(
+        "{{artifact_handoff:reference-properties-example}}",
+        "{{ancestor_contract_artifact_authority:ultrafuzz/reference-manifest@1}}"
+      ),
+    "utf8"
+  );
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({ projectRoot: project, runId: "reference-compact-authority", env: {} });
+
+    assert.equal(plan.ok, false);
+    assert.match(
+      JSON.stringify(plan.diagnostics),
+      /compact authority selector `ancestor_contract_artifact_authority:ultrafuzz\/reference-manifest@1` cannot select reference ancestor `reference-properties-example`; fixed reference consumers must use `artifact_path:reference-properties-example` or `artifact_handoff:reference-properties-example`/u
+    );
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
 test("plan provisions a validated trusted expectation catalog through pinned reference handoffs", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -7936,10 +8109,15 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
     layers?: unknown;
     pinned_submodules?: unknown;
-    tasks: Array<{ attemptId: string; dependencySmithersNodeIds: string[] }>;
+    tasks: Array<{
+      attemptId: string;
+      dependencySmithersNodeIds: string[];
+      referenceArtifactManifestAuthorities?: unknown;
+    }>;
   };
   assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
+  assert.ok(smithersTasks.tasks.every((task) => task.referenceArtifactManifestAuthorities === undefined));
   assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
   assert.deepEqual(
     smithersTasks.tasks.find((task) => task.attemptId === "project-discovery__model_0__attempt_0")
@@ -7962,10 +8140,198 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /lstatSync\(current\)\.isSymbolicLink\(\)/);
 });
 
+test("compileSmithersWorkflow marks specialist attempts and their artifact handoffs nonblocking", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "compiled-optional-specialist", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-compiled-optional-specialist",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  assert.deepEqual(compiled.nonBlockingAttemptIds, ["optional-specialist"]);
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = workflowSource.indexOf(specsPrefix);
+  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
+  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    continueOnFail: boolean;
+    dependencyArtifactDirs: string[];
+    optionalDependencyArtifactDirs: string[];
+    dependencyVerificationProducers: Array<{ attemptId: string; verifierId: string; optional: boolean }>;
+  }>;
+  const direct = specs.find((task) => task.attemptId === "direct-strategy");
+  const specialist = specs.find((task) => task.attemptId === "optional-specialist");
+  const report = specs.find((task) => task.attemptId === "final-report");
+  assert.equal(direct?.continueOnFail, false);
+  assert.equal(specialist?.continueOnFail, true);
+  assert.equal(report?.continueOnFail, false);
+  assert.deepEqual(specialist?.optionalDependencyArtifactDirs, []);
+  assert.deepEqual(report?.dependencyArtifactDirs.map((directory) => path.basename(directory)).sort(), [
+    "direct-strategy",
+    "optional-specialist"
+  ]);
+  assert.deepEqual(
+    report?.optionalDependencyArtifactDirs.map((directory) => path.basename(directory)),
+    ["optional-specialist"]
+  );
+  assert.deepEqual(report?.dependencyVerificationProducers, [
+    { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
+    { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
+  ]);
+  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+});
+
+test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "compiled-prompt-authority-selectors", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const reportPrompt = plan.value!.rendered_prompts.find((prompt) => prompt.attempt_id === "final-report");
+  assert.ok(reportPrompt);
+  const firstPaths = ["reports/alpha.json", "reports/zeta.json"];
+  const secondPaths = ["reports/alpha.json", "reports/beta.json"];
+  const firstPathSelector = {
+    kind: "path" as const,
+    id: promptArtifactAuthorityPathSelectorId(firstPaths),
+    paths: firstPaths
+  };
+  const secondPathSelector = {
+    kind: "path" as const,
+    id: promptArtifactAuthorityPathSelectorId(secondPaths),
+    paths: secondPaths
+  };
+  reportPrompt.artifact_references = [
+    { kind: "artifact_path" },
+    {
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: [],
+      contract: "ultrafuzz/generated-tests@3"
+    },
+    {
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: firstPathSelector.id,
+      relativePaths: firstPaths
+    },
+    { kind: "ancestor_contract_artifact_authority", logicalIds: [], contract: "ultrafuzz/findings@2" },
+    {
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: secondPathSelector.id,
+      relativePaths: secondPaths
+    },
+    {
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: [],
+      contract: "ultrafuzz/generated-tests@3"
+    }
+  ];
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compileInput = {
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-compiled-prompt-authority-selectors",
+    renderedPrompts: plan.value!.rendered_prompts
+  };
+  const compiled = compileSmithersWorkflow(compileInput);
+  const expectedSelectors = [
+    { kind: "contract", contract: "ultrafuzz/findings@2" },
+    { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
+    ...[firstPathSelector, secondPathSelector].sort((left, right) => left.id.localeCompare(right.id))
+  ];
+
+  const taskManifest = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
+    tasks: Array<{ attemptId: string; promptArtifactAuthoritySelectors?: unknown[] }>;
+  };
+  const reportTask = taskManifest.tasks.find((task) => task.attemptId === "final-report");
+  const directTask = taskManifest.tasks.find((task) => task.attemptId === "direct-strategy");
+  assert.deepEqual(reportTask?.promptArtifactAuthoritySelectors, expectedSelectors);
+  assert.equal("promptArtifactAuthoritySelectors" in directTask!, false);
+
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = workflowSource.indexOf(specsPrefix);
+  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
+  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    promptArtifactAuthoritySelectors?: unknown[];
+  }>;
+  assert.deepEqual(
+    specs.find((task) => task.attemptId === "final-report")?.promptArtifactAuthoritySelectors,
+    expectedSelectors
+  );
+  assert.equal(
+    "promptArtifactAuthoritySelectors" in specs.find((task) => task.attemptId === "direct-strategy")!,
+    false
+  );
+
+  reportPrompt.artifact_references = [
+    {
+      kind: "ancestor_contract_artifact_authority",
+      logicalIds: [],
+      contract: "ultrafuzz/not-a-registered-contract@1"
+    }
+  ];
+  assert.throws(() => compileSmithersWorkflow(compileInput), /unknown prompt artifact authority contract/u);
+  reportPrompt.artifact_references = [
+    {
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: firstPathSelector.id,
+      relativePaths: ["../controller-secret.json"]
+    }
+  ];
+  assert.throws(() => compileSmithersWorkflow(compileInput), /invalid prompt artifact authority path selector group/u);
+});
+
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
   const project = tempProject();
   writeFanoutProject(project);
   fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs.readFileSync(topologyPath, "utf8").replace(
+      `  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - signal-analysis
+`,
+      `  - id: cloud-consumer
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - signal-analysis
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - cloud-consumer
+`
+    ),
+    "utf8"
+  );
   const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
@@ -8068,10 +8434,20 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
   assert.match(
     workflowSource,
+    /timeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
+  );
+  assert.match(
+    workflowSource,
+    /heartbeatTimeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
+  );
+  assert.match(workflowSource, /timeout_seconds: task\.execution\.resources\.timeoutSeconds/u);
+  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs\}/u);
+  assert.match(
+    workflowSource,
     /<Task[\s\S]*?agent=\{agentForTask\(task, fullTaskPrompt\)\}[\s\S]*?retries=\{task\.retries\}/u
   );
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
-  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v2"/);
   assert.match(workflowSource, /run_id: "cloud-nodes"/u);
   assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
@@ -8088,6 +8464,41 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
     )
   );
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = workflowSource.indexOf(specsPrefix);
+  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
+  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    dependencyVerificationProducers: Array<{
+      attemptId: string;
+      verifierId: string;
+      optional: boolean;
+    }>;
+  }>;
+  const consumer = specs.find((task) => task.attemptId === "cloud-consumer");
+  assert.deepEqual(consumer?.dependencyVerificationProducers, [
+    {
+      attemptId: "project-discovery__model_0__attempt_0",
+      verifierId: "verify:project-discovery__model_0__attempt_0",
+      optional: false
+    },
+    {
+      attemptId: "project-discovery__model_1__attempt_1",
+      verifierId: "verify:project-discovery__model_1__attempt_1",
+      optional: false
+    },
+    {
+      attemptId: "signal-analysis__model_0__attempt_0",
+      verifierId: "verify:signal-analysis__model_0__attempt_0",
+      optional: false
+    },
+    {
+      attemptId: "signal-analysis__model_1__attempt_1",
+      verifierId: "verify:signal-analysis__model_1__attempt_1",
+      optional: false
+    }
+  ]);
   assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
   assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
 });
@@ -8837,7 +9248,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task, fullTaskPrompt\)\}/);
-  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
+  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/);
+  assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
+  assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
   assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.artifactDir, mirroredArtifactDir\(task\)\)/u);
@@ -8851,7 +9264,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /artifact handoff directory is unavailable/);
   assert.doesNotMatch(workflowSource, /canonicalEmptyArtifact|ultrafuzz\/findings@1/u);
   assert.match(workflowSource, /function artifactAwareAgent/);
-  assert.match(workflowSource, /return await agent\.generate\(attemptArgs\)/u);
+  assert.match(
+    workflowSource,
+    /const result = await executionAgent\.generate\(attemptArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?return result/u
+  );
   assert.doesNotMatch(
     workflowSource,
     /materializeMissingMarkdownArtifacts|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
@@ -9718,6 +10134,95 @@ bunAdapterTest(
     }
   }
 );
+
+test("startRun warns for optional specialist commands but still rejects blocking command gaps", async () => {
+  const command = "ultrafuzz-specialist-command-that-does-not-exist";
+  const optionalProject = tempProject();
+  initProject({ projectRoot: optionalProject, force: true });
+  writeOptionalSpecialistTopology(optionalProject, { specialistCommand: command });
+  const optionalRun = await startRun({
+    projectRoot: optionalProject,
+    runId: "optional-specialist-command",
+    env: fakeSmithersEnv(optionalProject)
+  });
+  assert.equal(optionalRun.ok, true, JSON.stringify(optionalRun.diagnostics));
+  assert.ok(
+    optionalRun.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "RUN_OPTIONAL_COMMAND_MISSING" &&
+        diagnostic.severity === "warning" &&
+        (diagnostic.details?.commands as string[] | undefined)?.includes(command)
+    ),
+    JSON.stringify(optionalRun.diagnostics)
+  );
+  const optionalResume = await resumeRun({
+    projectRoot: optionalProject,
+    runId: "optional-specialist-command",
+    force: true,
+    env: fakeSmithersEnv(optionalProject)
+  });
+  assert.equal(optionalResume.ok, true, JSON.stringify(optionalResume.diagnostics));
+  assert.ok(
+    optionalResume.diagnostics.some(
+      (diagnostic) => diagnostic.code === "RUN_OPTIONAL_COMMAND_MISSING" && diagnostic.severity === "warning"
+    ),
+    JSON.stringify(optionalResume.diagnostics)
+  );
+
+  const blockingProject = tempProject();
+  initProject({ projectRoot: blockingProject, force: true });
+  writeOptionalSpecialistTopology(blockingProject, {
+    specialistCommand: command,
+    blockingCommand: command
+  });
+  const blockingRun = await startRun({
+    projectRoot: blockingProject,
+    runId: "blocking-command",
+    env: fakeSmithersEnv(blockingProject)
+  });
+  assert.equal(blockingRun.ok, false);
+  assert.equal(blockingRun.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
+});
+
+test("optional command probes fail closed on exceptions and opaque result sets", async () => {
+  const command = "ultrafuzz-optional-probe-failure-command";
+  const cases = [
+    {
+      label: "exception",
+      probe: async (): Promise<never> => {
+        throw new Error("provider probe transport failed");
+      }
+    },
+    {
+      label: "omitted-result",
+      probe: async () => []
+    }
+  ] as const;
+
+  for (const probeCase of cases) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeOptionalSpecialistTopology(project, { specialistCommand: command });
+    const run = await startRun({
+      projectRoot: project,
+      runId: `optional-command-probe-${probeCase.label}`,
+      env: fakeSmithersEnv(project),
+      requiredCommandProbe: probeCase.probe
+    });
+
+    assert.equal(run.ok, false, JSON.stringify(run.diagnostics));
+    assert.ok(
+      run.diagnostics.some(
+        (diagnostic) => diagnostic.code === "RUN_REQUIRED_COMMAND_PREFLIGHT_FAILED" && diagnostic.severity === "error"
+      ),
+      JSON.stringify(run.diagnostics)
+    );
+    assert.equal(
+      run.diagnostics.some((diagnostic) => diagnostic.code === "RUN_OPTIONAL_COMMAND_MISSING"),
+      false
+    );
+  }
+});
 
 test("startRun rejects an untracked cwd executable before task worktrees or model work", async () => {
   const project = tempProject();
@@ -10908,7 +11413,7 @@ test("compatibility patcher rewrites every described workaround", async () => {
       assert.ok(startup);
       assert.match(
         startup.patched,
-        /"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u
+        /"--env-file=\/proc\/self\/fd\/3\/controls\/bun-empty\.env".*"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u
       );
     }
     const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
@@ -11263,6 +11768,7 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
     {
       fs.writeFileSync(path.join(root, "tsconfig.json"), "{}\n", "utf8");
       fs.writeFileSync(path.join(root, "controls", "bunfig.toml"), "\n", "utf8");
+      fs.writeFileSync(path.join(root, "controls", "bun-empty.env"), "\n", "utf8");
       fs.writeFileSync(path.join(root, "controls", "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
       fs.writeFileSync(path.join(root, "sealed-relative.mjs"), 'export default "sealed-relative";\n', "utf8");
       fs.mkdirSync(ambientRoot, { recursive: true });
@@ -11537,6 +12043,7 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
         "bun",
         [
           `--config=${path.join(controllerRoot, "controls", "bunfig.toml")}`,
+          `--env-file=${path.join(controllerRoot, "controls", "bun-empty.env")}`,
           "--no-env-file",
           "--no-install",
           "--no-addons",
@@ -12357,10 +12864,17 @@ test("syncRun accepts canonical findings without rewriting them and manifests on
   ) as {
     schema_version?: string;
     files?: Array<{ path?: string }>;
-    provenance?: { metadata?: unknown };
+    provenance?: { metadata?: unknown; verification_marker_sha256?: string };
   };
   assert.equal(manifest.schema_version, "ultrafuzz.artifact-manifest.v3");
   assert.deepEqual(manifest.provenance?.metadata, { concrete_node_id: "project-discovery" });
+  assert.equal(
+    manifest.provenance?.verification_marker_sha256,
+    crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(path.join(run.value!.run_root, ".ultrafuzz-verification", "project-discovery.json")))
+      .digest("hex")
+  );
   assert.deepEqual(manifest.files?.map((entry) => entry.path).sort(), ["findings.json", GENERIC_RUNTIME_MARKDOWN_PATH]);
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.doesNotMatch(events, /findings-normalized/u);
@@ -14686,6 +15200,228 @@ test("syncRun persists exhausted-loop evidence and fails a completed degraded wo
   assert.match(events, /"exhausted_loops":\[\{"id":"review","iteration":3,"max_iterations":3\}\]/u);
 });
 
+test("syncRun succeeds when only an explicitly nonblocking specialist fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const workflowRunId = "ultrafuzz-sync-optional-specialist-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:direct-strategy", state: "finished", attempt: 1 },
+        { id: "node:optional-specialist", state: "failed", attempt: 1 },
+        { id: "node:final-report", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:optional-specialist",
+        attempt: 1,
+        error: { message: "optional specialist failed" }
+      },
+      { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-optional-specialist-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  writeRequiredArtifactSet(run.value!.run_root, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-optional-specialist-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["direct-strategy"]?.status, "succeeded");
+  assert.equal(state.nodes?.["optional-specialist"]?.status, "failed");
+  assert.equal(state.nodes?.["final-report"]?.status, "succeeded");
+});
+
+for (const markerAuthority of ["malformed leaf", "dangling leaf", "symlinked root"] as const) {
+  test(`syncRun rejects a finalized optional prerequisite behind a ${markerAuthority}`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeOptionalSpecialistTopology(project);
+    const workflowRunId = `ultrafuzz-sync-optional-${markerAuthority.replaceAll(" ", "-")}`;
+    const upstreamEvents = [
+      { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:optional-specialist", attempt: 1 }
+    ];
+    const upstreamEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "finished", attempt: 1 },
+          { id: "node:final-report", state: "pending", attempt: 0 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, upstreamEvents)
+    });
+    const runId = `sync-optional-${markerAuthority.replaceAll(" ", "-")}`;
+    const run = await startRun({ projectRoot: project, runId, env: upstreamEnv });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const runRoot = run.value!.run_root;
+    writeRequiredArtifactSet(runRoot, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    writeRequiredArtifactSet(runRoot, "optional-specialist", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+
+    const upstreamSync = await syncRun({ projectRoot: project, runId, env: upstreamEnv });
+    assert.equal(upstreamSync.ok, true, JSON.stringify(upstreamSync.diagnostics));
+    assert.equal(fs.existsSync(path.join(runRoot, "artifacts", "optional-specialist", "artifact-manifest.json")), true);
+
+    const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+    const optionalMarker = path.join(markerRoot, "optional-specialist.json");
+    if (markerAuthority === "malformed leaf") {
+      fs.writeFileSync(optionalMarker, "{}\n", "utf8");
+    } else if (markerAuthority === "dangling leaf") {
+      fs.unlinkSync(optionalMarker);
+      fs.symlinkSync("missing-optional-marker.json", optionalMarker);
+    } else {
+      const realMarkerRoot = path.join(runRoot, "verification-authority-real");
+      fs.renameSync(markerRoot, realMarkerRoot);
+      fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+    }
+    writeRequiredArtifactSet(runRoot, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+
+    const finalEvents = [
+      ...upstreamEvents,
+      { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+      { type: "RunFinished" }
+    ];
+    const finalEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "finished", attempt: 1 },
+          { id: "node:final-report", state: "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, finalEvents)
+    });
+    const sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "failed", JSON.stringify(sync.diagnostics));
+    assert.ok(
+      sync.diagnostics.some((diagnostic) =>
+        ["ARTIFACT_MANIFEST_WRITE_FAILED", "ARTIFACT_VERIFICATION_AUTHORITY_INVALID"].includes(diagnostic.code)
+      ),
+      JSON.stringify(sync.diagnostics)
+    );
+    assert.equal(fs.existsSync(path.join(runRoot, "artifacts", "final-report", "artifact-manifest.json")), false);
+  });
+}
+
+test("syncRun binds an optional prerequisite digest before a final-boundary manifest swap", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const workflowRunId = "ultrafuzz-sync-optional-manifest-swap";
+  const upstreamEvents = [
+    { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:optional-specialist", attempt: 1 }
+  ];
+  const upstreamEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:direct-strategy", state: "finished", attempt: 1 },
+        { id: "node:optional-specialist", state: "finished", attempt: 1 },
+        { id: "node:final-report", state: "pending", attempt: 0 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, upstreamEvents)
+  });
+  const runId = "sync-optional-manifest-swap";
+  const run = await startRun({ projectRoot: project, runId, env: upstreamEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value!.run_root;
+  writeRequiredArtifactSet(runRoot, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  writeRequiredArtifactSet(runRoot, "optional-specialist", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  const upstreamSync = await syncRun({ projectRoot: project, runId, env: upstreamEnv });
+  assert.equal(upstreamSync.ok, true, JSON.stringify(upstreamSync.diagnostics));
+
+  const optionalManifestPath = path.join(runRoot, "artifacts", "optional-specialist", "artifact-manifest.json");
+  const optionalManifestBytes = fs.readFileSync(optionalManifestPath);
+  const optionalManifestSha256 = crypto.createHash("sha256").update(optionalManifestBytes).digest("hex");
+  const swappedManifestBytes = Buffer.concat([optionalManifestBytes, Buffer.from("\n")]);
+  const finalReportArtifactDir = path.join(runRoot, "artifacts", "final-report");
+  writeRequiredArtifactSet(runRoot, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  const finalEvents = [
+    ...upstreamEvents,
+    { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+    { type: "RunFinished" }
+  ];
+  const finalEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:direct-strategy", state: "finished", attempt: 1 },
+        { id: "node:optional-specialist", state: "finished", attempt: 1 },
+        { id: "node:final-report", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, finalEvents)
+  });
+
+  const readdirSyncDescriptor = Object.getOwnPropertyDescriptor(fs, "readdirSync")!;
+  const openSyncDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+  const originalReaddirSync = fs.readdirSync;
+  const originalOpenSync = fs.openSync;
+  let manifestConstructionStarted = false;
+  let swapped = false;
+  Object.defineProperty(fs, "readdirSync", {
+    ...readdirSyncDescriptor,
+    value: ((directory: fs.PathLike, options?: unknown) => {
+      if (path.resolve(String(directory)) === finalReportArtifactDir) manifestConstructionStarted = true;
+      return originalReaddirSync(directory, options as never);
+    }) as typeof fs.readdirSync
+  });
+  Object.defineProperty(fs, "openSync", {
+    ...openSyncDescriptor,
+    value: ((file: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      if (manifestConstructionStarted && !swapped && path.resolve(String(file)) === optionalManifestPath) {
+        swapped = true;
+        fs.writeFileSync(optionalManifestPath, swappedManifestBytes);
+      }
+      return originalOpenSync(file, flags, mode);
+    }) as typeof fs.openSync
+  });
+  let sync: Awaited<ReturnType<typeof syncRun>>;
+  try {
+    sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+  } finally {
+    Object.defineProperty(fs, "openSync", openSyncDescriptor);
+    Object.defineProperty(fs, "readdirSync", readdirSyncDescriptor);
+  }
+
+  assert.equal(swapped, true, "the optional manifest must be swapped after prerequisite capture");
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed", JSON.stringify(sync.diagnostics));
+  assert.ok(
+    sync.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED"),
+    JSON.stringify(sync.diagnostics)
+  );
+  const consumerManifest = JSON.parse(
+    fs.readFileSync(path.join(finalReportArtifactDir, "artifact-manifest.json"), "utf8")
+  ) as { prerequisite_manifests: Array<{ node_id: string; sha256: string }> };
+  assert.equal(
+    consumerManifest.prerequisite_manifests.find((entry) => entry.node_id === "optional-specialist")?.sha256,
+    optionalManifestSha256,
+    "the consumer must use the captured state-pinned digest instead of rereading the swapped manifest"
+  );
+  assert.notEqual(optionalManifestSha256, crypto.createHash("sha256").update(swappedManifestBytes).digest("hex"));
+});
+
 test("syncRun maps failed workflow nodes into durable failed run state", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -16481,6 +17217,119 @@ test("retry recovery survives an interrupted submission projection and rejects s
   );
 });
 
+test("retry recovery authenticates required success while an optional specialist remains failed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const runId = "recovery-with-persistent-optional-failure";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const initialEvents = [
+    {
+      type: "NodeFailed",
+      nodeId: "node:direct-strategy",
+      attempt: 1,
+      error: { message: "required strategy failed" }
+    },
+    {
+      type: "NodeFailed",
+      nodeId: "node:optional-specialist",
+      attempt: 1,
+      error: { message: "optional specialist failed" }
+    },
+    { type: "NodePending", nodeId: "node:final-report", attempt: 0 }
+  ];
+  const initialEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "required and optional tasks failed" },
+      steps: [
+        { id: "node:direct-strategy", state: "failed", attempt: 1 },
+        { id: "node:optional-specialist", state: "failed", attempt: 1 },
+        { id: "node:final-report", state: "pending", attempt: 0 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, initialEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env: initialEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const initialSync = await syncRun({ projectRoot: project, runId, env: initialEnv });
+  assert.equal(initialSync.ok, true, JSON.stringify(initialSync.diagnostics));
+  assert.equal(initialSync.value?.status, "failed");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    env: initialEnv
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
+  assert.deepEqual(
+    submitted.provenance?.recovery?.failed_nodes.map((node) => ({
+      node_id: node.node_id,
+      workflow_task_id: node.workflow_task_id,
+      failed_attempt: node.failed_attempt
+    })),
+    [{ node_id: "direct-strategy", workflow_task_id: "node:direct-strategy", failed_attempt: 1 }]
+  );
+
+  writeRequiredArtifactSet(run.value!.run_root, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  writeRequiredArtifactSet(run.value!.run_root, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  const recoveredEvents = [
+    ...initialEvents,
+    { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 2 },
+    {
+      type: "NodeFailed",
+      nodeId: "node:optional-specialist",
+      attempt: 2,
+      error: { message: "optional specialist still failed" }
+    },
+    { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+    { type: "RunFailed", error: { message: "optional specialist still failed" } }
+  ];
+  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "optional specialist still failed" },
+      steps: [
+        { id: "node:direct-strategy", state: "finished", attempt: 2 },
+        { id: "node:optional-specialist", state: "failed", attempt: 2 },
+        { id: "node:final-report", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, recoveredEvents)
+  });
+
+  const synchronized = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
+
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "succeeded", JSON.stringify(synchronized.diagnostics));
+  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(recovered.nodes["direct-strategy"]?.status, "succeeded");
+  assert.equal(recovered.nodes["optional-specialist"]?.status, "failed");
+  assert.equal(recovered.nodes["final-report"]?.status, "succeeded");
+  assert.equal(recovered.provenance?.recovery?.recovered, true);
+  assert.deepEqual(
+    recovered.provenance?.recovery?.failed_nodes.map((node) => node.node_id),
+    ["direct-strategy"]
+  );
+  const recoveryEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
+    (event) => event.event_type === "run-recovered"
+  );
+  assert.equal(recoveryEvents.length, 1);
+  assert.deepEqual(
+    recoveryEvents[0]?.payload.failed_nodes.map((node) => node.node_id),
+    ["direct-strategy"]
+  );
+});
+
 test("retry recovery stays failed when engine success has no durable submission disposition", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -16781,6 +17630,140 @@ test("retry recovery fails closed when durable failure provenance has no exact c
     (event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true
   );
   assert.equal(retryInvocations.length, 1, "retry may proceed but cannot claim recovery authority");
+});
+
+test("retry recovery rejects foreign task identity and non-positive failed attempts", async () => {
+  const cases = ["foreign-task", "zero-attempt"] as const;
+  for (const mutation of cases) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    const workflowRunId = `ultrafuzz-recovery-${mutation}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        error: { message: "Task failed: node:project-discovery" },
+        steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        {
+          type: "NodeFailed",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          error: { message: "discovery failed" }
+        }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId: `recovery-${mutation}`, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
+    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+
+    const statePath = path.join(run.value!.run_root, "state.json");
+    const forged = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+    const node = forged.nodes["project-discovery"]!;
+    const workflow = (node.provenance as unknown as { workflow: Record<string, unknown> }).workflow;
+    if (mutation === "foreign-task") {
+      (node.provenance as unknown as { failure: Record<string, unknown> }).failure.causal_task_id = "node:foreign-task";
+    } else {
+      workflow.attempt = 0;
+      fs.writeFileSync(
+        env.SMITHERS_FAKE_INSPECT!,
+        `${JSON.stringify(
+          workflowInspect({
+            workflowRunId,
+            status: "failed",
+            state: "failed",
+            error: { message: "Task failed: node:project-discovery" },
+            steps: [{ id: "node:project-discovery", state: "failed", attempt: 0 }]
+          })
+        )}\n`,
+        "utf8"
+      );
+    }
+    fs.writeFileSync(statePath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
+    fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
+
+    const resumed = await resumeRun({
+      projectRoot: project,
+      runId: run.value!.run_id,
+      force: true,
+      retryFailed: true,
+      env
+    });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const after = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+    assert.equal(after.provenance?.recovery, undefined);
+  }
+});
+
+test("retry recovery rejects a required failure hidden behind a forged aggregate projection", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const runId = "recovery-forged-required-aggregate";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const failedEvents = [
+    { type: "NodeFailed", nodeId: "node:direct-strategy", attempt: 1, error: { message: "direct failed" } },
+    {
+      type: "NodeFailed",
+      nodeId: "node:optional-specialist",
+      attempt: 1,
+      error: { message: "optional failed" }
+    },
+    { type: "NodeFailed", nodeId: "node:final-report", attempt: 1, error: { message: "report failed" } }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "required nodes failed" },
+      steps: [
+        { id: "node:direct-strategy", state: "failed", attempt: 1 },
+        { id: "node:optional-specialist", state: "failed", attempt: 1 },
+        { id: "node:final-report", state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, failedEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const forged = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  const report = forged.nodes["final-report"]!;
+  report.provenance = {
+    ...(report.provenance ?? {}),
+    workflow: { run_id: workflowRunId, aggregate_attempt_statuses: ["failed"] }
+  };
+  fs.writeFileSync(statePath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_INSPECT!,
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        error: { message: "required nodes failed" },
+        steps: [
+          { id: "node:direct-strategy", state: "failed", attempt: 1 },
+          { id: "node:optional-specialist", state: "failed", attempt: 1 }
+        ]
+      })
+    )}\n`,
+    "utf8"
+  );
+
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const after = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(after.provenance?.recovery, undefined);
 });
 
 test("an unrelated replacement link cannot retarget a pending retry recovery", async () => {

@@ -13,20 +13,22 @@ Use only the authoritative report-bound note vocabulary:
 
 Repair only consensus harness or reference defects from the looped triage outputs:
 
-Semantic red registries:
-{{artifact_handoff:differential-red-triage}}
+Sealed JSON authority for every declared semantic-red registry:
+{{ancestor_contract_artifact_authority:ultrafuzz/semantic-red-registry@1}}
 
-Triage A artifacts:
-{{artifact_path:differential-red-triage}}/triage-a.json
+Sealed JSON authority for every declared A/B triage artifact:
+{{ancestor_contract_artifact_authority:ultrafuzz/differential-red-triage@1}}
 
-Triage B artifacts:
-{{artifact_path:differential-red-triage}}/triage-b.json
+Sealed JSON authority for every declared lane result:
+{{ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1}}
 
-Lane results:
-{{artifact_handoff:differential-lane-author}}
+Sealed JSON authority for every declared audited-lanes artifact:
+{{ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1}}
 
-Audited lanes:
-{{artifact_handoff:reference-and-lane-auditor}}
+Read those manifest definitions instead of expecting expanded path or source
+arrays in this prompt. Use each selected absolute path only for reading. Derive
+report coordinates from the run-relative paths in each selector's required
+`localeCompare` order.
 
 This workspace should include direct replay of `base-test-setup` fixtures and
 `differential-lane-author` generated lane tests. Use those replayed files for
@@ -34,11 +36,13 @@ final focused-command reruns. If a focused command matches zero tests, first
 check whether the expected lane file exists in this workspace before marking
 the campaign incomplete.
 
-The `differential-red-triage` logical node is expected to provide
-`{{strategy_loop_count}}` fresh attempt artifact directories. If fewer than
-`{{strategy_loop_count}}` independent triage attempt directories are present, do
-not repair; mark the campaign incomplete in `gap-review.json` and
-`differential-report-review.json`.
+Trust only the exact declared semantic-red registry and A/B triage artifacts
+selected from the sealed manifest. Group them by the exact producer task and
+`artifact_dir`; require that producer's one registry plus its declared `pass: a`
+and `pass: b` siblings. The authenticated producer `attempt_id` establishes
+freshness and independence. Do not probe for, count, or require nested attempt
+directories, and do not create a report blocker merely because the declared
+artifacts are top-level files in their producer directory.
 
 Never weaken, remove, skip, or over-bound credible production-bug red tests. Do
 not repair reds classified as production bug, spec mismatch, or unknown. Never
@@ -69,8 +73,32 @@ Write {{artifact_path}}/gap-review.json using the exact pinned
 `{{schema_path}}/differential-gap-review.schema.json`. Reconcile every audited
 ready lane with the exact lane result having the same lane, attempt, auditor,
 and source-artifact coordinates. Record missing results, no-assigned-lane
-attempts, zero-match commands, absent triage attempts, green-suite evidence,
-and report blockers without inventing or converting a lane identity.
+attempts, zero-match commands, green-suite evidence, and genuine report
+blockers without inventing or converting a lane identity.
+
+Apply these exact derived projections in declared input order:
+
+- `ready_lanes` is every audited `ready_lanes` row projected to its unchanged
+  `lane_id`, `attempt_index`, `auditor_attempt_index`, and declaring auditor's
+  run-relative artifact path as `source_auditor_artifact`.
+- `lane_results_seen` is every declared lane-result artifact, including each
+  nullable `no_assigned_lane` row, projected to those four coordinates plus its
+  unchanged `status`.
+- `missing_lane_work_orders` contains exactly the projected ready lanes for
+  which no declared result has all four matching coordinates, in ready-lane
+  order. Copy the four coordinates unchanged.
+- `incomplete_campaign_work_orders` contains exactly the projected lane-result
+  rows whose status is `compile_or_harness_defect` or `no_assigned_lane`, in
+  lane-result order. Copy the four coordinates unchanged, including a null lane
+  ID when supplied.
+- `green_suite_evidence` contains exactly the green lane-result rows, in
+  lane-result order, with their unchanged four coordinates, focused command,
+  and positive matched-test count.
+
+For each derived work order, use its schema-defined `summary` and
+`evidence_paths` only for genuine evidence-backed explanation of that exact
+row; do not add or omit a work order to carry notes. Put only genuine
+campaign-level blockers in the schema-defined `report_blockers` channel.
 
 Write {{artifact_path}}/differential-report-review.json using the exact pinned
 `{{schema_path}}/differential-report-review.schema.json`. Derive campaign

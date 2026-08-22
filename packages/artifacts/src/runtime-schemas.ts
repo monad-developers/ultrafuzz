@@ -120,6 +120,11 @@ export const artifactVerificationJsonSchema = {
     schema_version: { const: ARTIFACT_VERIFICATION_SCHEMA_VERSION },
     attempt_id: { type: "string", minLength: 1 },
     node_id: { type: "string", minLength: 1 },
+    admitted_dependency_attempt_ids: {
+      type: "array",
+      uniqueItems: true,
+      items: { type: "string", minLength: 1, maxLength: 128 }
+    },
     artifacts: { type: "array", minItems: 1, items: artifactVerificationEntryJsonSchema },
     publications: {
       type: "array",
@@ -225,6 +230,8 @@ export interface ArtifactVerificationMarker {
   schema_version: typeof ARTIFACT_VERIFICATION_SCHEMA_VERSION;
   attempt_id: string;
   node_id: string;
+  /** Exact ancestor attempt roots admitted by this consumer's preparation. */
+  admitted_dependency_attempt_ids?: string[];
   artifacts: ArtifactVerificationEntry[];
   publications: Array<{ path: string; sha256: string }>;
 }

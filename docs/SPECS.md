@@ -277,7 +277,6 @@ The prompt variable set includes:
 - `schema_path`
 - `artifact_path`
 - `artifact_dir`
-- `ancestor_artifacts`
 - `run_metadata_path`
 - `output_findings_path`
 - `output_patch_path`
@@ -296,15 +295,81 @@ The prompt variable set includes:
 - `strategy_attempt_test_dir`
 - `artifact_path:<logical-node-id>`
 - `artifact_handoff:<logical-node-id>`
-- `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]`
-- `ancestor_artifacts_by_path:<path>[,<path>...]`
+- `ancestor_contract_artifact_authority:<contract>`
+- `ancestor_artifact_path_authority:<path>[,<path>...]`
 
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
 producers MUST declare a primary contracted output. Exact artifact paths MUST
-resolve to declared producer outputs. Ancestor artifact lists MUST use declared
-outputs. Path-filtered ancestor artifact lists MUST resolve only exact declared
-ancestor output paths and MUST render an explicit no-match sentinel when none
-are declared.
+resolve to declared producer outputs. The legacy collection helpers
+`ancestor_artifacts`, `ancestor_artifacts_by_path`,
+`ancestor_generated_test_manifests`, and
+`ancestor_generated_test_manifest_authorities` MUST fail prompt validation with
+an actionable compact-authority migration. Workflow-node prompts MUST NOT
+expand an ancestor collection into producer paths or authority rows.
+
+`ancestor_contract_artifact_authority:<contract>` MUST accept only a registered
+artifact contract ID and MUST select matching outputs only from the current
+task's transitive artifact-ancestor closure. The renderer MUST emit only a
+bounded pointer to the task-local JSON document at
+`<task-workspace>/.ultrafuzz/authorities/<attemptId>.json`, the exact current
+attempt ID, and the requested contract. It MUST NOT expand matching producer
+paths, model-fanout attempts, or source-authority rows into the prompt. The
+renderer MUST still record the exact matching logical ancestor IDs and contract
+in prompt artifact references so topology validation and contextual semantic
+gates share the same selector.
+
+Immediately before every model attempt, the runtime MUST reparse and validate
+the sealed execution snapshot's `controls/tasks.json` itself. That shared
+control file and its parent directory MUST NOT be admitted to the agent. The
+current task's `dependencyArtifactDirs` is the declared closure and
+`optionalDependencyArtifactDirs` is its exact optional subset. Matching
+producers outside that optional subset MUST remain admitted. A producer inside
+the optional subset MUST be admitted only when its exact runtime verification
+marker exists; a markerless optional producer MUST be excluded. Every admitted
+agentic producer MUST cross the complete verifier boundary before the authority
+is derived.
+
+The derived `ultrafuzz.prompt-artifact-authority.v1` document MUST contain only
+`schema_version`, `run_id`, `attempt_id`, the absolute relocated run root as
+`artifact_path_base`, the current prompt's canonical `selectors`, and matching
+`producers`. Each producer contains only its attempt ID, logical node ID,
+canonical `artifacts/<attemptId>` directory, and selected output `path` and
+`contract` declarations. Controller-host paths, workspaces, source identities,
+model metadata, unrelated tasks, and unselected outputs MUST be omitted. An
+empty `producers` array is the authoritative no-match representation. Every
+relative path MUST reject absolute prefixes and traversal before it is resolved
+beneath `artifact_path_base`.
+
+The deterministic serialized authority MUST be rejected when it exceeds
+32 MiB, before the runtime creates or writes the task-local sidecar.
+
+The runtime MUST restore the deterministic authority bytes before a retry and
+compare the exact file bytes after every model call, including failed calls and
+schema-correction calls. Missing, malformed, replaced, linked, or modified
+authority files MUST fail verification.
+
+`ancestor_artifact_path_authority:<path>[,<path>...]` MUST accept one or more
+distinct safe declared output paths and MUST apply the same transitive closure,
+runtime verification-marker admission, per-task JSON projection, bounded
+rendering, portable-path ordering, and prompt artifact-reference requirements as
+`ancestor_contract_artifact_authority`. It MUST select admitted producer output
+declarations only when their exact declared `path` is in the requested set. It
+MUST record the exact matching logical ancestor IDs, a deterministic SHA-256
+selector ID, and the canonically ordered requested output paths in the run
+plan. The sealed task manifest and task-local authority MUST preserve that path
+group and MUST reject an ID that does not match its paths. Prompt prose MUST
+name only the fixed-size selector ID; it MUST NOT enumerate the group's paths,
+matching producer paths, model-fanout attempts, or source-authority rows.
+
+Both compact authority selectors MUST select only planned nodes with
+`kind: agentic`. If a selector's exact contract or path filter matches any
+transitive `kind: reference` ancestor, the renderer MUST fail closed, including
+when the same selector also matches an agentic ancestor. The diagnostic MUST
+identify the reference node and direct fixed reference consumers to
+`artifact_path:<logical-node-id>` or `artifact_handoff:<logical-node-id>`.
+A selector with no matching ancestor MUST remain valid and MUST be represented
+by an empty `logicalIds` array in the run plan and an empty `producers` array at
+runtime.
 
 For every agent-authored JSON output, the centrally rendered output contract
 MUST include both safely shell-quoted commands using the exact resolved paths
@@ -523,6 +588,18 @@ positive integer `line` and `end_line` metadata. Disjoint spans MUST use at leas
 two ordered `line_ranges` objects with a required positive integer `line` and an
 optional `end_line` that does not precede it. Independent explanatory `detail`
 MUST remain separate from structural range metadata.
+
+Generated-test production is opt-in per topology node. A findings producer MAY
+omit `ultrafuzz/generated-tests@3` when tests or proofs of concept are optional
+supporting evidence rather than a required artifact, and MAY instead declare
+the contract as an optional, empty-allowed evidence channel satisfied by the
+schema-defined empty bundle when no proof of concept was produced. Only a node
+that declares that contract receives generated-test bundle instructions, and
+downstream consumers MUST use contract-derived manifest intake instead of
+assuming that every strategy or findings producer emits `generated-tests.json`.
+Review stages MUST define a validation path for findings that arrive with an
+empty manifest or from a producer that declares no manifest, instead of
+treating either case as blocked.
 
 Default review flows SHOULD deduplicate findings, classify severity, aggregate
 generated tests, and write final report artifacts. `ultrafuzz report` MUST read

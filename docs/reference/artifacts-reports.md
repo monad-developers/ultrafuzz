@@ -182,6 +182,17 @@ verifier compares that field with controller memory or independently persisted
 Smithers attempt authority before accepting the report, so downstream evals can
 detect mixed-model runs without trusting a model-writable file.
 
+The runtime does not serialize `agent_execution` or
+`property_implementation_coverage` into the model prompt. Immediately before a
+terminal-report attempt it writes both values to the bounded, task-local
+`.ultrafuzz/authorities/<attempt-id>.final-report-prompt.json` document and the
+prompt contains only that workspace-relative pointer and copy instructions.
+The controller strictly parses the file, compares it with the derived values,
+applies the pre-agent evidence byte limit, and verifies the same immutable bytes
+immediately before and after every model call. Retries replace the document from
+authenticated dependency snapshots with the newly observed retry-chain
+projection before generation.
+
 ## Node Artifacts
 
 Node and attempt artifacts live under:
@@ -202,8 +213,9 @@ generated-tests.json
 references/manifest.json
 ```
 
-The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
-and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
+The `stateful-invariant-campaign` node in the packaged `full` and
+`invariant-only` topologies runs one final recon-fuzzer backend and writes
+backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
 `campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan
 records the resolved vCPU count, worker count, wall-clock budget, deadline, and
 finalization reserve. The configured invariant fuzzer timeout is the backend's
@@ -463,6 +475,23 @@ If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
 `ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
 it does not reconstruct, reorder, normalize, or rewrite them.
+
+### Internal authority and public projection
+
+The paths above are the private, run-local report authority. Verification,
+scoring, and lifecycle consumers continue to use that immutable internal
+`report.json` and its canonical `report.md`; public publication neither mutates
+those files nor promotes a published copy to run authority.
+
+Public benchmark publication crosses a separate privacy boundary. It first
+validates the internal report, deep-copies its canonical JSON, redacts private
+filesystem paths from string values, and validates the sanitized JSON again.
+The publisher serializes that object as the public `report.json` and renders the
+public `report.md` from the exact same sanitized canonical JSON rather than
+copying the internal Markdown. Bundle validation rejects a public report whose
+JSON is not that privacy-safe projection or whose Markdown is not its exact
+canonical rendering. The published pair therefore remains in JSON/Markdown
+parity without changing the trusted internal report authority.
 
 ### Coverage evidence
 

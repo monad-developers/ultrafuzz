@@ -492,7 +492,7 @@ test("post-finalization property fan-in remains readable through sealed fanout a
       (error: unknown) =>
         error instanceof VerifiedOutputError &&
         error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
-        /prerequisite attempt IDs do not match the exact sealed dependencies/iu.test(error.message),
+        /prerequisite attempt IDs do not match the verifier-persisted admission/iu.test(error.message),
       `${variant.label} fanout prerequisite attempt must fail closed`
     );
     assert.deepEqual(fs.readFileSync(faninManifestPath), mutatedBytes);
@@ -692,9 +692,219 @@ test("sealed manifest prerequisites must exactly cover the current sealed direct
     (error: unknown) =>
       error instanceof VerifiedOutputError &&
       error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
-      /prerequisite attempt IDs do not match the exact sealed dependencies/iu.test(error.message)
+      /prerequisite attempt IDs do not match the verifier-persisted admission/iu.test(error.message)
   );
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
+});
+
+test("sealed manifest prerequisites may omit a markerless optional direct dependency", () => {
+  const fixture = createVerifiedReportFixture("verified-report-markerless-optional-prerequisite", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+
+  const loaded = loadVerifiedNodeOutputSnapshot({
+    runRoot: fixture.layout.root,
+    logicalNodeId: REPORT_LOGICAL_ID,
+    attemptId: fixture.attemptId
+  });
+
+  assert.equal(loaded.attempt_id, fixture.attemptId);
+  assert.deepEqual(
+    readManifest(path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json"))
+      .prerequisite_manifests,
+    []
+  );
+});
+
+test("legacy controller manifests without a marker digest fail closed for optional dependency closures", () => {
+  const fixture = createVerifiedReportFixture("verified-report-optional-missing-marker-digest", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+  const manifestPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json");
+  const manifest = readManifest(manifestPath);
+  delete manifest.provenance.verification_marker_sha256;
+  for (const entry of manifest.files) delete entry.provenance.verification_marker_sha256;
+  writeJsonDurable(manifestPath, manifest);
+  const manifestBytes = fs.readFileSync(manifestPath);
+  sealFinalReportManifest(fixture.layout, fixture.attemptId, digest(manifestBytes));
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: REPORT_LOGICAL_ID,
+        attemptId: fixture.attemptId
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /manifest does not authenticate optional dependency admission/iu.test(error.message)
+  );
+});
+
+test("persisted omitted admission survives a later successful optional-only retry", () => {
+  const fixture = createVerifiedReportFixture("verified-report-optional-retry-after-consumer", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+  finalizeFixtureProducer(fixture.layout);
+
+  const loaded = loadVerifiedNodeOutputSnapshot({
+    runRoot: fixture.layout.root,
+    logicalNodeId: REPORT_LOGICAL_ID,
+    attemptId: fixture.attemptId
+  });
+
+  assert.equal(loaded.attempt_id, fixture.attemptId);
+  assert.deepEqual(
+    readManifest(path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json"))
+      .prerequisite_manifests,
+    []
+  );
+});
+
+test("persisted admitted prerequisite remains causal after its optional marker disappears", () => {
+  const fixture = createVerifiedReportFixture("verified-report-admitted-optional-marker-removed", {
+    withPrerequisite: true,
+    optionalPrerequisite: true,
+    admitOptionalPrerequisite: true
+  });
+  finalizeFixtureProducer(fixture.layout);
+  fs.rmSync(path.join(fixture.layout.root, ".ultrafuzz-verification", "producer.json"));
+
+  const loaded = loadVerifiedNodeOutputSnapshot({
+    runRoot: fixture.layout.root,
+    logicalNodeId: REPORT_LOGICAL_ID,
+    attemptId: fixture.attemptId
+  });
+
+  assert.equal(loaded.attempt_id, fixture.attemptId);
+  assert.deepEqual(
+    readManifest(
+      path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json")
+    ).prerequisite_manifests.map((entry) => entry.node_id),
+    ["producer"]
+  );
+});
+
+test("controller manifest prerequisites must equal the verifier-persisted direct admission", () => {
+  const fixture = createVerifiedReportFixture("verified-report-optional-forged-prerequisite", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+  const producerManifestBytes = fs.readFileSync(
+    path.join(fixture.layout.artifactsDir, "producer", "artifact-manifest.json")
+  );
+  const manifestPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json");
+  const manifest = readManifest(manifestPath);
+  manifest.prerequisite_manifests = [{ node_id: "producer", sha256: digest(producerManifestBytes) }];
+  writeJsonDurable(manifestPath, manifest);
+  const manifestBytes = fs.readFileSync(manifestPath);
+  sealFinalReportManifest(fixture.layout, fixture.attemptId, digest(manifestBytes));
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: REPORT_LOGICAL_ID,
+        attemptId: fixture.attemptId
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /prerequisite attempt IDs do not match the verifier-persisted admission/iu.test(error.message)
+  );
+});
+
+test("controller manifest authenticates a marker replacement that changes only indirect optional admission", () => {
+  const fixture = createVerifiedReportFixture("verified-report-indirect-optional-marker-replaced", {
+    indirectOptionalPrerequisite: true
+  });
+  const manifestPath = path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json");
+  const markerPath = path.join(fixture.layout.root, ".ultrafuzz-verification", `${fixture.attemptId}.json`);
+  const manifestBefore = readManifest(manifestPath);
+  assert.deepEqual(
+    manifestBefore.prerequisite_manifests.map((entry) => entry.node_id),
+    ["bridge"],
+    "the direct prerequisite set is independent of the indirect optional admission"
+  );
+  const replacement = JSON.parse(fs.readFileSync(markerPath, "utf8")) as ArtifactVerificationMarker;
+  assert.deepEqual(replacement.admitted_dependency_attempt_ids, ["bridge"]);
+  replacement.admitted_dependency_attempt_ids = ["producer", "bridge"];
+  writeJsonDurable(markerPath, replacement);
+  const replacementBytes = fs.readFileSync(markerPath);
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: REPORT_LOGICAL_ID,
+        attemptId: fixture.attemptId
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /verification marker does not match controller manifest authority/iu.test(error.message)
+  );
+  assert.deepEqual(
+    readManifest(manifestPath).prerequisite_manifests.map((entry) => entry.node_id),
+    ["bridge"]
+  );
+  assert.deepEqual(fs.readFileSync(markerPath), replacementBytes);
+});
+
+for (const markerAuthority of ["malformed leaf", "dangling leaf"] as const) {
+  test(`persisted omitted admission ignores an optional marker that later becomes a ${markerAuthority}`, () => {
+    const fixture = createVerifiedReportFixture(`verified-report-optional-${markerAuthority.replaceAll(" ", "-")}`, {
+      withPrerequisite: true,
+      optionalPrerequisite: true
+    });
+    const markerRoot = path.join(fixture.layout.root, ".ultrafuzz-verification");
+    const producerMarker = path.join(markerRoot, "producer.json");
+    if (markerAuthority === "malformed leaf") {
+      writeJsonDurable(producerMarker, {});
+    } else if (markerAuthority === "dangling leaf") {
+      fs.symlinkSync("missing-producer-marker.json", producerMarker);
+    }
+
+    const loaded = loadVerifiedNodeOutputSnapshot({
+      runRoot: fixture.layout.root,
+      logicalNodeId: REPORT_LOGICAL_ID,
+      attemptId: fixture.attemptId
+    });
+    assert.equal(loaded.attempt_id, fixture.attemptId);
+    assert.deepEqual(
+      readManifest(path.join(fixture.layout.artifactsDir, fixture.attemptId, "artifact-manifest.json"))
+        .prerequisite_manifests,
+      []
+    );
+  });
+}
+
+test("verified output still rejects an unsafe marker authority root", () => {
+  const fixture = createVerifiedReportFixture("verified-report-optional-symlinked-root", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+  const markerRoot = path.join(fixture.layout.root, ".ultrafuzz-verification");
+  const realMarkerRoot = path.join(fixture.layout.root, "verification-authority-real");
+  fs.renameSync(markerRoot, realMarkerRoot);
+  fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+
+  assert.throws(
+    () =>
+      loadVerifiedNodeOutputSnapshot({
+        runRoot: fixture.layout.root,
+        logicalNodeId: REPORT_LOGICAL_ID,
+        attemptId: fixture.attemptId
+      }),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_AUTHORITY_INVALID" &&
+      /artifact verification marker root is unsafe/iu.test(error.message)
+  );
 });
 
 test("verified final-report selection rejects absent and ambiguous declared report producers", () => {
@@ -852,12 +1062,18 @@ function createVerifiedReportFixture(
     attemptId?: string;
     modelFanout?: PlannedGraphNodeDocument["model_fanout"];
     withPrerequisite?: boolean;
+    optionalPrerequisite?: boolean;
+    admitOptionalPrerequisite?: boolean;
+    indirectOptionalPrerequisite?: boolean;
   } = {}
 ): ReportFixture {
   const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-"));
   const outputs = override.outputs ?? finalReportOutputs();
   const prerequisiteOutputs = producerOutputs();
   const attemptId = override.attemptId ?? REPORT_ATTEMPT_ID;
+  const withPrerequisite = override.withPrerequisite === true || override.indirectOptionalPrerequisite === true;
+  const optionalPrerequisite = override.optionalPrerequisite === true || override.indirectOptionalPrerequisite === true;
+  const rootPrerequisiteAttemptId = override.indirectOptionalPrerequisite === true ? "bridge" : "producer";
   const modelFanout = override.modelFanout ?? [];
   const reportAttemptIds =
     modelFanout.length <= 1
@@ -867,15 +1083,16 @@ function createVerifiedReportFixture(
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "4",
     topology_version: 2,
-    groups: {},
+    groups: optionalPrerequisite ? { specialists: { defaults: { failure_policy: "continue" } } } : {},
     nodes: [
-      ...(override.withPrerequisite === true
+      ...(withPrerequisite
         ? [
             {
               id: "producer",
               logical_id: "producer",
               display_name: "Producer",
               kind: "agentic" as const,
+              ...(optionalPrerequisite ? { group: "specialists" } : {}),
               depends_on: [],
               artifact_dir: "artifacts/producer",
               outputs: prerequisiteOutputs,
@@ -887,12 +1104,30 @@ function createVerifiedReportFixture(
             }
           ]
         : []),
+      ...(override.indirectOptionalPrerequisite === true
+        ? [
+            {
+              id: "bridge",
+              logical_id: "bridge",
+              display_name: "Bridge",
+              kind: "agentic" as const,
+              depends_on: ["producer"],
+              artifact_dir: "artifacts/bridge",
+              outputs: prerequisiteOutputs,
+              prompt_id: "bridge",
+              prompt_path: "review/bridge.md",
+              loop: { index: 0, count: 1, mode: "parallel" as const, attempt_index: 0 },
+              model_fanout: [],
+              workflow: { node_id: "node:bridge", task_node_ids: ["node:bridge"] }
+            }
+          ]
+        : []),
       {
         id: REPORT_ATTEMPT_ID,
         logical_id: REPORT_LOGICAL_ID,
         display_name: "Final report",
         kind: "agentic",
-        depends_on: override.withPrerequisite === true ? ["producer"] : [],
+        depends_on: withPrerequisite ? [rootPrerequisiteAttemptId] : [],
         artifact_dir: `artifacts/${REPORT_ATTEMPT_ID}`,
         outputs,
         prompt_id: REPORT_LOGICAL_ID,
@@ -913,12 +1148,22 @@ function createVerifiedReportFixture(
     graphFingerprint: "f".repeat(64),
     configFingerprint: "e".repeat(64),
     stateNodes: [
-      ...(override.withPrerequisite === true
+      ...(withPrerequisite
         ? [
             {
               id: "producer",
               logicalNodeId: "producer",
               artifactDir: "artifacts/producer",
+              outputs: prerequisiteOutputs
+            }
+          ]
+        : []),
+      ...(override.indirectOptionalPrerequisite === true
+        ? [
+            {
+              id: "bridge",
+              logicalNodeId: "bridge",
+              artifactDir: "artifacts/bridge",
               outputs: prerequisiteOutputs
             }
           ]
@@ -952,7 +1197,7 @@ function createVerifiedReportFixture(
     );
   }
 
-  if (override.withPrerequisite === true) {
+  if (withPrerequisite) {
     writeFileDurable(path.join(layout.artifactsDir, "producer", "context.md"), "# Producer context\n");
     writeArtifactManifest({
       layout,
@@ -974,29 +1219,40 @@ function createVerifiedReportFixture(
     });
   }
 
-  writeArtifactManifest({
-    layout,
-    nodeId: attemptId,
-    include: outputs.map((output) => output.path),
-    outputs,
-    prerequisiteNodeIds: override.withPrerequisite === true ? ["producer"] : [],
-    provenance: {
-      producer_node_id: attemptId,
-      logical_node_id: REPORT_LOGICAL_ID,
-      attempt_index: 0,
-      loop_index: 0,
-      model_index: 0,
-      agent_ref: "Codex",
-      workflow_run_id: WORKFLOW_RUN_ID,
-      workflow_task_id: `node:${attemptId}`,
-      origin: "workflow",
-      metadata: { concrete_node_id: REPORT_ATTEMPT_ID }
-    }
-  });
+  if (override.indirectOptionalPrerequisite === true) {
+    writeFileDurable(path.join(layout.artifactsDir, "bridge", "context.md"), "# Bridge context\n");
+    writeArtifactManifest({
+      layout,
+      nodeId: "bridge",
+      include: ["context.md"],
+      outputs: prerequisiteOutputs,
+      provenance: {
+        producer_node_id: "bridge",
+        logical_node_id: "bridge",
+        attempt_index: 0,
+        loop_index: 0,
+        model_index: 0,
+        agent_ref: "Codex",
+        workflow_run_id: WORKFLOW_RUN_ID,
+        workflow_task_id: "node:bridge",
+        origin: "workflow",
+        metadata: { concrete_node_id: "bridge" }
+      }
+    });
+  }
+
   const marker: ArtifactVerificationMarker = {
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
     attempt_id: attemptId,
     node_id: REPORT_LOGICAL_ID,
+    admitted_dependency_attempt_ids:
+      withPrerequisite && (!optionalPrerequisite || override.admitOptionalPrerequisite === true)
+        ? override.indirectOptionalPrerequisite === true
+          ? ["producer", "bridge"]
+          : ["producer"]
+        : override.indirectOptionalPrerequisite === true
+          ? ["bridge"]
+          : [],
     artifacts: outputs.map((output) => ({
       ...output,
       sha256: digest(output.contract === "ultrafuzz/report@3" ? reportBytes : markdownBytes)
@@ -1006,7 +1262,35 @@ function createVerifiedReportFixture(
       sha256: digest(output.contract === "ultrafuzz/report@3" ? reportBytes : markdownBytes)
     }))
   };
-  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`), marker);
+  const markerPath = path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`);
+  writeJsonDurable(markerPath, marker);
+  const markerBytes = fs.readFileSync(markerPath);
+
+  writeArtifactManifest({
+    layout,
+    nodeId: attemptId,
+    include: outputs.map((output) => output.path),
+    outputs,
+    prerequisiteNodeIds:
+      override.indirectOptionalPrerequisite === true
+        ? ["bridge"]
+        : withPrerequisite && (!optionalPrerequisite || override.admitOptionalPrerequisite === true)
+          ? [rootPrerequisiteAttemptId]
+          : [],
+    provenance: {
+      producer_node_id: attemptId,
+      logical_node_id: REPORT_LOGICAL_ID,
+      attempt_index: 0,
+      loop_index: 0,
+      model_index: 0,
+      agent_ref: "Codex",
+      workflow_run_id: WORKFLOW_RUN_ID,
+      workflow_task_id: `node:${attemptId}`,
+      ...(optionalPrerequisite ? { verification_marker_sha256: digest(markerBytes) } : {}),
+      origin: "workflow",
+      metadata: { concrete_node_id: REPORT_ATTEMPT_ID }
+    }
+  });
   updateNodeState(layout, attemptId, {
     status: "succeeded",
     finished_at: new Date().toISOString(),
@@ -1036,6 +1320,44 @@ function createVerifiedReportFixture(
   );
   writeSealedTaskAuthority(layout, graph, tasks);
   return { layout, attemptId, reportPath, markdownPath, reportBytes, markdownBytes };
+}
+
+function finalizeFixtureProducer(layout: RunLayout): void {
+  const outputs = producerOutputs();
+  const bytes = fs.readFileSync(path.join(layout.artifactsDir, "producer", "context.md"));
+  const marker: ArtifactVerificationMarker = {
+    schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+    attempt_id: "producer",
+    node_id: "producer",
+    admitted_dependency_attempt_ids: [],
+    artifacts: outputs.map((output) => ({ ...output, sha256: digest(bytes) })),
+    publications: outputs.map((output) => ({ path: output.path, sha256: digest(bytes) }))
+  };
+  writeJsonDurable(path.join(layout.root, ".ultrafuzz-verification", "producer.json"), marker);
+  updateNodeState(layout, "producer", {
+    status: "succeeded",
+    finished_at: new Date().toISOString(),
+    wait_since: undefined,
+    wait_reason: undefined,
+    next_eligible_action: undefined,
+    provenance: {
+      workflow: {
+        run_id: WORKFLOW_RUN_ID,
+        task_id: "verify:producer",
+        agent_task_id: "node:producer",
+        verifier_task_id: "verify:producer",
+        state: "finished",
+        attempt: 1
+      },
+      output_contracts: {
+        ok: true,
+        missing: [],
+        artifact_manifest_sha256: digest(
+          fs.readFileSync(path.join(layout.artifactsDir, "producer", "artifact-manifest.json"))
+        )
+      }
+    }
+  });
 }
 
 function boundOutput(
@@ -1165,6 +1487,17 @@ function smithersTaskForNode(
     .filter((candidate) => ancestors.has(candidate.id))
     .flatMap(plannedAttemptIds)
     .map((ancestorAttemptId) => getNodeArtifactDir(layout, ancestorAttemptId, { create: true }));
+  const optionalAttemptIds = new Set(
+    graph.nodes
+      .filter(
+        (candidate) =>
+          candidate.group !== undefined && graph.groups[candidate.group]?.defaults?.failure_policy === "continue"
+      )
+      .flatMap(plannedAttemptIds)
+  );
+  const optionalDependencyArtifactDirs = dependencyArtifactDirs.filter((directory) =>
+    optionalAttemptIds.has(path.basename(directory))
+  );
   const artifactDir = getNodeArtifactDir(layout, attemptId, { create: true });
   const workspacePath = path.join(layout.workspacesDir, attemptId);
   const outputs = node.outputs.map((output) => ({
@@ -1219,6 +1552,7 @@ function smithersTaskForNode(
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
+    optionalDependencyArtifactDirs,
     renderedPromptPath: path.join(layout.root, "prompts", `${attemptId}.md`),
     execution,
     metadata: {
@@ -1235,6 +1569,7 @@ function smithersTaskForNode(
         attemptId,
         label: node.display_name,
         kind: "agentic",
+        ...(node.group === undefined ? {} : { group: node.group }),
         ...(node.prompt_path === "" ? {} : { promptPath: node.prompt_path })
       },
       dependencies: {
