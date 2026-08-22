@@ -815,11 +815,22 @@ export async function createModalNodeHandoffArchive(
       cwd: root,
       encoding: "utf8"
     }).trim();
-    execFileSync("git", ["init", "--quiet", `--object-format=${objectFormat}`], { cwd: staging });
-    execFileSync("git", ["config", "user.name", "Ultrafuzz Cloud"], { cwd: staging });
-    execFileSync("git", ["config", "user.email", "cloud@invalid"], { cwd: staging });
-    execFileSync("git", ["add", "-A"], { cwd: staging });
-    execFileSync("git", ["commit", "--quiet", "-m", "immutable cloud input"], { cwd: staging });
+    const gitTemplate = path.join(temporaryRoot, "git-template");
+    const gitEnvironment = deterministicCloudGitEnvironment();
+    fs.mkdirSync(gitTemplate, { mode: 0o700 });
+    execFileSync(
+      "git",
+      ["init", "--quiet", "--initial-branch=main", `--object-format=${objectFormat}`, `--template=${gitTemplate}`],
+      { cwd: staging, env: gitEnvironment }
+    );
+    // Reconstruct the committed tree rather than the original repository's history. Fixed commit
+    // metadata makes that parentless baseline a function of the immutable tree alone, so separately
+    // built handoffs can safely exchange workspace patches while a changed tree still changes HEAD.
+    execFileSync("git", ["add", "--all", "--force", "--", "."], { cwd: staging, env: gitEnvironment });
+    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "immutable cloud input"], {
+      cwd: staging,
+      env: gitEnvironment
+    });
     for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG"]) {
       fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
     }
@@ -906,6 +917,36 @@ function assertDependencyReferenceOverlapsAreExact(
       }
     }
   }
+}
+
+function deterministicCloudGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!name.startsWith("GIT_") && value !== undefined) environment[name] = value;
+  }
+  return {
+    ...environment,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "maintenance.auto",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_CONFIG_KEY_1: "gc.auto",
+    GIT_CONFIG_VALUE_1: "0",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Ultrafuzz Cloud",
+    GIT_AUTHOR_EMAIL: "cloud@invalid",
+    GIT_AUTHOR_DATE: "2000-01-01T00:00:00+0000",
+    GIT_COMMITTER_NAME: "Ultrafuzz Cloud",
+    GIT_COMMITTER_EMAIL: "cloud@invalid",
+    GIT_COMMITTER_DATE: "2000-01-01T00:00:00+0000",
+    GIT_INDEX_VERSION: "2",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    LANG: "C",
+    LC_ALL: "C",
+    TZ: "UTC"
+  };
 }
 
 const CLOUD_HANDOFF_EXPLICIT_FILES = [

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { CLOUD_SELECTED_TASK_SCHEMA_VERSION, type CloudSelectedTask } from "@ultrafuzz/artifacts";
+import { applyWorkspacePatch, captureWorkspacePatch, validateWorkspacePatchCapture } from "@ultrafuzz/runtime";
 import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
@@ -529,6 +530,85 @@ describe("Modal node sandbox provider", () => {
       fixture.cleanup();
     }
   });
+
+  it("seals identical cloud source trees under one stable commit identity", async () => {
+    const fixture = createProjectFixture();
+    const originalAuthorDate = process.env.GIT_AUTHOR_DATE;
+    const originalCommitterDate = process.env.GIT_COMMITTER_DATE;
+    const extractionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-stable-git-test-"));
+    const firstProject = path.join(extractionRoot, "first");
+    const secondProject = path.join(extractionRoot, "second");
+    const changedProject = path.join(extractionRoot, "changed");
+    fs.mkdirSync(firstProject);
+    fs.mkdirSync(secondProject);
+    fs.mkdirSync(changedProject);
+    let first: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    let second: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    let changed: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      process.env.GIT_AUTHOR_DATE = "2031-01-02T03:04:05Z";
+      process.env.GIT_COMMITTER_DATE = "2031-01-02T03:04:05Z";
+      first = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      process.env.GIT_AUTHOR_DATE = "2042-06-07T08:09:10Z";
+      process.env.GIT_COMMITTER_DATE = "2042-06-07T08:09:10Z";
+      second = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      await extractSafeTarArchive(first.path, firstProject, { gzip: true, label: "first stable Git handoff" });
+      await extractSafeTarArchive(second.path, secondProject, { gzip: true, label: "second stable Git handoff" });
+
+      const firstHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: firstProject, encoding: "utf8" }).trim();
+      const secondHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: secondProject, encoding: "utf8" }).trim();
+      const firstTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: firstProject,
+        encoding: "utf8"
+      }).trim();
+      const secondTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: secondProject,
+        encoding: "utf8"
+      }).trim();
+      expect(secondTree).toBe(firstTree);
+      expect(secondHead).toBe(firstHead);
+
+      fs.appendFileSync(path.join(firstProject, "source.txt"), "workspace change\n");
+      const capture = captureWorkspacePatch(firstProject, firstTree);
+      expect(() => applyWorkspacePatch(secondProject, capture)).not.toThrow();
+      expect(fs.readFileSync(path.join(secondProject, "source.txt"), "utf8")).toBe(
+        "committed source\nworkspace change\n"
+      );
+
+      fs.writeFileSync(path.join(fixture.root, "source.txt"), "repinned source\n");
+      execFileSync("git", ["add", "--", "source.txt"], { cwd: fixture.root });
+      execFileSync("git", ["commit", "--quiet", "-m", "repin fixture"], { cwd: fixture.root });
+      changed = await createModalNodeHandoffArchive(fixture.root, {
+        ...fixture.input,
+        project_content_sha256: undefined
+      });
+      await extractSafeTarArchive(changed.path, changedProject, { gzip: true, label: "changed Git handoff" });
+      const changedHead = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: changedProject,
+        encoding: "utf8"
+      }).trim();
+      const changedTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: changedProject,
+        encoding: "utf8"
+      }).trim();
+      expect(changedTree).not.toBe(firstTree);
+      expect(changedHead).not.toBe(firstHead);
+      expect(() => validateWorkspacePatchCapture(changedProject, capture)).toThrow(
+        /workspace patch base commit mismatch/u
+      );
+      expect(fs.readFileSync(path.join(changedProject, "source.txt"), "utf8")).toBe("repinned source\n");
+    } finally {
+      if (originalAuthorDate === undefined) delete process.env.GIT_AUTHOR_DATE;
+      else process.env.GIT_AUTHOR_DATE = originalAuthorDate;
+      if (originalCommitterDate === undefined) delete process.env.GIT_COMMITTER_DATE;
+      else process.env.GIT_COMMITTER_DATE = originalCommitterDate;
+      changed?.cleanup();
+      second?.cleanup();
+      first?.cleanup();
+      fs.rmSync(extractionRoot, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  }, 15_000);
 
   it("hands a relocated worker the reference artifact tree and the digest-bound planner catalog", async () => {
     const fixture = createProjectFixture();
