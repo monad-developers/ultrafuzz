@@ -89,6 +89,8 @@ export interface EffectiveControllerGeneration {
 export interface CommittedControllerGenerationAuthority {
   controlGeneration: string;
   controllerGeneration: string;
+  semanticFingerprint: string;
+  authorizedGenerations: readonly string[];
   workflowPath: string;
   files: readonly {
     path: string;
@@ -282,10 +284,17 @@ export function verifyCommittedControllerGenerationAuthority(
   if (manifest.controller_generation !== expectedGeneration) {
     throw new Error("controller generation manifest identity is invalid");
   }
+  for (const ancestor of journal.entries) {
+    if (readManifest(layout, ancestor).semantic_fingerprint !== manifest.semantic_fingerprint) {
+      throw new Error("controller generation journal changes sealed campaign semantics");
+    }
+  }
   verifyControllerGenerationEvent(layout, journal, entry, manifest, eventRecords);
   return {
     controlGeneration,
     controllerGeneration,
+    semanticFingerprint: manifest.semantic_fingerprint,
+    authorizedGenerations: authorizedGenerations(journal, controlGeneration),
     workflowPath: manifest.workflow_path,
     files: manifest.files.map((file) => ({
       path: file.path,
