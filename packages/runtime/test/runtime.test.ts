@@ -15979,6 +15979,160 @@ test("controller refresh refuses an active workflow without publishing a generat
   assert.equal(fs.readdirSync(path.join(launched.value!.run_root, "smithers", "execution-snapshots")).length, 1);
 });
 
+test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-runner-patches";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  const dependencyManifest = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "dependencies/manifest.json"
+  );
+  assert.ok(resolvedConfig);
+  assert.ok(dependencyManifest);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+  const dependencyMap = JSON.parse(dependencyManifest.contents.toString("utf8")) as {
+    packages: Array<{ id: string; name: string; version: string; snapshot_path: string }>;
+    issuers: Array<{ id: string; snapshot_path: string; dependencies: Record<string, string> }>;
+  };
+  assert.equal(
+    dependencyMap.packages.some((entry) => entry.name === "@smthrs/engine"),
+    false
+  );
+
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const enginePatches = SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (candidate) => candidate.packageName === "@smthrs/engine"
+  );
+  const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
+  assert.ok(newlyRequired);
+  const sequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
+  const packageId = `package:${sequence}`;
+  const packageSnapshotPath = `dependencies/packages/${sequence}`;
+  const rootIssuer = dependencyMap.issuers.find((entry) => entry.id === "root");
+  assert.ok(rootIssuer);
+  const refreshedDependencyMap = {
+    ...dependencyMap,
+    packages: [
+      ...dependencyMap.packages,
+      {
+        id: packageId,
+        name: "@smthrs/engine",
+        version: SMITHERS_VERSION,
+        snapshot_path: packageSnapshotPath
+      }
+    ],
+    issuers: [
+      ...dependencyMap.issuers.map((entry) =>
+        entry.id === "root"
+          ? {
+              ...entry,
+              dependencies: Object.fromEntries(
+                (
+                  [...Object.entries(entry.dependencies), ["@smthrs/engine", packageId]] as Array<[string, string]>
+                ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+              )
+            }
+          : entry
+      ),
+      { id: packageId, snapshot_path: packageSnapshotPath, dependencies: {} }
+    ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+  };
+  const engineSourcePath = `${packageSnapshotPath}/${newlyRequired.sourceRelativePath}`;
+  const engineSources = new Map<string, string>();
+  for (const sourceRelativePath of new Set(enginePatches.map((candidate) => candidate.sourceRelativePath))) {
+    engineSources.set(
+      sourceRelativePath,
+      enginePatches
+        .filter((candidate) => candidate.sourceRelativePath === sourceRelativePath)
+        .map((candidate) => (candidate.id === newlyRequired.id ? candidate.patchable : candidate.patched))
+        .join("\n")
+    );
+  }
+  const preFixEngineSource = engineSources.get(newlyRequired.sourceRelativePath)!;
+  assert.equal(preFixEngineSource.includes(newlyRequired.patchable), true);
+  assert.equal(preFixEngineSource.includes(newlyRequired.patched), false);
+  const syntheticExecutionFiles = [
+    ...evidence.verifiedControl.executionFiles.map((file) =>
+      file.snapshotPath === dependencyManifest.snapshotPath
+        ? {
+            ...file,
+            contents: Buffer.from(`${JSON.stringify(refreshedDependencyMap, null, 2)}\n`, "utf8")
+          }
+        : file
+    ),
+    {
+      sourcePath: path.join(project, ".synthetic-runner", "package.json"),
+      snapshotPath: `${packageSnapshotPath}/package.json`,
+      contents: Buffer.from(`${JSON.stringify({ name: "@smthrs/engine", version: SMITHERS_VERSION })}\n`, "utf8")
+    },
+    ...[...engineSources].map(([sourceRelativePath, contents]) => ({
+      sourcePath: path.join(project, ".synthetic-runner", ...sourceRelativePath.split("/")),
+      snapshotPath: `${packageSnapshotPath}/${sourceRelativePath}`,
+      contents: Buffer.from(contents, "utf8")
+    }))
+  ].sort((left, right) =>
+    left.snapshotPath < right.snapshotPath ? -1 : left.snapshotPath > right.snapshotPath ? 1 : 0
+  );
+  const syntheticPreFix = { ...evidence.verifiedControl, executionFiles: syntheticExecutionFiles };
+
+  const rebuilt = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: syntheticPreFix,
+    config
+  });
+  const refreshedEngine = rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === engineSourcePath);
+  assert.ok(refreshedEngine);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patched), true);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patchable), false);
+
+  const prepared = prepareControllerGeneration(evidence.layout, syntheticPreFix, rebuilt, {
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId
+  });
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: prepared.snapshot,
+    authorizedGenerations: prepared.authorizedGenerations
+  });
+  assert.equal(path.basename(materialized.root), prepared.controllerGeneration);
+  assert.equal(
+    fs
+      .readFileSync(path.join(materialized.root, ...engineSourcePath.split("/")), "utf8")
+      .includes(newlyRequired.patched),
+    true
+  );
+
+  const drifted = {
+    ...syntheticPreFix,
+    executionFiles: syntheticExecutionFiles.map((file) =>
+      file.snapshotPath === engineSourcePath
+        ? { ...file, contents: Buffer.from("export const unrelatedRunnerShape = true;\n", "utf8") }
+        : file
+    )
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: drifted,
+        config
+      }),
+    /authenticated controller runner .* implementation is incompatible/u
+  );
+});
+
 test(
   "controller refresh adopts an exact orphan manifest after a publication crash",
   { concurrency: false },

@@ -1207,7 +1207,9 @@ export interface RefreshedSmithersControllerSnapshot {
  * deliberately narrower than an upgrade: existing module paths cannot vanish
  * and the sealed dependency map remains authoritative. New Ultrafuzz-owned
  * module files are admitted only from the installed package root and become
- * explicit members of the new generation manifest.
+ * explicit members of the new generation manifest. Newly required runner
+ * compatibility replacements are applied only to their exact sealed package
+ * paths and bytes before the refreshed generation is authenticated.
  */
 export function refreshedSmithersControllerSnapshot(input: {
   projectRoot: string;
@@ -1250,6 +1252,7 @@ export function refreshedSmithersControllerSnapshot(input: {
   }));
   replaceStockAgentFiles(projectRoot, executionFiles);
   replaceInternalModuleFiles(executionFiles);
+  applyRefreshedSmithersCompatibilityPatches(executionFiles);
   const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
   const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
   return {
@@ -1353,6 +1356,71 @@ function replaceInternalModuleFiles(files: Array<WorkflowExecutionControlFile & 
         contents: readRegularFileSnapshot(file.sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES)
       });
     }
+  }
+}
+
+function applyRefreshedSmithersCompatibilityPatches(
+  files: Array<WorkflowExecutionControlFile & { contents: Buffer }>
+): void {
+  const dependencyManifest = files.find(
+    (file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH
+  );
+  if (dependencyManifest === undefined) {
+    throw new Error("controller refresh is missing its sealed dependency map");
+  }
+  const dependencyMap = parseRuntimeDocumentBytes(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    dependencyManifest.contents,
+    "controller refresh dependency map"
+  );
+  const bySnapshotPath = new Map(files.map((file) => [file.snapshotPath, file]));
+  if (bySnapshotPath.size !== files.length) {
+    throw new Error("controller refresh execution paths are duplicated");
+  }
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const packages = dependencyMap.packages.filter((candidate) => candidate.name === patch.packageName);
+    // Explicit external runners do not belong to the sealed dependency closure.
+    if (packages.length === 0) continue;
+    if (packages.length !== 1) {
+      throw new Error(`controller refresh has multiple sealed roots for ${patch.packageName}`);
+    }
+    const dependency = packages[0]!;
+    if (dependency.version !== SMITHERS_VERSION) {
+      throw new Error(`controller refresh ${patch.packageName} dependency must remain at ${SMITHERS_VERSION}`);
+    }
+    const packageManifestPath = path.posix.join(dependency.snapshot_path, "package.json");
+    const packageManifest = bySnapshotPath.get(packageManifestPath);
+    if (packageManifest === undefined) {
+      throw new Error(`controller refresh is missing sealed runner package manifest ${packageManifestPath}`);
+    }
+    const packageMetadata = parseStrictJsonBytes(packageManifest.contents);
+    if (
+      !isObjectRecord(packageMetadata) ||
+      packageMetadata.name !== patch.packageName ||
+      packageMetadata.version !== SMITHERS_VERSION
+    ) {
+      throw new Error(`controller refresh sealed package metadata differs for ${patch.packageName}`);
+    }
+    const snapshotPath = path.posix.join(dependency.snapshot_path, patch.sourceRelativePath);
+    const source = bySnapshotPath.get(snapshotPath);
+    if (source === undefined) {
+      throw new Error(`controller refresh is missing sealed runner source ${snapshotPath}`);
+    }
+    let contents: string;
+    try {
+      contents = new TextDecoder("utf-8", { fatal: true }).decode(source.contents);
+    } catch {
+      throw new Error(`authenticated controller runner ${patch.id} source is not valid UTF-8`);
+    }
+    source.contents = Buffer.from(
+      applyRequiredSmithersPatch(
+        contents,
+        patch.patchable,
+        patch.patched,
+        `authenticated controller runner ${patch.id}`
+      ),
+      "utf8"
+    );
   }
 }
 
