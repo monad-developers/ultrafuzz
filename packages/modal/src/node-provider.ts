@@ -484,6 +484,139 @@ export function modalNodeWorkerInput(
   });
 }
 
+export interface ModalNodeContinuationIdentity {
+  taskIdentitySha256: string;
+  nonControllerInputsSha256: string;
+  targetGitTree: string;
+  controlGeneration: string;
+  controllerGeneration: string;
+  semanticFingerprint?: string;
+  authorizedGenerations: readonly string[];
+}
+
+/**
+ * Derives the recovery identity that is stable across authenticated controller
+ * refreshes. Controller-owned workflow, module, and snapshot paths are excluded;
+ * every task input outside that boundary is hashed from the extracted handoff.
+ */
+export function modalNodeContinuationIdentity(
+  projectRoot: string,
+  inputValue: ModalNodeWorkerInput
+): ModalNodeContinuationIdentity {
+  const input = parseModalNodeWorkerInput(inputValue);
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  const gitExecutable = trustedGitExecutable(root);
+  const runRoot = checkedPath(root, input.run_root, "run root");
+  const snapshotRoot = checkedPath(root, input.execution_snapshot_root, "execution snapshot root");
+  const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
+  assertExecutionSnapshotRoot(runRoot, snapshotRoot);
+  assertChildPath(snapshotRoot, workflowPath, "workflow path");
+  const targetGitTree = readGovernedContinuationTree(snapshotRoot);
+  const checkedOutTree = execFileSync(gitExecutable, ["rev-parse", "--verify", "HEAD^{tree}"], {
+    cwd: root,
+    env: deterministicGitEnvironment(gitExecutable),
+    encoding: "utf8",
+    maxBuffer: 64 * 1024,
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+    .trim()
+    .toLowerCase();
+  if (checkedOutTree !== targetGitTree) {
+    throw new Error("cloud continuation target Git tree does not match sealed governance");
+  }
+
+  const sealContents = readStableRegularFile(
+    path.join(runRoot, "smithers", "control-integrity.json"),
+    64 * 1024 * 1024,
+    "workflow control seal"
+  );
+  const controlGeneration = crypto.createHash("sha256").update(sealContents).digest("hex");
+  const controllerGeneration = path.basename(snapshotRoot);
+  let semanticFingerprint: string | undefined;
+  let authorizedGenerations: readonly string[] = [controlGeneration];
+  if (controllerGeneration !== controlGeneration) {
+    const authority = verifyCommittedControllerGenerationAuthority(
+      layoutForRunRoot(runRoot),
+      controlGeneration,
+      controllerGeneration
+    );
+    semanticFingerprint = authority.semanticFingerprint;
+    authorizedGenerations = authority.authorizedGenerations;
+  }
+
+  const taskIdentitySha256 = framedDigest("ultrafuzz-modal-continuation-task-v1", [
+    input.run_id,
+    input.task_id,
+    input.attempt_id
+  ]);
+  const nonController = crypto.createHash("sha256").update("ultrafuzz-modal-continuation-inputs-v1\0");
+  updateFramedHash(
+    nonController,
+    JSON.stringify({
+      schema_version: input.schema_version,
+      source_revision: input.source_revision ?? null,
+      source_ref: input.source_ref ?? null,
+      run_root: normalizedContinuationPath(root, input.run_root, "run root"),
+      artifact_dir: normalizedContinuationPath(root, input.artifact_dir, "artifact directory"),
+      workspace_dir: normalizedContinuationPath(root, input.workspace_dir, "workspace directory"),
+      dependency_artifact_dirs: input.dependency_artifact_dirs.map((value) =>
+        normalizedContinuationPath(root, value, "dependency artifact directory")
+      ),
+      optional_dependency_artifact_dirs: (input.optional_dependency_artifact_dirs ?? []).map((value) =>
+        normalizedContinuationPath(root, value, "optional dependency artifact directory")
+      ),
+      dependency_verification_authorities: input.dependency_verification_authorities,
+      resources: input.resources,
+      agent_credential_env: input.agent_credential_env,
+      operator_prompt: input.operator_prompt ?? null,
+      target_git_tree: targetGitTree
+    })
+  );
+  const fingerprintContext: ContinuationFingerprintContext = { entries: 0, totalBytes: 0n };
+  fingerprintContinuationTree(
+    nonController,
+    "sealed-controls",
+    path.join(snapshotRoot, "controls"),
+    fingerprintContext,
+    true
+  );
+  fingerprintContinuationTree(
+    nonController,
+    "generated-schemas",
+    path.join(root, ".ultrafuzz", "schemas"),
+    fingerprintContext,
+    true
+  );
+  const optionalDependencies = new Set(input.optional_dependency_artifact_dirs ?? []);
+  for (const [index, value] of input.dependency_artifact_dirs.entries()) {
+    fingerprintContinuationTree(
+      nonController,
+      `dependency:${index}`,
+      checkedPath(root, value, "dependency artifact directory", !optionalDependencies.has(value)),
+      fingerprintContext,
+      !optionalDependencies.has(value)
+    );
+  }
+  for (const [index, authority] of input.dependency_verification_authorities.entries()) {
+    fingerprintContinuationTree(
+      nonController,
+      `dependency-verification:${index}`,
+      path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY, modalAttemptVerificationMarkerName(authority.attempt_id)),
+      fingerprintContext,
+      true
+    );
+  }
+  return {
+    taskIdentitySha256,
+    nonControllerInputsSha256: nonController.digest("hex"),
+    targetGitTree,
+    controlGeneration,
+    controllerGeneration,
+    ...(semanticFingerprint === undefined ? {} : { semanticFingerprint }),
+    authorizedGenerations
+  };
+}
+
 function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   try {
     assertModalDocumentValue(MODAL_NODE_INPUT_SCHEMA_ID, value as StrictModalNodeInputDocument);
@@ -701,6 +834,22 @@ function readGovernedSourceIdentity(
     .toLowerCase();
   if (actualTree !== tree) throw new Error("cloud source differs from the acknowledged Git tree");
   return { commit, tree };
+}
+
+function readGovernedContinuationTree(snapshotRoot: string): string {
+  const governance = parseStrictJsonBytes(
+    readStableSnapshotRelativeFile(
+      snapshotRoot,
+      "controls/data-governance.json",
+      1024 * 1024,
+      "sealed cloud continuation governance"
+    )
+  );
+  const target = isRecord(governance) && isRecord(governance.target) ? governance.target : {};
+  if (typeof target.tree !== "string" || !/^[a-f0-9]{40,64}$/u.test(target.tree) || target.dirty !== false) {
+    throw new Error("sealed cloud continuation governance has an invalid Git tree");
+  }
+  return target.tree;
 }
 
 function pinnedSourceHasGitlinks(projectRoot: string, gitExecutable: string, commit: string): boolean {
@@ -980,6 +1129,120 @@ function deterministicGitEnvironment(gitExecutable: string): NodeJS.ProcessEnv {
     LC_ALL: "C",
     TZ: "UTC"
   };
+}
+
+interface ContinuationFingerprintContext {
+  entries: number;
+  totalBytes: bigint;
+}
+
+function normalizedContinuationPath(projectRoot: string, value: string, label: string): string {
+  const absolute = checkedPath(projectRoot, value, label, false);
+  return path.relative(projectRoot, absolute).split(path.sep).join("/");
+}
+
+function framedDigest(domain: string, values: readonly string[]): string {
+  const hash = crypto.createHash("sha256").update(`${domain}\0`);
+  for (const value of values) updateFramedHash(hash, value);
+  return hash.digest("hex");
+}
+
+function updateFramedHash(hash: crypto.Hash, value: string): void {
+  hash
+    .update(`${Buffer.byteLength(value, "utf8")}\0`)
+    .update(value)
+    .update("\0");
+}
+
+function fingerprintContinuationTree(
+  hash: crypto.Hash,
+  label: string,
+  treePath: string,
+  context: ContinuationFingerprintContext,
+  required: boolean
+): void {
+  updateFramedHash(hash, label);
+  const state = (() => {
+    try {
+      return fs.lstatSync(treePath, { bigint: true });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT" && !required) return undefined;
+      throw error;
+    }
+  })();
+  if (state === undefined) {
+    updateFramedHash(hash, "absent");
+    return;
+  }
+  fingerprintContinuationEntry(hash, treePath, "", state, context);
+}
+
+function fingerprintContinuationEntry(
+  hash: crypto.Hash,
+  entryPath: string,
+  relativePath: string,
+  opened: fs.BigIntStats,
+  context: ContinuationFingerprintContext
+): void {
+  context.entries += 1;
+  if (context.entries > MAX_HANDOFF_SNAPSHOT_ENTRIES) {
+    throw new Error("cloud continuation input contains too many entries");
+  }
+  if (opened.isSymbolicLink()) throw new Error("cloud continuation input contains a symbolic link");
+  if (opened.isFile()) {
+    const identity = stableContinuationFileIdentity(entryPath, opened);
+    context.totalBytes += identity.size;
+    if (context.totalBytes > BigInt(MAX_HANDOFF_SNAPSHOT_TOTAL_BYTES)) {
+      throw new Error("cloud continuation input exceeds the total size limit");
+    }
+    updateFramedHash(hash, `file\0${relativePath}\0${identity.mode}\0${identity.size}\0${identity.sha256}`);
+    return;
+  }
+  if (!opened.isDirectory()) throw new Error("cloud continuation input contains a special filesystem entry");
+  updateFramedHash(hash, `directory\0${relativePath}`);
+  const beforeNames = fs.readdirSync(entryPath).sort(comparePathNames);
+  for (const name of beforeNames) {
+    const childPath = path.join(entryPath, name);
+    const childRelative = relativePath === "" ? name : `${relativePath}/${name}`;
+    fingerprintContinuationEntry(hash, childPath, childRelative, fs.lstatSync(childPath, { bigint: true }), context);
+  }
+  const completed = fs.lstatSync(entryPath, { bigint: true });
+  const afterNames = fs.readdirSync(entryPath).sort(comparePathNames);
+  if (!sameBigIntStableStat(opened, completed) || JSON.stringify(beforeNames) !== JSON.stringify(afterNames)) {
+    throw new Error("cloud continuation input changed while it was fingerprinted");
+  }
+}
+
+function stableContinuationFileIdentity(
+  filePath: string,
+  lexical: fs.BigIntStats
+): { sha256: string; size: bigint; mode: bigint } {
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (
+      !before.isFile() ||
+      !sameBigIntFileIdentity(before, lexical) ||
+      before.nlink !== 1n ||
+      before.size > BigInt(MAX_HANDOFF_SNAPSHOT_FILE_BYTES)
+    ) {
+      throw new Error("cloud continuation input file is unsafe");
+    }
+    const firstDigest = sha256Descriptor(descriptor, Number(before.size));
+    const secondDigest = sha256Descriptor(descriptor, Number(before.size));
+    const completed = fs.fstatSync(descriptor, { bigint: true });
+    const completedLexical = fs.lstatSync(filePath, { bigint: true });
+    if (
+      firstDigest !== secondDigest ||
+      !sameBigIntStableStat(before, completed) ||
+      !sameBigIntFileIdentity(before, completedLexical)
+    ) {
+      throw new Error("cloud continuation input file changed while it was fingerprinted");
+    }
+    return { sha256: firstDigest, size: before.size, mode: before.mode & 0o111n };
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 /**

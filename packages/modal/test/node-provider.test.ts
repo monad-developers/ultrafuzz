@@ -1745,6 +1745,117 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   }, 15_000);
 
+  it("continues a normalized task across authenticated controller generations", async () => {
+    const fixture = createProjectFixture();
+    const originalControllerPaths = {
+      executionSnapshotRoot: fixture.input.execution_snapshot_root,
+      workflowPath: fixture.input.workflow_path,
+      promptPath: fixture.input.prompt_path
+    };
+    installControllerGenerationFixture(fixture);
+    const baseArchive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = baseArchive.sha256;
+    const volumeParent = path.join(path.dirname(fixture.root), "modal-volume", "controller-continuation");
+    const priorRoot = path.join(volumeParent, "prior");
+    const refreshedRoot = path.join(volumeParent, "refreshed");
+    let refreshedArchive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      const prior = await initializeDurableNodeWorkspace(priorRoot, baseArchive.path, fixture.input);
+      const evidence = path.join(prior.projectRoot, fixture.input.workspace_dir, "continued.txt");
+      fs.mkdirSync(path.dirname(evidence), { recursive: true });
+      fs.writeFileSync(evidence, "authenticated continuation\n");
+      await prior.recordCheckpoint("completed");
+
+      const priorControllerSnapshot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+      makeFixtureTreeWritable(priorControllerSnapshot);
+      fs.rmSync(priorControllerSnapshot, { recursive: true });
+      fixture.input.execution_snapshot_root = originalControllerPaths.executionSnapshotRoot;
+      fixture.input.workflow_path = originalControllerPaths.workflowPath;
+      fixture.input.prompt_path = originalControllerPaths.promptPath;
+      installControllerGenerationFixture(fixture, 2);
+      const { project_archive_sha256: _baseDigest, ...refreshedFixtureInput } = fixture.input;
+      const refreshedInput: ModalNodeSandboxInput = {
+        ...refreshedFixtureInput,
+        execution_generation: "reset-after-controller-refresh"
+      };
+      refreshedArchive = await createModalNodeHandoffArchive(fixture.root, refreshedInput);
+      refreshedInput.project_archive_sha256 = refreshedArchive.sha256;
+      const refreshed = await initializeDurableNodeWorkspace(refreshedRoot, refreshedArchive.path, refreshedInput);
+
+      expect(
+        fs.readFileSync(
+          path.join(refreshed.projectRoot, ".ultrafuzz", "recovered", "prior", "workspace", "continued.txt"),
+          "utf8"
+        )
+      ).toBe("authenticated continuation\n");
+      expect(JSON.parse(fs.readFileSync(path.join(refreshedRoot, "input", "restore.json"), "utf8"))).toEqual({
+        schema_version: "ultrafuzz.modal.node-restore.v1",
+        source_root: priorRoot
+      });
+      await expect(refreshed.recordCheckpoint("prepared")).resolves.toMatchObject({ restored_from: priorRoot });
+    } finally {
+      refreshedArchive?.cleanup();
+      baseArchive.cleanup();
+      fixture.cleanup();
+    }
+  }, 30_000);
+
+  it("rejects controller-generation continuation when the prior target Git tree changed", async () => {
+    const fixture = createProjectFixture();
+    const originalControllerPaths = {
+      executionSnapshotRoot: fixture.input.execution_snapshot_root,
+      workflowPath: fixture.input.workflow_path,
+      promptPath: fixture.input.prompt_path
+    };
+    installControllerGenerationFixture(fixture);
+    const baseArchive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = baseArchive.sha256;
+    const volumeParent = path.join(path.dirname(fixture.root), "modal-volume", "changed-target-continuation");
+    const priorRoot = path.join(volumeParent, "prior");
+    const refreshedRoot = path.join(volumeParent, "refreshed");
+    let refreshedArchive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      const prior = await initializeDurableNodeWorkspace(priorRoot, baseArchive.path, fixture.input);
+      const evidence = path.join(prior.projectRoot, fixture.input.workspace_dir, "must-not-restore.txt");
+      fs.mkdirSync(path.dirname(evidence), { recursive: true });
+      fs.writeFileSync(evidence, "stale target evidence\n");
+      await prior.recordCheckpoint("completed");
+      fs.writeFileSync(path.join(prior.projectRoot, "changed-target.txt"), "changed target tree\n");
+      execFileSync("git", ["add", "--", "changed-target.txt"], { cwd: prior.projectRoot });
+      execFileSync(
+        "git",
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-m", "change target"],
+        {
+          cwd: prior.projectRoot,
+          stdio: "ignore"
+        }
+      );
+
+      const priorControllerSnapshot = path.join(fixture.root, fixture.input.execution_snapshot_root);
+      makeFixtureTreeWritable(priorControllerSnapshot);
+      fs.rmSync(priorControllerSnapshot, { recursive: true });
+      fixture.input.execution_snapshot_root = originalControllerPaths.executionSnapshotRoot;
+      fixture.input.workflow_path = originalControllerPaths.workflowPath;
+      fixture.input.prompt_path = originalControllerPaths.promptPath;
+      installControllerGenerationFixture(fixture, 2);
+      const { project_archive_sha256: _baseDigest, ...refreshedFixtureInput } = fixture.input;
+      const refreshedInput: ModalNodeSandboxInput = {
+        ...refreshedFixtureInput,
+        execution_generation: "reset-with-changed-target"
+      };
+      refreshedArchive = await createModalNodeHandoffArchive(fixture.root, refreshedInput);
+      refreshedInput.project_archive_sha256 = refreshedArchive.sha256;
+      await expect(
+        initializeDurableNodeWorkspace(refreshedRoot, refreshedArchive.path, refreshedInput)
+      ).rejects.toThrow(/target Git tree does not match sealed governance/u);
+      expect(fs.existsSync(path.join(refreshedRoot, "input", "restore.json"))).toBe(false);
+    } finally {
+      refreshedArchive?.cleanup();
+      baseArchive.cleanup();
+      fixture.cleanup();
+    }
+  }, 30_000);
+
   it("recognizes a completed checkpoint so publication retries skip the inner workflow", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);

@@ -18,6 +18,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import {
+  modalNodeContinuationIdentity,
   modalAttemptVerificationMarkerName,
   parseModalNodeWorkerInput,
   readModalExecutionDependencyClosure,
@@ -1092,7 +1093,7 @@ function compatiblePriorAttempt(
   if (
     persisted.project_archive_sha256 === undefined ||
     persisted.execution_generation === input.execution_generation ||
-    !sameResumableNodeInput(persisted, input, true)
+    !sameCompatiblePriorNodeInput(candidateRoot, currentRoot, persisted, input)
   ) {
     if (allowMissingOrUnrelated) return undefined;
     throw new Error("durable restore marker does not reference a compatible prior generation");
@@ -1141,6 +1142,41 @@ function compatiblePriorAttempt(
     mtimeMs: fs.statSync(checkpointDirectory).mtimeMs,
     input: persisted
   };
+}
+
+function sameCompatiblePriorNodeInput(
+  candidateRoot: string,
+  currentRoot: string,
+  prior: ReturnType<typeof parseModalNodeWorkerInput>,
+  current: ReturnType<typeof parseModalNodeWorkerInput>
+): boolean {
+  if (sameResumableNodeInput(prior, current, true)) return true;
+  if (prior.run_id !== current.run_id || prior.task_id !== current.task_id || prior.attempt_id !== current.attempt_id) {
+    return false;
+  }
+
+  const priorProjectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
+  const currentProjectRoot = path.join(currentRoot, DURABLE_WORKSPACE_DIRECTORY);
+  verifyModalExecutionSnapshotClosure(priorProjectRoot, prior, { requireSealedPermissions: true });
+  const priorIdentity = modalNodeContinuationIdentity(priorProjectRoot, prior);
+  const currentIdentity = modalNodeContinuationIdentity(currentProjectRoot, current);
+  if (
+    priorIdentity.taskIdentitySha256 !== currentIdentity.taskIdentitySha256 ||
+    priorIdentity.nonControllerInputsSha256 !== currentIdentity.nonControllerInputsSha256 ||
+    priorIdentity.targetGitTree !== currentIdentity.targetGitTree ||
+    priorIdentity.controlGeneration !== currentIdentity.controlGeneration ||
+    !currentIdentity.authorizedGenerations.includes(priorIdentity.controllerGeneration) ||
+    currentIdentity.semanticFingerprint === undefined
+  ) {
+    return false;
+  }
+  // A refreshed ancestor authenticates its own semantic fingerprint. The
+  // original control generation has no manifest field of its own; the current
+  // committed manifest was admitted only after matching those sealed semantics.
+  return (
+    priorIdentity.semanticFingerprint === undefined ||
+    priorIdentity.semanticFingerprint === currentIdentity.semanticFingerprint
+  );
 }
 
 function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof parseModalNodeWorkerInput>): boolean {
