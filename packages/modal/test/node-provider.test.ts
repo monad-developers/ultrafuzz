@@ -14,6 +14,7 @@ import {
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider,
   ModalNodeCleanupRefusedError,
+  modalAttemptVerificationMarkerName,
   modalNodeDispatchFingerprint,
   modalNodeHandoffContentFingerprint,
   modalNodeSandboxName,
@@ -2350,6 +2351,229 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("publishes reset-generation source proof provenance for a stable attempt id", async () => {
+    const fixture = createProjectFixture();
+    const baseResult = createResultArchive(fixture.input, { invariantSourceProof: "base generation proof\n" });
+    let resetResult: ReturnType<typeof createResultArchive> | undefined;
+    try {
+      const baseProvider = createModalNodeSandboxProvider(
+        providerOptions(fakeClient({ listed: [fakeSandbox(baseResult)] }))
+      );
+      await expect(
+        baseProvider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ workspaceId: "run-one/attempt-one/base" });
+
+      const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+      resetResult = createResultArchive(resetInput, { invariantSourceProof: "reset generation proof\n" });
+      const resetProvider = createModalNodeSandboxProvider(
+        providerOptions(fakeClient({ listed: [fakeSandbox(resetResult)] }))
+      );
+      await expect(
+        resetProvider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: resetInput,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ workspaceId: "run-one/attempt-one/reset-one" });
+      expect(
+        fs.readFileSync(
+          path.join(fixture.root, fixture.input.run_root, "source-proofs", "attempt-one.invariant.json"),
+          "utf8"
+        )
+      ).toBe("reset generation proof\n");
+      expect(JSON.parse(fs.readFileSync(invariantProofPublicationPath(fixture), "utf8"))).toMatchObject({
+        schema_version: "ultrafuzz.modal.invariant-source-proof-publication.v1",
+        attempt_id: "attempt-one",
+        execution_generation: "reset-one",
+        storage_lineage: "run-one/attempt-one/reset-one",
+        logical_dispatch_fingerprint: modalNodeDispatchFingerprint(resetInput),
+        source_proof_sha256: sha256Hex("reset generation proof\n")
+      });
+    } finally {
+      resetResult?.cleanup();
+      baseResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps base-generation source proof republication byte immutable", async () => {
+    const fixture = createProjectFixture();
+    const publishedResult = createResultArchive(fixture.input, { invariantSourceProof: "published proof\n" });
+    let conflictingResult: ReturnType<typeof createResultArchive> | undefined;
+    try {
+      await expect(publishResultFixture(fixture, fixture.input, publishedResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/base"
+      });
+      conflictingResult = createResultArchive(fixture.input, { invariantSourceProof: "changed proof\n" });
+      await expect(publishResultFixture(fixture, fixture.input, conflictingResult)).rejects.toThrow(
+        /would replace an immutable publication file/u
+      );
+      expect(fs.readFileSync(invariantProofPath(fixture), "utf8")).toBe("published proof\n");
+    } finally {
+      conflictingResult?.cleanup();
+      publishedResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps reset-generation source proof republication byte immutable", async () => {
+    const fixture = createProjectFixture();
+    const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+    const publishedResult = createResultArchive(resetInput, { invariantSourceProof: "reset proof\n" });
+    let conflictingResult: ReturnType<typeof createResultArchive> | undefined;
+    try {
+      await expect(publishResultFixture(fixture, resetInput, publishedResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/reset-one"
+      });
+      conflictingResult = createResultArchive(resetInput, { invariantSourceProof: "conflicting reset proof\n" });
+      await expect(publishResultFixture(fixture, resetInput, conflictingResult)).rejects.toThrow(
+        /would replace an immutable publication file/u
+      );
+      expect(fs.readFileSync(invariantProofPath(fixture), "utf8")).toBe("reset proof\n");
+    } finally {
+      conflictingResult?.cleanup();
+      publishedResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("advances recorded reset generations with different logical dispatch fingerprints", async () => {
+    const fixture = createProjectFixture();
+    const resetOneInput = withExecutionGeneration(fixture.input, "reset-one");
+    const resetTwoInput = withExecutionGeneration(
+      { ...fixture.input, operator_prompt: "synthetic reset-two operator prompt" },
+      "reset-two"
+    );
+    const resetOneResult = createResultArchive(resetOneInput, { invariantSourceProof: "reset one proof\n" });
+    const resetTwoResult = createResultArchive(resetTwoInput, { invariantSourceProof: "reset two proof\n" });
+    try {
+      expect(modalNodeDispatchFingerprint(resetTwoInput)).not.toBe(modalNodeDispatchFingerprint(resetOneInput));
+      await expect(publishResultFixture(fixture, resetOneInput, resetOneResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/reset-one"
+      });
+      await expect(publishResultFixture(fixture, resetTwoInput, resetTwoResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/reset-two"
+      });
+      expect(fs.readFileSync(invariantProofPath(fixture), "utf8")).toBe("reset two proof\n");
+      expect(JSON.parse(fs.readFileSync(invariantProofPublicationPath(fixture), "utf8"))).toMatchObject({
+        execution_generation: "reset-two",
+        storage_lineage: "run-one/attempt-one/reset-two",
+        logical_dispatch_fingerprint: modalNodeDispatchFingerprint(resetTwoInput),
+        source_proof_sha256: sha256Hex("reset two proof\n")
+      });
+    } finally {
+      resetTwoResult.cleanup();
+      resetOneResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a conflicting receipt-less invariant proof even in a reset generation", async () => {
+    const fixture = createProjectFixture();
+    const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+    const result = createResultArchive(resetInput, { invariantSourceProof: "reset proof\n" });
+    try {
+      const proof = invariantProofPath(fixture);
+      fs.mkdirSync(path.dirname(proof), { recursive: true });
+      fs.writeFileSync(proof, "legacy proof\n");
+      expect(fs.existsSync(invariantProofPublicationPath(fixture))).toBe(false);
+
+      await expect(publishResultFixture(fixture, resetInput, result)).rejects.toThrow(
+        /would replace an immutable publication file/u
+      );
+      expect(fs.readFileSync(proof, "utf8")).toBe("legacy proof\n");
+      expect(fs.existsSync(invariantProofPublicationPath(fixture))).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("backfills an identical receipt-less invariant proof", async () => {
+    const fixture = createProjectFixture();
+    const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+    const result = createResultArchive(resetInput, { invariantSourceProof: "reset proof\n" });
+    try {
+      const proof = invariantProofPath(fixture);
+      fs.mkdirSync(path.dirname(proof), { recursive: true });
+      fs.writeFileSync(proof, "reset proof\n");
+      expect(fs.existsSync(invariantProofPublicationPath(fixture))).toBe(false);
+
+      await expect(publishResultFixture(fixture, resetInput, result)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/reset-one"
+      });
+      expect(fs.readFileSync(proof, "utf8")).toBe("reset proof\n");
+      expect(JSON.parse(fs.readFileSync(invariantProofPublicationPath(fixture), "utf8"))).toMatchObject({
+        execution_generation: "reset-one",
+        source_proof_sha256: sha256Hex("reset proof\n")
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("recovers an interrupted proof advance before its generation provenance is published", async () => {
+    const fixture = createProjectFixture();
+    const baseResult = createResultArchive(fixture.input, { invariantSourceProof: "base proof\n" });
+    let resetResult: ReturnType<typeof createResultArchive> | undefined;
+    try {
+      await expect(publishResultFixture(fixture, fixture.input, baseResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/base"
+      });
+      const basePublication = fs.readFileSync(invariantProofPublicationPath(fixture), "utf8");
+      fs.writeFileSync(invariantProofPath(fixture), "reset proof\n");
+
+      const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+      resetResult = createResultArchive(resetInput, { invariantSourceProof: "reset proof\n" });
+      await expect(publishResultFixture(fixture, resetInput, resetResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/reset-one"
+      });
+      expect(fs.readFileSync(invariantProofPath(fixture), "utf8")).toBe("reset proof\n");
+      expect(fs.readFileSync(invariantProofPublicationPath(fixture), "utf8")).not.toBe(basePublication);
+      expect(JSON.parse(fs.readFileSync(invariantProofPublicationPath(fixture), "utf8"))).toMatchObject({
+        execution_generation: "reset-one",
+        source_proof_sha256: sha256Hex("reset proof\n")
+      });
+    } finally {
+      resetResult?.cleanup();
+      baseResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects unsafe invariant proof publication provenance before advancing a reset", async () => {
+    const fixture = createProjectFixture();
+    const baseResult = createResultArchive(fixture.input, { invariantSourceProof: "base proof\n" });
+    let resetResult: ReturnType<typeof createResultArchive> | undefined;
+    try {
+      await expect(publishResultFixture(fixture, fixture.input, baseResult)).resolves.toMatchObject({
+        workspaceId: "run-one/attempt-one/base"
+      });
+      const publication = invariantProofPublicationPath(fixture);
+      fs.linkSync(publication, `${publication}.linked`);
+
+      const resetInput = withExecutionGeneration(fixture.input, "reset-one");
+      resetResult = createResultArchive(resetInput, { invariantSourceProof: "reset proof\n" });
+      await expect(publishResultFixture(fixture, resetInput, resetResult)).rejects.toThrow(
+        /destination file is unsafe/u
+      );
+      expect(fs.readFileSync(invariantProofPath(fixture), "utf8")).toBe("base proof\n");
+    } finally {
+      resetResult?.cleanup();
+      baseResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("recovers a published result before starting a replacement worker", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive(fixture.input);
@@ -3375,6 +3599,34 @@ function verificationMarkerFixture(findingSha256: string): string {
   )}\n`;
 }
 
+function invariantProofPath(fixture: ReturnType<typeof createProjectFixture>): string {
+  return path.join(fixture.root, fixture.input.run_root, "source-proofs", `${fixture.input.attempt_id}.invariant.json`);
+}
+
+function invariantProofPublicationPath(fixture: ReturnType<typeof createProjectFixture>): string {
+  return path.join(
+    fixture.root,
+    fixture.input.run_root,
+    "source-proofs",
+    `${fixture.input.attempt_id}.invariant.publication.json`
+  );
+}
+
+function publishResultFixture(
+  fixture: ReturnType<typeof createProjectFixture>,
+  input: ModalNodeSandboxInput,
+  result: ReturnType<typeof createResultArchive>
+) {
+  const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(result)] })));
+  return provider.run({
+    runId: "controller-run",
+    sandboxId: "node:attempt",
+    input,
+    rootDir: fixture.root,
+    heartbeat: vi.fn()
+  });
+}
+
 function createResultArchive(
   dispatch: ModalNodeSandboxInput,
   options: {
@@ -3382,6 +3634,7 @@ function createResultArchive(
     includeDurableCheckpoint?: boolean;
     includeVerificationMarker?: boolean;
     logicalDispatchFingerprint?: string;
+    invariantSourceProof?: string;
     verificationMarker?: string;
     schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   } = {}
@@ -3408,17 +3661,20 @@ function createResultArchive(
     fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
   }
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
-  fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
-  fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
+  fs.writeFileSync(
+    path.join(bundle, "source-proofs", `${dispatch.attempt_id}.invariant.json`),
+    options.invariantSourceProof ?? "durable source proof\n"
+  );
+  fs.writeFileSync(path.join(bundle, "source-proofs", `${dispatch.attempt_id}.json`), "pinned source proof\n");
   if (options.includeVerificationMarker !== false) {
     fs.writeFileSync(
-      path.join(bundle, "verification", "attempt-one.json"),
+      path.join(bundle, "verification", modalAttemptVerificationMarkerName(dispatch.attempt_id)),
       options.verificationMarker ?? '{"verified":true}\n'
     );
   }
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
-  const tags = modalNodeTags("controller-run", "node:attempt");
+  const tags = modalNodeTags("controller-run", "node:attempt", dispatch.execution_generation);
   const attemptRoot = `/data/ultrafuzz-nodes/${tags.run}/${tags.attempt}`;
   const durableCheckpoint = `${attemptRoot}/checkpoints/0003-completed.json`;
   const durableCheckpointIndex = `${attemptRoot}/checkpoints/index.json`;
@@ -3429,7 +3685,7 @@ function createResultArchive(
       status: "succeeded",
       artifact_archive: `${attemptRoot}/artifacts.tgz`,
       artifact_sha256: digest,
-      storage_lineage: "run-one/attempt-one/base",
+      storage_lineage: `${dispatch.run_id}/${dispatch.attempt_id}/${dispatch.execution_generation}`,
       logical_dispatch_fingerprint: fingerprint,
       ...(options.includeDurableCheckpoint === false
         ? {}
@@ -3441,19 +3697,19 @@ function createResultArchive(
     durableCheckpoint: JSON.stringify({
       schema_version: "ultrafuzz.modal.node-checkpoint.v1",
       stage: "completed",
-      storage_lineage: "run-one/attempt-one/base",
+      storage_lineage: `${dispatch.run_id}/${dispatch.attempt_id}/${dispatch.execution_generation}`,
       logical_dispatch_fingerprint: fingerprint,
       workspace_path: `${attemptRoot}/workspace`,
-      run_root: ".ultrafuzz/runs/run-one",
+      run_root: dispatch.run_root,
       execution_snapshot_root: dispatch.execution_snapshot_root,
       handoff_archive: `${attemptRoot}/input/project.tgz`
     }),
     durableCheckpointIndex: JSON.stringify({
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
-      storage_lineage: "run-one/attempt-one/base",
+      storage_lineage: `${dispatch.run_id}/${dispatch.attempt_id}/${dispatch.execution_generation}`,
       logical_dispatch_fingerprint: fingerprint,
       workspace_path: `${attemptRoot}/workspace`,
-      run_root: ".ultrafuzz/runs/run-one",
+      run_root: dispatch.run_root,
       execution_snapshot_root: dispatch.execution_snapshot_root,
       handoff_archive: `${attemptRoot}/input/project.tgz`,
       checkpoints: [{ manifest: durableCheckpoint, stage: "completed" }]
