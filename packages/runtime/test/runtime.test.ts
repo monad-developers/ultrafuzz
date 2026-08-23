@@ -17035,6 +17035,59 @@ test(
 );
 
 test(
+  "controller refresh resumes a prepared journal after snapshot publication succeeds",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-published-prepared";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(project, runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+      (file) => file.snapshotPath === "controls/resolved-config.json"
+    );
+    assert.ok(resolvedConfig);
+    const config = JSON.parse(resolvedConfig.contents.toString("utf8"));
+    const refreshed = refreshedSmithersControllerSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      original: evidence.verifiedControl,
+      config
+    });
+    const prepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, refreshed, {
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId
+    });
+    const published = materializeWorkflowExecutionSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      snapshot: prepared.snapshot,
+      authorizedGenerations: prepared.authorizedGenerations
+    });
+    assert.equal(fs.existsSync(published.root), true);
+    const journalPath = path.join(evidence.layout.root, "smithers", "controller-generation-journal.json");
+    const pending = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+      entries?: Array<{ phase?: string; controller_generation?: string }>;
+    };
+    assert.equal(pending.entries?.at(-1)?.phase, "prepared");
+
+    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    const committed = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+      entries?: Array<{ phase?: string; controller_generation?: string }>;
+    };
+    assert.equal(committed.entries?.at(-1)?.phase, "committed");
+    assert.equal(committed.entries?.at(-1)?.controller_generation, prepared.controllerGeneration);
+  }
+);
+
+test(
   "controller refresh reconciles a committed journal before metadata projection",
   { concurrency: false },
   async () => {

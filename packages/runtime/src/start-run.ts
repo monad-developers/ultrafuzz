@@ -79,6 +79,7 @@ import {
 } from "./workflow-integrity.js";
 import {
   commitControllerGeneration,
+  commitPublishedPreparedControllerGeneration,
   effectiveControllerGeneration,
   prepareControllerGeneration
 } from "./workflow-controller-generation.js";
@@ -595,23 +596,34 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ) {
           throw new Error("workflow link changed before controller refresh");
         }
-        const refreshed = refreshedSmithersControllerSnapshot({
-          projectRoot: path.resolve(input.projectRoot),
-          layout: evidence.layout,
-          original,
-          config: sealedConfig
-        });
-        const prepared = prepareControllerGeneration(evidence.layout, original, refreshed, {
-          workflowRunId: activeLink.workflow_run_id,
-          workflowLinkId: activeLink.link_id
-        });
+        const publishedPrepared = commitPublishedPreparedControllerGeneration(evidence.layout, original);
+        const prepared =
+          publishedPrepared === undefined
+            ? prepareControllerGeneration(
+                evidence.layout,
+                original,
+                refreshedSmithersControllerSnapshot({
+                  projectRoot: path.resolve(input.projectRoot),
+                  layout: evidence.layout,
+                  original,
+                  config: sealedConfig
+                }),
+                {
+                  workflowRunId: activeLink.workflow_run_id,
+                  workflowLinkId: activeLink.link_id
+                }
+              )
+            : undefined;
+        const selectedSnapshot = publishedPrepared?.snapshot ?? prepared!.snapshot;
+        const authorizedGenerations = publishedPrepared?.authorizedGenerations ?? prepared!.authorizedGenerations;
         const published = materializeWorkflowExecutionSnapshot({
           projectRoot: path.resolve(input.projectRoot),
           layout: evidence.layout,
-          snapshot: prepared.snapshot,
-          authorizedGenerations: prepared.authorizedGenerations
+          snapshot: selectedSnapshot,
+          authorizedGenerations
         });
-        const committed = commitControllerGeneration(evidence.layout, original, prepared.controllerGeneration);
+        const committed =
+          publishedPrepared ?? commitControllerGeneration(evidence.layout, original, prepared!.controllerGeneration);
         evidence = {
           ...evidence,
           workflowPath: published.workflowPath,
