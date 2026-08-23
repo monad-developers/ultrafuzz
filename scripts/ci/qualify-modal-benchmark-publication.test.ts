@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { qualifyModalBenchmarkPublication } from "./qualify-modal-benchmark-publication.mjs";
 
@@ -10,7 +14,8 @@ const successfulJobs = [
   {
     jobs: [
       { name: "launch", conclusion: "success" },
-      { name: "collect", conclusion: "success" }
+      { name: "collect", conclusion: "success" },
+      { name: "monitor_full", conclusion: "skipped" }
     ]
   }
 ];
@@ -31,7 +36,7 @@ describe("trusted Modal benchmark publication qualification", () => {
     expect(
       qualifyModalBenchmarkPublication(
         event({ event: "workflow_dispatch" }),
-        successfulJobs,
+        fullSuccessfulJobs(),
         artifacts("full"),
         repository
       )
@@ -67,7 +72,8 @@ describe("trusted Modal benchmark publication qualification", () => {
       {
         jobs: [
           { name: "launch", conclusion: "skipped" },
-          { name: "collect", conclusion: "skipped" }
+          { name: "collect", conclusion: "skipped" },
+          { name: "monitor_full", conclusion: "skipped" }
         ]
       }
     ];
@@ -81,13 +87,28 @@ describe("trusted Modal benchmark publication qualification", () => {
           {
             jobs: [
               { name: "launch", conclusion: "success" },
-              { name: "collect", conclusion: "failure" }
+              { name: "collect", conclusion: "failure" },
+              { name: "monitor_full", conclusion: "skipped" }
             ]
           }
         ],
         artifacts("smoke"),
         repository
       )
+    ).toEqual(expect.objectContaining({ eligible: false }));
+  });
+
+  it("requires the staged monitor only for the full lane", () => {
+    expect(
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("full"),
+        repository
+      )
+    ).toEqual(expect.objectContaining({ eligible: false }));
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), fullSuccessfulJobs(), artifacts("smoke"), repository)
     ).toEqual(expect.objectContaining({ eligible: false }));
   });
 
@@ -122,16 +143,61 @@ describe("trusted Modal benchmark publication qualification", () => {
       ).toEqual(expect.objectContaining({ eligible: false }));
     }
   });
+
+  it("strictly parses GitHub-owned event and REST envelopes before projecting fields", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-github-envelope-"));
+    try {
+      const eventPath = path.join(root, "event.json");
+      const jobsPath = path.join(root, "jobs.json");
+      const artifactsPath = path.join(root, "artifacts.json");
+      const outputPath = path.join(root, "github-output");
+      const eventJson = JSON.stringify(event({ event: "push" }));
+      fs.writeFileSync(
+        eventPath,
+        eventJson.replace('{"repository":', '{"repository":{"default_branch":"shadowed"},"repository":')
+      );
+      fs.writeFileSync(jobsPath, JSON.stringify(successfulJobs));
+      fs.writeFileSync(artifactsPath, JSON.stringify(artifacts("smoke")));
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          path.resolve("scripts/ci/qualify-modal-benchmark-publication.mjs"),
+          eventPath,
+          jobsPath,
+          artifactsPath,
+          outputPath,
+          repository
+        ],
+        { cwd: path.resolve("."), encoding: "utf8" }
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/strict JSON|duplicate/iu);
+      expect(fs.existsSync(outputPath)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
-function artifacts(
-  mode: "smoke" | "full" | "threat-model",
-  overrides: { expired?: boolean; runAttempt?: number } = {}
-) {
+function fullSuccessfulJobs() {
+  return [
+    {
+      jobs: [
+        { name: "launch", conclusion: "success" },
+        { name: "collect", conclusion: "success" },
+        { name: "monitor_full", conclusion: "success" }
+      ]
+    }
+  ];
+}
+
+function artifacts(mode: "smoke" | "full", overrides: { expired?: boolean; runAttempt?: number } = {}) {
   const attempt = overrides.runAttempt ?? runAttempt;
   const expired = overrides.expired ?? false;
   return {
-    artifacts: ["modal-benchmark-launch", "public-benchmark-results"].map((prefix) => ({
+    artifacts: ["modal-benchmark-launch", "modal-benchmark-control", "public-benchmark-results"].map((prefix) => ({
       name: `${prefix}-${mode}-${runId}-${attempt}`,
       expired
     }))

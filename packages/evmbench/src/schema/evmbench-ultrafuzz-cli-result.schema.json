@@ -1,0 +1,682 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evmbench:ultrafuzz-cli-result:1",
+  "title": "Ultrafuzz CLI result subset consumed by EVMBench",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command", "ok", "diagnostics", "data"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.cli.result.v2"
+    },
+    "command": {
+      "enum": ["init", "run", "resume", "status", "report"]
+    },
+    "ok": {
+      "const": true
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/diagnostic"
+      }
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "not": {
+            "type": "array",
+            "contains": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "const": "error"
+                }
+              },
+              "required": ["severity"]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "const": "init"
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/initData"
+          }
+        },
+        "required": ["data"]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "const": "run"
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/runData"
+          }
+        },
+        "required": ["data"]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "const": "resume"
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/resumeData"
+          }
+        },
+        "required": ["data"]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "const": "status"
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/statusData"
+          }
+        },
+        "required": ["data"]
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "const": "report"
+          }
+        },
+        "required": ["command"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/$defs/reportData"
+          }
+        },
+        "required": ["data"]
+      }
+    }
+  ],
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "severity", "source"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": ["error", "warning", "info"]
+        },
+        "source": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "initData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_root", "created", "preserved", "overwritten"],
+      "properties": {
+        "project_root": {
+          "type": "string"
+        },
+        "created": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "preserved": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "overwritten": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "runData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "run_root", "status", "graph_fingerprint", "config_fingerprint", "workflow_ids"],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "run_root": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "source_run_id": {
+          "type": "string"
+        },
+        "graph_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "config_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "workflow_ids": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "resumeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "action", "submitted"],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "workflow_run_id": {
+          "type": "string"
+        },
+        "workflow_path": {
+          "type": "string"
+        },
+        "action": {
+          "const": "resume"
+        },
+        "submitted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "statusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "run_root",
+        "status",
+        "workflow_ids",
+        "workflow_run_id",
+        "workflow_status",
+        "verdict",
+        "reason",
+        "counts",
+        "model_mix",
+        "throughput",
+        "progress",
+        "eta",
+        "current_step",
+        "gating",
+        "gating_omitted",
+        "quota",
+        "generated_at_ms"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "run_root": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "finished_at": {
+          "type": "string"
+        },
+        "source_run_id": {
+          "type": "string"
+        },
+        "audit_profile": {
+          "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/properties/audit_profile"
+        },
+        "workflow_ids": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "workflow_run_id": {
+          "type": "string"
+        },
+        "workflow_status": {
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "done",
+            "degraded",
+            "running-healthy",
+            "progressing",
+            "stalled",
+            "orphaned",
+            "cancel-pending",
+            "blocked",
+            "waiting-quota",
+            "paused",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "finished",
+            "in_progress",
+            "pending",
+            "failed",
+            "waiting_approval",
+            "waiting_event",
+            "waiting_timer",
+            "skipped",
+            "other",
+            "total"
+          ],
+          "properties": {
+            "finished": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "in_progress": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "pending": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "failed": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "waiting_approval": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "waiting_event": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "waiting_timer": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "skipped": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "other": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "total": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          }
+        },
+        "model_mix": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["engine", "model", "attempts", "quota_parked"],
+            "properties": {
+              "engine": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "attempts": {
+                "$ref": "#/$defs/nonNegativeInteger"
+              },
+              "quota_parked": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "throughput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recent_finished", "window_ms", "total_finished", "last_finished_at_ms"],
+          "properties": {
+            "recent_finished": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "window_ms": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "total_finished": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "last_finished_at_ms": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "progress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["percent", "finished", "in_progress", "pending", "failed", "skipped", "remaining", "total"],
+          "properties": {
+            "percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "finished": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "in_progress": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "pending": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "failed": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "skipped": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "remaining": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "total": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          }
+        },
+        "eta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "seconds", "basis", "unavailable_reason"],
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "seconds": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "basis": {
+              "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes", null]
+            },
+            "unavailable_reason": {
+              "enum": [
+                "run-terminal",
+                "run-paused",
+                "no-node-counts",
+                "no-finished-nodes",
+                "no-observed-elapsed-time",
+                null
+              ]
+            }
+          },
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "available": {
+                  "const": true
+                },
+                "seconds": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "basis": {
+                  "enum": ["recent-throughput", "run-throughput", "no-remaining-nodes"]
+                },
+                "unavailable_reason": {
+                  "type": "null"
+                }
+              },
+              "required": ["available", "seconds", "basis", "unavailable_reason"]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "available": {
+                  "const": false
+                },
+                "seconds": {
+                  "type": "null"
+                },
+                "basis": {
+                  "type": "null"
+                },
+                "unavailable_reason": {
+                  "enum": [
+                    "run-terminal",
+                    "run-paused",
+                    "no-node-counts",
+                    "no-finished-nodes",
+                    "no-observed-elapsed-time"
+                  ]
+                }
+              },
+              "required": ["available", "seconds", "basis", "unavailable_reason"]
+            }
+          ]
+        },
+        "current_step": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["node_id", "iteration", "started_at", "elapsed_seconds", "running_count"],
+          "properties": {
+            "node_id": {
+              "type": ["string", "null"]
+            },
+            "iteration": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "started_at": {
+              "type": ["string", "null"]
+            },
+            "elapsed_seconds": {
+              "type": ["number", "null"],
+              "minimum": 0
+            },
+            "running_count": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          }
+        },
+        "gating": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node_id", "iteration", "state", "detail"],
+            "properties": {
+              "node_id": {
+                "type": "string"
+              },
+              "iteration": {
+                "$ref": "#/$defs/nonNegativeInteger"
+              },
+              "state": {
+                "type": "string"
+              },
+              "detail": {
+                "type": ["string", "null"]
+              }
+            }
+          }
+        },
+        "gating_omitted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "quota": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["parked_count", "parked_node_ids", "reset_at_ms"],
+              "properties": {
+                "parked_count": {
+                  "$ref": "#/$defs/nonNegativeInteger"
+                },
+                "parked_node_ids": {
+                  "$ref": "#/$defs/stringArray"
+                },
+                "reset_at_ms": {
+                  "type": ["integer", "null"],
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          ]
+        },
+        "attention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "op_id",
+            "crossed_count",
+            "blocking_count",
+            "revertible_count",
+            "warning_count",
+            "late_completion",
+            "archived_by_op",
+            "timestamp_ms"
+          ],
+          "properties": {
+            "operation": { "type": "string", "minLength": 1 },
+            "op_id": { "type": ["string", "null"] },
+            "crossed_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "blocking_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "revertible_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "warning_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "late_completion": { "type": "boolean" },
+            "archived_by_op": { "type": ["string", "null"] },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "information": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["operation", "warning_count", "timestamp_ms"],
+          "properties": {
+            "operation": { "type": "string", "minLength": 1 },
+            "warning_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "oneshot_control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "status", "timestamp_ms"],
+          "properties": {
+            "kind": { "enum": ["steer", "restart"] },
+            "status": { "type": "string", "minLength": 1 },
+            "message_id": { "type": "string", "minLength": 1 },
+            "restarted_as_run_id": { "type": "string", "minLength": 1 },
+            "error": { "type": "string", "minLength": 1 },
+            "timestamp_ms": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        },
+        "started_by": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "harness": { "type": "string", "minLength": 1 },
+            "session_id": { "type": "string", "minLength": 1 },
+            "detected": { "const": true }
+          }
+        },
+        "generated_at_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "reportData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown_path", "json_path", "source"],
+      "properties": {
+        "markdown_path": {
+          "type": "string"
+        },
+        "json_path": {
+          "type": "string"
+        },
+        "source": {
+          "const": "verified-agent-report"
+        }
+      }
+    }
+  }
+}

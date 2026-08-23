@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:cli:operator-input:1",
+  "title": "Ultrafuzz operator workflow input",
+  "$comment": "The payload is intentionally application-defined operator data. The CLI guarantees an immutable RFC 8259 JSON value and does not infer, repair, normalize, or reinterpret its contents.",
+  "$ref": "#/$defs/jsonValue",
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    }
+  }
+}

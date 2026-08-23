@@ -71,6 +71,12 @@ export type TrustModel = "skip-permissions";
 
 export type AgentAuthMode = "api-key" | "subscription";
 
+/** User-authored `ultrafuzz.toml` contract. The optional retry table does not break v2 inputs. */
+export const PROJECT_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
+
+/** Closed persisted resolved-config JSON contract. */
+export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v3" as const;
+
 export interface ProjectConfig {
   repo: string;
   name?: string;
@@ -138,6 +144,13 @@ export interface ModelsConfig {
   profiles: Record<string, ModelProfile>;
 }
 
+export interface RetryConfig {
+  /** Total primary-profile attempts, including the first generation. */
+  sameAgentAttempts: number;
+  /** Ordered model-profile IDs. The first profile is primary; later profiles are opt-in fallbacks. */
+  agents: string[];
+}
+
 export interface AgentConfig {
   auth: AgentAuthMode;
   apiKeyEnv?: string;
@@ -148,6 +161,8 @@ export interface PermissionConfig {
   trustModel: TrustModel;
   promptReviewRequired: boolean;
   materializeOutputsAsUnstaged: boolean;
+  /** Target-relative directory roots whose contents must remain pinned to the source snapshot. */
+  productionSourceRoots: string[];
 }
 
 export interface InvariantConfig {
@@ -187,7 +202,7 @@ export interface EvalConfig {
 }
 
 export interface ResolvedConfig {
-  schemaVersion: string;
+  schemaVersion: typeof RESOLVED_CONFIG_SCHEMA_VERSION;
   auditProfile: string;
   topologyPath?: string;
   strategyLoops?: number;
@@ -197,6 +212,7 @@ export interface ResolvedConfig {
   run: RunConfig;
   execution: ExecutionConfig;
   models: ModelsConfig;
+  retry: RetryConfig;
   agents: Record<string, AgentConfig>;
   permissions: PermissionConfig;
   invariants: InvariantConfig;
@@ -223,7 +239,7 @@ export interface PromptMetadataLayer {
 }
 
 export interface ProjectConfigInput {
-  schemaVersion?: string;
+  schemaVersion?: typeof PROJECT_CONFIG_SCHEMA_VERSION;
   auditProfile?: string;
   topologyPath?: string;
   strategyLoops?: number;
@@ -236,6 +252,7 @@ export interface ProjectConfigInput {
     synthesizedDefault?: boolean;
     profiles?: Record<string, Partial<ModelProfile> & { id?: string }>;
   };
+  retry?: Partial<RetryConfig>;
   agents?: Record<string, Partial<AgentConfig>>;
   permissions?: Partial<PermissionConfig>;
   invariants?: Partial<InvariantConfig>;
@@ -275,6 +292,8 @@ export interface RuntimeConfigOverrides extends ProjectConfigInput {
   maxDynamicNodes?: number;
   outputDir?: string;
   keepWorkspaces?: boolean;
+  /** Fail planning when project retry configuration would allow a different model profile. */
+  forbidModelFallback?: boolean;
 }
 
 export interface ResolveConfigInput {

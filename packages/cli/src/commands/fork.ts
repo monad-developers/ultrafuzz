@@ -1,7 +1,14 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { forkRun } from "@ultrafuzz/runtime";
 
-import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import {
+  cliEntrypoint,
+  cliIo,
+  commandFromRuntime,
+  emitCommandResult,
+  globalFlags,
+  projectRoot
+} from "../command-shared.js";
 
 export default class Fork extends Command {
   static override summary = "Fork a linked run";
@@ -18,6 +25,7 @@ export default class Fork extends Command {
     const { args, flags } = await this.parse(Fork);
     const result = await forkRun({
       projectRoot: projectRoot(flags),
+      ultrafuzzCliEntrypoint: cliEntrypoint(),
       runId: args.runId,
       forkFrame: flags.frame,
       resetNode: flags["reset-node"],

@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:history-automatic-publication-plan:1",
+  "title": "Ultrafuzz automatic eval-history publication plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_commit",
+    "candidate_repository_url",
+    "source_artifact",
+    "producer_run_id",
+    "producer_run_attempt",
+    "mode",
+    "benchmark",
+    "pairs"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval-history-automatic-publication-plan.v1" },
+    "candidate_commit": { "$ref": "#/$defs/fullCommit" },
+    "candidate_repository_url": { "$ref": "#/$defs/githubRepository" },
+    "source_artifact": { "$ref": "#/$defs/actionsRun" },
+    "producer_run_id": { "$ref": "#/$defs/positiveDecimal" },
+    "producer_run_attempt": { "$ref": "#/$defs/positiveDecimal" },
+    "mode": { "$ref": "#/$defs/lane" },
+    "benchmark": { "$ref": "#/$defs/benchmark" },
+    "pairs": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/pair" }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "safeLowerId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "fullCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "positiveDecimal": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "githubRepository": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "actionsRun": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"
+    },
+    "actionsArtifacts": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*/artifacts$"
+    },
+    "relativePath": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,7}$"
+    },
+    "benchmark": { "enum": ["evmbench", "ultrafuzz-bench"] },
+    "lane": { "enum": ["smoke", "full"] },
+    "status": { "enum": ["succeeded", "genuine-task-failures", "failed"] },
+    "targetIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2048,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/safeId" }
+    },
+    "pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pair",
+        "provider",
+        "model_slug",
+        "bundle_path",
+        "unpack_path",
+        "eval_run_id",
+        "benchmark",
+        "lane",
+        "status",
+        "target_ids",
+        "executed_case_count",
+        "graded_case_count",
+        "publication_url"
+      ],
+      "properties": {
+        "pair": { "$ref": "#/$defs/safeLowerId" },
+        "provider": { "enum": ["openai", "anthropic", "kimi", "deepseek", "openrouter"] },
+        "model_slug": { "$ref": "#/$defs/safeLowerId" },
+        "bundle_path": { "$ref": "#/$defs/relativePath" },
+        "unpack_path": { "$ref": "#/$defs/safeLowerId" },
+        "eval_run_id": { "$ref": "#/$defs/safeId" },
+        "benchmark": { "$ref": "#/$defs/benchmark" },
+        "lane": { "$ref": "#/$defs/lane" },
+        "status": { "$ref": "#/$defs/status" },
+        "target_ids": { "$ref": "#/$defs/targetIds" },
+        "executed_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "graded_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "publication_url": { "$ref": "#/$defs/actionsArtifacts" }
+      }
+    }
+  }
+}

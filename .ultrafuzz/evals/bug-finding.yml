@@ -4,7 +4,7 @@
 # binding and credentials env-var names live in ultrafuzz.toml under [eval].
 # Ground-truth files resolve under [eval].ground_truth_root, which MUST live
 # outside the repository.
-schema_version: ultrafuzz.eval.v1
+schema_version: ultrafuzz.eval.v2
 suite: bug-finding-regression
 
 model_profiles:
@@ -34,7 +34,6 @@ run:
   max_parallel_runs: 8
 
 metrics:
-  primary: [precision, recall, f1_score]
   recall_threshold: 0.7
 
 recovery_equivalence:
@@ -48,5 +47,5 @@ reporting: # policy only — provider selection/credentials live in ultrafuzz.to
   experiment_prefix: bug-finding
   artifacts:
     mode: manifest-only # forced default when target.sensitivity == private; opt in to "upload"
-    include: ["report.md", "report.json", "findings.normalized.json"]
+    include: ["report.md", "report.json"]
     max_file_bytes: 5000000

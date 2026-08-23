@@ -1,6 +1,6 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
-import { getRunHealth, type RunHealthValue } from "@ultrafuzz/runtime";
+import { getRunHealth, isLiveWorkflowRunStatus, type RunHealthValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
@@ -12,10 +12,20 @@ import {
   projectRoot,
   type CommandResult
 } from "../command-shared.js";
+import { formatStatusDuration } from "../status-rendering.js";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
+const STOP_WATCH_VERDICTS = new Set<RunHealthValue["verdict"]>([
+  "done",
+  "degraded",
+  "orphaned",
+  "cancel-pending",
+  "paused",
+  "cancelled",
+  "failed"
+]);
 
 export default class Status extends Command {
   static override summary = "Show concise health for an Ultrafuzz run";
@@ -82,7 +92,7 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
 }
 
 function shouldRefresh(value: RunHealthValue | undefined): boolean {
-  return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status);
+  return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status) && !STOP_WATCH_VERDICTS.has(value.verdict);
 }
 
 async function wait(milliseconds: number): Promise<void> {
@@ -97,6 +107,7 @@ function renderHealth(value: RunHealthValue): string {
     `Run: ${value.run_id}`,
     ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
     `Status: ${value.verdict} (${value.status})`,
+    ...lifecycleDivergenceLines(value),
     `Reason: ${value.reason}`,
     `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
     `ETA: ${renderEta(value.eta)}`,
@@ -113,11 +124,18 @@ function renderHealth(value: RunHealthValue): string {
   return `${lines.join("\n")}\n`;
 }
 
+function lifecycleDivergenceLines(value: RunHealthValue): string[] {
+  if (!TERMINAL_RUN_STATUSES.has(value.status) || !isLiveWorkflowRunStatus(value.workflow_status)) return [];
+  return [
+    `Lifecycle divergence: Ultrafuzz is terminal ${value.status}, but the workflow runner is ${value.workflow_status}; workflow work may still be active.`
+  ];
+}
+
 function renderEta(eta: RunHealthValue["eta"]): string {
   if (eta.seconds === null) {
     return `unavailable (${eta.unavailable_reason ?? "unknown"})`;
   }
-  return eta.seconds === 0 ? "no remaining nodes" : formatDuration(eta.seconds);
+  return eta.seconds === 0 ? "no remaining nodes" : formatStatusDuration(eta.seconds);
 }
 
 function renderCurrentStep(step: RunHealthValue["current_step"]): string {
@@ -128,7 +146,7 @@ function renderCurrentStep(step: RunHealthValue["current_step"]): string {
   if (step.elapsed_seconds === null || step.node_id === null) {
     return `unavailable (no recorded start)${others}`;
   }
-  return `${formatDuration(step.elapsed_seconds)} on ${step.node_id}${others}`;
+  return `${formatStatusDuration(step.elapsed_seconds)} on ${step.node_id}${others}`;
 }
 
 /** Keeps the Progress line's buckets summing to `total` when nodes are waiting. */
@@ -141,19 +159,4 @@ function extraBuckets(value: RunHealthValue): string {
     counts.other > 0 ? `${counts.other} other` : undefined
   ].filter((entry): entry is string => entry !== undefined);
   return entries.length === 0 ? "" : ` / ${entries.join(" / ")}`;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) {
-    return "less than a minute";
-  }
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) {
-    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) {
-    return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
-  }
-  return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, "0")}h`;
 }

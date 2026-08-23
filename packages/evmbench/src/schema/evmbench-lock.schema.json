@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evmbench:lock:2",
+  "title": "Ultrafuzz EVMBench lock",
+  "type": "object",
+  "required": ["schema_version", "evmbench", "frontier_evals", "selected_split", "splits", "catalog"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.evmbench.lock.v2"
+    },
+    "evmbench": {
+      "type": "object",
+      "required": ["repository", "commit"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "const": "https://github.com/paradigmxyz/evmbench.git"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        }
+      }
+    },
+    "frontier_evals": {
+      "type": "object",
+      "required": ["repository", "commit"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "const": "https://github.com/openai/frontier-evals.git"
+        },
+        "commit": {
+          "$ref": "#/$defs/commit"
+        }
+      }
+    },
+    "selected_split": {
+      "const": "detect-tasks"
+    },
+    "splits": {
+      "type": "object",
+      "required": ["debug", "detect-tasks"],
+      "additionalProperties": false,
+      "properties": {
+        "debug": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        },
+        "detect-tasks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "const": "audit-catalog.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}

@@ -4,5 +4,6 @@ export * from "./expanded-graph-schema.js";
 export * from "./expand.js";
 export * from "./fingerprint.js";
 export * from "./load.js";
+export * from "./schema-registry.js";
 export * from "./types.js";
 export * from "./validate.js";

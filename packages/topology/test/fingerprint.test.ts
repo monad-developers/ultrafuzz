@@ -14,8 +14,10 @@ describe("fingerprintGraph", () => {
   it("changes for topology, prompt, and config edits", () => {
     const base = fingerprintGraph(
       expandTopology(validTopology(), {
-        configFingerprint: { agent_profile: "codex-default" },
-        promptTexts: { "strategies/strategy.md": "original" }
+        configFingerprint: "a".repeat(64),
+        promptTexts: {
+          "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+        }
       })
     );
 
@@ -25,8 +27,10 @@ describe("fingerprintGraph", () => {
     expect(
       fingerprintGraph(
         expandTopology(validTopology(), {
-          configFingerprint: { agent_profile: "codex-default" },
-          promptTexts: { "strategies/strategy.md": "changed" }
+          configFingerprint: "a".repeat(64),
+          promptTexts: {
+            "strategies/strategy.md": "changed {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+          }
         })
       )
     ).not.toBe(base);
@@ -34,8 +38,10 @@ describe("fingerprintGraph", () => {
     expect(
       fingerprintGraph(
         expandTopology(validTopology(), {
-          configFingerprint: { agent_profile: "claude-default" },
-          promptTexts: { "strategies/strategy.md": "original" }
+          configFingerprint: "b".repeat(64),
+          promptTexts: {
+            "strategies/strategy.md": "original {{finding_reachability_vocabulary}} {{finding_note_key_vocabulary}}"
+          }
         })
       )
     ).not.toBe(base);

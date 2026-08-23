@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-restore:1",
+  "title": "Ultrafuzz Modal node restore marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_root"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.node-restore.v1" },
+    "source_root": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" }
+  }
+}

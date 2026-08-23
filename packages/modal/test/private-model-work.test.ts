@@ -3,7 +3,13 @@ import path from "node:path";
 
 import { expect, it } from "vitest";
 
-import { createInitialRunState, type NodeState, type RunState, type RunStatus } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  createInitialRunState,
+  type NodeState,
+  type RunState,
+  type RunStatus
+} from "@ultrafuzz/artifacts";
 
 import { classifyModalRunnerStatus, modalPreModelAttempt, parseModalWorkerStatus } from "../src/launch-state.js";
 import {
@@ -30,7 +36,7 @@ it("does not count plan-time reference successes as model work", () => {
   expect(privateEvalModelWorkEvidence(target)).toBe("none");
 });
 
-it("keeps the flag for model-node work and for ambiguous durable evidence", () => {
+it("keeps the flag for model-node work and for genuinely ambiguous durable evidence", () => {
   const started = privateRunFixture({
     status: "failed",
     graphNodes: [{ id: "model", kind: "agentic", model_fanout: [] }],
@@ -50,7 +56,7 @@ it("keeps the flag for model-node work and for ambiguous durable evidence", () =
     graphNodes: [{ id: "model", kind: "agentic", model_fanout: [] }],
     stateNodes: { model: { node_id: "different", status: "pending" } }
   });
-  expect(privateEvalModelWorkEvidence(malformed)).toBe("unknown");
+  expect(() => privateEvalModelWorkEvidence(malformed)).toThrow(/node_id must match map key/u);
 
   const incomplete = privateRunFixture({
     status: "failed",
@@ -60,7 +66,25 @@ it("keeps the flag for model-node work and for ambiguous durable evidence", () =
       delete (state as Partial<RunState>).controller_lease;
     }
   });
-  expect(privateEvalModelWorkEvidence(incomplete)).toBe("unknown");
+  expect(() => privateEvalModelWorkEvidence(incomplete)).toThrow(/schema-invalid/u);
+});
+
+it("rejects malformed present graph evidence while treating a missing graph as unavailable", () => {
+  const corrupt = privateRunFixture({
+    status: "failed",
+    graphNodes: [{ id: "model", kind: "agentic", model_fanout: [] }],
+    stateNodes: { model: { node_id: "model", status: "pending" } }
+  });
+  fs.writeFileSync(path.join(corrupt, ".ultrafuzz", "runs", "run-one", "graph.json"), "{not-json");
+  expect(() => privateEvalModelWorkEvidence(corrupt)).toThrow();
+
+  const missing = privateRunFixture({
+    status: "failed",
+    graphNodes: [{ id: "model", kind: "agentic", model_fanout: [] }],
+    stateNodes: { model: { node_id: "model", status: "pending" } }
+  });
+  fs.unlinkSync(path.join(missing, ".ultrafuzz", "runs", "run-one", "graph.json"));
+  expect(privateEvalModelWorkEvidence(missing)).toBe("unknown");
 });
 
 it("never clears the conservative flag when corroboration is unavailable", async () => {
@@ -92,6 +116,41 @@ it("never clears the conservative flag when corroboration is unavailable", async
 
   expect(modelWorkStarted).toBe(true);
   expect(order).toEqual(["run", "evidence", "checkpoint-true", "flush"]);
+});
+
+it("persists the conservative flag and surfaces malformed corroboration evidence", async () => {
+  const order: string[] = [];
+  const runFailure = new Error("eval command returned nonzero");
+  const evidenceFailure = new Error("run state is schema-invalid");
+  let caught: unknown;
+
+  try {
+    await runWithPrivateModelWorkCorroboration({
+      run: async () => {
+        order.push("run");
+        throw runFailure;
+      },
+      evidence: () => {
+        order.push("evidence");
+        throw evidenceFailure;
+      },
+      clearStarted: () => {
+        order.push("cleared");
+      },
+      checkpoint: async () => {
+        order.push("checkpoint");
+      },
+      flush: async () => {
+        order.push("flush");
+      }
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(AggregateError);
+  expect((caught as AggregateError).errors).toEqual([runFailure, evidenceFailure]);
+  expect(order).toEqual(["run", "evidence", "checkpoint", "flush"]);
 });
 
 it("reports a returned pre-model eval failure in the bounded three-attempt lane", async () => {
@@ -194,7 +253,11 @@ it("reports a returned pre-model eval failure in the bounded three-attempt lane"
 function privateRunFixture(
   input: {
     status: string;
-    graphNodes: Array<Record<string, unknown>>;
+    graphNodes: Array<{
+      id: string;
+      kind: "agentic" | "reference";
+      model_fanout: Array<{ model_profile_id: string }>;
+    }>;
     stateNodes: Record<string, Record<string, unknown>>;
     mutateState?: (state: RunState) => void;
   },
@@ -203,15 +266,61 @@ function privateRunFixture(
   const target = path.join(root, "target");
   const runRoot = path.join(target, ".ultrafuzz", "runs", "run-one");
   fs.mkdirSync(runRoot, { recursive: true });
-  fs.writeFileSync(path.join(runRoot, "graph.json"), `${JSON.stringify({ nodes: input.graphNodes })}\n`);
+  const graphNodes = input.graphNodes.map((node) => ({
+    id: node.id,
+    logical_id: node.id,
+    display_name: node.id,
+    kind: node.kind,
+    depends_on: [],
+    artifact_dir: `artifacts/${node.id}`,
+    outputs: [
+      {
+        path: "result.md",
+        contract: "ultrafuzz/nonempty-markdown@1",
+        contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+        primary: true
+      }
+    ],
+    prompt_id: node.id,
+    prompt_path: node.kind === "reference" ? "" : `prompts/${node.id}.md`,
+    ...(node.kind === "reference"
+      ? {
+          reference: `fixture-${node.id}`,
+          reference_revision: {
+            provider: "github",
+            repo: "example/reference",
+            commit: "a".repeat(40),
+            paths: ["README.md"]
+          }
+        }
+      : {}),
+    loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
+    model_fanout: node.model_fanout.map((model, modelIndex) => ({
+      model_profile_id: model.model_profile_id,
+      agent_ref: "CodexAgent",
+      model_index: modelIndex,
+      loop_index: 0,
+      attempt_index: 0
+    }))
+  }));
+  fs.writeFileSync(
+    path.join(runRoot, "graph.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.planned-graph.v4",
+      graph_version: "4",
+      topology_version: 2,
+      groups: {},
+      nodes: graphNodes
+    })}\n`
+  );
   const createdAt = "2026-01-01T00:00:00.000Z";
   const state = createInitialRunState({
     runId: "run-one",
     graphFingerprint: "graph-fingerprint",
     configFingerprint: "config-fingerprint",
     createdAt,
-    nodes: input.graphNodes.map((node) => ({
-      id: String(node.id),
+    nodes: graphNodes.map((node) => ({
+      id: node.id,
       waitSince: createdAt,
       waitReason: "ready",
       nextEligibleAction: "dispatch"

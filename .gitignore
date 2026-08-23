@@ -23,6 +23,14 @@ dist/
 dist-test/
 smithers.db*
 .DS_Store
+.env
+.env.*
+.envrc
+*.pem
+*.key
+*.p12
+id_rsa
 
 # Agent session artifacts written by package-level test runs
 packages/*/.ultrafuzz/
+packages/dashboard/frontend/.generated/

@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { parseSmithersTaskManifestBytes } from "@ultrafuzz/artifacts";
+
 import {
   capturePinnedSubmoduleSnapshot,
   enablePinnedSubmoduleWorktreeConfig,
@@ -25,6 +27,7 @@ import {
   sealWorkflowControlFiles,
   verifyWorkflowControlSnapshot
 } from "../src/workflow-integrity.js";
+import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
@@ -54,6 +57,30 @@ nodes:
 `,
     "utf8"
   );
+}
+
+function writeTrustedNpmLauncher(root: string): string {
+  const binDir = path.join(root, "trusted-bin");
+  const launcher = path.join(binDir, process.platform === "win32" ? "npm-cli.js" : "npm");
+  const npmCli = fs.realpathSync(
+    path.join(
+      path.dirname(process.execPath),
+      ...(process.platform === "win32" ? ["node_modules", "npm", "bin", "npm-cli.js"] : ["npm"])
+    )
+  );
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    launcher,
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.execPath, [${JSON.stringify(npmCli)}, ...process.argv.slice(2)], { stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`,
+    "utf8"
+  );
+  fs.chmodSync(launcher, 0o555);
+  return binDir;
 }
 
 test("sealed recursive submodules hydrate a real task worktree without child Git metadata", (context) => {
@@ -199,6 +226,63 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
         expectation
       }),
     /sealed submodule file changed/u
+  );
+});
+
+test("a failed immediate submodule restore preserves the transaction backup", (context) => {
+  const fixture = nestedSubmoduleFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const captured = capturePinnedSubmoduleSnapshot(fixture.source);
+  assert.ok(captured !== undefined);
+  writePinnedSubmoduleSnapshot(fixture.source, captured);
+  const expectation = pinnedSubmoduleExpectation(captured);
+  removeChildGitMetadata(fixture.source, captured.top_level_roots);
+
+  const executionRoot = path.join(fixture.root, "rollback-execution-snapshot");
+  fs.mkdirSync(executionRoot);
+  copyExecutionFiles(fixture.source, executionRoot, expectation);
+
+  const task = path.join(fixture.root, "rollback-task-worktree");
+  git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/rollback-task", task, "ultrafuzz-pinned"]);
+  git(fixture.source, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
+  const dependencyRoot = path.join(task, "vendor/dependency");
+  fs.writeFileSync(path.join(dependencyRoot, "preexisting.txt"), "recoverable bytes\n");
+
+  const originalRenameSync = fs.renameSync;
+  fs.renameSync = ((oldPath, newPath) => {
+    const source = oldPath.toString();
+    const destination = newPath.toString();
+    const transactionSource = source.includes(`${path.sep}.ultrafuzz-submodule-transaction-`);
+    if (
+      destination === dependencyRoot &&
+      transactionSource &&
+      (source.includes(`${path.sep}staged${path.sep}`) || source.includes(`${path.sep}backup${path.sep}`))
+    ) {
+      throw new Error("injected rename failure");
+    }
+    originalRenameSync(oldPath, newPath);
+  }) as typeof fs.renameSync;
+  try {
+    assert.throws(
+      () =>
+        hydratePinnedSubmodulesFromExecutionSnapshot({
+          executionSnapshotRoot: executionRoot,
+          workspaceRoot: task,
+          expectation
+        }),
+      /transaction rollback is incomplete/u
+    );
+  } finally {
+    fs.renameSync = originalRenameSync;
+  }
+
+  const transactions = fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
+  assert.equal(transactions.length, 1);
+  assert.equal(fs.existsSync(dependencyRoot), false);
+  assert.equal(
+    fs.readFileSync(path.join(task, transactions[0]!, "backup/vendor/dependency/preexisting.txt"), "utf8"),
+    "recoverable bytes\n"
   );
 });
 
@@ -435,19 +519,27 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   if (symlink.type !== "symlink") throw new Error("test fixture symlink is unavailable");
   symlink.target = "../../../../../../outside";
   assert.throws(() => pinnedSubmoduleExpectation(symlinkEscape), /symlink escapes/u);
+  const nestedRepositoryEscape = structuredClone(captured);
+  const nestedSymlink = nestedRepositoryEscape.entries.find((entry) => entry.type === "symlink")!;
+  if (nestedSymlink.type !== "symlink") throw new Error("test fixture symlink is unavailable");
+  nestedSymlink.target = "../../dependency.txt";
+  assert.throws(() => pinnedSubmoduleExpectation(nestedRepositoryEscape), /symlink escapes/u);
 });
 
-test("pinned local compilation carries the exact manifest through the product execution snapshot", async (context) => {
+test("pinned local and cloud compilation carry the exact manifest through sealed execution closures", async (context) => {
   const fixture = nestedSubmoduleFixture();
+  const npmInstaller = writeFakeNpmInstaller(fixture.source);
   context.after(() => {
     makeTreeWritable(fixture.root);
     fs.rmSync(fixture.root, { recursive: true, force: true });
+    fs.rmSync(npmInstaller.binDir, { recursive: true, force: true });
   });
 
   const snapshot = capturePinnedSubmoduleSnapshot(fixture.source);
   assert.ok(snapshot !== undefined);
   const manifestPath = writePinnedSubmoduleSnapshot(fixture.source, snapshot);
   const expectation = pinnedSubmoduleExpectation(snapshot);
+  const trustedBin = writeTrustedNpmLauncher(fixture.root);
   removeChildGitMetadata(fixture.source, snapshot.top_level_roots);
 
   const initialized = initProject({ projectRoot: fixture.source, force: true });
@@ -455,6 +547,7 @@ test("pinned local compilation carries the exact manifest through the product ex
   writeSmallTopology(fixture.source);
   const plan = await planRun({ projectRoot: fixture.source, runId: "pinned-closure", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  delete plan.value!.resolved_config.execution.providers.modal;
   const compiled = compileSmithersWorkflow({
     projectRoot: fixture.source,
     config: plan.value!.resolved_config,
@@ -468,14 +561,19 @@ test("pinned local compilation carries the exact manifest through the product ex
   assert.ok(workflowSource.includes(expectation.manifest_sha256));
   assert.match(workflowSource, /"pinnedSubmodules": \{/u);
 
-  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, {
-    SMITHERS_BIN: "/bin/true"
-  });
-  const pinnedFiles = executionFiles.filter((file) =>
-    file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`)
-  );
-  assert.equal(pinnedFiles.length, 1 + snapshot.entries.filter((entry) => entry.type === "file").length);
-  assert.ok(pinnedFiles.some((file) => file.snapshotPath.endsWith("/manifest.json")));
+  const executionEnvironment = {
+    SMITHERS_BIN: "/bin/true",
+    ULTRAFUZZ_TRUSTED_BIN: trustedBin
+  };
+  const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
+  const sealedTaskManifest = executionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
+  assert.ok(sealedTaskManifest !== undefined);
+  assert.equal(fs.realpathSync(sealedTaskManifest.sourcePath), fs.realpathSync(compiled.tasksPath));
+  const pinnedPaths = executionFiles
+    .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
+    .map((file) => file.snapshotPath);
+  assert.equal(pinnedPaths.length, 1 + snapshot.entries.filter((entry) => entry.type === "file").length);
+  assert.ok(pinnedPaths.some((snapshotPath) => snapshotPath.endsWith("/manifest.json")));
 
   for (const node of plan.value!.graph.nodes) {
     const taskNodeIds = compiled.tasks
@@ -486,7 +584,6 @@ test("pinned local compilation carries the exact manifest through the product ex
     }
   }
   fs.writeFileSync(plan.value!.layout.graphPath, `${JSON.stringify(plan.value!.graph, null, 2)}\n`);
-
   sealWorkflowControlFiles({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,
@@ -499,13 +596,28 @@ test("pinned local compilation carries the exact manifest through the product ex
     executionFiles
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, plan.value!.layout);
+  assert.deepEqual(
+    verifiedControl.executionFiles
+      .filter((file) => file.snapshotPath.startsWith("controls/bun"))
+      .map((file) => file.snapshotPath),
+    ["controls/bun-empty.env", "controls/bun-module-confinement.js", "controls/bunfig.toml"]
+  );
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout: plan.value!.layout,
     snapshot: verifiedControl
   });
-  const materializedManifest = path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json");
-  assert.equal(sha256(fs.readFileSync(materializedManifest)), expectation.manifest_sha256);
+  assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
+  assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bun-empty.env"), "utf8"), "\n");
+  assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
+  assert.deepEqual(
+    parseSmithersTaskManifestBytes(fs.readFileSync(path.join(materialized.root, "controls", "tasks.json"))),
+    parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath))
+  );
+  assert.equal(
+    sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
+    expectation.manifest_sha256
+  );
 
   const task = path.join(fixture.root, "compiled-closure-task");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/compiled-closure", task, "ultrafuzz-pinned"]);
@@ -518,22 +630,25 @@ test("pinned local compilation carries the exact manifest through the product ex
 
   const manifestBeforeCloudCompile = fs.readFileSync(manifestPath);
   const commonConfigBeforeCloudCompile = fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config"));
-  const cloudPlan = await planRun({ projectRoot: fixture.source, runId: "pinned-cloud-only", env: {} });
+  const configPath = path.join(fixture.source, "ultrafuzz.toml");
+  const localConfig = fs.readFileSync(configPath, "utf8");
+  assert.match(localConfig, /\[execution\]\nmode = "local"\n/u);
+  fs.writeFileSync(
+    configPath,
+    `${localConfig
+      .replace('[execution]\nmode = "local"\n', '[execution]\nmode = "cloud"\nprovider = "modal"\n')
+      .replace(
+        "[agents.CodexAgent]",
+        "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]"
+      )}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
+    "utf8"
+  );
+  const cloudPlan = await planRun({
+    projectRoot: fixture.source,
+    runId: "pinned-cloud-only",
+    env: { MODAL_TOKEN_ID: "test-id", MODAL_TOKEN_SECRET: "test-secret", ULTRAFUZZ_PROVIDER_HOME_ROOT: fixture.root }
+  });
   assert.equal(cloudPlan.ok, true, JSON.stringify(cloudPlan.diagnostics));
-  cloudPlan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
-    nodes: {},
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: []
-      }
-    }
-  };
   const cloudCompiled = compileSmithersWorkflow({
     projectRoot: fixture.source,
     config: cloudPlan.value!.resolved_config,
@@ -542,8 +657,95 @@ test("pinned local compilation carries the exact manifest through the product ex
     workflowName: "ultrafuzz-pinned-cloud-only",
     renderedPrompts: cloudPlan.value!.rendered_prompts
   });
-  assert.equal(cloudCompiled.pinnedSubmodules, undefined);
-  assert.match(fs.readFileSync(cloudCompiled.workflowPath, "utf8"), /"pinnedSubmodules": null/u);
+  assert.deepEqual(cloudCompiled.pinnedSubmodules, expectation);
+  const cloudWorkflowSource = fs.readFileSync(cloudCompiled.workflowPath, "utf8");
+  assert.equal(cloudWorkflowSource.match(/"pinnedSubmodules": \{/gu)?.length, cloudCompiled.tasks.length);
+  const cloudTaskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(cloudCompiled.tasksPath));
+  assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
+
+  const cloudExecutionFiles = await smithersExecutionControlFiles(
+    cloudCompiled,
+    cloudPlan.value!.layout,
+    executionEnvironment
+  );
+  const sealedCloudTaskManifest = cloudExecutionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
+  assert.ok(sealedCloudTaskManifest !== undefined);
+  assert.equal(fs.realpathSync(sealedCloudTaskManifest.sourcePath), fs.realpathSync(cloudCompiled.tasksPath));
+  const cloudPinnedPaths = cloudExecutionFiles
+    .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
+    .map((file) => file.snapshotPath);
+  assert.equal(cloudPinnedPaths.length, pinnedPaths.length);
+  assert.deepEqual(cloudPinnedPaths, pinnedPaths);
+
+  for (const node of cloudPlan.value!.graph.nodes) {
+    const taskNodeIds = cloudCompiled.tasks
+      .filter((taskSpec) => taskSpec.concreteNodeId === node.id)
+      .map((taskSpec) => taskSpec.smithersNodeId);
+    if (taskNodeIds.length > 0) node.workflow = { node_id: taskNodeIds[0]!, task_node_ids: taskNodeIds };
+  }
+  fs.writeFileSync(cloudPlan.value!.layout.graphPath, `${JSON.stringify(cloudPlan.value!.graph, null, 2)}\n`);
+  sealWorkflowControlFiles({
+    projectRoot: cloudCompiled.projectRoot,
+    layout: cloudPlan.value!.layout,
+    workflowPath: cloudCompiled.workflowPath,
+    expandedGraphPath: cloudCompiled.expandedGraphPath,
+    configPath: cloudCompiled.configPath,
+    evidenceWorkflowPath: cloudCompiled.evidenceWorkflowPath,
+    tasksPath: cloudCompiled.tasksPath,
+    inputPath: cloudCompiled.inputPath,
+    executionFiles: cloudExecutionFiles
+  });
+  const cloudVerifiedControl = verifyWorkflowControlSnapshot(cloudCompiled.projectRoot, cloudPlan.value!.layout);
+  const cloudExecutionSnapshotRoot = path.join(fixture.root, "verified-cloud-execution-snapshot");
+  fs.mkdirSync(cloudExecutionSnapshotRoot);
+  const sealedCloudPinnedFiles = cloudVerifiedControl.executionFiles.filter((file) =>
+    file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`)
+  );
+  assert.deepEqual(
+    sealedCloudPinnedFiles.map((file) => file.snapshotPath),
+    pinnedPaths
+  );
+  for (const file of sealedCloudPinnedFiles) {
+    const destination = path.join(cloudExecutionSnapshotRoot, ...file.snapshotPath.split("/"));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, file.contents);
+  }
+  assert.equal(
+    sha256(fs.readFileSync(path.join(cloudExecutionSnapshotRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
+    expectation.manifest_sha256
+  );
+
+  const cloudTask = path.join(fixture.root, "compiled-cloud-closure-task");
+  git(fixture.source, [
+    "worktree",
+    "add",
+    "-B",
+    "ultrafuzz/test/compiled-cloud-closure",
+    cloudTask,
+    "ultrafuzz-pinned"
+  ]);
+  hydratePinnedSubmodulesFromExecutionSnapshot({
+    executionSnapshotRoot: cloudExecutionSnapshotRoot,
+    workspaceRoot: cloudTask,
+    expectation: cloudCompiled.pinnedSubmodules
+  });
+  const cloudDependency = path.join(cloudTask, "vendor/dependency/dependency.txt");
+  assert.equal(fs.readFileSync(cloudDependency, "utf8"), "dependency\n");
+  verifyPinnedSubmodulesFromExecutionSnapshot({
+    executionSnapshotRoot: cloudExecutionSnapshotRoot,
+    workspaceRoot: cloudTask,
+    expectation: cloudCompiled.pinnedSubmodules
+  });
+  fs.writeFileSync(cloudDependency, "agent mutation\n");
+  assert.throws(
+    () =>
+      verifyPinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: cloudExecutionSnapshotRoot,
+        workspaceRoot: cloudTask,
+        expectation: cloudCompiled.pinnedSubmodules
+      }),
+    /byte tree changed/u
+  );
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeCloudCompile);
   assert.deepEqual(
     fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config")),

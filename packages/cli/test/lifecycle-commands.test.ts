@@ -28,7 +28,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1", ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
@@ -51,9 +51,7 @@ function parseJson(capture: Capture): Record<string, unknown> {
 
 function assertNoEngineBranding(value: unknown): void {
   assert.doesNotMatch(JSON.stringify(value), /smithers/iu);
-  // The engine's successor package name does not contain "smithers", so it slips
-  // past the scrub by spelling alone. Name it explicitly or the de-branding
-  // invariant silently stops covering operator-facing engine text.
+  // The abbreviated package name needs its own operator-facing branding check.
   assert.doesNotMatch(JSON.stringify(value), /smthrs/iu);
 }
 
@@ -88,18 +86,95 @@ ${requiredCommand === undefined ? "" : `    required_commands: [${requiredComman
   );
 }
 
+function addOpenRouterProfile(project: string): void {
+  fs.appendFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    '\n[models.openrouter]\nagent = "OpenRouterAgent"\nmodel = "~anthropic/claude-sonnet-latest:free"\nreasoning = "high"\n',
+    "utf8"
+  );
+}
+
 function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const whyPath = path.join(project, "fake-why.json");
   const timelinePath = path.join(project, "fake-timeline.json");
   const snapshotsPath = path.join(project, "fake-snapshots.json");
   const nodePath = path.join(project, "fake-node.json");
+  const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   const eventsPath = path.join(project, "fake-events.ndjson");
+  const eventsFailurePath = path.join(project, "fake-events-failure");
+  const commandLog = path.join(project, "smithers-commands.log");
+  const nodeUsage = {
+    inputTokens: 10,
+    outputTokens: 5,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 1,
+    models: ["gpt-test"],
+    agents: ["codex"]
+  };
+  const nodeToolCall = {
+    attempt: 1,
+    seq: 1,
+    name: "shell",
+    status: "ok",
+    startedAtMs: 1_700_000_501_000,
+    finishedAtMs: 1_700_000_502_000,
+    durationMs: 1_000,
+    input: { command: "forge build" },
+    output: { note: "ok" },
+    error: null
+  };
+  const nodeDetail = {
+    node: {
+      runId: WORKFLOW_RUN_ID,
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      state: "in-progress",
+      lastAttempt: 1,
+      updatedAtMs: 1_700_000_600_000,
+      outputTable: null,
+      label: null
+    },
+    status: "in-progress",
+    durationMs: 65_000,
+    attemptsSummary: { total: 1, failed: 0, cancelled: 0, succeeded: 0, waiting: 1 },
+    attempts: [
+      {
+        runId: WORKFLOW_RUN_ID,
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        iteration: 0,
+        state: "in-progress",
+        startedAtMs: 1_700_000_500_000,
+        finishedAtMs: null,
+        durationMs: null,
+        error: null,
+        errorDetail: null,
+        tokenUsage: nodeUsage,
+        toolCalls: [nodeToolCall],
+        meta: null,
+        responseText: null,
+        cached: false,
+        jjPointer: null,
+        jjCwd: null
+      }
+    ],
+    toolCalls: [nodeToolCall],
+    tokenUsage: { ...nodeUsage, byAttempt: [{ attempt: 1, usage: nodeUsage }] },
+    scorers: [],
+    output: { validated: null, raw: null, source: "none", cacheKey: null },
+    approval: null,
+    limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
+  };
 
   fs.writeFileSync(
     whyPath,
     `${JSON.stringify({
+      ok: true,
       data: {
         runId: WORKFLOW_RUN_ID,
         status: "running",
@@ -119,7 +194,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             maxAttempts: 3
           }
         ]
-      }
+      },
+      meta: { command: "why", duration: "1ms" }
     })}\n`,
     "utf8"
   );
@@ -128,7 +204,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     `${JSON.stringify({
       timeline: {
         runId: WORKFLOW_RUN_ID,
-        branch: "main",
+        branch: null,
         frames: [
           { frameNo: 2, createdAtMs: 1_700_000_000_000, contentHash: "hash-2", forks: [] },
           { frameNo: 7, createdAtMs: 1_700_000_500_000, contentHash: "hash-7", forks: [] }
@@ -143,6 +219,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     `${JSON.stringify({
       snapshots: [
         {
+          runId: WORKFLOW_RUN_ID,
           seq: 4,
           nodeId: "node:project-discovery",
           iteration: 0,
@@ -162,73 +239,44 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   fs.writeFileSync(
     nodePath,
     `${JSON.stringify({
-      data: {
-        node: {
-          runId: WORKFLOW_RUN_ID,
-          nodeId: "node:project-discovery",
-          iteration: 0,
-          state: "in-progress",
-          lastAttempt: 1,
-          updatedAtMs: 1_700_000_600_000,
-          outputTable: null,
-          label: null
-        },
-        status: "running",
-        durationMs: 65_000,
-        attemptsSummary: { total: 1, failed: 0, cancelled: 0, succeeded: 0, waiting: 1 },
-        attempts: [
-          {
-            attempt: 1,
-            iteration: 0,
-            state: "in-progress",
-            startedAtMs: 1_700_000_500_000,
-            finishedAtMs: null,
-            durationMs: null,
-            error: null,
-            tokenUsage: { models: ["gpt-test"], agents: ["codex"] },
-            toolCalls: [
-              {
-                attempt: 1,
-                seq: 1,
-                name: "shell",
-                status: "ok",
-                durationMs: 1_000,
-                input: { command: "forge build" },
-                output: { note: "ok" },
-                error: null
-              }
-            ],
-            cached: false
-          }
-        ],
-        toolCalls: [],
-        tokenUsage: { models: ["gpt-test"], agents: ["codex"], byAttempt: [] },
-        scorers: [],
-        output: { validated: null, raw: null, source: "none", cacheKey: null },
-        approval: null,
-        limits: { toolPayloadBytesHuman: 1, validatedOutputBytesHuman: 1 }
-      }
+      ok: true,
+      data: nodeDetail,
+      meta: { command: "node", duration: "1ms" }
     })}\n`,
     "utf8"
   );
+  fs.writeFileSync(nodeWatchPath, `${JSON.stringify(nodeDetail)}\n`, "utf8");
   fs.writeFileSync(
     eventsPath,
-    [
+    `${[
       JSON.stringify({
         runId: WORKFLOW_RUN_ID,
         seq: 1,
         timestampMs: 1_700_000_000_000,
-        type: "node.started",
-        payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1, state: "in-progress" }
+        type: "NodeStarted",
+        payload: {
+          runId: WORKFLOW_RUN_ID,
+          timestampMs: 1_700_000_000_000,
+          type: "NodeStarted",
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          state: "in-progress"
+        }
       }),
       JSON.stringify({
         runId: WORKFLOW_RUN_ID,
         seq: 2,
         timestampMs: 1_700_000_060_000,
-        type: "run.progress",
-        payload: { status: "running" }
+        type: "RunStatusChanged",
+        payload: {
+          runId: WORKFLOW_RUN_ID,
+          timestampMs: 1_700_000_060_000,
+          type: "RunStatusChanged",
+          status: "running"
+        }
       })
-    ].join("\n"),
+    ].join("\n")}\n`,
     "utf8"
   );
 
@@ -237,15 +285,60 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     smithers,
     [
       "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
+      `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       `  why) cat ${shellQuote(whyPath)} ;;`,
       `  timeline) cat ${shellQuote(timelinePath)} ;;`,
       `  snapshots) cat ${shellQuote(snapshotsPath)} ;;`,
-      `  node) cat ${shellQuote(nodePath)} ;;`,
-      `  events) cat ${shellQuote(eventsPath)} ;;`,
+      "  node)",
+      '    case "$*" in',
+      `      *"--format jsonl"*) cat ${shellQuote(nodeWatchPath)} ;;`,
+      `      *) cat ${shellQuote(nodePath)} ;;`,
+      "    esac",
+      "    ;;",
+      "  events)",
+      `    if [ -f ${shellQuote(eventsFailurePath)} ]; then`,
+      `      cat ${shellQuote(eventsFailurePath)} >&2`,
+      "      exit 3",
+      "    fi",
+      `    cat ${shellQuote(eventsPath)}`,
+      "    ;;",
+      "  inspect)",
+      `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
+      "    ;;",
+      "  status)",
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            status: "running",
+            verdict: "blocked",
+            reason: "run `smithers why` for the blocking node",
+            counts: {
+              finished: 1,
+              inProgress: 0,
+              pending: 5,
+              failed: 0,
+              waitingApproval: 1,
+              waitingEvent: 0,
+              waitingTimer: 0,
+              skipped: 0,
+              other: 0,
+              total: 6
+            },
+            modelMix: [],
+            throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1_000 },
+            bottleneck: [],
+            bottleneckOmitted: 0,
+            quota: null,
+            generatedAtMs: 2_000
+          },
+          meta: { command: "status", duration: "1ms" }
+        })
+      )}`,
+      "    ;;",
       "  cancel)",
-      `    printf '%s\\n' '{"data":{"status":"${options.cancelStatus ?? "cancel-requested"}"}}'`,
+      `    printf '%s\\n' '{"ok":true,"data":{"status":"${options.cancelStatus ?? "cancel-requested"}"},"meta":{"command":"cancel","duration":"1ms"}}'`,
       "    exit 2",
       "    ;;",
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
@@ -257,8 +350,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_BIN: smithers
   };
 }
 
@@ -339,7 +431,7 @@ test("events returns bounded lifecycle events in human and JSON output", async (
   const human = await cli(project, ["events", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Events: 2$/mu);
-  assert.match(human.stdout, /node node:project-discovery#0 attempt 1 - in-progress/u);
+  assert.match(human.stdout, /NodeStarted node:project-discovery#0 attempt 1 - in-progress/u);
 
   const json = await cli(project, ["events", RUN_ID, "--limit", "1", "--json"], env);
   assert.equal(json.code, 0, json.stderr);
@@ -356,7 +448,7 @@ test("events --watch streams one line per event and terminates", async () => {
   assert.equal(human.code, 0, human.stderr);
   const humanLines = human.stdout.split("\n").filter(Boolean);
   assert.equal(humanLines.length, 2);
-  assert.match(humanLines[0]!, /node node:project-discovery/u);
+  assert.match(humanLines[0]!, /NodeStarted node:project-discovery/u);
 
   const json = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
   assert.equal(json.code, 0, json.stderr);
@@ -377,7 +469,7 @@ test("node reports focused status and only expands tool payloads with --tools", 
   const human = await cli(project, ["node", RUN_ID, "node:project-discovery"], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Node: node:project-discovery#0$/mu);
-  assert.match(human.stdout, /^State: in-progress \(running\)$/mu);
+  assert.match(human.stdout, /^State: in-progress \(in-progress\)$/mu);
   assert.match(human.stdout, /^Duration: 65s$/mu);
   assert.match(human.stdout, /^Attempts: 1 total, 0 succeeded, 0 failed, 0 cancelled, 1 waiting$/mu);
   assert.match(human.stdout, /^Output: not recorded$/mu);
@@ -435,8 +527,7 @@ test("events rejects a raw event category instead of widening the view", async (
 
 test("events --watch --json keeps a stream failure on one NDJSON line", async () => {
   const { project, env } = await launchedProject();
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'stream broke' >&2\nexit 3\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  fs.writeFileSync(path.join(project, "fake-events-failure"), "stream broke\n", "utf8");
 
   const watched = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
 
@@ -484,7 +575,7 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /^Workflow engine:$/mu);
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
-  assert.match(human.stdout + human.stderr, /- compatibility patches: detached admission /u);
+  assert.match(human.stdout + human.stderr, /- compatibility patches: local delegation .*detached snapshot transfer /u);
   // Every tracked workaround has to reach the operator, not just the first one.
   // The two resume-durability patches are the ones whose absence silently costs
   // durable resume progress, so assert them by name.
@@ -492,13 +583,12 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
   assert.match(human.stdout + human.stderr, /- recon: missing from execution environment/u);
-  assert.doesNotMatch(human.stdout + human.stderr, /smithers-orchestrator/u);
-  // The registry check reports the renamed upstream package; it must describe it
-  // without naming it, on both the human and JSON surfaces.
+  assert.doesNotMatch(human.stdout + human.stderr, /smthrs/u);
   assert.doesNotMatch(human.stdout + human.stderr, /smthrs/iu);
 
   const json = await cli(project, ["doctor", "--json"], doctorEnv);
   const body = parseJson(json);
+  assert.notEqual(body.data, null, `${json.stdout}${json.stderr}`);
   const data = body.data as {
     checks: Array<{ name: string; status: string }>;
     toolchain: Array<{ name: string; available: boolean }>;
@@ -510,11 +600,32 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.equal(data.toolchain.find((entry) => entry.name === "recon")?.available, false);
   assert.match(data.workflow_engine.required_version, /^\d+\.\d+\.\d+$/u);
   assert.equal(typeof data.workflow_engine.latest_published_version, "string");
+
+  addOpenRouterProfile(project);
+  const topologyOverride = path.join(project, ".ultrafuzz", "openrouter-topology.yml");
+  fs.writeFileSync(
+    topologyOverride,
+    fs
+      .readFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - openrouter\n"
+      ),
+    "utf8"
+  );
+  const override = await cli(
+    project,
+    ["doctor", "--topology-path", ".ultrafuzz/openrouter-topology.yml", "--json"],
+    doctorEnv
+  );
+  const overrideBody = parseJson(override) as { diagnostics: Array<{ code?: string }> };
+  assert.equal(override.code, 1);
+  assert.ok(overrideBody.diagnostics.some((diagnostic) => diagnostic.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
 });
 
 test("status recommends ultrafuzz why instead of the engine command", async () => {
   const project = tempProject();
-  const binDir = path.join(project, "fake-bin");
+  const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -522,32 +633,41 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
     [
       "#!/bin/sh",
       'case "$1" in',
+      "  inspect)",
+      `    printf '{"ok":true,"data":{"run":{"id":"%s","workflow":"workflow","status":"running","started":"2026-08-09T00:00:00.000Z","elapsed":"1s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-08-09T00:00:01.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n' "$2" "$2"`,
+      "    ;;",
+      "  events)",
+      "    ;;",
       "  status)",
-      `    printf '%s\\n' '${JSON.stringify({
-        data: {
-          status: "running",
-          verdict: "blocked",
-          reason: "run `smithers why` for the blocking node",
-          counts: {
-            finished: 1,
-            inProgress: 0,
-            pending: 5,
-            failed: 0,
-            waitingApproval: 1,
-            waitingEvent: 0,
-            waitingTimer: 0,
-            skipped: 0,
-            other: 0,
-            total: 6
+      `    printf '%s\\n' ${shellQuote(
+        JSON.stringify({
+          ok: true,
+          data: {
+            status: "running",
+            verdict: "blocked",
+            reason: "run `smithers why` for the blocking node",
+            counts: {
+              finished: 1,
+              inProgress: 0,
+              pending: 5,
+              failed: 0,
+              waitingApproval: 1,
+              waitingEvent: 0,
+              waitingTimer: 0,
+              skipped: 0,
+              other: 0,
+              total: 6
+            },
+            modelMix: [],
+            throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1_000 },
+            bottleneck: [],
+            bottleneckOmitted: 0,
+            quota: null,
+            generatedAtMs: 2_000
           },
-          modelMix: [],
-          throughput: { recentFinished: 0, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1000 },
-          bottleneck: [],
-          bottleneckOmitted: 0,
-          quota: null,
-          generatedAtMs: 2000
-        }
-      })}'`,
+          meta: { command: "status", duration: "1ms" }
+        })
+      )}`,
       "    ;;",
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
       "esac",

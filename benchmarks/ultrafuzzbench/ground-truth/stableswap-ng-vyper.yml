@@ -1,0 +1,35 @@
+schema_version: ultrafuzz.eval-ground-truth.v1
+source:
+  url: https://github.com/mixbytes/audits_public/blob/50dea7e8af1cc7e94ef80bf14a6614bf7cee48aa/Curve%20Finance/StableSwapNG/README.md
+  source_commit: 50dea7e8af1cc7e94ef80bf14a6614bf7cee48aa
+  retrieved_sha256: 2bfacc4e7143e2a620ee646ad49a6b8fa151a5eb3a2a4bc1bd503fa17cef9f81
+  note: Public MixBytes findings selected by the original Ultrafuzz StableSwapNG benchmark.
+bugs:
+  - id: critical-rebasing-rewards-stuck
+    severity: critical
+    title: Rebasing rewards will get stuck on the contract
+    root_cause: stored_balances omitted rebaseable-token rewards, making accrued value impossible to withdraw
+  - id: critical-get-virtual-price-donation-skim
+    severity: critical
+    title: get_virtual_price can be manipulated
+    root_cause: Direct token transfers inflated virtual price and could be skimmed through exchange_received
+  - id: critical-metapool-old-base-readonly-reentrancy
+    severity: critical
+    title: Read-only reentrancy in a metapool with an old base pool
+    root_cause: A metapool consumed a manipulated old base-pool virtual price
+  - id: high-metapool-meta-coin-stored-balances-update
+    severity: high
+    title: Incorrect metapool storage update
+    root_cause: A metapool path used the wrong dx_w_fee when updating stored_balances
+  - id: high-metapool-base-pool-swap-stored-balances-update
+    severity: high
+    title: Incorrect base-pool swap accounting
+    root_cause: A base-pool swap through the metapool updated metapool stored_balances when it should not
+  - id: high-liquidity-gauge-crv-rate-update
+    severity: high
+    title: Incorrect CRV rate update
+    root_cause: LiquidityGauge fetched the CRV rate before advancing the CRV epoch and stored a stale rate
+  - id: high-empty-gauge-rewards-last-update
+    severity: high
+    title: Incorrect rewards distribution in an empty gauge
+    root_cause: Depositing rewards at zero total supply advanced last_update and trapped rewards

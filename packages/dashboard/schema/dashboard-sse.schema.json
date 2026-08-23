@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:dashboard:sse:1",
+  "title": "Ultrafuzz dashboard server-sent event data envelope",
+  "oneOf": [
+    { "$ref": "#/$defs/eventsEnvelope" },
+    { "$ref": "#/$defs/errorEnvelope" },
+    { "$ref": "#/$defs/commandJobsEnvelope" }
+  ],
+  "$defs": {
+    "nonNegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "eventsEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_type", "sequence", "generated_at", "payload"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.sse.v1" },
+        "event_type": { "const": "ultrafuzz-event" },
+        "sequence": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "urn:ultrafuzz:schema:dashboard:http:1#/$defs/eventsResponse" }
+      }
+    },
+    "errorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_type", "sequence", "generated_at", "payload"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.sse.v1" },
+        "event_type": { "const": "ultrafuzz-error" },
+        "sequence": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["message"],
+          "properties": {
+            "message": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "commandJobsEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_type", "sequence", "generated_at", "payload"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.sse.v1" },
+        "event_type": { "const": "ultrafuzz-command-jobs" },
+        "sequence": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jobs"],
+          "properties": {
+            "jobs": {
+              "type": "array",
+              "items": { "$ref": "urn:ultrafuzz:schema:dashboard:http:1#/$defs/commandJobResponse" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

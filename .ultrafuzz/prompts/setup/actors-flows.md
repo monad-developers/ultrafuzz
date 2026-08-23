@@ -51,8 +51,7 @@ Use precise contract and function names. Be concise, evidence-based, and label i
 
 Save your output to {{artifact_path}}/setup/actors-flows.md
 
-Write `[]` to {{artifact_path}}/findings.json unless you independently
-reproduce a concrete target defect with public impact and actionable evidence.
-Trust assumptions, privileged-role powers, documentation gaps, design footguns,
-and candidate strategy ideas are actor-flow context; record them in
-`setup/actors-flows.md`, not in `findings.json`.
+This node declares only the actor-flow Markdown output. Record trust
+assumptions, privileged-role powers, documentation gaps, design footguns, and
+candidate strategy ideas in `setup/actors-flows.md`; do not create an
+undeclared `findings.json` or any other sibling output.

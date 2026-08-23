@@ -1,0 +1,84 @@
+{
+  "schema_version": "ultrafuzz.benchmark.lanes.v2",
+  "smoke": {
+    "trials_per_variant": 1,
+    "strategy_loops": 1,
+    "disable_invariant_tests": true,
+    "disable_differential_tests": true,
+    "disable_dynamic_strategies": true,
+    "model_profiles": [
+      {
+        "id": "benchmark-smoke-gpt-5-6-luna-high",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "high"
+      }
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
+  },
+  "threat-model": {
+    "trials_per_variant": 1,
+    "strategy_loops": 1,
+    "disable_invariant_tests": false,
+    "disable_differential_tests": false,
+    "disable_dynamic_strategies": false,
+    "model_profiles": [
+      {
+        "id": "benchmark-threat-model-gpt-5-6-luna-high",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "high"
+      }
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
+  },
+  "full": {
+    "trials_per_variant": 1,
+    "strategy_loops": 1,
+    "disable_invariant_tests": false,
+    "disable_differential_tests": false,
+    "disable_dynamic_strategies": false,
+    "model_profiles": [
+      {
+        "id": "benchmark-full-gpt-5-6-luna-high",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "high"
+      },
+      {
+        "id": "benchmark-full-claude-sonnet-5-high",
+        "agent": "ClaudeAgent",
+        "model": "claude-sonnet-5",
+        "reasoning": "high"
+      },
+      {
+        "id": "benchmark-full-kimi-k3-max",
+        "agent": "KimiAgent",
+        "model": "kimi-k3",
+        "reasoning": "max"
+      },
+      {
+        "id": "benchmark-full-deepseek-v4-pro-max",
+        "agent": "DeepSeekAgent",
+        "model": "deepseek-v4-pro",
+        "reasoning": "max"
+      }
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
+  }
+}

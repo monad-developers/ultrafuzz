@@ -84,9 +84,13 @@ and existing harnesses for target-derived invariants and liveness requirements.
 Before writing the normalized inventory, create a machine-readable `Verbatim
 source-evidence ledger` at
 `{{artifact_path}}/setup/invariant-evidence-ledger.json`. Use the task-local
-`{{schema_path}}/invariant-evidence-ledger.schema.json` and assign each entry a
-stable `id`, source path, line or symbol location, kind, verbatim source text,
-and one or more `inventory_ids` using the `inventory-` prefix. Scan every
+`{{schema_path}}/invariant-evidence-ledger.schema.json`; it alone defines the
+JSON version, fields, types, required members, and empty form. Assign each entry
+a stable identity, source path, line or symbol location, kind, verbatim source
+text, and one or more schema-defined inventory references. Write each
+`source_location` as `line <n>`, `lines <first>-<last>`, or the name of the
+declared symbol the entry came from; the verifier reads exactly those three
+forms, so an abbreviation such as `L55` is rejected. Scan every
 relevant documentation, specification, NatSpec, source-comment, test, and
 harness section and every explicitly enumerated bullet or formula, regardless of
 the section heading. Classify statements that express invariants, accounting,
@@ -109,10 +113,16 @@ operands, comparison direction, units, denominator, and rounding terms. If a
 separate source probe finds no matching section, record that probe and its result
 rather than silently skipping it.
 
-The JSON ledger must also contain `inventory_rows`, where each row has a
-stable `inventory-` ID, a normalized description, and one or more
-`ledger_ids`; every `inventory_id` in an entry must name one of these rows.
-Record each negative source probe in `scan_probes` with a stable `probe-` ID,
+Populate the schema-defined `inventory_rows` with a stable identity, normalized
+description, and references to the contributing ledger entries; every
+`inventory_id` in an entry must name one of these rows.
+The two ID lists must agree in both directions: if an entry lists
+`inventory-x`, then row `inventory-x` must list that entry's `id` in its
+`ledger_ids`, and every `ledger_ids` element must name a real entry whose
+`inventory_ids` contains that row's ID. A join that holds one way and not the
+other is rejected, so build one entry-to-row mapping and project it into both
+schema-defined collections instead of writing each side by hand.
+Record each negative source probe in `scan_probes` with a stable identity,
 source path, query, and result. A probe `source_path` may name a real
 directory you searched, or a path that turned out not to exist; neither is
 snapshotted, so either is a fine record of where you looked. A symlink is not:
@@ -126,18 +136,18 @@ is compared against its source, a probe's `result` is not. Use `safety`,
 classifications. Keep every `source_path` target-relative; for ledger
 `entries`, use a line range or symbol that can be checked against the
 checked-out source.
-If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
-at least one non-empty `scan_probes` record explaining the searches and
-their results, and a `no_invariants_justification` stating why this target
-carries no invariant: what you searched, and why the absence is a property of
-the target rather than of the search. The justification is required only for an
-empty ledger and is rejected on a ledger that has entries.
+If no invariant statement is found, use the pinned schema's empty-ledger form,
+record at least one non-empty source probe explaining the searches and their
+results, and state why this target carries no invariant: what you searched, and
+why the absence is a property of the target rather than of the search. This
+justification belongs only to an empty ledger and is rejected on a ledger that
+has entries.
 
 ### Byte-preserving ledger construction
 
 Treat every `verbatim` value as a byte-preserving source slice. The verifier
-normalizes only line endings, terminal line separators, and a leading Markdown
-presentation prefix; retain internal and trailing source whitespace. For a line
+normalizes only line endings and terminal line separators; retain Markdown
+presentation prefixes plus internal and trailing source whitespace. For a line
 location, derive the value by reading the cited file and slicing the requested
 line range; for a symbol location, derive it from the matching declaration.
 Use a short local script that reads the source and serializes the ledger with
@@ -147,11 +157,10 @@ such as `\\%` and `\\times` intact: JSON source shows each backslash escaped,
 while the parsed `verbatim` value must equal the source slice, including repeated
 backslashes and other literals. Build the Markdown
 handoff from those same parsed ledger objects so its `verbatim` blocks carry the
-identical text. Render multiline `verbatim` values as an indented literal block:
-place two spaces before each source line after the `verbatim:` field. This keeps
-source headings and delimiter-looking lines inside the field while preserving
-the parsed text. Keep extraction scripts small and file-based so source slices
-are not retyped in a large inline shell command.
+identical text. Use the strict JSON field grammar described below, so multiline
+values remain one JSON-string field with escaped line separators. Keep
+extraction scripts small and file-based so source slices are not retyped in a
+large inline shell command.
 
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
@@ -173,13 +182,22 @@ Create a table with information: file, coverage, semantic
 
 Write the discovery artifact with the framework decisions and project-specific context needed by later workflow nodes in {{artifact_path}}/setup/project-discovery.md
 
-The Markdown discovery handoff must reproduce every ledger entry's stable ID,
+The following grammar governs only the human-readable Markdown companion; the
+pinned schema remains the sole authority for the JSON ledger. The Markdown
+discovery handoff must reproduce every ledger entry's stable ID,
 source path, source location, verbatim text, and inventory IDs so reviewers can
 audit the structured artifact without opening JSON. A source statement may map to
 multiple normalized inventory rows, and equivalent source statements may map to
 one row; record those cardinalities explicitly rather than forcing a one-to-one
-mapping. Render each entry in a delimited block beginning with
-`### Ledger entry: <id>` and each normalized row in a block beginning with
-`### Inventory row: <inventory-id>`, including the complete fields in each block.
-Close those blocks with `### End ledger entry: <id>` and
-`### End inventory row: <inventory-id>` respectively.
+mapping. Use one reversible companion grammar. Render each entry between
+`### Ledger entry: <json-string-id>` and
+`### End ledger entry: <json-string-id>`. Inside it emit exactly these strict
+JSON-valued lines: `source_path`, `source_location`, `kind`, `verbatim`, and
+`inventory_ids`. Render every normalized row between
+`### Inventory row: <json-string-id>` and
+`### End inventory row: <json-string-id>`, with exactly `description` and
+`ledger_ids` strict JSON-valued lines. Heading IDs are JSON strings even when
+simple; scalar fields are JSON strings and list fields are JSON arrays. Do not
+use bullets, tables, bare tokens, indented multiline values, aliases, extra
+fields, duplicate fields, or extra blocks. Empty ledgers must contain no ledger
+entry or inventory row blocks.

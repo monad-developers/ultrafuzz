@@ -1,5 +1,14 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  findingNoteKeyPromptVocabulary,
+  findingReachabilityPromptVocabulary,
+  isArtifactContractId,
+  promptArtifactAuthorityPathSelectorId
+} from "@ultrafuzz/artifacts";
+
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
 import { builtInPromptRoot } from "./assets.js";
 
@@ -21,11 +30,13 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "schema_path",
   "artifact_path",
   "artifact_dir",
-  "ancestor_artifacts",
-  "ancestor_generated_test_manifests",
+  "ancestor_contract_artifact_authority",
+  "ancestor_artifact_path_authority",
   "run_metadata_path",
   "output_findings_path",
   "output_patch_path",
+  "output_stage_findings_path",
+  "output_stage_findings_relative_path",
   "strategy",
   "attempt_index",
   "strategy_loop_index",
@@ -39,14 +50,16 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
-  "vulnerability_database_path",
-  "artifact_schema_dir"
+  "finding_reachability_vocabulary",
+  "finding_note_key_vocabulary",
+  "coverage_evidence_markdown_projection"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
 
 export interface PromptGraphNode {
   id: string;
+  kind: "agentic" | "reference";
   dependsOn?: string[];
   depends_on?: string[];
   artifactDir?: string;
@@ -129,7 +142,6 @@ export interface PromptRenderInput {
     metadataPath: string;
   };
   outputs: {
-    findingsPath: string;
     patchPath: string;
   };
   resolvedConfig?: {
@@ -167,8 +179,13 @@ export interface PromptRenderResult {
 export type PromptArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | { kind: "ancestor_artifacts"; logicalIds: string[] | "direct" }
-  | { kind: "ancestor_artifacts_by_contract"; logicalIds: string[]; contract: string };
+  | {
+      kind: "ancestor_artifact_path_authority";
+      logicalIds: string[];
+      selectorId: string;
+      relativePaths: string[];
+    }
+  | { kind: "ancestor_contract_artifact_authority"; logicalIds: string[]; contract: string };
 
 type ArtifactProducer =
   { kind: "current" } | { kind: "logical"; logicalId: string } | { kind: "handoff"; logicalId: string };
@@ -231,6 +248,8 @@ export function parsePromptVariableReference(
     throw new PromptError("empty-template-variable", "template variable name cannot be empty");
   }
 
+  rejectLegacyAncestorCollectionHelper(raw);
+
   const producer = parseArtifactProducer(raw);
   if (producer) {
     if (producer.kind === "current") {
@@ -242,11 +261,26 @@ export function parsePromptVariableReference(
     return { raw, name: "artifact_handoff", argument: producer.logicalId };
   }
 
-  const ancestorArtifacts = parseAncestorArtifactsSelector(raw);
-  if (ancestorArtifacts) {
-    return ancestorArtifacts === "direct"
-      ? { raw, name: "ancestor_artifacts" }
-      : { raw, name: "ancestor_artifacts", argument: ancestorArtifacts.join(",") };
+  const ancestorArtifactPathAuthority = parseAncestorArtifactPathAuthoritySelector(raw);
+  if (ancestorArtifactPathAuthority) {
+    return { raw, name: "ancestor_artifact_path_authority", argument: ancestorArtifactPathAuthority.join(",") };
+  }
+  if (raw === "ancestor_artifact_path_authority") {
+    throw new PromptError(
+      "invalid-artifact-reference",
+      "ancestor_artifact_path_authority requires at least one exact declared output path"
+    );
+  }
+
+  const ancestorContractArtifactAuthority = parseAncestorContractArtifactAuthoritySelector(raw);
+  if (ancestorContractArtifactAuthority) {
+    return { raw, name: "ancestor_contract_artifact_authority", argument: ancestorContractArtifactAuthority };
+  }
+  if (raw === "ancestor_contract_artifact_authority") {
+    throw new PromptError(
+      "invalid-artifact-reference",
+      "ancestor_contract_artifact_authority requires an exact registered artifact contract"
+    );
   }
 
   if (options.allowDynamicItemVariables === true && isDynamicItemTemplateVariable(raw)) {
@@ -288,9 +322,13 @@ function validatePromptVariableOccurrence(
     const suffix = parseArtifactSuffix(producer, template.slice(occurrence.end));
     return suffix.path === undefined ? reference : { ...reference, path: suffix.path };
   }
-  const ancestorArtifacts = parseAncestorArtifactsSelector(occurrence.name);
-  if (ancestorArtifacts) {
-    rejectAncestorArtifactsSuffix(template.slice(occurrence.end));
+  const ancestorArtifactPathAuthority = parseAncestorArtifactPathAuthoritySelector(occurrence.name);
+  if (ancestorArtifactPathAuthority) {
+    rejectCompactAuthoritySuffix(template.slice(occurrence.end));
+  }
+  const ancestorContractArtifactAuthority = parseAncestorContractArtifactAuthoritySelector(occurrence.name);
+  if (ancestorContractArtifactAuthority) {
+    rejectCompactAuthoritySuffix(template.slice(occurrence.end));
   }
   return reference;
 }
@@ -323,23 +361,42 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       continue;
     }
 
-    const ancestorArtifacts = parseAncestorArtifactsSelector(occurrence.name);
-    if (ancestorArtifacts) {
-      rejectAncestorArtifactsSuffix(body.slice(occurrence.end));
-      rendered += renderAncestorArtifacts(ancestorArtifacts, graph);
+    const ancestorArtifactPathAuthority = parseAncestorArtifactPathAuthoritySelector(occurrence.name);
+    if (ancestorArtifactPathAuthority) {
+      rejectCompactAuthoritySuffix(body.slice(occurrence.end));
+      const matched = matchingAncestorsByPaths(ancestorArtifactPathAuthority, graph);
+      const selectorId = promptArtifactAuthorityPathSelectorId(ancestorArtifactPathAuthority);
+      rejectReferenceAncestorsForCompactAuthority(
+        `ancestor_artifact_path_authority:${ancestorArtifactPathAuthority.join(",")}`,
+        matched.logicalIds,
+        graph
+      );
+      rendered += renderAncestorArtifactPathAuthority(input, selectorId);
       artifactReferences.push({
-        kind: "ancestor_artifacts",
-        logicalIds: ancestorArtifacts === "direct" ? "direct" : ancestorArtifacts
+        kind: "ancestor_artifact_path_authority",
+        logicalIds: matched.logicalIds,
+        selectorId,
+        relativePaths: ancestorArtifactPathAuthority
       });
       consumed = occurrence.end;
       continue;
     }
 
-    if (occurrence.name === "ancestor_generated_test_manifests") {
-      const contract = "ultrafuzz/generated-tests@1";
-      const matched = ancestorArtifactsByContract(contract, graph);
-      rendered += renderPathList(matched.paths);
-      artifactReferences.push({ kind: "ancestor_artifacts_by_contract", logicalIds: matched.logicalIds, contract });
+    const ancestorContractArtifactAuthority = parseAncestorContractArtifactAuthoritySelector(occurrence.name);
+    if (ancestorContractArtifactAuthority) {
+      rejectCompactAuthoritySuffix(body.slice(occurrence.end));
+      const matched = matchingAncestorsByContract(ancestorContractArtifactAuthority, graph);
+      rejectReferenceAncestorsForCompactAuthority(
+        `ancestor_contract_artifact_authority:${ancestorContractArtifactAuthority}`,
+        matched.logicalIds,
+        graph
+      );
+      rendered += renderAncestorContractArtifactAuthority(input, ancestorContractArtifactAuthority);
+      artifactReferences.push({
+        kind: "ancestor_contract_artifact_authority",
+        logicalIds: matched.logicalIds,
+        contract: ancestorContractArtifactAuthority
+      });
       consumed = occurrence.end;
       continue;
     }
@@ -355,6 +412,17 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       }
       rendered += value;
     }
+    if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
+      const contractDescription =
+        occurrence.name === "output_findings_path"
+          ? "findings@2"
+          : "findings, triaged-findings, or severity-classified-findings";
+      throw new PromptError(
+        "invalid-artifact-reference",
+        `${occurrence.name} requires exactly one declared ${contractDescription} output`
+      );
+    }
+    rendered += value;
     consumed = occurrence.end;
   }
   rendered += unescapePromptTemplateLiterals(body.slice(consumed));
@@ -394,8 +462,29 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   }
 
   const schemaDirectory = taskSchemaDirectory(input);
+  const findingsGuidance = outputs.some((output) => output.contract === "ultrafuzz/findings@2")
+    ? renderOutputContractTemplate("findings.mdx", {})
+    : "";
+  const boundaryRecipesGuidance = outputs.some((output) => output.contract === "ultrafuzz/boundary-recipes@1")
+    ? renderOutputContractTemplate("boundary-recipes.mdx", {})
+    : "";
+  const generatedTestsOutput = outputs.find((output) => output.contract === "ultrafuzz/generated-tests@3");
+  const generatedTestsGuidance =
+    generatedTestsOutput === undefined
+      ? ""
+      : renderOutputContractTemplate("generated-tests.mdx", {
+          strategy_attempt_test_dir: markdownCodeSpan(strategyAttemptTestDirectory(input)),
+          generated_tests_dir: markdownCodeSpan(path.join(input.node.artifactDir, "generated-tests")),
+          generated_tests_manifest_path: markdownCodeSpan(path.join(input.node.artifactDir, generatedTestsOutput.path)),
+          run_id: markdownCodeSpan(input.run.id),
+          logical_node_id: markdownCodeSpan(input.node.logicalId)
+        });
+  const specializedGuidance = [findingsGuidance, boundaryRecipesGuidance, generatedTestsGuidance]
+    .filter((guidance) => guidance !== "")
+    .map((guidance) => guidance.trimEnd())
+    .join("\n\n");
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
-    ? `Where an entry above names a schema to validate against, that file is a JSON Schema already present in your workspace under \`${schemaDirectory}\`. Read it and check your artifact against it before you finish. It is the authority on field names, types, and which fields are required; prefer it over any example when the two appear to disagree.\n\n`
+    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
     : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
     schema_guidance: schemaGuidance,
@@ -403,23 +492,77 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .map((output) => {
         const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
         const empty =
-          validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
+          output.schemaFile !== undefined
+            ? "Schema-backed empty form: defined only by the pinned schema; inspect and validate it instead of copying a prose example."
+            : validEmptyExample === undefined
+              ? "Empty output is not valid."
+              : `Valid empty form: \`${validEmptyExample}\``;
         return [
           `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
           `  Contract: \`${output.contract}\``,
-          `  Schema: ${output.description}`,
+          `  Purpose: ${output.description}`,
           // A machine-readable schema beats prose: the producer can check the
           // file it just wrote rather than discover a bad field from a failed node.
           ...(output.schemaFile === undefined
             ? []
-            : [`  Validate against: \`${path.join(schemaDirectory, output.schemaFile)}\``]),
+            : [
+                `  Validate against: ${markdownCodeSpan(path.join(schemaDirectory, output.schemaFile))}`,
+                `  Validation command: ${validationCommand(
+                  path.join(schemaDirectory, output.schemaFile),
+                  path.join(input.node.artifactDir, output.path)
+                )}`,
+                `  Contract validation command: ${contractValidationCommand(
+                  output.contract,
+                  path.join(input.node.artifactDir, output.path)
+                )}`
+              ]),
           `  ${empty}`
         ].join("\n");
       })
       .join("\n")
   });
 
-  return `${rendered.trimEnd()}\n\n${contract.trimEnd()}\n`;
+  return `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${contract.trimEnd()}\n`;
+}
+
+function validationCommand(schemaPath: string, artifactPath: string): string {
+  const command = [
+    "ultrafuzz json validate",
+    "--schema",
+    shellSingleQuote(schemaPath),
+    "--file",
+    shellSingleQuote(artifactPath)
+  ].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function contractValidationCommand(contract: string, artifactPath: string): string {
+  const command = ["ultrafuzz artifact validate", shellSingleQuote(contract), shellSingleQuote(artifactPath)].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function shellSingleQuote(value: string): string {
+  if (hasControlCharacter(value)) {
+    throw new PromptError(
+      "unsafe-validation-command-path",
+      "JSON validation command paths must not contain control characters"
+    );
+  }
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || (codeUnit >= 0x7f && codeUnit <= 0x9f)) return true;
+  }
+  return false;
+}
+
+function markdownCodeSpan(value: string): string {
+  const longestRun = Math.max(0, ...(value.match(/`+/gu) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longestRun + 1);
+  return longestRun === 0 ? `${fence}${value}${fence}` : `${fence} ${value} ${fence}`;
 }
 
 const outputContractTemplateCache = new Map<string, string>();
@@ -445,7 +588,20 @@ function loadOutputContractTemplate(relativePath: string): string {
 }
 
 function outputContractTemplateRoot(): string {
-  return path.join(builtInPromptRoot(), "_templates", "output-contract");
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "prompts", "_templates", "output-contract"),
+    path.resolve(here, "../../../.ultrafuzz/prompts/_templates/output-contract")
+  ];
+  const found = candidates.find((candidate) => {
+    try {
+      return statSync(candidate).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (found === undefined) throw new Error(`unable to locate the packaged output contract templates from ${here}`);
+  return found;
 }
 
 const agentPreambleTemplateCache = new Map<AgentPreambleTemplateName, string>();
@@ -496,6 +652,7 @@ export function writeRenderedPrompt(result: PromptRenderResult): string {
 export function renamePromptArtifactReferences(template: string, oldLogicalId: string, newLogicalId: string): string {
   validateArtifactReferenceId(oldLogicalId);
   validateArtifactReferenceId(newLogicalId);
+  validatePromptVariables(template);
 
   let rewritten = "";
   let consumed = 0;
@@ -599,24 +756,57 @@ function parseArtifactProducer(name: string): ArtifactProducer | undefined {
   return undefined;
 }
 
-function parseAncestorArtifactsSelector(name: string): "direct" | string[] | undefined {
-  if (name === "ancestor_artifacts") {
-    return "direct";
-  }
-  const selected = name.match(/^ancestor_artifacts:(.+)$/);
-  if (!selected) {
-    return undefined;
-  }
+function rejectLegacyAncestorCollectionHelper(name: string): void {
+  const legacyHelper = [
+    "ancestor_generated_test_manifest_authorities",
+    "ancestor_generated_test_manifests",
+    "ancestor_artifacts_by_path",
+    "ancestor_artifacts"
+  ].find((candidate) => name === candidate || name.startsWith(`${candidate}:`));
+  if (legacyHelper === undefined) return;
+  const replacement =
+    legacyHelper === "ancestor_generated_test_manifests" ||
+    legacyHelper === "ancestor_generated_test_manifest_authorities"
+      ? "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3"
+      : legacyHelper === "ancestor_artifacts_by_path"
+        ? "ancestor_artifact_path_authority:<path>[,<path>...]"
+        : "ancestor_contract_artifact_authority:<contract> or ancestor_artifact_path_authority:<path>[,<path>...]";
+  throw new PromptError(
+    "invalid-artifact-reference",
+    `legacy prompt helper \`${legacyHelper}\` is no longer supported; migrate to \`${replacement}\``,
+    { variable: name }
+  );
+}
+
+function parseAncestorArtifactPathAuthoritySelector(name: string): string[] | undefined {
+  const selected = name.match(/^ancestor_artifact_path_authority:(.+)$/u);
+  if (!selected) return undefined;
   const seen = new Set<string>();
-  const ids = (selected[1] ?? "").split(",").map((part) => part.trim());
-  for (const id of ids) {
-    validateArtifactReferenceId(id);
-    if (seen.has(id)) {
-      throw new PromptError("invalid-artifact-reference", `duplicate ancestor_artifacts target: ${id}`);
+  const relativePaths = (selected[1] ?? "").split(",").map((part) => part.trim());
+  for (const relativePath of relativePaths) {
+    validateArtifactRelativePath(relativePath);
+    if (seen.has(relativePath)) {
+      throw new PromptError(
+        "invalid-artifact-reference",
+        `duplicate ancestor_artifact_path_authority target: ${relativePath}`
+      );
     }
-    seen.add(id);
+    seen.add(relativePath);
   }
-  return ids;
+  return relativePaths.sort((left, right) => left.localeCompare(right));
+}
+
+function parseAncestorContractArtifactAuthoritySelector(name: string): string | undefined {
+  const selected = name.match(/^ancestor_contract_artifact_authority:(.+)$/u);
+  if (!selected) return undefined;
+  const contract = (selected[1] ?? "").trim();
+  if (!isArtifactContractId(contract)) {
+    throw new PromptError(
+      "invalid-artifact-reference",
+      `unknown ancestor artifact contract for sealed authority: ${contract}`
+    );
+  }
+  return contract;
 }
 
 function validateArtifactReferenceId(id: string): void {
@@ -653,9 +843,12 @@ function parseArtifactSuffix(producer: ArtifactProducer, afterVariable: string):
   };
 }
 
-function rejectAncestorArtifactsSuffix(afterVariable: string): void {
+function rejectCompactAuthoritySuffix(afterVariable: string): void {
   if (afterVariable.startsWith("/")) {
-    throw new PromptError("invalid-artifact-reference", "ancestor_artifacts does not accept a path suffix");
+    throw new PromptError(
+      "invalid-artifact-reference",
+      "compact ancestor authority selectors do not accept a path suffix"
+    );
   }
 }
 
@@ -673,7 +866,6 @@ interface GraphIndex {
   current: PromptGraphNode;
   logicalNodes: Map<string, PromptGraphNode>;
   ancestorIds: Set<string>;
-  directDependencyIds: string[];
   artifactDirsByLogicalId: Map<string, string[]>;
 }
 
@@ -724,7 +916,6 @@ function buildGraphIndex(input: PromptRenderInput): GraphIndex {
     current,
     logicalNodes,
     ancestorIds: collectAncestorIds(input.node.logicalId, logicalNodes),
-    directDependencyIds: dependenciesFor(current),
     artifactDirsByLogicalId
   };
 }
@@ -819,57 +1010,46 @@ function renderArtifactProducer(producer: ArtifactProducer, suffix: string | und
   return renderPathList(dirs.map((dir) => path.join(dir, suffix ?? "")));
 }
 
-function renderAncestorArtifacts(selector: "direct" | string[], graph: GraphIndex): string {
-  const logicalIds = selector === "direct" ? graph.directDependencyIds : selector;
-  if (logicalIds.length === 0) {
-    throw new PromptError("invalid-artifact-reference", "ancestor_artifacts has no producers");
-  }
-  const paths: string[] = [];
-  for (const logicalId of logicalIds) {
-    const node = graph.logicalNodes.get(logicalId);
-    if (!node) {
-      throw new PromptError("invalid-artifact-reference", `unknown ancestor_artifacts producer: ${logicalId}`);
-    }
-    if (!graph.ancestorIds.has(logicalId)) {
-      throw new PromptError(
-        "not-ancestor",
-        `ancestor_artifacts producer \`${logicalId}\` is not an ancestor of \`${graph.current.id}\``
-      );
-    }
-    const required = requiredArtifactsFor(node);
-    if (required.length === 0) {
-      throw new PromptError(
-        "invalid-artifact-reference",
-        `ancestor_artifacts producer \`${logicalId}\` has no outputs`
-      );
-    }
-    const dirs = graph.artifactDirsByLogicalId.get(logicalId) ?? [];
-    for (const dir of dirs) {
-      for (const artifact of required) {
-        paths.push(path.join(dir, artifact));
-      }
-    }
-  }
-  return renderPathList(paths.sort());
-}
-
-function ancestorArtifactsByContract(contract: string, graph: GraphIndex): { logicalIds: string[]; paths: string[] } {
+function matchingAncestorsByContract(contract: string, graph: GraphIndex): { logicalIds: string[] } {
   const logicalIds: string[] = [];
-  const paths: string[] = [];
   for (const logicalId of [...graph.ancestorIds].sort()) {
     const node = graph.logicalNodes.get(logicalId);
     if (node === undefined) continue;
     const outputs = artifactOutputsFor(node).filter((output) => output.contract === contract);
     if (outputs.length === 0) continue;
     logicalIds.push(logicalId);
-    for (const dir of graph.artifactDirsByLogicalId.get(logicalId) ?? []) {
-      for (const output of outputs) paths.push(path.join(dir, output.path));
-    }
   }
-  if (paths.length === 0) {
-    throw new PromptError("invalid-artifact-reference", `no ancestor artifacts use contract ${contract}`);
+  return { logicalIds };
+}
+
+function matchingAncestorsByPaths(relativePaths: readonly string[], graph: GraphIndex): { logicalIds: string[] } {
+  const requested = new Set(relativePaths);
+  const logicalIds = new Set<string>();
+  for (const logicalId of [...graph.ancestorIds].sort()) {
+    const node = graph.logicalNodes.get(logicalId);
+    if (node === undefined) continue;
+    const outputs = artifactOutputsFor(node).filter((output) => requested.has(output.path));
+    if (outputs.length === 0) continue;
+    logicalIds.add(logicalId);
   }
-  return { logicalIds, paths: paths.sort() };
+  return { logicalIds: [...logicalIds] };
+}
+
+function rejectReferenceAncestorsForCompactAuthority(
+  selector: string,
+  matchingLogicalIds: readonly string[],
+  graph: GraphIndex
+): void {
+  const referenceLogicalId = matchingLogicalIds.find(
+    (logicalId) => graph.logicalNodes.get(logicalId)?.kind === "reference"
+  );
+  if (referenceLogicalId === undefined) return;
+  throw new PromptError(
+    "invalid-artifact-reference",
+    `compact authority selector \`${selector}\` cannot select reference ancestor \`${referenceLogicalId}\`; ` +
+      `fixed reference consumers must use \`artifact_path:${referenceLogicalId}\` or ` +
+      `\`artifact_handoff:${referenceLogicalId}\``
+  );
 }
 
 function renderPathList(paths: string[]): string {
@@ -877,6 +1057,35 @@ function renderPathList(paths: string[]): string {
     return paths[0]!;
   }
   return paths.map((artifactPath) => `- ${artifactPath}`).join("\n");
+}
+
+function renderAncestorContractArtifactAuthority(input: PromptRenderInput, contract: string): string {
+  const authorityPath = promptArtifactAuthorityPath(input);
+  return (
+    `Read the runtime-generated ancestor artifact authority JSON at ${markdownCodeSpan(authorityPath)}. ` +
+    `Confirm its \`attempt_id\` is ${markdownCodeSpan(input.node.concreteId)}. It contains only this task's ` +
+    "verifier-admitted ancestor producers and the outputs selected by its compact prompt selectors; an empty " +
+    "`producers` array means no matching ancestor was admitted. For this intake, use only `producers[].outputs` " +
+    `entries whose \`contract\` is ${markdownCodeSpan(contract)}. Resolve each producer \`artifact_dir\` beneath ` +
+    "`artifact_path_base`, append the output `path`, and reject any absolute or escaping result."
+  );
+}
+
+function renderAncestorArtifactPathAuthority(input: PromptRenderInput, selectorId: string): string {
+  const authorityPath = promptArtifactAuthorityPath(input);
+  return (
+    `Read the runtime-generated ancestor artifact authority JSON at ${markdownCodeSpan(authorityPath)}. ` +
+    `Confirm its \`attempt_id\` is ${markdownCodeSpan(input.node.concreteId)}. It contains only this task's ` +
+    "verifier-admitted ancestor producers and the outputs selected by its compact prompt selectors; an empty " +
+    "`producers` array means no matching ancestor was admitted. For this intake, find the `selectors[]` path " +
+    `entry whose \`id\` is ${markdownCodeSpan(selectorId)}, then use only \`producers[].outputs\` entries whose ` +
+    "declared `path` is listed in that entry's `paths` array. Resolve each producer `artifact_dir` beneath " +
+    "`artifact_path_base`, append the output `path`, and reject any absolute or escaping result."
+  );
+}
+
+function promptArtifactAuthorityPath(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, ".ultrafuzz", "authorities", `${input.node.concreteId}.json`);
 }
 
 function referenceForProducer(producer: ArtifactProducer, suffix: string | undefined): PromptArtifactReference {
@@ -903,6 +1112,32 @@ function taskSchemaDirectory(input: PromptRenderInput): string {
   return path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
 }
 
+function strategyAttemptTestDirectory(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId);
+}
+
+function stageFindingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) =>
+    new Set(["ultrafuzz/findings@2", "ultrafuzz/triaged-findings@1", "ultrafuzz/severity-classified-findings@1"]).has(
+      contract
+    )
+  );
+}
+
+function findingsOutputRelativePath(input: PromptRenderInput): string {
+  return declaredFindingsOutputRelativePath(input, (contract) => contract === "ultrafuzz/findings@2");
+}
+
+function declaredFindingsOutputRelativePath(
+  input: PromptRenderInput,
+  acceptsContract: (contract: string) => boolean
+): string {
+  const current = input.graph.logicalNodes.filter((node) => node.id === input.node.logicalId);
+  if (current.length !== 1) return "";
+  const outputs = artifactOutputsFor(current[0]!).filter((output) => acceptsContract(output.contract));
+  return outputs.length === 1 ? outputs[0]!.path : "";
+}
+
 function buildVariableContext(input: PromptRenderInput): Record<string, string> {
   return {
     repo_path: input.node.repoPath,
@@ -911,8 +1146,16 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
-    output_findings_path: input.outputs.findingsPath,
+    output_findings_path: (() => {
+      const relativePath = findingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
     output_patch_path: input.outputs.patchPath,
+    output_stage_findings_path: (() => {
+      const relativePath = stageFindingsOutputRelativePath(input);
+      return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
+    })(),
+    output_stage_findings_relative_path: stageFindingsOutputRelativePath(input),
     strategy: input.node.logicalId,
     attempt_index: String(input.node.attemptIndex ?? 0),
     strategy_loop_index: String(input.node.loopIndex ?? 0),
@@ -925,11 +1168,11 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
-    strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
-    vulnerability_database_path: input.resolvedConfig?.vulnerabilityDatabasePath ?? "unavailable",
-    artifact_schema_dir: input.resolvedConfig?.artifactSchemaDir ?? "unavailable",
-    ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)])),
-    ...Object.fromEntries(Object.entries(input.dynamicVariables ?? {}).map(([key, value]) => [key, String(value)]))
+    strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
+    finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
+    finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
+    coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
+    ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }
 
@@ -940,7 +1183,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     input.node.artifactDir,
     input.run.artifactsDir,
     input.run.metadataPath,
-    input.outputs.findingsPath,
     input.outputs.patchPath
   ];
   for (const absolutePath of absolutePaths) {
@@ -949,7 +1191,6 @@ function validateRenderInputPaths(input: PromptRenderInput): void {
     }
   }
   ensureInsidePath(input.run.artifactsDir, input.node.artifactDir, "node artifact directory");
-  ensureInsidePath(input.node.artifactDir, input.outputs.findingsPath, "output findings path");
   ensureInsidePath(input.node.artifactDir, input.outputs.patchPath, "output patch path");
 }
 
@@ -961,8 +1202,15 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (!isSupportedTemplateVariable(key)) {
       throw new PromptError("missing-template-variable", `unknown prompt render variable override: ${key}`);
     }
-    if (key === "schema_path") {
-      throw new PromptError("invalid-render-input", "schema_path is task-local and cannot be overridden");
+    if (key === "schema_path" || isTopologyDerivedFindingsVariable(key)) {
+      throw new PromptError("invalid-render-input", `${key} is topology-derived and cannot be overridden`);
+    }
+    if (
+      key === "finding_reachability_vocabulary" ||
+      key === "finding_note_key_vocabulary" ||
+      key === "coverage_evidence_markdown_projection"
+    ) {
+      throw new PromptError("invalid-render-input", `${key} is authoritative and cannot be overridden`);
     }
     if (!(
       typeof value === "string" ||
@@ -974,59 +1222,12 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
   }
 }
 
-function validateDynamicVariables(variables: PromptRenderInput["dynamicVariables"]): void {
-  if (!variables) {
-    return;
-  }
-  for (const [key, value] of Object.entries(variables)) {
-    if (!isDynamicItemTemplateVariable(key)) {
-      throw new PromptError("missing-template-variable", `invalid dynamic item template variable: ${key}`);
-    }
-    if (isSupportedTemplateVariable(key)) {
-      throw new PromptError("invalid-render-input", `dynamic item variable cannot override built-in variable: ${key}`);
-    }
-    if (!(
-      typeof value === "string" ||
-      typeof value === "boolean" ||
-      (typeof value === "number" && Number.isFinite(value))
-    )) {
-      throw new PromptError("invalid-render-input", `invalid dynamic item variable value for ${key}`);
-    }
-  }
-}
-
-function resolveDynamicVariable(
-  name: string,
-  variables: NonNullable<PromptRenderInput["dynamicVariables"]>,
-  stack: string[] = []
-): { value: string; variablesUsed: string[] } {
-  if (stack.includes(name) || stack.length >= 16) {
-    throw new PromptError("invalid-render-input", `cyclic or over-deep dynamic item template variable: ${name}`);
-  }
-  const candidate = variables[name];
-  if (candidate === undefined) {
-    throw new PromptError("missing-template-variable", `missing dynamic item template variable: ${name}`);
-  }
-  let value = String(candidate);
-  const variablesUsed = [name];
-  let rendered = "";
-  let consumed = 0;
-  for (const occurrence of findTemplateOccurrences(value)) {
-    if (!isDynamicItemTemplateVariable(occurrence.name)) {
-      throw new PromptError(
-        "missing-template-variable",
-        `dynamic item value ${name} references non-item variable: ${occurrence.name}`
-      );
-    }
-    const nested = resolveDynamicVariable(occurrence.name, variables, [...stack, name]);
-    rendered += value.slice(consumed, occurrence.start);
-    rendered += nested.value;
-    variablesUsed.push(...nested.variablesUsed);
-    consumed = occurrence.end;
-  }
-  rendered += value.slice(consumed);
-  value = rendered;
-  return { value, variablesUsed };
+function isTopologyDerivedFindingsVariable(value: string): boolean {
+  return (
+    value === "output_findings_path" ||
+    value === "output_stage_findings_path" ||
+    value === "output_stage_findings_relative_path"
+  );
 }
 
 function resolveModelProvenance(input: PromptRenderInput): PromptModelProvenance | undefined {
@@ -1088,10 +1289,6 @@ function renameTemplateVariableName(name: string, oldLogicalId: string, newLogic
   }
   if (name === `artifact_handoff:${oldLogicalId}`) {
     return `artifact_handoff:${newLogicalId}`;
-  }
-  const ancestorArtifacts = parseAncestorArtifactsSelector(name);
-  if (Array.isArray(ancestorArtifacts)) {
-    return `ancestor_artifacts:${ancestorArtifacts.map((id) => (id === oldLogicalId ? newLogicalId : id)).join(",")}`;
   }
   return name;
 }

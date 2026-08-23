@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 
 import {
   assertNoSymlinkComponents,
@@ -35,7 +34,7 @@ import {
 export interface ReconciledReportArtifacts {
   markdown_path: string;
   json_path: string;
-  source: "canonical-final-report" | "preserved-agent-report";
+  source: "verified-agent-report";
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -357,39 +356,23 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
 }
 
 /**
- * A campaign that never fuzzed and a campaign that fuzzed and found nothing
- * both leave an empty findings array, and the agent-authored report cannot
- * tell them apart. Take the outcome from the campaign's own summary so the
- * report states which one happened.
+ * Locate an agent-authored final report only after current verifier and
+ * controller finalization records bind its exact bytes. This compatibility
+ * export retains the CLI-local API name while delegating the trust boundary to
+ * the shared runtime reader used by other external consumers.
  */
-function reconcileCampaignOutcome(runRoot: string, report: JsonRecord): JsonRecord {
-  // A project topology may record the campaign under either supported logical
-  // node; missing one would leave an unverified status in the canonical report.
-  let summary: JsonRecord | undefined;
-  for (const logicalNodeId of ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const) {
-    const summaryPath = logicalArtifactPath(runRoot, logicalNodeId, "campaign-summary.json");
-    if (summaryPath === undefined) continue;
-    const candidate = readRecord(runRoot, summaryPath);
-    if (typeof candidate?.outcome === "string" && candidate.outcome.trim() !== "") {
-      summary = candidate;
-      break;
-    }
-  }
-  const outcome = summary?.outcome;
-  if (typeof outcome !== "string" || outcome.trim() === "") {
-    // Without an authoritative outcome there is nothing to stand behind, and an
-    // agent-authored status could disclose a non-run that did not happen or
-    // hide one that did. Drop it rather than publish it unverified.
-    const { campaign_outcome: unverified, ...rest } = report;
-    return unverified === undefined ? report : rest;
-  }
-  const reason = summary?.reason;
+export function loadValidatedReportArtifacts(runRoot: string): ValidatedReportArtifacts {
+  return loadValidatedReportSnapshot(runRoot).artifacts;
+}
+
+export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot {
+  const report = loadVerifiedFinalReportSnapshot(runRoot);
   return {
-    ...report,
-    campaign_outcome: {
-      outcome: outcome.trim(),
-      ...(typeof reason === "string" && reason.trim() !== "" ? { reason: reason.trim() } : {})
-    }
+    artifacts: report.artifacts,
+    json: report.json,
+    json_bytes: report.json_bytes,
+    markdown: report.markdown,
+    markdown_bytes: report.markdown_bytes
   };
 }
 

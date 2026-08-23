@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evmbench:result:2",
+  "title": "Normalized Ultrafuzz EVMBench result",
+  "type": "object",
+  "required": ["schema_version", "official_evmbench", "provenance", "operational"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.evmbench.result.v2"
+    },
+    "official_evmbench": {
+      "$ref": "#/$defs/officialMetrics"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "operational": {
+      "$ref": "#/$defs/operational"
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "perAuditMetrics": {
+      "type": "object",
+      "required": ["score", "max_score", "n_runs", "detect_award", "detect_max_award"],
+      "additionalProperties": false,
+      "properties": {
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_score": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "n_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "detect_award": {
+          "type": "number",
+          "minimum": 0
+        },
+        "detect_max_award": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "officialMetrics": {
+      "type": "object",
+      "required": ["score", "max_score", "recall", "detect_award", "detect_max_award", "per_audit"],
+      "additionalProperties": false,
+      "properties": {
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max_score": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "recall": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "detect_award": {
+          "type": "number",
+          "minimum": 0
+        },
+        "detect_max_award": {
+          "type": "number",
+          "minimum": 0
+        },
+        "per_audit": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/safeId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/perAuditMetrics"
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["audit_id", "source_commit"],
+      "additionalProperties": false,
+      "properties": {
+        "audit_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/commit"
+        }
+      }
+    },
+    "auditImage": {
+      "type": "object",
+      "required": ["audit_id", "source_image_digest", "overlay_image_digest"],
+      "additionalProperties": false,
+      "properties": {
+        "audit_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_image_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "overlay_image_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "benchmark_identity",
+        "ultrafuzz_commit",
+        "ultrafuzz_dirty",
+        "evmbench_commit",
+        "frontier_evals_commit",
+        "targets",
+        "audit_images",
+        "profile",
+        "profile_fingerprint",
+        "topology_fingerprint",
+        "model",
+        "agent",
+        "reasoning",
+        "concurrency"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "benchmark_identity": {
+          "$ref": "#/$defs/digest"
+        },
+        "ultrafuzz_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "ultrafuzz_dirty": {
+          "type": "boolean"
+        },
+        "evmbench_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "frontier_evals_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/target"
+          }
+        },
+        "audit_images": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/auditImage"
+          }
+        },
+        "profile": {
+          "enum": ["smoke", "full"]
+        },
+        "profile_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "topology_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "agent": {
+          "enum": ["ultrafuzz", "official-gold"]
+        },
+        "reasoning": {
+          "$ref": "#/$defs/safeId"
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "const": "official-gold"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "audit_images": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "overlay_image_digest": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "audit_images": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "overlay_image_digest": {
+                      "$ref": "#/$defs/digest"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "completeness": {
+      "type": "object",
+      "required": ["runtime", "token_usage", "cost"],
+      "additionalProperties": false,
+      "properties": {
+        "runtime": {
+          "enum": ["complete", "unavailable"]
+        },
+        "token_usage": {
+          "enum": ["complete", "unavailable"]
+        },
+        "cost": {
+          "enum": ["complete", "unavailable"]
+        }
+      }
+    },
+    "operational": {
+      "type": "object",
+      "required": ["runtime_seconds", "token_usage", "cost_usd", "completeness"],
+      "additionalProperties": false,
+      "properties": {
+        "runtime_seconds": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "token_usage": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cost_usd": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "completeness": {
+          "$ref": "#/$defs/completeness"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "completeness": {
+                "type": "object",
+                "properties": {
+                  "runtime": {
+                    "const": "complete"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "runtime_seconds": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "runtime_seconds": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "completeness": {
+                "type": "object",
+                "properties": {
+                  "token_usage": {
+                    "const": "complete"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "token_usage": {
+                "type": "integer"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "token_usage": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "completeness": {
+                "type": "object",
+                "properties": {
+                  "cost": {
+                    "const": "complete"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "cost_usd": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": {
+              "cost_usd": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

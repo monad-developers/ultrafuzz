@@ -59,6 +59,10 @@ the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
 `api_key` config field. DeepSeek V4 Pro requires `DEEPSEEK_API_KEY`; the worker
 forwards it only to the selected DeepSeek pair, whose generated adapter routes
 Claude Code to DeepSeek's Anthropic-compatible endpoint.
+OpenRouter rows require `OPENROUTER_API_KEY`, always use `auth_mode =
+"api-key"`, and route the Codex CLI through `https://openrouter.ai/api/v1`.
+The selected OpenRouter catalogue ID is retained verbatim in the benchmark
+config and launch evidence.
 
 For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
 auth or serial launches when comparing multiple Kimi profiles, so OAuth
@@ -66,17 +70,18 @@ refresh-token rotation remains single-writer.
 
 ## Create a private runtime config
 
-The eight-model matrix is built in, so `models` may be omitted. The default is
-one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, Claude Opus
-4.8, Kimi K3, and DeepSeek V4 Pro, with the default production strategy loop
-count `loops = 3`.
-Public CI launch configs intentionally set `loops = 1` for their smoke and full
+The v2 document is an exact contract: every operational value is explicit.
+The loader does not add models, loop counts, image names, credential names,
+timeouts, reporting settings, or target selections. Configure each model row you
+intend to run; public CI launch configs set `loops = 1` for their smoke and full
 lanes.
 
 ```json
 {
-  "schema_version": "ultrafuzz.modal.benchmark.v1",
+  "schema_version": "ultrafuzz.modal.benchmark.v2",
   "run_id": "example-run",
+  "app_name": "ultrafuzz-evals",
+  "image_name": "ultrafuzz-security-runner:latest",
   "target": {
     "repo": "https://example.invalid/subject.git",
     "ref": "full-commit-sha"
@@ -84,18 +89,47 @@ lanes.
   "ground_truth": {
     "repo": "https://example.invalid/reference-findings.git",
     "ref": "full-commit-sha",
-    "file": "findings.yml"
+    "file": "findings.yml",
+    "format": "ultrafuzz"
+  },
+  "benchmark_execution": {
+    "excluded_node_ids": []
+  },
+  "eval_reporting": {
+    "provider": "braintrust"
   },
   "braintrust": {
     "project": "private-evals",
-    "api_key_env": "BRAINTRUST_API_KEY"
-  }
+    "api_key_env": "BRAINTRUST_API_KEY",
+    "judge_api_key_env": "OPENAI_API_KEY",
+    "judge_url": "https://api.openai.com/v1/chat/completions",
+    "judge_credential_ttl_seconds": 57600
+  },
+  "node_timeout_seconds": 7200,
+  "loops": 3,
+  "models": [
+    {
+      "slug": "gpt-5-6-sol",
+      "model": "gpt-5.6-sol",
+      "provider": "openai",
+      "agent": "CodexAgent",
+      "reasoning": "xhigh",
+      "auth_mode": "subscription"
+    }
+  ]
 }
 ```
 
 The ground-truth file must use the format accepted by `ultrafuzz eval score`.
 The config schema intentionally accepts credential environment-variable names,
-not inline credential values.
+not inline credential values. Validate the exact file before launch; validation
+does not repair or rewrite it:
+
+```bash
+ultrafuzz json validate \
+  --schema packages/modal/schema/modal-benchmark-config.schema.json \
+  --file .ultrafuzz/modal/benchmark.json
+```
 
 For a private benchmark, the ground-truth file must bind the bugs to the target
 codebase, independently of the repository that stores the file:
@@ -112,8 +146,8 @@ bugs: []
 the materialized target commit before model work, before scoring, and when a
 Modal workspace resumes. A storage repository may therefore be a separate
 private repository, but an upstream repository and its fork are different
-subjects. Legacy unbound documents remain usable only for public or historical
-compatibility paths; a new private benchmark fails closed without this binding.
+subjects. Private benchmarks fail closed without this binding; there is no
+historical compatibility reader.
 
 Audit reports with bracketed issue headings can set `ground_truth.format` to
 `audit-markdown` and provide `ground_truth.expected_findings`. Conversion runs
@@ -151,22 +185,46 @@ rather than treating it as a measured regression.
 
 The checked-in GitHub workflow uses Actions only to build the candidate and as a
 control and collection plane; all benchmark and model compute runs on Modal.
-Every non-deletion push to a branch in this repository launches the paid smoke
-for the exact pushed commit, including pushes to branches whose pull requests
-are still drafts. Fork pull-request events do not run this workflow. Repository
-write access that is allowed to receive Actions secrets is therefore inside the
-benchmark credential and cost trust boundary; protect that access and enforce
-scoped provider credentials and hard provider/Modal budgets. A newer commit on
-the same branch cancels its older smoke workflow. Each run installs and builds
-the exact candidate commit before building its immutable Modal image.
+Every non-deletion push to `main` launches the paid smoke for the exact merged
+commit. Feature-branch and pull-request events, including drafts, do not run this
+workflow. Repository write access that can merge or push to `main` is therefore
+inside the benchmark credential and cost trust boundary; protect that access
+and enforce scoped provider credentials and hard provider/Modal budgets. A
+newer commit on `main` cancels its older smoke workflow. Each run installs and
+builds the exact candidate commit before building its immutable Modal image.
 
-Cancellation is latest-wins only within one branch. A separate recovery
+Cancellation is latest-wins on `main`. A separate recovery
 workflow uses tooling from the trusted default branch, treats the exact
 candidate checkout only as fingerprinted data, and semantically validates the
 incomplete attempt's immutable pre-compute plan before giving termination code
 Modal credentials. It recovers failed, timed-out, and cancelled generations.
-Runs on different branches and independent full dispatches may overlap, so
-provider and Modal budgets remain the hard aggregate cost boundary.
+Independent manual dispatches may overlap the automatic smoke, so provider and
+Modal budgets remain the hard aggregate cost boundary.
+
+GitHub attaches a `workflow_run` recovery check to the trusted default-branch
+tooling commit, not to the candidate tree it operates on. Recovery run titles,
+check names, and job summaries therefore carry the full candidate SHA plus the
+source run and attempt. When qualifying an exact release commit, list its check
+runs without opening logs:
+
+```bash
+repository=monad-developers/ultrafuzz
+release_sha=<40-character-release-sha>
+gh api --paginate "repos/$repository/commits/$release_sha/check-runs?per_page=100" \
+  --jq '.check_runs[] | [.name, .conclusion, .details_url] | @tsv'
+```
+
+A check named `Recover candidate <sha> from source run ...` is about the tree
+identified by `<sha>`; it is tree-local to the release only when that SHA equals
+`$release_sha`. To query recovery runs for a candidate directly, independently
+of the commit to which GitHub attached their checks, use the run title:
+
+```bash
+candidate_sha=<40-character-candidate-sha>
+gh api --paginate "repos/$repository/actions/workflows/eval-benchmark-recovery.yml/runs?per_page=100" \
+  | jq --arg candidate "$candidate_sha" \
+      '.workflow_runs[] | select(.display_title | contains("candidate \($candidate) from source run")) | {id, display_title, conclusion, html_url}'
+```
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
@@ -179,62 +237,52 @@ stages are absent from this graph. Repository variable
 smoke model without changing its single OpenAI/Codex provider or its target and
 topology limits.
 
-A manual `workflow_dispatch` chooses `smoke`, `full`, or `threat-model` with the
-`benchmark_lane` input. Push events always select smoke with its checked-in
-OpenAI default. A dispatched smoke instead uses the requested `smoke_provider`,
-`smoke_model`, and `smoke_reasoning`; its three targets, reduced topology,
-single-runner shape, and judge remain fixed.
-
-`full` evaluates every checked-in EVMBench target with GPT-5.6 Luna at `high`,
-Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by
-default. Dispatch inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
+A manual `workflow_dispatch` selects the full lane by default and can explicitly
+select smoke for an ad hoc run. Full evaluates every checked-in EVMBench target
+with GPT-5.6 Luna at `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and
+DeepSeek V4 Pro at `max` by default. Dispatch inputs `openai_model`,
+`openai_reasoning`, `anthropic_model`,
 `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
 `deepseek_reasoning` provide explicit overrides. The full lane retains the
-production strategy set, including invariant, differential, and dynamic
-strategies, with all three disable flags set to `false`.
+packaged `full` audit profile's strategy set, including invariant,
+differential, and dynamic strategies, with all three disable flags set to
+`false`. Target preparation selects and validates that `full` profile, and its
+effective catalog and topology digests are attested again before `startRun`.
+Push events can never select the full lane.
 
-### The `threat-model` release gate
+For an ad hoc OpenRouter smoke, select `openrouter` as `smoke_provider`, enter
+any current OpenRouter catalogue ID in `smoke_model`, and configure the
+`OPENROUTER_API_KEY` Actions secret. The workflow does not validate the ID
+against a static catalogue and does not add OpenRouter to the historical
+four-provider full lane automatically.
 
-`threat-model` is the v0.1.0 release gate. It is the only lane that runs the
-**production** `full` packaged topology against the pinned three-target
-Ultrafuzz-bench cohort, and it exists because neither existing lane can: smoke
-substitutes the reduced packaged `smoke` graph, and full is
-bound to the EVMBench cohort. Without it, the `threat-model`, `goal-plan`,
-`threat-goals` and `class-goals` nodes never meet a real pinned protocol.
-
-The lane sets all three `disable_*` flags to `false` and passes an empty
-exclusion list, so nothing is pruned. `loadBenchmarkLanesManifest` rejects a
-checked-in lane that turns any of them on, and
-`adaptBenchmarkManifestToEvalSuite` refuses to compile a suite whose exclusions
-would remove a node the gate exists to exercise. It ignores the model dispatch
-inputs entirely and takes its runner from `benchmarks/lanes.json`
-(GPT-5.6 Luna at `high`, one trial), so no dispatch-form value can retune the
-gate's model identity. Beyond the usual report bundle it retains
-`THREAT_MODEL.md`, `threat-model.json`, `goal-plan.json`, and
-`vulnerability-db-manifest.json` from every row, because its automated
-assertions are deliberately structural and the prose has to stay reviewable.
-
-Gate results are **not** appended to `benchmarks/history.json`. Publication is a
-longitudinal claim about one comparable series, and this lane runs a different
-topology and execution policy against the same targets. The publication
-qualifier derives the lane from the exact run/attempt artifact names and
-allowlists only smoke and full; threat-model artifacts are refused even when
-mixed with a publishable lane. The v0.1.0 release owner reviews the retained
-cohort directly.
-
-The gate costs real money on every dispatch. Confirm a named owner and a
-compute budget with a number attached before selecting it.
-
-All three lanes use the standard Modal benchmark resources described above. Each
-smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
-sequential agent stages may each use two 1,800-second attempts, with ten minutes
-left for workflow transitions and final synchronization. Gate rows take the same
-15,000-second bound, which is the hard ceiling `public_benchmark.max_runtime_seconds`
-accepts. Full-lane rows retain the 3,600-second bound. The smoke and the gate
-admit all three rows at a time; the full lane admits 20, keeping each checked-in
-cohort to two row waves. Smoke uses four-way workflow concurrency; the gate and
-full use eight-way concurrency so production rows -- and, for the gate, a large
-dynamic goal-fanout ready queue -- progress without serializing their agent work.
+Both lanes use the standard Modal benchmark resources described above. Each
+smoke target row keeps its 15,000-second model-work watchdog: the smoke graph's
+four sequential agent stages may each use two 1,800-second attempts, with ten
+minutes left for workflow transitions and final synchronization. Manual full
+rows also have a 15,000-second watchdog, the schema's bounded maximum. That
+budget leaves the packaged specialist durations unchanged, including the
+7,200-second stateful-invariant node whose 10-minute smoke, one-hour fuzzing,
+five-minute shutdown grace, and five-minute finalization reserve require 4,800
+seconds. It is a hard execution cutoff, not a guarantee that every full-topology
+node can consume its worst-case timeout in one row. With 40 rows and 20-way row
+concurrency, the full control deadline derives to 37,500 seconds after adding
+two eval waves, preparation, scoring, cleanup, reporting, and polling grace.
+The launch job seals that deadline once in a strict sidecar bound to the
+candidate, canonical repository, run attempt, mode, and control-manifest
+digest. A full-only hosted monitor uses at most the first 19,500 seconds,
+persists a mutable handoff, and leaves 18,000 seconds for the final collection
+job. The final job treats the exact launch artifact as authoritative and
+byte-compares the handoff's manifest, deadline sidecar, launch-attempt log, and
+every pair config before accepting only updated state, status, outcome, and
+diagnostic files. Those two phases leave 35 and 60 minutes respectively below
+GitHub's six-hour hosted-job limit for handoff, setup, collection, and artifact
+upload. Recovery never resets the absolute deadline. Smoke remains a single
+collection phase.
+Smoke admits all three rows at a time; full admits 20, keeping each checked-in
+cohort to two row waves. Smoke uses four-way workflow concurrency; full uses
+eight-way concurrency so production rows can progress without serializing their
+agent work.
 Scoring remains independent of the runner and always uses GPT-5.6 Sol at
 `xhigh`.
 
@@ -243,10 +291,10 @@ lanes resolve to one trial. Increase it only deliberately: benchmark work and
 cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
-Actions secrets. Only `full` dispatches additionally require `ANTHROPIC_API_KEY`
-and either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`;
-automatic smoke runs and `threat-model` gate dispatches do not, and the workflow
-does not hand those credentials to them.
+Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
+either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
+smoke runs do not.
+An OpenRouter manual smoke additionally requires `OPENROUTER_API_KEY`.
 Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
 should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust
@@ -277,11 +325,10 @@ and chart paths are excluded from the Modal push trigger, so the App commit
 cannot recursively start another benchmark run.
 
 Only a successful producer run whose candidate is still reachable from the
-repository's default `main` branch may mint the publisher token. Feature-branch
-smoke runs still execute and upload review artifacts, but their data is not
-published; the successful `main` run after merge is the publication source.
-Full-lane runs follow the same boundary by dispatching the Modal benchmark
-workflow on `main`. There is no free-form artifact replay entry point.
+repository's default `main` branch may mint the publisher token. The automatic
+`main` smoke after merge is the publication source. Full-lane runs follow the
+same boundary by dispatching the Modal benchmark workflow on `main`. There is
+no free-form artifact replay entry point.
 
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
 variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
@@ -452,13 +499,15 @@ volume artifacts.
 
 Public EVMBench and Ultrafuzz-bench targets use a separate explicit contract.
 For those old open-source projects, `collect --public-results --config <path>`
-additionally copies the scored eval generation plus `report.md`, `report.json`,
-and `findings.normalized.json`. It also embeds the exact
+additionally copies the scored eval generation plus `report.md` and the
+schema-validated `report.json`. The latter's `issues` array is the sole terminal
+finding authority. The bundle also embeds the exact
 `public-eval-diagnostics.json` sidecar under `eval/`, so report-backed genuine
 task failures remain verifiable when the generation is published to history.
 The bundle validates a fixed path allowlist, byte limits, canonical base64,
 unique paths, sizes, SHA-256 hashes, exact launch and diagnostic lineage,
-score-ready lifecycle evidence, complete per-row report files, and the absence
+score-ready lifecycle evidence, report/run/score identity joins, complete
+per-row report files, and the absence
 of generic or exact injected secrets before any file is extracted or uploaded.
 
 This public mode assumes the pinned benchmark repositories are trusted inputs.

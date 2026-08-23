@@ -1,6 +1,16 @@
+import { lookup as dnsLookup } from "node:dns/promises";
+import type { IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { BlockList, isIP } from "node:net";
+import { Readable } from "node:stream";
+
+import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
-const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
+export const MAX_PRICING_CATALOG_BYTES = 25 * 1024 * 1024;
+const MAX_PRICING_CATALOG_CHUNKS = 65_536;
+const MAX_PRICING_ADDRESS_ATTEMPTS = 8;
 const MOONSHOT_PROVIDER_ID = "moonshotai";
 const DEEPSEEK_PROVIDER_ID = "deepseek";
 
@@ -60,13 +70,81 @@ interface CatalogProvider {
 
 const DISABLED_VALUES = new Set(["disabled", "none", "off"]);
 
+export interface PricingResolvedAddress {
+  address: string;
+  family: 4 | 6;
+}
+
+export type PricingHostnameLookup = (
+  hostname: string,
+  signal?: AbortSignal
+) => Promise<ReadonlyArray<{ address: string; family: number }>>;
+
+export type PricingCatalogFetch = (
+  input: string,
+  init: RequestInit,
+  pinnedAddresses: readonly PricingResolvedAddress[]
+) => Promise<Response>;
+
+interface ValidatedPricingCatalogDestination {
+  url: string;
+  addresses: PricingResolvedAddress[];
+}
+
+/** Trusted test seam; production connects by HTTPS to the supplied pinned address. */
+type PinnedPricingAddressFetch = (
+  input: string,
+  init: RequestInit,
+  address: PricingResolvedAddress
+) => Promise<Response>;
+
+const forbiddenIpv4Addresses = new BlockList();
+const forbiddenIpv6Addresses = new BlockList();
+for (const [address, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 3]
+] as const) {
+  forbiddenIpv4Addresses.addSubnet(address, prefix, "ipv4");
+}
+for (const [address, prefix] of [
+  ["::", 96],
+  ["::ffff:0:0", 96],
+  ["64:ff9b::", 96],
+  ["64:ff9b:1::", 48],
+  ["100::", 64],
+  ["2001::", 23],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["fec0::", 10],
+  ["ff00::", 8]
+] as const) {
+  forbiddenIpv6Addresses.addSubnet(address, prefix, "ipv6");
+}
+
 export async function resolveLiveModelPricing(input: {
   models: Iterable<string>;
   env?: Record<string, string | undefined>;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Trusted test/embedding seam; destination validation is never bypassed. */
+  fetchImpl?: PricingCatalogFetch;
+  /** Trusted test/embedding seam; every returned address is still classified. */
+  lookupHostname?: PricingHostnameLookup;
 }): Promise<PricingCatalogResult> {
-  const models = uniqueNormalizedModels(input.models);
+  const models = uniqueModels(input.models);
   if (models.length === 0) {
     return {
       prices: new Map(),
@@ -101,18 +179,31 @@ export async function resolveLiveModelPricing(input: {
   );
   try {
     const timeoutSignal = AbortSignal.timeout(Math.max(1, timeoutMs));
-    const response = await fetch(sourceUrl, {
-      headers: { accept: "application/json" },
-      signal: input.signal === undefined ? timeoutSignal : AbortSignal.any([input.signal, timeoutSignal])
-    });
+    const signal = input.signal === undefined ? timeoutSignal : AbortSignal.any([input.signal, timeoutSignal]);
+    const destination = await validatePricingCatalogDestination(sourceUrl, input.lookupHostname, signal);
+    const response = await (input.fetchImpl ?? fetchPinnedPricingCatalog)(
+      destination.url,
+      {
+        headers: { accept: "application/json" },
+        redirect: "error",
+        signal
+      },
+      destination.addresses
+    );
     if (!response.ok) {
+      cancelPricingBody(response.body, `pricing catalog returned HTTP ${response.status}`);
       throw new Error(`pricing catalog returned HTTP ${response.status}`);
     }
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > MAX_CATALOG_BYTES) {
-      throw new Error("pricing catalog exceeded the maximum response size");
-    }
-    const catalog = JSON.parse(text) as unknown;
+    const bytes = await readBoundedPricingCatalogResponse(response, MAX_PRICING_CATALOG_BYTES, signal);
+    // models.dev is a transient third-party envelope, not retained Ultrafuzz
+    // evidence. Its provider/model keys are intentionally dynamic, but its
+    // bytes must still meet the shared strict JSON and UTF-8 contract.
+    const catalog = parseStrictJsonBytes(bytes, {
+      maxBytes: MAX_PRICING_CATALOG_BYTES,
+      maxDepth: 32,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
     const prices = pricesForModels(catalog, models);
     const resolvedModels = models.filter((model) => prices.has(model));
     return {
@@ -138,6 +229,266 @@ export async function resolveLiveModelPricing(input: {
   }
 }
 
+export async function validatePricingCatalogUrl(
+  value: string,
+  lookupHostname?: PricingHostnameLookup,
+  signal?: AbortSignal
+): Promise<string> {
+  return (await validatePricingCatalogDestination(value, lookupHostname, signal)).url;
+}
+
+async function validatePricingCatalogDestination(
+  value: string,
+  lookupHostname: PricingHostnameLookup = async (hostname) => dnsLookup(hostname, { all: true, verbatim: true }),
+  signal?: AbortSignal
+): Promise<ValidatedPricingCatalogDestination> {
+  signal?.throwIfAborted();
+  // URL normalization erases empty delimiters, so reject them from the raw
+  // value before parsing as well as checking the normalized URL below.
+  if (value.includes("?") || value.includes("#")) {
+    throw new Error("pricing catalog URL must not contain a query or fragment");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("pricing catalog URL is invalid");
+  }
+  if (parsed.protocol !== "https:") throw new Error("pricing catalog URL must use HTTPS");
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("pricing catalog URL must not contain credentials");
+  }
+  if (parsed.search !== "" || parsed.hash !== "") {
+    throw new Error("pricing catalog URL must not contain a query or fragment");
+  }
+
+  const hostname = parsed.hostname
+    .replace(/^\[|\]$/gu, "")
+    .replace(/\.$/u, "")
+    .toLowerCase();
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "metadata" ||
+    hostname === "instance-data" ||
+    hostname.endsWith(".local") ||
+    hostname.endsWith(".internal")
+  ) {
+    throw new Error("pricing catalog hostname is local or metadata-only");
+  }
+
+  const literalFamily = isIP(hostname);
+  const addresses =
+    literalFamily === 0
+      ? await abortablePricingLookup(lookupHostname(hostname, signal), signal)
+      : [{ address: hostname, family: literalFamily }];
+  if (addresses.length === 0) throw new Error("pricing catalog hostname did not resolve");
+
+  const validatedAddresses: PricingResolvedAddress[] = [];
+  for (const { address, family } of addresses) {
+    const detectedFamily = isIP(address);
+    const normalizedFamily = family === 6 || detectedFamily === 6 ? 6 : family === 4 || detectedFamily === 4 ? 4 : 0;
+    const forbidden =
+      normalizedFamily === 4
+        ? forbiddenIpv4Addresses.check(address, "ipv4")
+        : normalizedFamily === 6
+          ? forbiddenIpv6Addresses.check(address, "ipv6")
+          : true;
+    if (forbidden) {
+      throw new Error("pricing catalog hostname resolves to a non-public address");
+    }
+    validatedAddresses.push({ address, family: normalizedFamily as 4 | 6 });
+  }
+  return { url: parsed.href, addresses: validatedAddresses };
+}
+
+async function abortablePricingLookup<T>(lookup: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return lookup;
+  if (signal.aborted) throw signal.reason;
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(signal.reason));
+    signal.addEventListener("abort", onAbort, { once: true });
+    void lookup.then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
+export async function fetchPinnedPricingCatalog(
+  input: string,
+  init: RequestInit,
+  pinnedAddresses: readonly PricingResolvedAddress[],
+  fetchAddress: PinnedPricingAddressFetch = fetchPinnedPricingAddress
+): Promise<Response> {
+  const addresses = pinnedAddresses.slice(0, MAX_PRICING_ADDRESS_ATTEMPTS);
+  if (addresses.length === 0) throw new Error("pricing catalog has no validated address");
+  let lastError: unknown = new Error("pricing catalog connection failed");
+  for (const address of addresses) {
+    init.signal?.throwIfAborted();
+    try {
+      return await fetchAddress(input, init, address);
+    } catch (error) {
+      if (init.signal?.aborted === true) throw init.signal.reason;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function fetchPinnedPricingAddress(
+  input: string,
+  init: RequestInit,
+  selected: PricingResolvedAddress
+): Promise<Response> {
+  const url = new URL(input);
+  const requestHeaders: Record<string, string> = {};
+  new Headers(init.headers).forEach((value, name) => {
+    requestHeaders[name] = value;
+  });
+
+  return await new Promise<Response>((resolve, reject) => {
+    const request = httpsRequest(
+      url,
+      {
+        method: "GET",
+        headers: requestHeaders,
+        signal: init.signal ?? undefined,
+        agent: false,
+        family: selected.family,
+        lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family)
+      },
+      (incoming) => {
+        try {
+          resolve(pricingCatalogResponseFromIncoming(incoming));
+        } catch (error) {
+          incoming.destroy(error instanceof Error ? error : new Error(String(error)));
+          reject(error);
+        }
+      }
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+function pricingCatalogResponseFromIncoming(incoming: IncomingMessage): Response {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming.headers)) {
+    if (Array.isArray(value)) {
+      for (const entry of value) headers.append(name, entry);
+    } else if (value !== undefined) {
+      headers.set(name, value);
+    }
+  }
+  const status = incoming.statusCode ?? 500;
+  if (!Number.isSafeInteger(status) || status < 200 || status > 599) {
+    throw new Error(`pricing catalog returned invalid HTTP status ${status}`);
+  }
+  const body = status === 204 || status === 205 || status === 304 ? null : Readable.toWeb(incoming);
+  return new Response(body as ReadableStream<Uint8Array> | null, {
+    status,
+    statusText: incoming.statusMessage,
+    headers
+  });
+}
+
+export async function readBoundedPricingCatalogResponse(
+  response: Response,
+  maxBytes = MAX_PRICING_CATALOG_BYTES,
+  signal?: AbortSignal
+): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_PRICING_CATALOG_BYTES) {
+    throw new Error("pricing catalog response limit is invalid");
+  }
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const declaredBytes = /^\d+$/u.test(declaredLength) ? Number(declaredLength) : Number.NaN;
+    if (!Number.isSafeInteger(declaredBytes) || declaredBytes > maxBytes) {
+      cancelPricingBody(response.body, "pricing catalog exceeded the maximum response size");
+      throw new Error("pricing catalog exceeded the maximum response size");
+    }
+  }
+  if (response.body === null) return Buffer.alloc(0);
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await readPricingCatalogChunk(reader, signal);
+      if (done) break;
+      if (value === undefined || value.byteLength === 0) continue;
+      if (value.byteLength > maxBytes - totalBytes) {
+        cancelPricingReader(reader, "pricing catalog exceeded the maximum response size");
+        throw new Error("pricing catalog exceeded the maximum response size");
+      }
+      if (chunks.length >= MAX_PRICING_CATALOG_CHUNKS) {
+        cancelPricingReader(reader, "pricing catalog response is too fragmented");
+        throw new Error("pricing catalog response is too fragmented");
+      }
+      totalBytes += value.byteLength;
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A timed-out adversarial stream can retain a pending read after it has
+      // been cancelled. The body is never reused, so retaining the lock is safe.
+    }
+  }
+  return Buffer.concat(chunks, totalBytes);
+}
+
+function cancelPricingBody(body: ReadableStream<Uint8Array> | null, reason: string): void {
+  if (body !== null) void body.cancel(reason).catch(() => undefined);
+}
+
+function cancelPricingReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): void {
+  void reader.cancel(reason).catch(() => undefined);
+}
+
+async function readPricingCatalogChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  if (signal === undefined) return await reader.read();
+  if (signal.aborted) {
+    cancelPricingReader(reader, signal.reason);
+    throw signal.reason;
+  }
+  return await new Promise<{ done: boolean; value?: Uint8Array }>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      cancelPricingReader(reader, signal.reason);
+      finish(() => reject(signal.reason));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    void reader.read().then(
+      (result) => finish(() => resolve(result)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
+
 function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelPricing> {
   const result = new Map<string, ModelPricing>();
   if (!isRecord(catalog)) {
@@ -154,7 +505,7 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
       if (!isRecord(provider.models)) {
         continue;
       }
-      const match = Object.entries(provider.models).find(([id]) => normalizeModel(id) === model);
+      const match = Object.entries(provider.models).find(([id]) => id === model);
       const pricing = pricingFromCatalogModel(match?.[1]);
       if (pricing !== undefined) {
         result.set(model, pricing);
@@ -229,7 +580,7 @@ export function modelPricingFromSnapshot(value: unknown): Map<string, ModelPrici
   for (const [model, rawPricing] of Object.entries(value)) {
     const pricing = storedModelPricing(rawPricing);
     if (pricing !== undefined) {
-      result.set(normalizeModel(model), pricing);
+      result.set(model, pricing);
     }
   }
   return result;
@@ -338,12 +689,8 @@ function pinnedProviderForModel(model: string): string | undefined {
   return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
 }
 
-function uniqueNormalizedModels(models: Iterable<string>): string[] {
-  return [...new Set([...models].map(normalizeModel).filter((model) => model.length > 0))].sort();
-}
-
-function normalizeModel(model: string): string {
-  return model.trim().toLowerCase();
+function uniqueModels(models: Iterable<string>): string[] {
+  return [...new Set([...models].filter((model) => model.length > 0))].sort();
 }
 
 function pricingTimeoutMs(value: string | undefined): number {

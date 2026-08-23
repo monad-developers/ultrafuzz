@@ -5,6 +5,12 @@ display_name: Implement properties
 
 # Role
 
+Use the authoritative reachability tokens and report-bound note keys below for every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an Invariant Testing specialist for Solidity smart contracts.
 
 Your job is to implement concrete invariant properties from the consolidated
@@ -24,7 +30,9 @@ Read the current invariant suite handoffs before editing:
 
 {{artifact_path:stateful-invariant-handlers}}/handler-coverage-inventory.md
 
-{{artifact_path:stateful-invariant-coverage}}/coverage-report.md
+Read the admitted prior Recon coverage reports through this compact authority:
+
+{{ancestor_artifact_path_authority:coverage-report.md}}
 
 Use this resolved implementation priority threshold:
 
@@ -66,9 +74,9 @@ cannot be lost during priority filtering.
      continue in-process if sub-agent spawning or waiting fails.
    - Before spawning any sub-agent or doing broad implementation work, write
      initial versions of all required output artifacts that list the selected
-     properties, mark unimplemented entries as pending or deferred, use an
-     empty generated-test manifest, and use an empty findings array. Update
-     those artifacts as work progresses so timeout or interruption still leaves
+     properties, mark unimplemented entries as pending or deferred, and use the
+     schema-defined empty forms for generated tests and findings. Update those
+     artifacts as work progresses so timeout or interruption still leaves
      reviewable state.
    - If no properties match the threshold or carry a reference expectation, write empty implementation artifacts
      explaining that no selected properties were eligible.
@@ -80,6 +88,20 @@ cannot be lost during priority filtering.
      repair the handler and rerun its bounded smoke when any entry is missing.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
+   - Every expected value or state transition must come from an independent
+     oracle grounded in public specifications, source-declared invariants, or
+     an independently derived accounting equation. Never call, copy,
+     translate, simplify, or re-derive the implementation under test as the
+     oracle for its own behavior. When no independent expected value exists,
+     record the property as blocked instead of implementing a self-comparison.
+   - Require non-vacuity evidence for every `implemented` property: Recon must
+     discover its public assertion entrypoint, a relevant handler must have a
+     realistic path that reaches and completes a meaningful protocol action,
+     and the assertion must read the resulting target state or accounting
+     observation. A constant-true assertion, an assertion over an empty target
+     set, a property reachable only after all handlers return at guards, or a
+     property whose relevant actions never complete is not implemented; repair
+     the suite or record the property as blocked with the concrete reason.
    - Every assertion observes state after a directly invoked protocol action;
      preserve any target revert, panic, or out-of-gas failure as Recon evidence
      and connect it to the selected property when the catalog requires it.
@@ -88,10 +110,17 @@ cannot be lost during priority filtering.
      `test/foundry/stateful-invariant-implement-properties/` or
      `tests/foundry/stateful-invariant-implement-properties/`. Existing changed
      `*.t.sol` files under that root's `recon/`, `chimera/`, `invariants/`, or
-     `foundry/invariants/` directories are also collected.
+     `foundry/invariants/` directories are also collected. That root is the
+     repository's own top-level `test/` or `tests/` directory: the handoff
+     refuses a package-scoped suite such as `packages/<pkg>/test/`, so write
+     files you intend to report under a supported root.
    - Keep setup and handler changes minimal and realistic.
    - Do not weaken existing assertions or hide failures with broad
      precondition skips.
+   - Never convert a source-backed safety assertion into a `require`, handler
+     guard, or other precondition that prevents the backend from observing the
+     violating post-state. Preconditions may admit valid actions; they may not
+     assume the property under test.
    - Do not edit production contracts except interfaces that are genuinely
      required by the test harness.
    - Keep generated or changed invariant files in the test tree and include
@@ -103,6 +132,12 @@ cannot be lost during priority filtering.
      authorized under Recon, such as by setting the mutable root admin, owner,
      or bootstrap caller to `address(this)` before `super.setUp()` in the Recon
      constructor path.
+   - Give every independently falsifiable property its own public
+     assertion/invariant entrypoint. Each entrypoint must test exactly one
+     canonical `property_id`, so one failing property cannot retire unrelated
+     properties from the backend campaign. Shared action handlers and read-only
+     helpers remain permitted; only the property observation entrypoints must
+     be separate.
 
 4. Preserve implementation evidence.
    - Run the narrowest useful build or test command that demonstrates the
@@ -114,6 +149,15 @@ cannot be lost during priority filtering.
      requires it. If the smoke reverts before fuzzing, repair the harness before
      writing a successful implementation handoff; if tooling or dependencies
      are absent, record the blocker.
+   - Before accepting the suite, compare the public property entrypoints in its
+     compiled target ABI with Recon's discovered/admitted test list from the
+     smoke. If Recon omits an entrypoint, make its assertion directly
+     discoverable and rerun the smoke. If it still cannot be admitted, mark
+     that property `blocked` with the omitted entrypoint and diagnostic; never
+     report an omitted property as implemented.
+   - Do not treat the one-action deployment smoke or a green assertion alone as
+     anti-vacuity proof. Preserve the handler reachability and target-state
+     evidence that makes each implemented observation meaningful.
    - If dependencies or repository layout block compilation, record the exact
      blocker and leave the implemented files and artifacts in a reviewable
      state.
@@ -129,73 +173,65 @@ Write structured implementation records to:
 
 {{artifact_dir}}/implemented-properties.json
 
-Use this exact top-level shape:
+Read the exact pinned schema at
+`{{schema_path}}/implemented-properties.schema.json`; it alone defines the
+JSON version, fields, types, enums, required members, and empty forms. After
+the final write, run the exact `ultrafuzz json validate` command rendered for
+this artifact in the central output contract.
 
-The example below uses `tests/`; replace that prefix with the detected
-repository test root when it uses `test/` instead.
-
-```json
-{
-  "schema_version": "ultrafuzz.implemented-properties.v1",
-  "selection": {
-    "priority_threshold": "{{invariant_property_priority_threshold}}",
-    "priorities": ["high"],
-    "property_ids": ["property-1"]
-  },
-  "properties": [
-    {
-      "property_id": "property-1",
-      "status": "implemented",
-      "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
-    }
-  ]
-}
-```
-
-The `selection` object is required for current runs. Set `priorities` to the
-exact configured priority set above and list every canonical ID in
+Set the schema-defined selection priorities to the exact configured priority
+set above and list every canonical ID in
 `properties.json` whose priority is in that set, plus every canonical ID with
 one or more `reference_expectations`, in catalog order. Emit one
 implementation record for every selected ID. A selected property that cannot
-be implemented must use `status` `blocked`, `pending`, or `deferred` and carry
-an actionable `blocker` object with this shape:
+be implemented must carry an actionable typed blocker. Preserve every selected
+property's canonical ID exactly; dangling references fail contextual
+validation. Carry the complete expectation-ID set for a selected property when
+the source property has one, and do not invent an empty expectation set for a
+property that has none. Preserve generated and changed test paths separately
+from invariant/helper implementation paths. These selection, preservation,
+and cross-artifact joins remain required beyond JSON Schema.
 
-```json
-{
-  "code": "missing-oracle",
-  "summary": "The target exposes no stable getter for the required value.",
-  "next_action": "Add a read-only harness oracle or document the source-backed blocker."
-}
-```
-
-`status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
-`implementation_paths` and `test_paths` on every record, using an empty array
-for either path field when no corresponding path exists. A selected property
-with one or more `reference_expectations` carries the complete expectation-ID
-array on its implementation record in the same order-independent set. Omit
-`reference_expectations` entirely when the property has none; do not emit an
-empty array. A
-`property_id` must exactly match a canonical ID in `properties.json`; dangling
-references fail artifact validation. Preserve generated and changed test paths
-in `test_paths` and invariant/helper implementation paths in
-`implementation_paths`.
+Every path on an `implemented` record is repository-relative, uses forward
+slashes, and lives under an allowed root: each `implementation_paths` entry must
+start with `src/`, `contracts/`, `test/`, or `tests/`, and each `test_paths`
+entry must start with `test/` or `tests/`. The host reads these paths to
+assemble the invariant-suite handoff and terminates this node on any other root,
+including a package-scoped path such as `packages/<pkg>/test/...`, a `script/`
+helper, an absolute path, and any path through `.git`, `.ultrafuzz`,
+`.smithers`, `node_modules`, or an env file. If the work you did lives outside
+those roots, do not cite it: record the property as `blocked` with a `blocker`
+naming the suite location as the concrete obstacle. A record that is not
+`implemented` is never read for paths, so when its only paths sit under an
+unsupported root, cite no implementation or test paths and state the root in
+the blocker.
 
 Write a generated-test manifest to:
 
 {{artifact_dir}}/generated-tests.json
 
+Read the exact pinned schema at `{{schema_path}}/generated-tests.schema.json`.
+Classify independently runnable tests and reproducers as runnable and every
+imported invariant/helper implementation, mock, fixture, script, or data
+dependency as non-runnable support.
+
 Write structured findings to:
 
 {{output_findings_path}}
 
-Use an empty JSON array for findings unless property implementation itself
-finds a concrete production issue. Keep implementation-only blockers in
+Read the exact pinned schema at `{{schema_path}}/findings.schema.json`. Use its
+schema-defined empty form unless property implementation itself finds a
+concrete production issue. Keep implementation-only blockers in
 `implemented-properties.json`, not as production findings.
-When such a finding is caused by a catalog property, add a non-empty
-`property_ids` array containing its canonical ID or IDs. Omit `property_ids`
-for findings unrelated to a catalog property.
+When such a finding is caused by one or more catalog properties, preserve the
+exact canonical property attribution using the findings schema's property
+provenance representation. Use a stable union when several properties
+contribute, and do not invent property attribution for an unrelated finding.
 
 If you changed files in the isolated workspace, save a patch at:
 
 {{output_patch_path}}
+
+After all final JSON writes, run every exact `ultrafuzz json validate` command
+rendered in the central output contract. Correct any exit-1 artifact yourself
+and rerun its command after any later edit.

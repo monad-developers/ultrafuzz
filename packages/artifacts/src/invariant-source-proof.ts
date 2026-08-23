@@ -1,6 +1,7 @@
 import { z } from "zod/v4";
 
 import { validateWithZod, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
+import { executeSemanticGate } from "./semantic-gates.js";
 
 export const INVARIANT_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.invariant-source-proof.v1" as const;
 
@@ -30,28 +31,14 @@ export const invariantSourceProofFileSchema = z.strictObject({
     .refine((value) => !value.includes("\u0000"), { message: "Source proof content must be UTF-8 text" })
 });
 
-export const invariantSourceProofSchema = z
-  .strictObject({
-    schema_version: z.literal(INVARIANT_SOURCE_PROOF_SCHEMA_VERSION),
-    attempt_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
-    commit: z.string().regex(fullSha),
-    tree: z.string().regex(fullSha),
-    ledger_sha256: z.string().regex(sha256),
-    files: z.array(invariantSourceProofFileSchema)
-  })
-  .superRefine((proof, context) => {
-    const seen = new Set<string>();
-    for (const [index, file] of proof.files.entries()) {
-      if (seen.has(file.path)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate source proof path ${JSON.stringify(file.path)}`,
-          path: ["files", index, "path"]
-        });
-      }
-      seen.add(file.path);
-    }
-  });
+export const invariantSourceProofSchema = z.strictObject({
+  schema_version: z.literal(INVARIANT_SOURCE_PROOF_SCHEMA_VERSION),
+  attempt_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+  commit: z.string().regex(fullSha),
+  tree: z.string().regex(fullSha),
+  ledger_sha256: z.string().regex(sha256),
+  files: z.array(invariantSourceProofFileSchema)
+});
 
 export type InvariantSourceProof = z.infer<typeof invariantSourceProofSchema>;
 export type InvariantSourceProofFile = z.infer<typeof invariantSourceProofFileSchema>;
@@ -60,10 +47,25 @@ export function validateInvariantSourceProofSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<InvariantSourceProof> {
-  return validateWithZod(invariantSourceProofSchema, value, {
+  const shape = validateWithZod(invariantSourceProofSchema, value, {
     path,
     code: "INVARIANT_SOURCE_PROOF_SCHEMA_INVALID"
   });
+  if (!shape.ok || shape.value === undefined) return shape;
+  const semantics = executeSemanticGate("invariant-source-proof-path-uniqueness", { document: shape.value });
+  if (semantics.status !== "failed") return shape;
+  return {
+    ok: false,
+    issues: semantics.issues.map((semanticIssue) => ({
+      code: "INVARIANT_SOURCE_PROOF_SCHEMA_INVALID",
+      message: semanticIssue.message.replace("Duplicate invariant source proof path ", "Duplicate source proof path "),
+      path: `${prefixedSemanticPath(path, semanticIssue.path)}.path`
+    }))
+  };
+}
+
+function prefixedSemanticPath(rootPath: string, semanticPath: string): string {
+  return semanticPath === "$" ? rootPath : `${rootPath}${semanticPath.slice(1)}`;
 }
 
 export function invariantSourceProofSchemaIssues(value: unknown, path = "$"): SchemaValidationIssue[] {
@@ -72,7 +74,7 @@ export function invariantSourceProofSchemaIssues(value: unknown, path = "$"): Sc
 
 export const invariantSourceProofJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/invariant-source-proof",
+  $id: "urn:ultrafuzz:schema:artifacts:invariant-source-proof:1",
   title: "Ultrafuzz invariant source proof",
   type: "object",
   additionalProperties: false,

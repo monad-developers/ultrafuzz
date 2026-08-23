@@ -37,6 +37,7 @@ export function remoteAuthDir(provider: ModelProvider): string {
   if (provider === "openai") return "/run/ultrafuzz-auth/codex";
   if (provider === "anthropic") return "/run/ultrafuzz-auth/claude";
   if (provider === "deepseek") return "/run/ultrafuzz-auth/deepseek";
+  if (provider === "openrouter") return "/run/ultrafuzz-auth/openrouter";
   return "/run/ultrafuzz-auth/kimi";
 }
 
@@ -44,5 +45,6 @@ export function remoteAuthPath(provider: ModelProvider): string {
   if (provider === "openai") return path.posix.join(remoteAuthDir(provider), "auth.json");
   if (provider === "anthropic") return path.posix.join(remoteAuthDir(provider), ".credentials.json");
   if (provider === "deepseek") return path.posix.join(remoteAuthDir(provider), "api-key");
+  if (provider === "openrouter") return path.posix.join(remoteAuthDir(provider), "api-key");
   return path.posix.join(remoteAuthDir(provider), "config.toml");
 }

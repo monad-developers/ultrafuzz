@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:cloud-execution-generation:1",
+  "title": "Ultrafuzz cloud execution generation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation", "reset_node", "applied_at"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.cloud.execution-generation.v1"
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "reset_node": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "applied_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

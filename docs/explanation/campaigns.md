@@ -24,9 +24,11 @@ reference material. Reference nodes can provide normalized Markdown handoffs
 from `.ultrafuzz/references.yml`, but reference fetching is always an explicit
 operator action.
 
-Strategies run independent and looped agents that author tests, explore
-invariants, build differential harnesses, or expand coverage. Topology controls
-loops and explicit model-profile fan-out so repeated attempts are traceable.
+Strategies run independent and looped agents that investigate concrete,
+source-backed production bugs. Their primary security output is typed findings;
+they may also author a focused test or reproducer when execution is useful to
+confirm the result. Topology controls loops and explicit model-profile fan-out
+so repeated attempts are traceable.
 
 Review deduplicates findings, triages severity, aggregates generated tests, and
 writes the final report artifacts. Reports are produced by the final-report
@@ -34,31 +36,24 @@ phase; they are evidence to inspect, not an automatic security submission.
 
 ## Default Strategy Families
 
-The default scaffold mixes broad discovery with targeted test-generation lanes:
+The default scaffold is the direct bug-finding workflow:
 
-- Property discovery lenses produce the shared property catalog.
-- Boundary and accounting tests cover admin/config boundaries, dependency
-  boundaries, AMM liquidity, payable fallback accounting, externalized-state
-  accounting, batch atomicity, router accounting, rounding direction, market
-  exhaustion, order replacement, state-machine behavior, and lifecycle/view
-  boundaries.
-- Input, round-trip, workflow, time, and coverage-expansion strategies turn the
-  property catalog into concrete fuzz tests.
-- Stateful invariant campaigns use recon-fuzzer for setup and coverage
-  iteration, then run recon-fuzzer as the single final backend over the
-  implemented Chimera property suite for final bug finding. Differential
-  campaigns build oracle plans, reference-model lanes, repair passes, and
-  review reports.
-- Dynamic strategy generation reviews accumulated artifacts, enumerates
-  target-specific candidates, and feeds selected generated tests and findings
-  into review.
-- Threat modeling produces canonical structured and Markdown views of assets,
-  actors, trust boundaries, capabilities, invariants, attack surfaces, and
-  evidence-backed threats. The planner then runs one focused dynamic `/goal`
-  node for every threat and every applicable vulnerability class, plus one
-  fixed roaming goal that challenges both the model and taxonomy. Applicability
-  excludes only evidence-backed incompatibilities; unknown does not mean
-  absent.
+- Eight property-discovery lenses produce the shared property catalog and may
+  publish concrete findings discovered while deriving properties.
+- Twenty direct strategies investigate boundary, accounting, input,
+  round-trip, workflow, time, state-machine, dependency, parity, lifecycle, and
+  coverage-expansion hypotheses.
+- Every direct strategy writes `findings@2` as its primary result. Focused tests,
+  PoCs, and generated-test bundles are supporting evidence and may be empty
+  when source-complete or already-executed evidence adequately confirms the
+  result.
+- Review reconciles every raw finding, then deduplicates, triages, classifies,
+  aggregates any authored test evidence, and produces the final report.
+
+The `full` audit profile explicitly opts into the higher-cost specialist lanes
+in addition to that direct workflow. Those lanes add a five-stage stateful
+invariant campaign, the deep differential oracle/harness/review pipeline, and
+one dynamic strategy coordinator. They are not part of the default scaffold.
 
 ## Why The Graph Is Persisted
 

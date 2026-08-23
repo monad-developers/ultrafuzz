@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:history:2",
+  "title": "Ultrafuzz longitudinal eval history v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "supersessions", "observations"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.history.v2" },
+    "supersessions": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/supersession" }
+    },
+    "observations": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/observationV6" }
+    }
+  },
+  "$defs": {
+    "safeText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "sourceArtifact": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "fullSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "fingerprint": { "type": "string", "pattern": "^(?:sha256:)?[0-9a-f]{64}$" },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "maxLength": 1000,
+      "pattern": "^https://[^\\s]+$"
+    },
+    "repositoryUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://[^\\s]+$"
+    },
+    "githubRepositoryUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?![A-Za-z]:/)(?!.*//)(?!\\.?\\.?$)(?!\\.\\.?/)(?!.*\\/\\.\\.?(?:/|$))[^\\\\\\u0000-\\u001f\\u007f]+$"
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeNumber": { "type": "number", "minimum": 0 },
+    "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": { "enum": ["complete", "partial", "unavailable"] },
+        "reasons": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/safeText" }
+        }
+      }
+    },
+    "targetRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "revision"],
+      "properties": {
+        "target": { "$ref": "#/$defs/safeText" },
+        "revision": { "$ref": "#/$defs/fullSha" }
+      }
+    },
+    "publicationLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_path", "report_paths"],
+      "properties": {
+        "bundle_path": { "$ref": "#/$defs/relativePath" },
+        "report_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/relativePath" }
+        }
+      }
+    },
+    "targetPublication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "repository",
+        "revision",
+        "status",
+        "executed_case_count",
+        "graded_case_count",
+        "publication_location"
+      ],
+      "properties": {
+        "target": { "$ref": "#/$defs/safeText" },
+        "repository": { "$ref": "#/$defs/repositoryUrl" },
+        "revision": { "$ref": "#/$defs/fullSha" },
+        "framework": { "$ref": "#/$defs/safeText" },
+        "status": { "enum": ["succeeded", "genuine-task-failures", "failed"] },
+        "executed_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "graded_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "publication_location": { "$ref": "#/$defs/publicationLocation" }
+      }
+    },
+    "observationV6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "id",
+        "benchmark",
+        "lane",
+        "status",
+        "target",
+        "variant",
+        "trial_count",
+        "run_timestamp",
+        "candidate_commit",
+        "candidate_repository_url",
+        "cohort_fingerprint",
+        "target_revisions",
+        "model_profile",
+        "model",
+        "reasoning_effort",
+        "execution_policy_fingerprint",
+        "scoring_fingerprint",
+        "precision",
+        "recall",
+        "f1",
+        "cumulative_unique_true_positives",
+        "ground_truth_bug_count",
+        "wall_clock_seconds",
+        "wall_clock_completeness",
+        "cost_usd",
+        "cost_completeness",
+        "executed_case_count",
+        "graded_case_count",
+        "publication_url",
+        "target_publication",
+        "source_eval_run_id",
+        "source_artifact"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.eval.history.observation.v6" },
+        "id": { "$ref": "#/$defs/safeText" },
+        "benchmark": { "enum": ["evmbench", "ultrafuzz-bench"] },
+        "lane": { "enum": ["smoke", "full"] },
+        "status": { "enum": ["succeeded", "genuine-task-failures", "failed"] },
+        "target": { "$ref": "#/$defs/safeText" },
+        "variant": { "$ref": "#/$defs/safeText" },
+        "trial_count": { "$ref": "#/$defs/positiveInteger" },
+        "run_timestamp": { "$ref": "#/$defs/timestamp" },
+        "candidate_commit": { "$ref": "#/$defs/fullSha" },
+        "candidate_repository_url": { "$ref": "#/$defs/githubRepositoryUrl" },
+        "cohort_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "target_revisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/targetRevision" }
+        },
+        "model_profile": { "$ref": "#/$defs/safeText" },
+        "model": { "$ref": "#/$defs/safeText" },
+        "reasoning_effort": { "$ref": "#/$defs/safeText" },
+        "execution_policy_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "scoring_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "precision": { "$ref": "#/$defs/ratio" },
+        "recall": { "$ref": "#/$defs/ratio" },
+        "f1": { "$ref": "#/$defs/ratio" },
+        "cumulative_unique_true_positives": { "$ref": "#/$defs/nonNegativeInteger" },
+        "ground_truth_bug_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "wall_clock_seconds": {
+          "oneOf": [{ "$ref": "#/$defs/nonNegativeNumber" }, { "type": "null" }]
+        },
+        "wall_clock_completeness": { "$ref": "#/$defs/completeness" },
+        "cost_usd": {
+          "oneOf": [{ "$ref": "#/$defs/nonNegativeNumber" }, { "type": "null" }]
+        },
+        "cost_completeness": { "$ref": "#/$defs/completeness" },
+        "executed_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "graded_case_count": { "$ref": "#/$defs/positiveInteger" },
+        "publication_url": { "$ref": "#/$defs/httpsUrl" },
+        "target_publication": { "$ref": "#/$defs/targetPublication" },
+        "source_eval_run_id": { "$ref": "#/$defs/safeText" },
+        "source_artifact": { "$ref": "#/$defs/sourceArtifact" }
+      }
+    },
+    "cohortTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["superseded_cohort_fingerprint", "replacement_cohort_fingerprint"],
+      "properties": {
+        "superseded_cohort_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "replacement_cohort_fingerprint": { "$ref": "#/$defs/fingerprint" }
+      }
+    },
+    "supersession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["superseded_source_eval_run_id", "replacement_source_eval_run_id", "reason", "issue_url"],
+      "properties": {
+        "superseded_source_eval_run_id": { "$ref": "#/$defs/safeText" },
+        "replacement_source_eval_run_id": { "$ref": "#/$defs/safeText" },
+        "cohort_transition": { "$ref": "#/$defs/cohortTransition" },
+        "reason": { "$ref": "#/$defs/safeText" },
+        "issue_url": {
+          "type": "string",
+          "maxLength": 1000,
+          "pattern": "^https://github\\.com/monad-developers/ultrafuzz/issues/[1-9][0-9]*$"
+        }
+      }
+    }
+  }
+}

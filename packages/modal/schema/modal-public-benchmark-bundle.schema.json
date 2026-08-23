@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:public-benchmark-bundle:5",
+  "title": "Ultrafuzz Modal public benchmark bundle",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "benchmark",
+    "lane",
+    "model_slug",
+    "model",
+    "reasoning",
+    "judge_model",
+    "judge_reasoning",
+    "candidate_commit",
+    "eval_run_id",
+    "lineage",
+    "status",
+    "executed_case_count",
+    "graded_case_count",
+    "created_at",
+    "files",
+    "targets"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.modal.public-benchmark-bundle.v5"
+    },
+    "benchmark": {
+      "enum": ["evmbench", "ultrafuzz-bench"]
+    },
+    "lane": {
+      "enum": ["smoke", "full"]
+    },
+    "model_slug": {
+      "$ref": "#/$defs/safeId"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "reasoning": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "judge_model": {
+      "const": "gpt-5.6-sol"
+    },
+    "judge_reasoning": {
+      "const": "xhigh"
+    },
+    "candidate_commit": {
+      "$ref": "#/$defs/gitCommit"
+    },
+    "eval_run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "lineage": {
+      "$ref": "#/$defs/lineage"
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
+    "executed_case_count": {
+      "$ref": "#/$defs/caseCount"
+    },
+    "graded_case_count": {
+      "$ref": "#/$defs/caseCount"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 69648,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2048,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "caseCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2048
+    },
+    "status": {
+      "enum": ["succeeded", "genuine-task-failures", "failed"]
+    },
+    "canonicalRelativePosixPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.{1,2}(?:/|$))(?!.*\\/\\.{1,2}(?:/|$))(?!.*//)(?!.*\\\\)[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "allowedBundleFilePath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/canonicalRelativePosixPath"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?:eval/(?:eval\\.json|matrix\\.json|runs\\.jsonl|run-summary\\.json|public-eval-diagnostics\\.json|scores\\.jsonl|summary\\.json|summary\\.md|review/new-findings\\.jsonl)|reports/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:report\\.(?:md|json)|artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:THREAT_MODEL\\.md|goal-plan\\.json|threat-model\\.json|vulnerability-db-manifest\\.json)))$"
+        }
+      ]
+    },
+    "reportPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/canonicalRelativePosixPath"
+        },
+        {
+          "type": "string",
+          "pattern": "^reports/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/report\\.(?:md|json)$"
+        }
+      ]
+    },
+    "lineage": {
+      "type": "object",
+      "required": [
+        "logical_run_id",
+        "generation",
+        "attempt",
+        "attempt_id",
+        "config_fingerprint",
+        "source_fingerprint",
+        "image_fingerprint",
+        "model_fingerprint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "logical_run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "generation": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "attempt": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "config_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "image_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "model_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "required": ["path", "size_bytes", "sha256", "contents_base64"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/allowedBundleFilePath"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5242880
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contents_base64": {
+          "type": "string",
+          "maxLength": 6990508
+        }
+      }
+    },
+    "publicationLocation": {
+      "type": "object",
+      "required": ["bundle_path", "report_paths"],
+      "additionalProperties": false,
+      "properties": {
+        "bundle_path": {
+          "$ref": "#/$defs/canonicalRelativePosixPath"
+        },
+        "report_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/reportPath"
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "id",
+        "repository",
+        "revision",
+        "status",
+        "executed_case_count",
+        "graded_case_count",
+        "publication_location"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "repository": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 2048
+        },
+        "revision": {
+          "$ref": "#/$defs/gitCommit"
+        },
+        "framework": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "executed_case_count": {
+          "$ref": "#/$defs/caseCount"
+        },
+        "graded_case_count": {
+          "$ref": "#/$defs/caseCount"
+        },
+        "publication_location": {
+          "$ref": "#/$defs/publicationLocation"
+        }
+      }
+    }
+  }
+}

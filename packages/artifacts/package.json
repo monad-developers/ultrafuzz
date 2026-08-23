@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/artifacts",
   "version": "0.1.0",
   "private": true,
-  "description": "Artifact contracts, schemas, and durable run records for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,6 +11,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./strict-json": {
+      "types": "./dist/strict-json.d.ts",
+      "import": "./dist/strict-json.js",
+      "default": "./dist/strict-json.js"
     }
   },
   "files": [
@@ -19,12 +24,15 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm --filter @ultrafuzz/artifacts^... build && sh -c 'rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js' --",
-    "typecheck": "pnpm --filter @ultrafuzz/artifacts^... build && tsc -p tsconfig.json --noEmit"
+    "schema:check": "pnpm build && node scripts/verify-schema-snapshots.mjs",
+    "test": "pnpm --filter @ultrafuzz/security build && sh -c 'rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js' --",
+    "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "zod": "^4.4.3"
   },
   "homepage": "https://github.com/monad-developers/ultrafuzz#readme",

@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:benchmark-provenance:1",
+  "title": "Ultrafuzz private benchmark analysis provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "privacy",
+    "rows_are_sets",
+    "finding_instances",
+    "root_cause_entities",
+    "row_statuses"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.benchmark-provenance.v1" },
+    "privacy": { "const": "private-analysis-output-do-not-commit" },
+    "rows_are_sets": { "const": true },
+    "finding_instances": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/findingProvenance" }
+    },
+    "root_cause_entities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/rootCauseEntity" }
+    },
+    "row_statuses": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/rowStatus" }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonEmptyString" },
+    "nonNegativeInteger": {
+      "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/nonNegativeInteger"
+    },
+    "severity": { "enum": ["H", "M", "L"] },
+    "classification": { "enum": ["true-positive", "false-positive", "needs-human-review"] },
+    "nullableString": {
+      "oneOf": [{ "$ref": "#/$defs/nonEmptyString" }, { "type": "null" }]
+    },
+    "findingProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "condition",
+        "finding_id",
+        "qualified_id",
+        "finding_instance_id",
+        "root_cause_cluster_id",
+        "severity",
+        "title",
+        "source_strategies",
+        "classification",
+        "matched_source",
+        "matched_candidate_id",
+        "matched_identity",
+        "ground_truth_label",
+        "ground_truth_title",
+        "ground_truth_tp_credits",
+        "stable_issue_id",
+        "duplicate_of_finding_instance_id"
+      ],
+      "properties": {
+        "row_id": { "$ref": "#/$defs/nonEmptyString" },
+        "condition": { "$ref": "#/$defs/nonEmptyString" },
+        "finding_id": { "$ref": "#/$defs/nonEmptyString" },
+        "qualified_id": { "$ref": "#/$defs/nonEmptyString" },
+        "finding_instance_id": { "$ref": "#/$defs/nonEmptyString" },
+        "root_cause_cluster_id": { "$ref": "#/$defs/nonEmptyString" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "title": { "$ref": "#/$defs/nonEmptyString" },
+        "source_strategies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "classification": { "$ref": "#/$defs/classification" },
+        "matched_source": {
+          "oneOf": [{ "const": "canonical-ground-truth" }, { "type": "null" }]
+        },
+        "matched_candidate_id": { "$ref": "#/$defs/nullableString" },
+        "matched_identity": { "$ref": "#/$defs/nullableString" },
+        "ground_truth_label": { "$ref": "#/$defs/nullableString" },
+        "ground_truth_title": { "$ref": "#/$defs/nullableString" },
+        "ground_truth_tp_credits": { "$ref": "#/$defs/nonNegativeInteger" },
+        "stable_issue_id": { "$ref": "#/$defs/nonEmptyString" },
+        "duplicate_of_finding_instance_id": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "rootCauseEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_cause_cluster_id",
+        "top_severity",
+        "classification",
+        "ground_truth_tp_credits",
+        "rows",
+        "row_count",
+        "detection_count",
+        "qualified_findings"
+      ],
+      "properties": {
+        "root_cause_cluster_id": { "$ref": "#/$defs/nonEmptyString" },
+        "top_severity": { "$ref": "#/$defs/severity" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "ground_truth_tp_credits": { "$ref": "#/$defs/nonNegativeInteger" },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "row_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "detection_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "qualified_findings": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "rowStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rowId", "condition", "valid", "status", "reason"],
+      "properties": {
+        "rowId": { "$ref": "#/$defs/nonEmptyString" },
+        "condition": { "$ref": "#/$defs/nonEmptyString" },
+        "valid": { "const": true },
+        "status": { "const": "valid" },
+        "reason": { "type": "null" }
+      }
+    }
+  }
+}

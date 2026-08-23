@@ -9,25 +9,132 @@ import { describe, expect, it } from "vitest";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  benchmarkLanesZodSchema,
   benchmarkLaneTopologyExclusions,
+  BENCHMARK_LANES_SCHEMA_VERSION,
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
   BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_SMOKE_WORKFLOW_PROFILE,
-  DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
-  THREAT_MODEL_GOAL_FANOUT_NODE_IDS,
+  evmbenchCohortZodSchema,
   loadBenchmarkCohortManifest,
-  loadBenchmarkLanesManifest
+  loadBenchmarkLanesManifest,
+  ultrafuzzBenchCohortZodSchema
 } from "../src/benchmark-manifest.js";
-import { benchmarkModelProfileOverrides, benchmarkTopologyTransform } from "../src/runner.js";
+import {
+  EVAL_BENCHMARK_COHORT_SCHEMA_ID,
+  EVAL_BENCHMARK_LANES_SCHEMA_ID,
+  EVAL_EVMBENCH_COHORT_SCHEMA_ID,
+  EVAL_SUITE_SCHEMA_ID,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
+import {
+  assertPackagedBenchmarkPrelaunchPolicy,
+  benchmarkModelProfileOverrides,
+  benchmarkTopologyTransform,
+  runtimeRowLauncher
+} from "../src/runner.js";
+import { evalSuiteInputDocument } from "../src/suite.js";
+import { testRow } from "./helpers.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
+const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json");
+const EVMBENCH_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "evmbench", "cohort.json");
+const ULTRAFUZZ_BENCH_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "cohort.json");
+
+interface RetainedZodSchema {
+  safeParse(value: unknown): { success: boolean };
+}
+
+function jsonFixture(filePath: string): Record<string, unknown> {
+  return JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+}
+
+function expectShapeParity(schemaId: string, zodSchema: RetainedZodSchema, value: unknown, expected: boolean): void {
+  expect({
+    jsonSchema: validateEvalJsonSchema(schemaId, value).ok,
+    zod: zodSchema.safeParse(value).success
+  }).toEqual({ jsonSchema: expected, zod: expected });
+}
 
 describe("public benchmark manifests", () => {
+  it("keeps the checked-in cohort and lane documents in exact JSON Schema/Zod parity", () => {
+    expectShapeParity(EVAL_EVMBENCH_COHORT_SCHEMA_ID, evmbenchCohortZodSchema, jsonFixture(EVMBENCH_PATH), true);
+    expectShapeParity(
+      EVAL_BENCHMARK_COHORT_SCHEMA_ID,
+      ultrafuzzBenchCohortZodSchema,
+      jsonFixture(ULTRAFUZZ_BENCH_PATH),
+      true
+    );
+    expectShapeParity(EVAL_BENCHMARK_LANES_SCHEMA_ID, benchmarkLanesZodSchema, jsonFixture(LANES_PATH), true);
+  });
+
+  it("rejects the same portable cohort mutations in JSON Schema and retained Zod", () => {
+    for (const [schemaId, zodSchema, filePath] of [
+      [EVAL_EVMBENCH_COHORT_SCHEMA_ID, evmbenchCohortZodSchema, EVMBENCH_PATH],
+      [EVAL_BENCHMARK_COHORT_SCHEMA_ID, ultrafuzzBenchCohortZodSchema, ULTRAFUZZ_BENCH_PATH]
+    ] as const) {
+      const source = jsonFixture(filePath);
+      const missingTargets = structuredClone(source);
+      delete missingTargets.targets;
+      const extraRoot = { ...structuredClone(source), fallback_target: "legacy" };
+      const duplicateSmoke = structuredClone(source);
+      duplicateSmoke.smoke_targets = ["target-a", "target-a"];
+      const mutableRevision = structuredClone(source);
+      const targets = mutableRevision.targets as Array<Record<string, unknown>>;
+      targets[0] = { ...targets[0], revision: "main" };
+      for (const value of [missingTargets, extraRoot, duplicateSmoke, mutableRevision]) {
+        expectShapeParity(schemaId, zodSchema, value, false);
+      }
+    }
+  });
+
+  it("rejects the same portable lane mutations without defaulting or stripping", () => {
+    const source = jsonFixture(LANES_PATH);
+    const missingTrials = structuredClone(source);
+    delete (missingTrials.smoke as Record<string, unknown>).trials_per_variant;
+    const oldVersion = { ...structuredClone(source), schema_version: "ultrafuzz.benchmark.lanes.v1" };
+    const extraLaneField = structuredClone(source);
+    (extraLaneField.full as Record<string, unknown>).compatibility_model = "latest";
+    const mutableModel = structuredClone(source);
+    const smoke = mutableModel.smoke as { model_profiles: Array<Record<string, unknown>> };
+    smoke.model_profiles[0] = { ...smoke.model_profiles[0], model: "frontier-LATEST" };
+    const unsafeInteger = structuredClone(source);
+    (unsafeInteger.full as Record<string, unknown>).trials_per_variant = Number.MAX_SAFE_INTEGER + 1;
+    for (const value of [missingTrials, oldVersion, extraLaneField, mutableModel, unsafeInteger]) {
+      expectShapeParity(EVAL_BENCHMARK_LANES_SCHEMA_ID, benchmarkLanesZodSchema, value, false);
+    }
+    expect(benchmarkLanesZodSchema.parse(source)).toEqual(source);
+  });
+
+  it("runs cohort joins and pinned lane policy as named semantic gates", () => {
+    const cohort = jsonFixture(ULTRAFUZZ_BENCH_PATH);
+    const targets = cohort.targets as Array<Record<string, unknown>>;
+    targets[1] = { ...targets[1], id: targets[0]!.id };
+    cohort.smoke_targets = [...(cohort.smoke_targets as string[]), "missing-target"];
+    expectShapeParity(EVAL_BENCHMARK_COHORT_SCHEMA_ID, ultrafuzzBenchCohortZodSchema, cohort, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_BENCHMARK_COHORT_SCHEMA_ID, cohort)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ gate: "eval-benchmark-cohort-identity-joins", path: "$.targets[1]" }),
+        expect.objectContaining({
+          gate: "eval-benchmark-cohort-identity-joins",
+          path: expect.stringMatching(/^\$\.smoke_targets\[/u)
+        })
+      ])
+    );
+
+    const lanes = jsonFixture(LANES_PATH);
+    (lanes.smoke as Record<string, unknown>).strategy_loops = 2;
+    expectShapeParity(EVAL_BENCHMARK_LANES_SCHEMA_ID, benchmarkLanesZodSchema, lanes, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_BENCHMARK_LANES_SCHEMA_ID, lanes)).toContainEqual(
+      expect.objectContaining({ gate: "eval-benchmark-lanes-policy", path: "$.smoke" })
+    );
+  });
+
   it("uses one model and exactly three pinned Ultrafuzz-bench targets in smoke", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    const cohort = loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH);
     expect(cohort.schema_version).toBe("ultrafuzz.benchmark.cohort.v1");
     expect(cohort.targets).toHaveLength(3);
     expect(cohort.smoke_targets).toHaveLength(3);
@@ -35,11 +142,12 @@ describe("public benchmark manifests", () => {
     expect(cohort.targets.every((target) => /^[0-9a-f]{40}$/u.test(target.revision))).toBe(true);
     expect(new Set(cohort.targets.map((target) => target.revision)).has("latest")).toBe(false);
 
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "ultrafuzz-bench",
       lane: "smoke",
       cohort,
-      lanes: loadBenchmarkLanesManifest(LANES_PATH)
+      lanes
     });
     expect(suite.targets.map((target) => target.id)).toEqual(cohort.smoke_targets);
     expect(suite.targets.every((target) => target.sensitivity === "public")).toBe(true);
@@ -67,8 +175,10 @@ describe("public benchmark manifests", () => {
     expect(suite.reporting.artifacts).toMatchObject({
       mode: "upload",
       mode_explicit: true,
-      include: ["report.md", "report.json", "findings.normalized.json"]
+      include: ["report.md", "report.json"]
     });
+    expect(validateEvalJsonSchema(EVAL_SUITE_SCHEMA_ID, evalSuiteInputDocument(suite))).toMatchObject({ ok: true });
+    expect(evalSuiteInputDocument(suite)).not.toHaveProperty("reporting.artifacts.mode_explicit");
     expect(suite.variants[0]?.topology).toBeUndefined();
     expect(suite.variants[0]?.workflow_input).toMatchObject({
       excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],
@@ -95,13 +205,34 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
+    });
+
+    const openRouterModel = "~anthropic/claude-sonnet-latest:free";
+    const smokeOpenRouterOverride = {
+      id: "workflow-smoke-openrouter-high",
+      agent: "OpenRouterAgent" as const,
+      model: openRouterModel,
+      reasoning: "high"
+    };
+    const smokeOpenRouterSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort,
+      lanes,
+      runnerModelProfileOverride: smokeOpenRouterOverride
+    });
+    expect(smokeOpenRouterSuite.model_profiles[smokeOpenRouterOverride.id]).toEqual({
+      agent: "OpenRouterAgent",
+      model: openRouterModel,
+      reasoning: "high"
     });
   });
 
   it("accepts explicit runner overrides while keeping provider boundaries and the fixed judge", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
+    const cohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const runnerModelProfileOverride = {
       id: "workflow-full-gpt-5-6-luna-202607-medium",
@@ -190,7 +321,7 @@ describe("public benchmark manifests", () => {
       reasoning: "max"
     });
 
-    const smokeCohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    const smokeCohort = loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH);
     const smokeOverride = {
       id: "workflow-smoke-gpt-5-6-luna-202607-medium",
       agent: "CodexAgent" as const,
@@ -241,7 +372,8 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
     });
 
@@ -270,13 +402,14 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "smoke"
+        auditProfile: "smoke",
+        forbidModelFallback: true
       }
     });
   });
 
   it("uses every supported target and every pinned profile in the full lane", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
+    const cohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
     expect(suite.targets).toHaveLength(cohort.targets.length);
@@ -296,12 +429,87 @@ describe("public benchmark manifests", () => {
     for (const variant of suite.variants) {
       expect(variant.workflow_input).toMatchObject({
         excluded_strategy_families: [],
-        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+        benchmark_execution: {
+          strategy_loops: 1,
+          excluded_node_ids: []
+        }
       });
     }
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toEqual({
       topologyTransform: { strategyLoops: 1, excludedNodeIds: [] }
     });
+    expect(
+      benchmarkModelProfileOverrides(
+        { workflow_input: suite.variants[0]?.workflow_input },
+        suite.model_profiles[suite.run.runner_model_profile]
+      )
+    ).toEqual({
+      runtimeOverrides: {
+        auditProfile: "full",
+        forbidModelFallback: true
+      }
+    });
+  });
+
+  it("attests the effective full topology and rejects overrides before launch", async () => {
+    const cohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
+    const variant = suite.variants[0]!;
+    const runnerProfile = suite.model_profiles[variant.runner_model_profile!];
+    const runtimeOverrides = benchmarkModelProfileOverrides(
+      { workflow_input: variant.workflow_input },
+      runnerProfile
+    ).runtimeOverrides;
+    const project = mkdtempSync(path.join(tmpdir(), "ultrafuzz-full-policy-"));
+    const row = testRow(suite, {
+      target: { ...suite.targets[0]!, path: project, ground_truth_path: path.join(project, "ground-truth.yml") },
+      variant: { ...variant },
+      workflow_input: variant.workflow_input,
+      runner_model_profile: variant.runner_model_profile!
+    });
+
+    await expect(
+      assertPackagedBenchmarkPrelaunchPolicy({ row, projectRoot: project, runtimeOverrides, env: {} })
+    ).resolves.toBeUndefined();
+
+    const variantOverrideRow = {
+      ...row,
+      variant: {
+        ...row.variant,
+        topology: "packages/config/topologies/default.yml",
+        topology_path: path.join(REPOSITORY_ROOT, "packages/config/topologies/default.yml")
+      }
+    };
+    await expect(
+      runtimeRowLauncher({ row: variantOverrideRow, runId: "variant-override", suite, env: {} })
+    ).rejects.toMatchObject({ code: "EVAL_BENCHMARK_EXECUTION_INVALID" });
+
+    fs.mkdirSync(path.join(project, ".ultrafuzz"), { recursive: true });
+    fs.copyFileSync(
+      path.join(REPOSITORY_ROOT, "packages/config/topologies/default.yml"),
+      path.join(project, ".ultrafuzz/topology.yml")
+    );
+    fs.writeFileSync(
+      path.join(project, "ultrafuzz.toml"),
+      'schema_version = "ultrafuzz.config.v2"\naudit_profile = "default"\ntopology_path = ".ultrafuzz/topology.yml"\n',
+      "utf8"
+    );
+    await expect(runtimeRowLauncher({ row, runId: "target-config-override", suite, env: {} })).rejects.toMatchObject({
+      code: "EVAL_BENCHMARK_EXECUTION_INVALID",
+      message: expect.stringContaining("effective audit profile, catalog digest, and topology digest")
+    });
+    fs.copyFileSync(
+      path.join(REPOSITORY_ROOT, "packages/config/topologies/full.yml"),
+      path.join(project, ".ultrafuzz/topology.yml")
+    );
+    await expect(
+      runtimeRowLauncher({ row, runId: "byte-identical-target-config-override", suite, env: {} })
+    ).rejects.toMatchObject({
+      code: "EVAL_BENCHMARK_EXECUTION_INVALID",
+      message: expect.stringContaining("originate from the current packaged policy")
+    });
+    expect(fs.existsSync(path.join(project, ".ultrafuzz/runs"))).toBe(false);
   });
 
   it("derives exact topology exclusions from the canonical lane flags", () => {
@@ -371,7 +579,7 @@ describe("public benchmark manifests", () => {
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    const cohort = loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH);
     expect(cohort.targets).toHaveLength(3);
     expect(cohort.smoke_targets).toEqual(cohort.targets.map((target) => target.id));
     expect(cohort.targets.map((target) => target.framework).sort()).toEqual(["foundry", "hardhat", "vyper"]);
@@ -380,12 +588,8 @@ describe("public benchmark manifests", () => {
 
   it("rejects cross-lane benchmark cohorts", () => {
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
-    const ultrafuzzCohort = loadBenchmarkCohortManifest(
-      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json")
-    );
-    const evmbenchCohort = loadBenchmarkCohortManifest(
-      path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json")
-    );
+    const ultrafuzzCohort = loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH);
+    const evmbenchCohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
     expect(() =>
       adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "smoke", cohort: evmbenchCohort, lanes })
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" }));
@@ -399,7 +603,7 @@ describe("public benchmark manifests", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" }));
   });
 
-  it("defaults omitted benchmark trials to one and preserves explicit multi-trial experiments", () => {
+  it("requires authored benchmark trial counts and preserves explicit multi-trial experiments", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-trials-"));
     const lanesPath = path.join(directory, "lanes.json");
     const omitted = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
@@ -410,29 +614,17 @@ describe("public benchmark manifests", () => {
     delete omitted.full.trials_per_variant;
     fs.writeFileSync(lanesPath, JSON.stringify(omitted));
 
-    const defaulted = loadBenchmarkLanesManifest(lanesPath);
-    expect(defaulted.smoke.trials_per_variant).toBe(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT);
-    expect(defaulted.full.trials_per_variant).toBe(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT);
-    const ultrafuzzCohort = loadBenchmarkCohortManifest(
-      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json")
+    expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
+      expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
     );
-    const evmbenchCohort = loadBenchmarkCohortManifest(
-      path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json")
-    );
+    const ultrafuzzCohort = loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH);
+    const evmbenchCohort = loadBenchmarkCohortManifest(EVMBENCH_PATH);
     expect(
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "ultrafuzz-bench",
         lane: "smoke",
         cohort: ultrafuzzCohort,
-        lanes: defaulted
-      }).run.trials_per_variant
-    ).toBe(1);
-    expect(
-      adaptBenchmarkManifestToEvalSuite({
-        benchmark: "evmbench",
-        lane: "full",
-        cohort: evmbenchCohort,
-        lanes: defaulted
+        lanes: loadBenchmarkLanesManifest(LANES_PATH)
       }).run.trials_per_variant
     ).toBe(1);
 
@@ -470,6 +662,19 @@ describe("public benchmark manifests", () => {
         expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
       );
     }
+  });
+
+  it("accepts only the current lanes v2 document and never converts v1", () => {
+    expect(loadBenchmarkLanesManifest(LANES_PATH).schema_version).toBe(BENCHMARK_LANES_SCHEMA_VERSION);
+    const directory = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-lanes-version-"));
+    const lanesPath = path.join(directory, "lanes.json");
+    fs.writeFileSync(
+      lanesPath,
+      JSON.stringify({ ...jsonFixture(LANES_PATH), schema_version: "ultrafuzz.benchmark.lanes.v1" })
+    );
+    expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
+      expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
+    );
   });
 
   it("rejects mutable revisions, mutable models, and noncanonical lane topology", () => {

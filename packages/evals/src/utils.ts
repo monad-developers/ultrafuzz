@@ -3,10 +3,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { appendLineDurable, safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
+import {
+  assertPlannedGraph,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  safeResolveInside,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
-
-import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
 
 export class EvalError extends Error {
   readonly code: string;
@@ -18,15 +22,6 @@ export class EvalError extends Error {
     this.code = code;
     this.details = details;
   }
-}
-
-export function evalResult<T>(ok: boolean, value?: T, diagnostics: RuntimeDiagnostic[] = []): EvalResult<T> {
-  return {
-    schema_version: EVAL_RESULT_SCHEMA_VERSION,
-    ok,
-    diagnostics,
-    ...(value !== undefined ? { value } : {})
-  };
 }
 
 export function diagnosticFromError(error: unknown, fallbackCode = "EVAL_FAILED"): RuntimeDiagnostic {
@@ -83,6 +78,18 @@ export function boundedEvalId(parts: string[], maxLength: number): string {
   return assertSafeEvalId(bounded, "eval ID");
 }
 
+/** Build the runtime run ID whose `ultrafuzz-`-prefixed Smithers ID is current and bounded. */
+export function boundedEvalWorkflowRunId(parts: string[]): string {
+  const smithersPrefix = "ultrafuzz-";
+  const smithersMaxLength = 64;
+  const compatibleParts = parts.map((part) => part.toLowerCase().replaceAll(".", "-"));
+  const runId = boundedEvalId(compatibleParts, smithersMaxLength - smithersPrefix.length);
+  if (!/^[a-z0-9_-]+$/u.test(runId)) {
+    throw new EvalError("EVAL_ID_INVALID", "eval workflow run ID is not Smithers-compatible", { runId });
+  }
+  return runId;
+}
+
 function normalizeEvalId(parts: string[]): string {
   return parts
     .join("-")
@@ -111,25 +118,17 @@ export interface TerminalReportPathResolution {
   reason: string;
 }
 
-export function resolveTerminalReportPath(input: {
-  runRoot?: string;
-  recordedPath?: string;
-  fallbackPath?: string;
-}): TerminalReportPathResolution {
+export function resolveTerminalReportPath(input: { runRoot?: string }): TerminalReportPathResolution {
   if (input.runRoot === undefined) {
-    const reportPath = input.recordedPath ?? input.fallbackPath;
-    return reportPath === undefined
-      ? { reason: "terminal report path is unavailable" }
-      : { path: reportPath, reason: "terminal report path came from eval metadata" };
+    return { reason: "terminal report run root is unavailable" };
   }
 
   const runRoot = path.resolve(input.runRoot);
-  let graph: unknown;
-  try {
-    graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
-  } catch {
-    return recordedReportFallback(runRoot, input.recordedPath, "run graph is unavailable");
+  const graphPath = path.join(runRoot, "graph.json");
+  if (!fs.existsSync(graphPath)) {
+    return { reason: "run graph is unavailable" };
   }
+  const graph = assertPlannedGraph(readStrictJsonFile(graphPath));
   const candidates = terminalReportCandidates(runRoot, graph);
   if (candidates.length === 1) {
     return {
@@ -139,9 +138,9 @@ export function resolveTerminalReportPath(input: {
     };
   }
   if (candidates.length > 1) {
-    return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
+    return { reason: "run graph declares more than one ultrafuzz/report@3 output" };
   }
-  return recordedReportFallback(runRoot, input.recordedPath, "run graph does not declare ultrafuzz/report@1");
+  return { reason: "run graph does not declare ultrafuzz/report@3" };
 }
 
 function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path: string; relativePath: string }> {
@@ -154,7 +153,7 @@ function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path
       continue;
     }
     for (const output of node.outputs) {
-      if (!isRecord(output) || output.contract !== "ultrafuzz/report@1" || typeof output.path !== "string") {
+      if (!isRecord(output) || output.contract !== "ultrafuzz/report@3" || typeof output.path !== "string") {
         continue;
       }
       try {
@@ -167,26 +166,6 @@ function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path
     }
   }
   return [...candidates.values()];
-}
-
-function recordedReportFallback(
-  runRoot: string,
-  recordedPath: string | undefined,
-  missingGraphReason: string
-): TerminalReportPathResolution {
-  if (recordedPath === undefined || !path.isAbsolute(recordedPath) || !isPathInside(runRoot, recordedPath)) {
-    return { reason: missingGraphReason };
-  }
-  try {
-    const relativePath = path.relative(runRoot, recordedPath).split(path.sep).join("/");
-    return {
-      path: safeResolveInside(runRoot, relativePath, "recorded terminal report path"),
-      relativePath,
-      reason: `${missingGraphReason}; using compatible recorded path`
-    };
-  } catch {
-    return { reason: `${missingGraphReason}; recorded path is unsafe` };
-  }
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {
@@ -297,7 +276,7 @@ function matchesPinnedHoldout(targetPath: string, ref: string, head: string): bo
   let record: unknown;
   try {
     if (!fs.statSync(recordPath).isFile()) return false;
-    record = JSON.parse(fs.readFileSync(recordPath, "utf8"));
+    record = readStrictJsonFile(recordPath, 1024 * 1024);
   } catch {
     return false;
   }
@@ -320,23 +299,8 @@ export function evalRunRoot(projectRoot: string, evalRunId: string): string {
   );
 }
 
-export function jsonFile<T = unknown>(filePath: string): T {
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
-}
-
-export function appendJsonLine(filePath: string, value: unknown): void {
-  appendLineDurable(filePath, JSON.stringify(value));
-}
-
-export function readJsonLines<T = unknown>(filePath: string): T[] {
-  if (!fs.existsSync(filePath)) {
-    return [];
-  }
-  return fs
-    .readFileSync(filePath, "utf8")
-    .split(/\r?\n/u)
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as T);
+function readStrictJsonFile(filePath: string, maximumBytes = 64 * 1024 * 1024): unknown {
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, maximumBytes));
 }
 
 export function roundMetric(value: number): number {

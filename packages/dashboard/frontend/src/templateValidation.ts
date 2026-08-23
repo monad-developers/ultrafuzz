@@ -87,6 +87,15 @@ export function validatePromptTemplateVariables(
           }
         }
       }
+    } else if (isAncestorArtifactsByPathReference(variable)) {
+      const targets = ancestorArtifactsByPathTargets(variable);
+      if (
+        targets === null ||
+        hasDuplicates(targets) ||
+        targets.some((target) => !isValidArtifactRelativePath(target))
+      ) {
+        invalidArtifactReferences.add(variable);
+      }
     } else if (!supportedTemplateVariableSet.has(variable)) {
       unknownVariables.add(variable);
     }
@@ -129,6 +138,10 @@ function isAncestorArtifactsReference(variable: string): boolean {
   return variable === "ancestor_artifacts" || variable.startsWith("ancestor_artifacts:");
 }
 
+function isAncestorArtifactsByPathReference(variable: string): boolean {
+  return variable.startsWith("ancestor_artifacts_by_path:");
+}
+
 function artifactPathReferenceTarget(variable: string): string | null {
   return variable.startsWith("artifact_path:") ? variable.slice("artifact_path:".length) : null;
 }
@@ -151,10 +164,33 @@ function ancestorArtifactsReferenceTargets(variable: string): string[] | null {
   return targets.length > 0 && targets.every((target) => target.length > 0) ? targets : null;
 }
 
+function ancestorArtifactsByPathTargets(variable: string): string[] | null {
+  if (!variable.startsWith("ancestor_artifacts_by_path:")) {
+    return null;
+  }
+  const targets = variable
+    .slice("ancestor_artifacts_by_path:".length)
+    .split(",")
+    .map((target) => target.trim());
+  return targets.length > 0 && targets.every((target) => target.length > 0) ? targets : null;
+}
+
 function hasDuplicates(values: readonly string[]): boolean {
   return new Set(values).size !== values.length;
 }
 
 function isValidNodeId(value: string): boolean {
   return /^[a-z0-9_-]+$/.test(value);
+}
+
+function isValidArtifactRelativePath(value: string): boolean {
+  const parts = value.split("/");
+  return (
+    value.length > 0 &&
+    !value.includes("\\") &&
+    !value.startsWith("/") &&
+    !value.includes("//") &&
+    !parts.some((part) => part === "" || part === "." || part === "..") &&
+    /^[A-Za-z0-9._/@+-]+$/u.test(value)
+  );
 }

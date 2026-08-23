@@ -1,77 +1,189 @@
-import fs from "node:fs";
-
+import {
+  publishFileDurableExclusive,
+  readStrictJsonlSnapshot,
+  type DurablePublicationResult,
+  type StrictJsonlCodec
+} from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
-export const EVMBENCH_RESULT_VERSION = "ultrafuzz.evmbench.result.v1" as const;
+import {
+  EVMBENCH_RESULT_VERSION,
+  evmbenchOperationalMetricsSchema,
+  evmbenchRunProvenanceSchema,
+  evmbenchSafeIdSchema,
+  parseNormalizedEvmbenchResultBytes,
+  serializeNormalizedEvmbenchResult,
+  type EvmbenchOperationalMetrics,
+  type EvmbenchRunProvenance,
+  type NormalizedEvmbenchResult
+} from "./contracts.js";
+import { assertEvmbenchJsonSchema } from "./schema-registry.js";
+import { assertEvmbenchDocumentSemantics } from "./semantic-gates.js";
 
-const officialMetricsSchema = z
+export const NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-final-report:1" as const;
+export const NANOEVAL_RECORD_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:evmbench:nanoeval-record:1" as const;
+export const NANOEVAL_TIMESTAMP_PATTERN_SOURCE =
+  "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$" as const;
+
+const jsonValueSchema = z.json();
+const recorderIdSchema = z.string().min(1).max(1024);
+const positiveSafeIntegerSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const nonNegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const nanoevalTimestampSchema = z
+  .string()
+  .regex(new RegExp(NANOEVAL_TIMESTAMP_PATTERN_SOURCE, "u"))
+  .datetime({ offset: true });
+const commonRecorderFields = {
+  timestamp: nanoevalTimestampSchema,
+  sample_id: recorderIdSchema.nullable(),
+  group_id: recorderIdSchema.nullable()
+} as const;
+
+export const nanoevalPerAuditMetricsSchema = z
   .object({
     score: z.number().nonnegative(),
     max_score: z.number().positive(),
+    n_runs: positiveSafeIntegerSchema,
+    detect_award: z.number().nonnegative(),
+    detect_max_award: z.number().nonnegative()
+  })
+  .strict();
+
+export const nanoevalMetricsSchema = z
+  .object({
+    score: z.number().nonnegative(),
+    max_score: z.number().positive(),
+    score_percentage: z.number().min(0).max(100),
+    per_audit: z
+      .record(evmbenchSafeIdSchema, nanoevalPerAuditMetricsSchema)
+      .refine((perAudit) => Object.keys(perAudit).length > 0, "per_audit must not be empty"),
     detect_award: z.number().nonnegative(),
     detect_max_award: z.number().nonnegative(),
-    per_audit: z.unknown().optional()
+    detect_score_percentage: z.number().min(0).max(100)
   })
-  .passthrough();
+  .strict();
 
-export interface EvmbenchRunProvenance {
-  benchmark_identity: string;
-  ultrafuzz_commit: string;
-  ultrafuzz_dirty: boolean;
-  evmbench_commit: string;
-  frontier_evals_commit: string;
-  targets: Array<{ audit_id: string; source_commit: string }>;
-  audit_images: Array<{ audit_id: string; source_image_digest: string; overlay_image_digest: string | null }>;
-  profile: string;
-  profile_fingerprint: string;
-  topology_fingerprint: string;
-  model: string;
-  agent: "ultrafuzz" | "official-gold";
-  reasoning: string;
-  concurrency: number;
+export const nanoevalFinalReportSchema = z
+  .object({
+    params: z
+      .object({
+        audit_split: evmbenchSafeIdSchema,
+        mode: z.literal("detect"),
+        n_tries: positiveSafeIntegerSchema,
+        n_samples: positiveSafeIntegerSchema,
+        agent: z.enum(["ultrafuzz", "human"])
+      })
+      .strict(),
+    run_health: z.object({ n_rollouts_failed: nonNegativeSafeIntegerSchema }).strict(),
+    metrics: nanoevalMetricsSchema,
+    run_group_id: evmbenchSafeIdSchema,
+    partial: z.literal(true).optional()
+  })
+  .strict();
+
+const nanoevalRunStartedRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("run_started"),
+    sample_id: z.null(),
+    group_id: z.null(),
+    run_spec: z.object({ run_id: recorderIdSchema, run_set_id: recorderIdSchema }).strict()
+  })
+  .strict();
+const nanoevalSamplingRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("sampling"),
+    prompt: z.string(),
+    sampled: z.string()
+  })
+  .strict();
+const nanoevalMatchRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("match"),
+    correct: z.boolean(),
+    expected: z.null(),
+    picked: z.null(),
+    prob_correct: z.null()
+  })
+  .strict();
+const nanoevalExtraRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("extra"),
+    data: jsonValueSchema
+  })
+  .strict();
+const nanoevalSampleCompletedRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("sample_completed"),
+    status: z.literal("completed")
+  })
+  .strict();
+const nanoevalErrorRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("error"),
+    message: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
+    error: z
+      .string()
+      .max(1024 * 1024)
+      .nullable()
+  })
+  .strict();
+const nanoevalFinalReportRecordSchema = z
+  .object({
+    ...commonRecorderFields,
+    record_type: z.literal("final_report"),
+    sample_id: z.null(),
+    group_id: z.null(),
+    final_report: nanoevalFinalReportSchema
+  })
+  .strict();
+
+export const nanoevalRecordSchema = z.discriminatedUnion("record_type", [
+  nanoevalRunStartedRecordSchema,
+  nanoevalSamplingRecordSchema,
+  nanoevalMatchRecordSchema,
+  nanoevalExtraRecordSchema,
+  nanoevalSampleCompletedRecordSchema,
+  nanoevalErrorRecordSchema,
+  nanoevalFinalReportRecordSchema
+]);
+
+export type NanoevalFinalReport = z.infer<typeof nanoevalFinalReportSchema>;
+export type NanoevalRecord = z.infer<typeof nanoevalRecordSchema>;
+
+export function parseNanoevalFinalReport(value: unknown, label = "NanoEval final report"): NanoevalFinalReport {
+  assertEvmbenchJsonSchema(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, value, label);
+  const parsed = nanoevalFinalReportSchema.parse(value);
+  assertEvmbenchDocumentSemantics(NANOEVAL_FINAL_REPORT_JSON_SCHEMA_ID, parsed);
+  return parsed;
 }
 
-export interface EvmbenchOperationalMetrics {
-  runtime_seconds: number | null;
-  token_usage: number | null;
-  cost_usd: number | null;
-  completeness: {
-    runtime: "complete" | "unavailable";
-    token_usage: "complete" | "unavailable";
-    cost: "complete" | "unavailable";
-  };
-}
-
-export interface NormalizedEvmbenchResult {
-  schema_version: typeof EVMBENCH_RESULT_VERSION;
-  official_evmbench: {
-    score: number;
-    max_score: number;
-    recall: number;
-    detect_award: number;
-    detect_max_award: number;
-    per_audit?: unknown;
-    per_vulnerability_decisions?: unknown[];
-  };
-  provenance: EvmbenchRunProvenance;
-  operational: EvmbenchOperationalMetrics;
-  ultrafuzz_metrics?: unknown;
+export function parseNanoevalRecord(value: unknown, label = "NanoEval record"): NanoevalRecord {
+  assertEvmbenchJsonSchema(NANOEVAL_RECORD_JSON_SCHEMA_ID, value, label);
+  const parsed = nanoevalRecordSchema.parse(value);
+  assertEvmbenchDocumentSemantics(NANOEVAL_RECORD_JSON_SCHEMA_ID, parsed);
+  return parsed;
 }
 
 export function normalizeEvmbenchResult(input: {
   finalReport: unknown;
   provenance: EvmbenchRunProvenance;
   operational: EvmbenchOperationalMetrics;
-  perVulnerabilityDecisions?: unknown[];
-  ultrafuzzMetrics?: unknown;
 }): NormalizedEvmbenchResult {
-  const finalReport = record(input.finalReport, "NanoEval final report");
-  const metrics = officialMetricsSchema.parse(finalReport.metrics ?? finalReport);
-  if (metrics.detect_award > metrics.detect_max_award) {
-    throw new Error("official detect award exceeds its maximum");
-  }
-  if (metrics.score > metrics.max_score) throw new Error("official score exceeds its maximum");
-  return {
+  const finalReport = parseNanoevalFinalReport(input.finalReport);
+  if (finalReport.partial === true) throw new Error("cannot normalize a partial NanoEval final report");
+  const provenance = evmbenchRunProvenanceSchema.parse(input.provenance);
+  const operational = evmbenchOperationalMetricsSchema.parse(input.operational);
+  const metrics = finalReport.metrics;
+  const normalized = {
     schema_version: EVMBENCH_RESULT_VERSION,
     official_evmbench: {
       score: metrics.score,
@@ -79,35 +191,76 @@ export function normalizeEvmbenchResult(input: {
       recall: metrics.score / metrics.max_score,
       detect_award: metrics.detect_award,
       detect_max_award: metrics.detect_max_award,
-      ...(metrics.per_audit === undefined ? {} : { per_audit: metrics.per_audit }),
-      ...(input.perVulnerabilityDecisions === undefined
-        ? {}
-        : { per_vulnerability_decisions: input.perVulnerabilityDecisions })
+      per_audit: metrics.per_audit
     },
-    provenance: input.provenance,
-    operational: input.operational,
-    ...(input.ultrafuzzMetrics === undefined ? {} : { ultrafuzz_metrics: input.ultrafuzzMetrics })
-  };
+    provenance,
+    operational
+  } satisfies NormalizedEvmbenchResult;
+  return parseNormalizedEvmbenchResultBytes(serializeNormalizedEvmbenchResult(normalized));
 }
 
-export function readNanoevalFinalReport(recordFiles: string[]): unknown {
-  let finalReport: unknown;
+export function publishNormalizedEvmbenchResult(
+  root: string,
+  relativePath: string,
+  result: NormalizedEvmbenchResult
+): DurablePublicationResult {
+  const bytes = serializeNormalizedEvmbenchResult(result);
+  return publishFileDurableExclusive(root, relativePath, bytes);
+}
+
+export function readNanoevalFinalReport(recordFiles: string[]): NanoevalFinalReport {
+  if (recordFiles.length === 0) throw new Error("NanoEval did not produce a JSONL record file");
+  let finalReport: NanoevalFinalReport | undefined;
   for (const filePath of [...recordFiles].sort()) {
-    const lines = fs
-      .readFileSync(filePath, "utf8")
-      .split(/\r?\n/u)
-      .filter((line) => line.trim() !== "");
-    for (const line of lines) {
-      const row = record(JSON.parse(line) as unknown, "NanoEval record");
-      if (row.record_type === "final_report") finalReport = row.final_report;
+    const snapshot = readStrictJsonlSnapshot(filePath, nanoevalCodec(filePath));
+    if (!snapshot.exists || snapshot.records.length === 0) {
+      throw new Error(`NanoEval record journal is missing or empty: ${filePath}`);
+    }
+    for (const record of snapshot.records) {
+      if (record.record_type !== "final_report" || record.final_report.partial === true) continue;
+      if (finalReport !== undefined) throw new Error("NanoEval recorded more than one non-partial final report");
+      finalReport = record.final_report;
     }
   }
-  if (finalReport === undefined) throw new Error("NanoEval did not record a final report");
+  if (finalReport === undefined) throw new Error("NanoEval did not record a non-partial final report");
   return finalReport;
 }
 
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
+function nanoevalCodec(filePath: string): StrictJsonlCodec<NanoevalRecord> {
+  return {
+    label: `NanoEval record journal ${filePath}`,
+    parseRecord(value, recordPath) {
+      try {
+        return parseNanoevalRecord(value, `NanoEval record ${recordPath}`);
+      } catch (error) {
+        throw new Error(
+          `NanoEval record ${recordPath} violates the pinned recorder contract: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error }
+        );
+      }
+    },
+    identity(record) {
+      return `${record.timestamp}\u0000${record.record_type}\u0000${record.sample_id ?? ""}\u0000${record.group_id ?? ""}\u0000${JSON.stringify(record)}`;
+    },
+    validateHistory(records) {
+      if (records[0]?.record_type !== "run_started") {
+        throw new Error("NanoEval record journal must begin with run_started");
+      }
+      if (records.slice(1).some((record) => record.record_type === "run_started")) {
+        throw new Error("NanoEval record journal contains more than one run_started record");
+      }
+      let completeFinalSeen = false;
+      for (const [index, record] of records.entries()) {
+        if (completeFinalSeen) {
+          throw new Error(`NanoEval record journal contains data after its final report at record ${index + 1}`);
+        }
+        if (record.record_type === "final_report" && record.final_report.partial !== true) {
+          completeFinalSeen = true;
+        }
+      }
+    },
+    maxBytes: 256 * 1024 * 1024,
+    maxRecordBytes: 16 * 1024 * 1024,
+    maxRecords: 1_000_000
+  };
 }

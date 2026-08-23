@@ -11,6 +11,9 @@ pnpm-lock.yaml
 
 packages/*/dist
 packages/*/dist-test
+packages/dashboard/frontend/.generated
+packages/config/test/fixtures/resolved-config.valid.json
+packages/config/test/fixtures/resolved-config.valid.pre-same-agent-attempts.json
 
 prompts/**/*.md
 docs/reference/audit-profiles.md

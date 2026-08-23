@@ -9,12 +9,16 @@ import {
   RUN_STATE_STATUSES,
   TERMINAL_NODE_STATE_STATUSES,
   TERMINAL_RUN_STATE_STATUSES,
+  readRunState,
   type NodeNextEligibleAction,
   type NodeStatus,
   type NodeWaitReason,
   type RunStatus
 } from "@ultrafuzz/artifacts";
 
+import { readEvalMatrix, readEvalRunRecords } from "./eval-durable.js";
+import { EVAL_STATUS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
+import type { EvalRunRecord } from "./types.js";
 import { EvalError, evalRunRoot, isRecord } from "./utils.js";
 
 export const EVAL_STATUS_SCHEMA_VERSION = "ultrafuzz.eval.status.v1" as const;
@@ -88,6 +92,11 @@ export interface EvalStatusSnapshot {
   rows: EvalStatusRow[];
 }
 
+export interface EvalStatusSemanticIssue {
+  path: string;
+  message: string;
+}
+
 export interface ReadEvalStatusInput {
   projectRoot: string;
   evalRunId: string;
@@ -113,8 +122,7 @@ interface MatrixRow {
 }
 
 interface RunRecords {
-  latestByRowId: Map<string, unknown>;
-  malformed: boolean;
+  latestByRowId: Map<string, EvalRunRecord>;
 }
 
 const RUN_STATUSES = new Set<string>(RUN_STATE_STATUSES);
@@ -125,8 +133,8 @@ const LINKED_WORKFLOW_STATUS_VALUES = new Set<string>(EVAL_STATUS_LINKED_WORKFLO
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
 const COMPLETED_NODE_STATUSES = new Set<string>(TERMINAL_NODE_STATE_STATUSES);
 const MAX_VISIBLE_STATUS_NODES = 3;
-// Durable node IDs are valid up to 128 ASCII characters. Keep every valid ID
-// exact in the compact view and bound only malformed/future state values.
+// Preserve every durable node ID exactly in JSON while bounding only the
+// compact table representation.
 const MAX_VISIBLE_STATUS_NODE_ID_CHARACTERS = 128;
 const MAX_LINKED_WORKFLOW_IDS = 32;
 const AMBIGUOUS_LINKED_WORKFLOW_IDS = Symbol("ambiguous-linked-workflow-ids");
@@ -166,7 +174,7 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
     if (row.id !== null) idCounts.set(row.id, (idCounts.get(row.id) ?? 0) + 1);
   }
 
-  return {
+  return parseEvalStatusSnapshot({
     schema_version: EVAL_STATUS_SCHEMA_VERSION,
     snapshot_at: now.toISOString(),
     stale_after_seconds: staleAfterSeconds,
@@ -178,7 +186,7 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
       }
       const record = records.latestByRowId.get(matrixRow.id);
       if (record === undefined) {
-        return records.malformed ? unavailableRow(row, "invalid", false) : unavailableRow(row, "not-launched", false);
+        return unavailableRow(row, "not-launched", false);
       }
       return statusForRecord({
         row,
@@ -187,7 +195,128 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
         staleAfterSeconds
       });
     })
-  };
+  });
+}
+
+export function parseEvalStatusSnapshot(value: unknown, source = "eval status"): EvalStatusSnapshot {
+  const canonical = validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, value);
+  if (!canonical.ok) {
+    throw new EvalError("EVAL_STATUS_INVALID", `${source} failed canonical schema validation`, {
+      schema_id: EVAL_STATUS_SCHEMA_ID,
+      issues: canonical.issues,
+      truncated: canonical.truncated
+    });
+  }
+  const snapshot = value as EvalStatusSnapshot;
+  const semanticIssues = evalStatusSemanticIssues(snapshot);
+  if (semanticIssues.length > 0) {
+    throw new EvalError("EVAL_STATUS_INVALID", `${source} failed semantic validation`, { issues: semanticIssues });
+  }
+  return snapshot;
+}
+
+export function evalStatusSemanticIssues(snapshot: EvalStatusSnapshot): EvalStatusSemanticIssue[] {
+  const issues: EvalStatusSemanticIssue[] = [];
+  const snapshotAtMs = Date.parse(snapshot.snapshot_at);
+  const expectedCompletedStatuses = [...TERMINAL_NODE_STATE_STATUSES];
+  if (JSON.stringify(snapshot.completed_node_statuses) !== JSON.stringify(expectedCompletedStatuses)) {
+    issues.push({
+      path: "$.completed_node_statuses",
+      message: "must equal the canonical terminal node-status sequence"
+    });
+  }
+  const seenRows = new Set<string>();
+  for (const [index, row] of snapshot.rows.entries()) {
+    const root = `$.rows[${index}]`;
+    if (seenRows.has(row.row)) issues.push({ path: `${root}.row`, message: "row labels must be unique" });
+    seenRows.add(row.row);
+    const expectedLabel = `row-${String(index + 1).padStart(Math.max(2, String(snapshot.rows.length).length), "0")}`;
+    if (row.row !== expectedLabel) {
+      issues.push({ path: `${root}.row`, message: `must equal the canonical matrix position ${expectedLabel}` });
+    }
+    const terminalStatus = TERMINAL_RUN_STATUSES.has(row.status);
+    if (row.terminal !== terminalStatus) {
+      issues.push({ path: `${root}.terminal`, message: "must match the row status" });
+    }
+    const progressValues = [row.executed_nodes, row.total_nodes, row.progress_percent];
+    const progressAvailable = progressValues.every((entry) => entry !== null);
+    if (progressValues.some((entry) => entry !== null) && !progressAvailable) {
+      issues.push({ path: root, message: "progress counts and percentage must be present or null together" });
+    }
+    if (progressAvailable) {
+      const executed = row.executed_nodes!;
+      const total = row.total_nodes!;
+      if (executed > total) {
+        issues.push({ path: `${root}.executed_nodes`, message: "must not exceed total_nodes" });
+      } else {
+        const expectedProgress = total === 0 ? (row.terminal ? 100 : 0) : Number(((executed / total) * 100).toFixed(1));
+        if (!Object.is(row.progress_percent, expectedProgress)) {
+          issues.push({ path: `${root}.progress_percent`, message: `must equal ${expectedProgress}` });
+        }
+      }
+    } else if (row.eta_unavailable_reason !== "progress-unavailable") {
+      issues.push({ path: `${root}.eta_unavailable_reason`, message: "must explain unavailable progress" });
+    }
+    if ((row.checkpoint_age_seconds === null) !== (row.checkpoint_stale === null)) {
+      issues.push({ path: root, message: "checkpoint age and stale flag must be present or null together" });
+    } else if (
+      row.checkpoint_age_seconds !== null &&
+      row.checkpoint_stale !== row.checkpoint_age_seconds > snapshot.stale_after_seconds
+    ) {
+      issues.push({ path: `${root}.checkpoint_stale`, message: "must match the snapshot stale threshold" });
+    }
+    const etaAvailable = row.eta_remaining_seconds !== null || row.eta_at !== null || row.eta_basis !== null;
+    if (etaAvailable) {
+      if (
+        row.eta_remaining_seconds === null ||
+        row.eta_at === null ||
+        row.eta_basis === null ||
+        row.eta_unavailable_reason !== null
+      ) {
+        issues.push({ path: root, message: "ETA value, timestamp, basis, and reason are inconsistent" });
+      } else if (
+        row.eta_basis === "terminal" &&
+        (row.eta_remaining_seconds !== 0 || (!row.terminal && row.executed_nodes !== row.total_nodes))
+      ) {
+        issues.push({
+          path: `${root}.eta_basis`,
+          message: "terminal ETA requires zero seconds and terminal or fully executed progress"
+        });
+      } else if (row.eta_basis === EVAL_STATUS_ETA_BASIS) {
+        if (
+          row.terminal ||
+          !progressAvailable ||
+          row.executed_nodes === 0 ||
+          row.executed_nodes === row.total_nodes ||
+          row.checkpoint_stale !== false
+        ) {
+          issues.push({
+            path: `${root}.eta_basis`,
+            message: "throughput ETA requires fresh, partial, nonterminal progress"
+          });
+        }
+        if (Date.parse(row.eta_at) !== snapshotAtMs + row.eta_remaining_seconds * 1_000) {
+          issues.push({ path: `${root}.eta_at`, message: "must equal snapshot_at plus eta_remaining_seconds" });
+        }
+      } else if (row.eta_basis === "terminal" && Date.parse(row.eta_at) > snapshotAtMs) {
+        issues.push({ path: `${root}.eta_at`, message: "terminal ETA cannot be after snapshot_at" });
+      }
+    } else {
+      if (row.eta_unavailable_reason === null) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "is required when ETA is unavailable" });
+      } else if (row.eta_unavailable_reason === "progress-unavailable" && progressAvailable) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires unavailable progress" });
+      } else if (
+        row.eta_unavailable_reason === "no-completed-nodes" &&
+        (!progressAvailable || row.executed_nodes !== 0)
+      ) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires zero completed nodes" });
+      } else if (row.eta_unavailable_reason === "checkpoint-stale" && row.checkpoint_stale !== true) {
+        issues.push({ path: `${root}.eta_unavailable_reason`, message: "requires a stale checkpoint" });
+      }
+    }
+  }
+  return issues;
 }
 
 export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
@@ -269,57 +398,33 @@ export function renderEvalStatusTable(snapshot: EvalStatusSnapshot): string {
 }
 
 function readMatrix(matrixPath: string): MatrixRow[] {
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(matrixPath, "utf8"));
-  } catch {
-    throw new EvalError("EVAL_STATUS_MATRIX_UNAVAILABLE", "eval status matrix is unavailable");
+    return readEvalMatrix(matrixPath).map((row) => ({ id: row.id, valid: true }));
+  } catch (error) {
+    throw new EvalError("EVAL_STATUS_MATRIX_INVALID", "eval status matrix is invalid", {
+      reason: error instanceof Error ? error.message : String(error)
+    });
   }
-  if (!Array.isArray(parsed)) {
-    throw new EvalError("EVAL_STATUS_MATRIX_INVALID", "eval status matrix is invalid");
-  }
-  return parsed.map((value) => {
-    const id = isRecord(value) && typeof value.id === "string" && value.id.length > 0 ? value.id : null;
-    return { id, valid: id !== null };
-  });
 }
 
 function readRunRecords(recordsPath: string, expectedEvalRunId: string): RunRecords {
-  if (!fs.existsSync(recordsPath)) {
-    return { latestByRowId: new Map(), malformed: false };
-  }
-  let contents: string;
-  try {
-    contents = fs.readFileSync(recordsPath, "utf8");
-  } catch {
-    return { latestByRowId: new Map(), malformed: true };
-  }
-  const latestByRowId = new Map<string, unknown>();
-  let malformed = false;
-  for (const line of contents.split(/\r?\n/u)) {
-    if (line.trim().length === 0) continue;
-    try {
-      const record: unknown = JSON.parse(line);
-      if (
-        !isRecord(record) ||
-        record.eval_run_id !== expectedEvalRunId ||
-        typeof record.row_id !== "string" ||
-        record.row_id.length === 0
-      ) {
-        malformed = true;
-        continue;
-      }
-      latestByRowId.set(record.row_id, record);
-    } catch {
-      malformed = true;
+  const latestByRowId = new Map<string, EvalRunRecord>();
+  for (const record of readEvalRunRecords(recordsPath)) {
+    if (record.eval_run_id !== expectedEvalRunId) {
+      throw new EvalError("EVAL_STATUS_RECORD_LINEAGE_INVALID", "eval status run record names another eval run", {
+        expected_eval_run_id: expectedEvalRunId,
+        observed_eval_run_id: record.eval_run_id,
+        row_id: record.row_id
+      });
     }
+    latestByRowId.set(record.row_id, record);
   }
-  return { latestByRowId, malformed };
+  return { latestByRowId };
 }
 
 function statusForRecord(input: {
   row: string;
-  record: unknown;
+  record: EvalRunRecord;
   snapshotAtMs: number;
   staleAfterSeconds: number;
 }): EvalStatusRow {
@@ -343,15 +448,13 @@ function statusForRecord(input: {
     return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }
 
-  let contents: string;
-  try {
-    contents = fs.readFileSync(path.join(input.record.ultrafuzz_run_root, "state.json"), "utf8");
-  } catch {
+  const statePath = path.join(input.record.ultrafuzz_run_root, "state.json");
+  if (!fs.existsSync(statePath)) {
     return unavailableRow(input.row, "inaccessible", false, unavailableLinkedWorkflowStatus);
   }
   let rawState: unknown;
   try {
-    rawState = JSON.parse(contents);
+    rawState = readRunState(statePath);
   } catch {
     return unavailableRow(input.row, "invalid", false, unavailableLinkedWorkflowStatus);
   }

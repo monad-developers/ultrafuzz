@@ -3,15 +3,21 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import type { ControllerLeaseStatus, NodeState, RunStatus } from "@ultrafuzz/artifacts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   calculateEvalEta,
   EVAL_STATUS_ETA_BASIS,
   EVAL_STATUS_SCHEMA_VERSION,
+  parseEvalStatusSnapshot,
   readEvalStatus,
   renderEvalStatusTable
 } from "../src/status.js";
+import { EVAL_STATUS_SCHEMA_ID, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
+import type { EvalMatrixRow } from "../src/types.js";
+import { currentEvalRunRecord, currentRunState, testRow, testSuite } from "./helpers.js";
 
 const START = "2026-01-02T15:00:00.000Z";
 const CHECKPOINT = "2026-01-02T15:01:40.000Z";
@@ -19,6 +25,27 @@ const SNAPSHOT = new Date("2026-01-02T15:01:52.000Z");
 const EVAL_RUN_ID = "synthetic-status";
 
 describe("eval status", () => {
+  it("validates the checked-in whole-document fixture and executes nonportable consistency gates", () => {
+    const fixture = JSON.parse(
+      fs.readFileSync(new URL("./fixtures/eval-status.valid.json", import.meta.url), "utf8")
+    ) as ReturnType<typeof parseEvalStatusSnapshot>;
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, fixture)).toMatchObject({ ok: true });
+    expect(executeEvalSchemaSemanticGates(EVAL_STATUS_SCHEMA_ID, fixture)).toEqual([]);
+    expect(parseEvalStatusSnapshot(fixture)).toEqual(fixture);
+
+    const extra = { ...fixture, legacy: true };
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, extra).ok).toBe(false);
+    expect(() => parseEvalStatusSnapshot(extra)).toThrow();
+
+    const inconsistent = structuredClone(fixture);
+    inconsistent.rows[0]!.progress_percent = 99;
+    expect(validateEvalJsonSchema(EVAL_STATUS_SCHEMA_ID, inconsistent).ok).toBe(true);
+    expect(executeEvalSchemaSemanticGates(EVAL_STATUS_SCHEMA_ID, inconsistent)).toEqual([
+      expect.objectContaining({ gate: "eval-status-consistency", path: "$.rows[0].progress_percent" })
+    ]);
+    expect(() => parseEvalStatusSnapshot(inconsistent)).toThrow();
+  });
+
   it("reports every private matrix row with opaque labels and terminal node progress", () => {
     const fixture = evalFixture([privateRow("private-target-alpha"), privateRow("private-target-beta")]);
     const runningRoot = path.join(fixture.base, "sensitive-checkout-alpha");
@@ -125,15 +152,42 @@ describe("eval status", () => {
     const runRoot = path.join(fixture.base, "controller-loss-run");
     const runId = "run-controller-loss";
     fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify(
-        {
-          schema_version: "1.1",
-          run_id: runId,
-          status: "running",
-          graph_fingerprint: "r61-graph",
-          config_fingerprint: "r61-config",
+    const completedNodes: Record<string, Partial<NodeState>> = Object.fromEntries(
+      Array.from({ length: 29 }, (_, index) => {
+        const nodeId = `completed-${String(index + 1).padStart(2, "0")}`;
+        return [nodeId, { status: "succeeded", finished_at: "2026-01-02T12:00:00.000Z" }];
+      })
+    );
+    writeStateDocument(
+      runRoot,
+      currentRunState({
+        runId,
+        status: "running",
+        nodes: {
+          "aggregate-test-files": {
+            status: "pending",
+            started_at: undefined,
+            finished_at: undefined,
+            wait_since: "2026-01-02T12:01:52.000Z",
+            wait_reason: "controller-loss",
+            next_eligible_action: "controller-takeover"
+          },
+          "final-report": {
+            status: "pending",
+            started_at: undefined,
+            finished_at: undefined,
+            wait_since: "2026-01-02T12:01:52.000Z",
+            wait_reason: "controller-loss",
+            next_eligible_action: "controller-takeover"
+          },
+          "stateful-invariant-campaign": {
+            status: "succeeded",
+            started_at: "2026-01-02T10:00:00.000Z",
+            finished_at: "2026-01-02T12:00:00.000Z"
+          },
+          ...completedNodes
+        },
+        overrides: {
           created_at: "2026-01-02T10:00:00.000Z",
           started_at: "2026-01-02T10:00:00.000Z",
           last_transition_at: "2026-01-02T12:01:52.000Z",
@@ -153,54 +207,9 @@ describe("eval status", () => {
             active_duration_ms: 0,
             idle_duration_ms: 0,
             observed_at: "2026-01-02T12:01:52.000Z"
-          },
-          nodes: {
-            "aggregate-test-files": {
-              node_id: "aggregate-test-files",
-              status: "pending",
-              retry_count: 0,
-              timed_out: false,
-              wait_since: "2026-01-02T12:01:52.000Z",
-              wait_reason: "controller-loss",
-              next_eligible_action: "controller-takeover"
-            },
-            "final-report": {
-              node_id: "final-report",
-              status: "pending",
-              retry_count: 0,
-              timed_out: false,
-              wait_since: "2026-01-02T12:01:52.000Z",
-              wait_reason: "controller-loss",
-              next_eligible_action: "controller-takeover"
-            },
-            "stateful-invariant-campaign": {
-              node_id: "stateful-invariant-campaign",
-              status: "succeeded",
-              retry_count: 0,
-              timed_out: false,
-              finished_at: "2026-01-02T12:00:00.000Z"
-            },
-            ...Object.fromEntries(
-              Array.from({ length: 29 }, (_, index) => {
-                const nodeId = `completed-${String(index + 1).padStart(2, "0")}`;
-                return [
-                  nodeId,
-                  {
-                    node_id: nodeId,
-                    status: "succeeded",
-                    retry_count: 0,
-                    timed_out: false,
-                    finished_at: "2026-01-02T12:00:00.000Z"
-                  }
-                ];
-              })
-            )
           }
-        },
-        null,
-        2
-      )}\n`,
-      "utf8"
+        }
+      })
     );
     fs.writeFileSync(
       path.join(runRoot, "smithers", "logs", `${runId}.log`),
@@ -324,7 +333,7 @@ describe("eval status", () => {
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify({
         ...record("workflow-list-row", runId, runRoot),
-        workflow_ids: Array.from({ length: 33 }, () => runId)
+        workflow_ids: Array.from({ length: 33 }, (_, index) => `${runId}-${index}`)
       })}\n`,
       "utf8"
     );
@@ -357,13 +366,33 @@ describe("eval status", () => {
       `${JSON.stringify({ ...record("oversized-log-row", runId, runRoot), workflow_ids: [runId] })}\n`,
       "utf8"
     );
+    const openSync = vi.spyOn(fs, "openSync");
     const readSync = vi.spyOn(fs, "readSync");
     try {
       const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
 
       expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
-      expect(readSync).not.toHaveBeenCalled();
+      const logOpens = openSync.mock.calls.flatMap((call, index) =>
+        call[0] === logPath
+          ? [
+              {
+                descriptor: openSync.mock.results[index]?.value,
+                order: openSync.mock.invocationCallOrder[index] ?? 0
+              }
+            ]
+          : []
+      );
+      expect(logOpens).toHaveLength(1);
+      expect(
+        readSync.mock.calls.some(([descriptor], index) =>
+          logOpens.some(
+            (opened) =>
+              descriptor === opened.descriptor && (readSync.mock.invocationCallOrder[index] ?? 0) > opened.order
+          )
+        )
+      ).toBe(false);
     } finally {
+      openSync.mockRestore();
       readSync.mockRestore();
     }
   });
@@ -612,22 +641,29 @@ describe("eval status", () => {
     const oldWorkflowId = "workflow-before-recovery";
     const currentWorkflowId = "workflow-after-recovery";
     fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
+    writeStateDocument(
+      runRoot,
+      currentRunState({
+        runId,
         status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        controller_lease: { status: "active", expires_at: "2026-01-02T15:02:30.000Z" },
-        provenance: { workflow: { runId: currentWorkflowId } },
         nodes: {
-          active: { node_id: "active", status: "running" }
+          active: {
+            status: "running",
+            finished_at: undefined,
+            wait_since: START,
+            wait_reason: "active",
+            next_eligible_action: "task-complete"
+          }
+        },
+        overrides: {
+          created_at: START,
+          started_at: START,
+          last_transition_at: CHECKPOINT,
+          controller_lease: activeControllerLease(),
+          concurrency: runningConcurrency(),
+          provenance: { workflow: workflowProvenance(currentWorkflowId) }
         }
-      })}\n`,
-      "utf8"
+      })
     );
     fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${oldWorkflowId}.log`), "status: stopped\n", "utf8");
     fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${currentWorkflowId}.log`), "status: running\n", "utf8");
@@ -653,27 +689,30 @@ describe("eval status", () => {
     const directWorkflowId = "workflow-direct";
     const inspectionWorkflowId = "workflow-inspection";
     fs.mkdirSync(path.join(runRoot, "smithers", "logs"), { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
+    writeStateDocument(
+      runRoot,
+      currentRunState({
+        runId,
         status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        controller_lease: { status: "expired", expires_at: "2026-01-02T14:50:30.000Z" },
-        provenance: {
-          workflow: {
-            runId: directWorkflowId,
-            inspection: { runId: inspectionWorkflowId }
+        nodes: {
+          waiting: {
+            status: "pending",
+            started_at: undefined,
+            finished_at: undefined,
+            wait_since: START,
+            wait_reason: "ready",
+            next_eligible_action: "dispatch"
           }
         },
-        nodes: {
-          waiting: { node_id: "waiting", status: "pending" }
+        overrides: {
+          created_at: START,
+          started_at: START,
+          last_transition_at: CHECKPOINT,
+          controller_lease: expiredControllerLease(),
+          concurrency: runningConcurrency(),
+          provenance: { workflow: workflowProvenance(directWorkflowId, inspectionWorkflowId) }
         }
-      })}\n`,
-      "utf8"
+      })
     );
     fs.writeFileSync(path.join(runRoot, "smithers", "logs", `${directWorkflowId}.log`), "status: stopped\n", "utf8");
     fs.writeFileSync(
@@ -915,26 +954,28 @@ describe("eval status", () => {
     const fixture = evalFixture([privateRow("approval-row")]);
     const runRoot = path.join(fixture.base, "approval-run");
     const runId = "run-approval";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
+    writeStateDocument(
+      runRoot,
+      currentRunState({
+        runId,
         status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
         nodes: {
           approval: {
-            node_id: "approval",
             status: "running",
+            finished_at: undefined,
+            wait_since: START,
             wait_reason: "approval",
             next_eligible_action: "approve"
           }
+        },
+        overrides: {
+          created_at: START,
+          started_at: START,
+          last_transition_at: CHECKPOINT,
+          controller_lease: activeControllerLease(),
+          concurrency: runningConcurrency()
         }
-      })}\n`,
-      "utf8"
+      })
     );
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
@@ -959,31 +1000,35 @@ describe("eval status", () => {
     ]);
   });
 
-  it("keeps progress readable when a newer producer adds wait telemetry values", () => {
+  it("fails closed when a producer adds unknown wait telemetry values", () => {
     const fixture = evalFixture([privateRow("future-wait-row")]);
     const runRoot = path.join(fixture.base, "future-wait-run");
     const runId = "run-future-wait";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
-        status: "running",
+    const futureState = currentRunState({
+      runId,
+      status: "running",
+      nodes: {
+        future: {
+          status: "pending",
+          started_at: undefined,
+          finished_at: undefined,
+          wait_since: START,
+          wait_reason: "ready",
+          next_eligible_action: "dispatch"
+        }
+      },
+      overrides: {
         created_at: START,
         started_at: START,
         last_transition_at: CHECKPOINT,
-        nodes: {
-          future: {
-            node_id: "future",
-            status: "pending",
-            wait_reason: "future-wait-reason",
-            next_eligible_action: "future-next-action"
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
+        controller_lease: activeControllerLease(),
+        concurrency: runningConcurrency()
+      }
+    });
+    const futureNode = futureState.nodes.future as unknown as Record<string, unknown>;
+    futureNode.wait_reason = "future-wait-reason";
+    futureNode.next_eligible_action = "future-next-action";
+    writeStateDocument(runRoot, futureState);
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("future-wait-row", runId, runRoot))}\n`,
@@ -997,17 +1042,10 @@ describe("eval status", () => {
     });
 
     expect(snapshot.rows[0]).toMatchObject({
-      status: "running",
-      executed_nodes: 0,
-      total_nodes: 1,
-      waiting_nodes: [
-        {
-          node_id: "future",
-          status: "pending",
-          wait_reason: null,
-          next_eligible_action: null
-        }
-      ]
+      status: "invalid",
+      executed_nodes: null,
+      total_nodes: null,
+      waiting_nodes: []
     });
   });
 
@@ -1017,28 +1055,23 @@ describe("eval status", () => {
     const runId = "run-control-character";
     const activeNodeId = "active\u001b[2J";
     const waitingNodeId = "waiting\nnode";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
+    writeStatusNodes(runRoot, runId, {
+      [activeNodeId]: {
         status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: {
-          [activeNodeId]: { node_id: activeNodeId, status: "running" },
-          [waitingNodeId]: {
-            node_id: waitingNodeId,
-            status: "pending",
-            wait_reason: "controller-loss",
-            next_eligible_action: "controller-takeover"
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "active",
+        next_eligible_action: "task-complete"
+      },
+      [waitingNodeId]: {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "controller-loss",
+        next_eligible_action: "controller-takeover"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("control-character-row", runId, runRoot))}\n`,
@@ -1065,20 +1098,16 @@ describe("eval status", () => {
     const runRoot = path.join(fixture.base, "format-control-run");
     const runId = "run-format-control";
     const waitingNodeId = "waiting\u202Etxt\u2066suffix";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
-        status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
-      })}\n`,
-      "utf8"
-    );
+    writeStatusNodes(runRoot, runId, {
+      [waitingNodeId]: {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "ready",
+        next_eligible_action: "dispatch"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("format-control-row", runId, runRoot))}\n`,
@@ -1099,20 +1128,16 @@ describe("eval status", () => {
     const runRoot = path.join(fixture.base, "maximum-node-run");
     const runId = "run-maximum-node";
     const waitingNodeId = `waiting-${"x".repeat(120)}`;
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
-        status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
-      })}\n`,
-      "utf8"
-    );
+    writeStatusNodes(runRoot, runId, {
+      [waitingNodeId]: {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "ready",
+        next_eligible_action: "dispatch"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("maximum-node-row", runId, runRoot))}\n`,
@@ -1132,27 +1157,16 @@ describe("eval status", () => {
     const runRoot = path.join(fixture.base, "delimiter-run");
     const runId = "run-delimiter";
     const waitingNodeId = "waiting]; +99; active:spoof[";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
-        status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: {
-          [waitingNodeId]: {
-            node_id: waitingNodeId,
-            status: "pending",
-            wait_reason: "controller-loss",
-            next_eligible_action: "controller-takeover"
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
+    writeStatusNodes(runRoot, runId, {
+      [waitingNodeId]: {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "controller-loss",
+        next_eligible_action: "controller-takeover"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("delimiter-row", runId, runRoot))}\n`,
@@ -1172,20 +1186,16 @@ describe("eval status", () => {
     const runRoot = path.join(fixture.base, "long-node-run");
     const runId = "run-long-node";
     const waitingNodeId = `waiting-${"x".repeat(10_000)}`;
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
-        status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: { [waitingNodeId]: { node_id: waitingNodeId, status: "pending" } }
-      })}\n`,
-      "utf8"
-    );
+    writeStatusNodes(runRoot, runId, {
+      [waitingNodeId]: {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "ready",
+        next_eligible_action: "dispatch"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("long-node-row", runId, runRoot))}\n`,
@@ -1205,42 +1215,53 @@ describe("eval status", () => {
     const fixture = evalFixture([privateRow("bounded-row")]);
     const runRoot = path.join(fixture.base, "bounded-run");
     const runId = "run-bounded";
-    fs.mkdirSync(runRoot, { recursive: true });
-    fs.writeFileSync(
-      statePath(runRoot),
-      `${JSON.stringify({
-        schema_version: "1.1",
-        run_id: runId,
+    writeStatusNodes(runRoot, runId, {
+      "active-a": {
         status: "running",
-        created_at: START,
-        started_at: START,
-        last_transition_at: CHECKPOINT,
-        nodes: {
-          "active-a": { node_id: "active-a", status: "running" },
-          "active-b": { node_id: "active-b", status: "running" },
-          "active-c": { node_id: "active-c", status: "running" },
-          "waiting-a": {
-            node_id: "waiting-a",
-            status: "ready",
-            wait_reason: "ready",
-            next_eligible_action: "dispatch"
-          },
-          "waiting-b": {
-            node_id: "waiting-b",
-            status: "pending",
-            wait_reason: "controller-loss",
-            next_eligible_action: "controller-takeover"
-          },
-          "waiting-c": {
-            node_id: "waiting-c",
-            status: "pending",
-            wait_reason: "dependency",
-            next_eligible_action: "dependency-complete"
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "active",
+        next_eligible_action: "task-complete"
+      },
+      "active-b": {
+        status: "running",
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "active",
+        next_eligible_action: "task-complete"
+      },
+      "active-c": {
+        status: "running",
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "active",
+        next_eligible_action: "task-complete"
+      },
+      "waiting-a": {
+        status: "ready",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "ready",
+        next_eligible_action: "dispatch"
+      },
+      "waiting-b": {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "controller-loss",
+        next_eligible_action: "controller-takeover"
+      },
+      "waiting-c": {
+        status: "pending",
+        started_at: undefined,
+        finished_at: undefined,
+        wait_since: START,
+        wait_reason: "dependency",
+        next_eligible_action: "dependency-complete"
+      }
+    });
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify(record("bounded-row", runId, runRoot))}\n`,
@@ -1314,9 +1335,7 @@ describe("eval status", () => {
       path.join(fixture.root, "runs.jsonl"),
       [
         {
-          eval_run_id: EVAL_RUN_ID,
-          row_id: "launch-failed",
-          status: "failed",
+          ...failedRecord("launch-failed"),
           workflow_ids: ["workflow-launch-failed"]
         },
         record("inaccessible", "run-inaccessible", inaccessibleRoot),
@@ -1417,7 +1436,7 @@ describe("eval status", () => {
     expect(renderEvalStatusTable(snapshot).match(/unknown$/gmu)).toHaveLength(2);
   });
 
-  it("reports a malformed linked workflow binding as unknown when product state is readable", () => {
+  it("rejects a malformed linked workflow binding before reading product state", () => {
     const fixture = evalFixture([privateRow("malformed-link-row")]);
     const runRoot = path.join(fixture.base, "malformed-link-run");
     const runId = "run-malformed-link";
@@ -1428,48 +1447,43 @@ describe("eval status", () => {
       "utf8"
     );
 
-    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
-
-    expect(snapshot.rows[0]?.linked_workflow_status).toBe("unknown");
-    expect(renderEvalStatusTable(snapshot)).toMatch(/unknown$/mu);
+    expect(() =>
+      readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_DURABLE_SCHEMA_INVALID" }));
   });
 
-  it("preserves a linked workflow as unknown for a future run-record status", () => {
+  it("rejects a future run-record status", () => {
     const fixture = evalFixture([privateRow("future-record-row")]);
+    const runRoot = path.join(fixture.base, "future-record-run");
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       `${JSON.stringify({
-        eval_run_id: EVAL_RUN_ID,
-        row_id: "future-record-row",
+        ...record("future-record-row", "run-future-record", runRoot),
         status: "future-state",
         workflow_ids: ["workflow-future"]
       })}\n`,
       "utf8"
     );
 
-    const snapshot = readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT });
-
-    expect(snapshot.rows[0]).toMatchObject({
-      status: "invalid",
-      linked_workflow_status: "unknown"
-    });
+    expect(() =>
+      readEvalStatus({ projectRoot: fixture.project, evalRunId: fixture.evalRunId, now: SNAPSHOT })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_DURABLE_SCHEMA_INVALID" }));
   });
 
   it("marks an otherwise unrecorded row invalid when the durable record journal is malformed", () => {
     const fixture = evalFixture([privateRow("row-secret")]);
     fs.writeFileSync(path.join(fixture.root, "runs.jsonl"), "{malformed\n", "utf8");
 
-    const snapshot = readEvalStatus({
-      projectRoot: fixture.project,
-      evalRunId: fixture.evalRunId,
-      now: SNAPSHOT
-    });
-
-    expect(snapshot.rows).toEqual([expect.objectContaining({ row: "row-01", status: "invalid", terminal: false })]);
-    expect(JSON.stringify(snapshot)).not.toContain("row-secret");
+    expect(() =>
+      readEvalStatus({
+        projectRoot: fixture.project,
+        evalRunId: fixture.evalRunId,
+        now: SNAPSHOT
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_DURABLE_JSONL_INVALID" }));
   });
 
-  it("rejects cross-run records and relative durable run roots", () => {
+  it("rejects cross-run records", () => {
     const fixture = evalFixture([privateRow("foreign-row"), privateRow("relative-root")]);
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
@@ -1477,11 +1491,27 @@ describe("eval status", () => {
         {
           ...record("foreign-row", "foreign-run", path.join(fixture.base, "foreign-run")),
           eval_run_id: "another-eval"
-        },
-        record("relative-root", "relative-run", "relative-run-root")
+        }
       ]
         .map((value) => JSON.stringify(value))
         .join("\n") + "\n",
+      "utf8"
+    );
+
+    expect(() =>
+      readEvalStatus({
+        projectRoot: fixture.project,
+        evalRunId: fixture.evalRunId,
+        now: SNAPSHOT
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_STATUS_RECORD_LINEAGE_INVALID" }));
+  });
+
+  it("keeps a relative durable run root typed as invalid", () => {
+    const fixture = evalFixture([privateRow("relative-root")]);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      `${JSON.stringify(record("relative-root", "relative-run", "relative-run-root"))}\n`,
       "utf8"
     );
 
@@ -1490,13 +1520,7 @@ describe("eval status", () => {
       evalRunId: fixture.evalRunId,
       now: SNAPSHOT
     });
-
-    expect(snapshot.rows).toEqual([
-      expect.objectContaining({ row: "row-01", status: "invalid", terminal: false }),
-      expect.objectContaining({ row: "row-02", status: "invalid", terminal: false })
-    ]);
-    expect(JSON.stringify(snapshot)).not.toContain("foreign-row");
-    expect(JSON.stringify(snapshot)).not.toContain("relative-root");
+    expect(snapshot.rows).toEqual([expect.objectContaining({ row: "row-01", status: "invalid", terminal: false })]);
   });
 });
 
@@ -1604,29 +1628,64 @@ function evalFixture(matrix: unknown[]): {
   return { base, project, root, matrixPath, evalRunId };
 }
 
-function privateRow(id: string): unknown {
-  return {
+function privateRow(id: string): EvalMatrixRow {
+  const targetId = `target-${id}`;
+  const suite = testSuite("/private", {
+    targets: [
+      {
+        id: targetId,
+        sensitivity: "private",
+        repo: "https://private.example/repository",
+        ref: "confidential-ref",
+        path: "/private/sensitive-checkout",
+        ground_truth: "restricted-ground-truth.yml"
+      }
+    ]
+  });
+  return testRow(suite, {
     id,
-    target_id: `target-${id}`,
-    target: {
-      sensitivity: "private",
-      repo: "https://private.example/repository",
-      ref: "confidential-ref",
-      path: "/private/sensitive-checkout",
-      ground_truth: "restricted-ground-truth.yml",
-      ground_truth_path: "/private/restricted-ground-truth.yml"
-    }
-  };
+    run_id: `eval-row-${id}`,
+    target_id: targetId,
+    target: { ...suite.targets[0]!, ground_truth_path: "/private/restricted-ground-truth.yml" }
+  });
 }
 
 function record(rowId: string, runId: string, runRoot: string): Record<string, unknown> {
+  return currentEvalRunRecord({
+    row: privateRow(rowId),
+    runRoot,
+    runId,
+    evalRunId: EVAL_RUN_ID,
+    overrides: {
+      final_status: undefined,
+      report_json_path: undefined,
+      workflow: undefined,
+      recovery_equivalence: undefined,
+      diagnostics: [
+        {
+          code: "EVAL_TEST_DIAGNOSTIC",
+          message: "restricted-ground-truth should remain private",
+          severity: "info",
+          source: "status-test"
+        }
+      ]
+    }
+  }) as unknown as Record<string, unknown>;
+}
+
+function failedRecord(rowId: string): Record<string, unknown> {
+  const row = privateRow(rowId);
   return {
+    schema_version: "ultrafuzz.eval.run.v3",
     eval_run_id: EVAL_RUN_ID,
-    row_id: rowId,
-    status: "launched",
-    ultrafuzz_run_id: runId,
-    ultrafuzz_run_root: runRoot,
-    diagnostics: [{ message: "restricted-ground-truth should remain private" }]
+    row_id: row.id,
+    target_id: row.target_id,
+    variant_id: row.variant_id,
+    trial_id: row.trial_id,
+    status: "failed",
+    workflow_ids: [],
+    launcher: { status: "failed", started_at: START, finished_at: CHECKPOINT },
+    diagnostics: []
   };
 }
 
@@ -1634,42 +1693,131 @@ function writeState(
   runRoot: string,
   input: {
     runId: string;
-    status: string;
-    nodes: string[];
+    status: RunStatus;
+    nodes: NodeState["status"][];
     checkpoint?: string;
     startedAt?: string | null;
-    controllerLease?: { status: string; expiresAt: string };
+    controllerLease?: { status: ControllerLeaseStatus; expiresAt: string };
   }
 ): void {
   fs.mkdirSync(runRoot, { recursive: true });
   const checkpoint = input.checkpoint ?? CHECKPOINT;
-  const state = {
-    schema_version: "1.1",
-    run_id: input.runId,
+  const state = currentRunState({
+    runId: input.runId,
     status: input.status,
-    created_at: input.startedAt ?? START,
-    ...(input.startedAt === null ? {} : { started_at: input.startedAt ?? START }),
-    ...(input.status === "running" ? {} : { finished_at: checkpoint }),
-    last_transition_at: checkpoint,
-    controller_lease: {
-      renewed_at: checkpoint,
-      ...(input.controllerLease === undefined
-        ? {}
-        : { status: input.controllerLease.status, expires_at: input.controllerLease.expiresAt })
-    },
-    concurrency: { observed_at: checkpoint },
     nodes: Object.fromEntries(
       input.nodes.map((status, index) => [
         `node-${index + 1}`,
         {
-          node_id: `node-${index + 1}`,
           status,
-          ...(status === "pending" || status === "running" ? {} : { finished_at: checkpoint })
+          started_at: input.startedAt ?? START,
+          ...(status === "pending" || status === "running"
+            ? {
+                finished_at: undefined,
+                wait_since: input.startedAt ?? START,
+                wait_reason: status === "running" ? ("active" as const) : ("ready" as const),
+                next_eligible_action: status === "running" ? ("task-complete" as const) : ("dispatch" as const)
+              }
+            : { finished_at: checkpoint })
         }
       ])
-    )
-  };
+    ),
+    overrides: {
+      created_at: input.startedAt ?? START,
+      ...(input.startedAt === null ? { started_at: undefined } : { started_at: input.startedAt ?? START }),
+      ...(input.status === "running" ? { finished_at: undefined } : { finished_at: checkpoint }),
+      last_transition_at: checkpoint,
+      controller_lease: {
+        status: input.controllerLease?.status ?? "active",
+        duration_ms: 30_000,
+        renewed_at: checkpoint,
+        expires_at: input.controllerLease?.expiresAt ?? checkpoint,
+        recovery_attempts: 0
+      },
+      concurrency: {
+        requested_concurrency: 1,
+        effective_concurrency: input.status === "running" ? 1 : 0,
+        ready_queue_depth: 0,
+        active_work: input.status === "running" ? 1 : 0,
+        queued_duration_ms: 0,
+        active_duration_ms: 0,
+        idle_duration_ms: 0,
+        observed_at: checkpoint
+      }
+    }
+  });
   fs.writeFileSync(statePath(runRoot), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function writeStatusNodes(runRoot: string, runId: string, nodes: Record<string, Partial<NodeState>>): void {
+  writeStateDocument(
+    runRoot,
+    currentRunState({
+      runId,
+      status: "running",
+      nodes,
+      overrides: {
+        created_at: START,
+        started_at: START,
+        last_transition_at: CHECKPOINT,
+        controller_lease: activeControllerLease(),
+        concurrency: runningConcurrency()
+      }
+    })
+  );
+}
+
+function writeStateDocument(runRoot: string, state: ReturnType<typeof currentRunState>): void {
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(statePath(runRoot), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function activeControllerLease(): ReturnType<typeof currentRunState>["controller_lease"] {
+  return {
+    status: "active",
+    duration_ms: 30_000,
+    renewed_at: CHECKPOINT,
+    expires_at: "2026-01-02T15:02:30.000Z",
+    recovery_attempts: 0
+  };
+}
+
+function expiredControllerLease(): ReturnType<typeof currentRunState>["controller_lease"] {
+  return {
+    status: "expired",
+    duration_ms: 30_000,
+    renewed_at: "2026-01-02T14:50:00.000Z",
+    expires_at: "2026-01-02T14:50:30.000Z",
+    recovery_attempts: 1
+  };
+}
+
+function runningConcurrency(): ReturnType<typeof currentRunState>["concurrency"] {
+  return {
+    requested_concurrency: 1,
+    effective_concurrency: 1,
+    ready_queue_depth: 0,
+    active_work: 1,
+    queued_duration_ms: 0,
+    active_duration_ms: 0,
+    idle_duration_ms: 0,
+    observed_at: CHECKPOINT
+  };
+}
+
+function workflowProvenance(
+  runId: string,
+  inspectionRunId = runId
+): NonNullable<ReturnType<typeof currentRunState>["provenance"]>["workflow"] {
+  return {
+    inspection: { runId: inspectionRunId },
+    runId,
+    compiledRunId: "compiled-status-workflow",
+    name: "status-test-workflow",
+    controlGeneration: "a".repeat(64),
+    linkId: "00000000-0000-4000-8000-000000000001",
+    executionSnapshot: `smithers/execution-snapshots/${"b".repeat(64)}`
+  };
 }
 
 function statePath(runRoot: string): string {

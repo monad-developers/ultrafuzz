@@ -3,10 +3,10 @@ import path from "node:path";
 import { z } from "zod/v4";
 
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { executeSemanticGate } from "./semantic-gates.js";
 
 export const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
-export const WORKSPACE_PATCH_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/workspace-patch" as const;
+export const WORKSPACE_PATCH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:workspace-patch:1" as const;
 
 const gitObjectId = z.string().regex(/^[0-9a-f]{40,64}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -63,52 +63,25 @@ function isSafeWorkspacePatchPath(value: string): boolean {
 }
 
 export const workspacePatchFileSchema = z.strictObject({ path: workspacePatchPath });
+export const workspacePatchSourceSnapshotSchema = z.strictObject({
+  status: z.literal("preserved"),
+  protected_roots: z.array(workspacePatchPath).min(1)
+});
 export const workspacePatchExcludedFileSchema = z.strictObject({
   path: workspacePatchPath,
   diff_bytes_at_least: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   reason: z.literal("git-diff-overflow")
 });
-export const workspacePatchSchema = z
-  .strictObject({
-    schema_version: z.literal(WORKSPACE_PATCH_SCHEMA_VERSION),
-    base_commit: gitObjectId,
-    base_tree: gitObjectId,
-    result_tree: gitObjectId,
-    patch_sha256: sha256,
-    files: z.array(workspacePatchFileSchema),
-    excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
-  })
-  .superRefine((manifest, context) => {
-    const seen = new Set<string>();
-    for (const [index, entry] of manifest.files.entries()) {
-      if (seen.has(entry.path)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate workspace patch path ${JSON.stringify(entry.path)}`,
-          path: ["files", index, "path"]
-        });
-      }
-      seen.add(entry.path);
-    }
-    const excluded = new Set<string>();
-    for (const [index, entry] of (manifest.excluded_files ?? []).entries()) {
-      if (excluded.has(entry.path)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate excluded workspace patch path ${JSON.stringify(entry.path)}`,
-          path: ["excluded_files", index, "path"]
-        });
-      }
-      if (seen.has(entry.path)) {
-        context.addIssue({
-          code: "custom",
-          message: `Workspace patch path is both included and excluded ${JSON.stringify(entry.path)}`,
-          path: ["excluded_files", index, "path"]
-        });
-      }
-      excluded.add(entry.path);
-    }
-  });
+export const workspacePatchSchema = z.strictObject({
+  schema_version: z.literal(WORKSPACE_PATCH_SCHEMA_VERSION),
+  base_commit: gitObjectId,
+  base_tree: gitObjectId,
+  result_tree: gitObjectId,
+  patch_sha256: sha256,
+  files: z.array(workspacePatchFileSchema),
+  source_snapshot: workspacePatchSourceSnapshotSchema,
+  excluded_files: z.array(workspacePatchExcludedFileSchema).min(1).optional()
+});
 
 export type WorkspacePatchManifest = z.infer<typeof workspacePatchSchema>;
 
@@ -116,10 +89,25 @@ export function validateWorkspacePatchSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<WorkspacePatchManifest> {
-  return validateWithZod(workspacePatchSchema, value, {
+  const shape = validateWithZod(workspacePatchSchema, value, {
     path,
     code: "WORKSPACE_PATCH_SCHEMA_INVALID"
   });
+  if (!shape.ok || shape.value === undefined) return shape;
+  const semantics = executeSemanticGate("workspace-patch-path-uniqueness", { document: shape.value });
+  if (semantics.status !== "failed") return shape;
+  return {
+    ok: false,
+    issues: semantics.issues.map((semanticIssue) => ({
+      code: "WORKSPACE_PATCH_SCHEMA_INVALID",
+      message: semanticIssue.message,
+      path: prefixedSemanticPath(path, semanticIssue.path)
+    }))
+  };
+}
+
+function prefixedSemanticPath(rootPath: string, semanticPath: string): string {
+  return semanticPath === "$" ? rootPath : `${rootPath}${semanticPath.slice(1)}`;
 }
 
 export const workspacePatchJsonSchema = {
@@ -128,13 +116,26 @@ export const workspacePatchJsonSchema = {
   title: "Ultrafuzz workspace patch manifest",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "files"],
+  required: ["schema_version", "base_commit", "base_tree", "result_tree", "patch_sha256", "source_snapshot", "files"],
   properties: {
     schema_version: { const: WORKSPACE_PATCH_SCHEMA_VERSION },
     base_commit: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     base_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     result_tree: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
     patch_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+    source_snapshot: {
+      type: "object",
+      additionalProperties: false,
+      required: ["status", "protected_roots"],
+      properties: {
+        status: { const: "preserved" },
+        protected_roots: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", pattern: "^[A-Za-z0-9._-]{1,128}(?:/[A-Za-z0-9._-]{1,128})*$" }
+        }
+      }
+    },
     excluded_files: {
       type: "array",
       minItems: 1,

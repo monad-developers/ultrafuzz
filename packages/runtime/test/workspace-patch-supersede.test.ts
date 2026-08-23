@@ -9,7 +9,12 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts";
+import {
+  assertRegularFileInside,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  writeFileDurable
+} from "@ultrafuzz/artifacts";
 
 import { validateWorkspacePatchCapture } from "../src/workspace-handoff.js";
 
@@ -90,6 +95,7 @@ function manifestObject(patch: string, baseCommit: string, baseTree = OWN_BASELI
     base_tree: baseTree,
     result_tree: RESULT_TREE,
     patch_sha256: sha256(patch),
+    source_snapshot: { status: "preserved", protected_roots: ["contracts", "src"] },
     files: [{ path: "a.t.sol" }]
   };
 }
@@ -124,7 +130,12 @@ type Materializer = (task: unknown) => void;
 
 const TEMPLATE_FUNCTIONS = [
   "isStrictlyInsideDirectory",
+  "isMissingPathError",
+  "pathEntryExists",
   "resolveRegularArtifactFile",
+  "readBoundedRegularArtifactSnapshot",
+  "decodeStrictUtf8Snapshot",
+  "parseStrictJsonSnapshot",
   "holdsSupersededWorkspacePatchPair",
   "writeWorkspacePatchArtifact",
   "materializeWorkspacePatch"
@@ -143,17 +154,21 @@ function collaborators(
   return {
     path,
     existsSync: fs.existsSync,
+    lstatSync: fs.lstatSync,
     readFileSync: fs.readFileSync,
     mkdirSync: fs.mkdirSync,
     statSync: fs.statSync,
     realpathSync: fs.realpathSync,
+    readRegularFileSnapshot,
+    parseStrictJsonBytes,
     writeFileDurable: write,
     assertRegularFileInside,
     validateWorkspacePatchCapture,
     captureWorkspacePatch: () => captured,
     taskPublishesWorkspacePatch: () => true,
     taskArtifactRoots: () => [...roots],
-    workspacePatchBaselineTrees: new Map([["attempt", OWN_BASELINE]])
+    workspacePatchBaselineTrees: new Map([["attempt", OWN_BASELINE]]),
+    MAX_VERIFIED_ARTIFACT_BYTES: 64 * 1024 * 1024
   };
 }
 
@@ -197,6 +212,7 @@ function task(fixture: { root: string; workspaceRoot: string }): unknown {
   return {
     attemptId: "attempt",
     workspacePath: fixture.workspaceRoot,
+    productionSourceRoots: ["contracts", "src"],
     metadata: { artifacts: { dir: fixture.root } }
   };
 }
@@ -206,6 +222,7 @@ function capturedGeneration1(head: string): { patch: string; manifest: unknown }
 }
 
 const REJECTED = /workspace patch artifact was modified workspace\.patch/u;
+const INCOMPLETE = /workspace patch artifact pair is incomplete/u;
 
 test("#357 a re-executed node replaces its own superseded workspace patch", () => {
   withFixture((fixture) => {
@@ -246,7 +263,7 @@ test("#357 an agent-authored workspace patch is still rejected", () => {
     // it.
     writeFileDurable(path.join(fixture.root, "workspace.patch"), "diff --git a/x b/x\n+++ authored by the agent\n");
 
-    assert.throws(() => loadMaterializer(fixture.root, capturedGeneration1(fixture.head))(task(fixture)), REJECTED);
+    assert.throws(() => loadMaterializer(fixture.root, capturedGeneration1(fixture.head))(task(fixture)), INCOMPLETE);
   });
 });
 
@@ -306,7 +323,7 @@ test("#357 a superseded patch with no manifest beside it is rejected", () => {
     // launder a patch by removing the manifest, which is the easier of the two edits.
     writeFileDurable(path.join(fixture.root, "workspace.patch"), GENERATION_0_PATCH);
 
-    assert.throws(() => loadMaterializer(fixture.root, capturedGeneration1(fixture.head))(task(fixture)), REJECTED);
+    assert.throws(() => loadMaterializer(fixture.root, capturedGeneration1(fixture.head))(task(fixture)), INCOMPLETE);
   });
 });
 

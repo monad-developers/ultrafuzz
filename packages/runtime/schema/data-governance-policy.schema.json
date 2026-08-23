@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:data-governance-policy:1",
+  "title": "Ultrafuzz campaign data-governance policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sensitivity",
+    "source_destinations",
+    "artifact_destinations",
+    "destination_policies",
+    "openrouter_model_allowlist"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.data-governance-policy.v1" },
+    "sensitivity": { "enum": ["public", "private"] },
+    "source_destinations": { "$ref": "#/$defs/destinations" },
+    "artifact_destinations": { "$ref": "#/$defs/destinations" },
+    "destination_policies": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/destinationPolicy" }
+    },
+    "openrouter_model_allowlist": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[^\\s\\u0000-\\u001f\\u007f-\\u009f]+$(?![\\s\\S])"
+      }
+    }
+  },
+  "$defs": {
+    "destination": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(model|cloud|artifact):[a-z0-9][a-z0-9._-]{0,127}$(?![\\s\\S])"
+    },
+    "destinations": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/destination" }
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:\\S|\\S[\\s\\S]*\\S)$(?![\\s\\S])"
+    },
+    "destinationPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "destination",
+        "processor",
+        "region",
+        "retention_policy",
+        "training_policy",
+        "dpa_status",
+        "minimization_policy",
+        "data_handling_basis"
+      ],
+      "properties": {
+        "destination": { "$ref": "#/$defs/destination" },
+        "processor": { "$ref": "#/$defs/text" },
+        "region": { "$ref": "#/$defs/text" },
+        "retention_policy": { "$ref": "#/$defs/text" },
+        "training_policy": { "$ref": "#/$defs/text" },
+        "dpa_status": { "$ref": "#/$defs/text" },
+        "minimization_policy": { "$ref": "#/$defs/text" },
+        "data_handling_basis": { "$ref": "#/$defs/text" }
+      }
+    }
+  }
+}

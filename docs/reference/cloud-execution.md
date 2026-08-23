@@ -19,12 +19,12 @@ retention_days = 30
 [execution.resources]
 cpu = 4
 memory_mib = 8192
-timeout_seconds = 1800
+timeout_seconds = 3600
 
 [execution.providers.modal]
 app = "ultrafuzz"
 image = "ultrafuzz"
-credential_env = ["YOUR_PROVIDER_ID_VARIABLE", "YOUR_PROVIDER_SECRET_VARIABLE"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 
 [execution.nodes.project-discovery.resources]
 cpu = 8
@@ -32,12 +32,21 @@ memory_mib = 16384
 timeout_seconds = 2400
 ```
 
-`credential_env` identifies the two host variables used by the Modal client.
+`credential_env` is fixed to `["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]`, the two operator-owned host variables used by the Modal client. Provider routes selected through acknowledged environment variables are supported; host provider-home route files are rejected during cloud planning because they are not transported to Modal.
 Values are read only when configuration is resolved and when a sandbox is
 launched or cleaned; values are not serialized into run configuration,
 handoff archives, tags, errors, or logs. API-key agent credentials are injected
 through a per-launch Modal Secret. Subscription-based agent authentication is
-not supported by cloud node execution.
+not supported by cloud node execution. Credential-like names or values in
+`ULTRAFUZZ_AGENT_ENV_ALLOWLIST` are included only when their most-specific
+recognized route prefix belongs to the task's provider; ordinary allowlisted
+workflow inputs remain available to every task.
+
+An OpenRouter task uses the `api_key_env` configured for `OpenRouterAgent`
+(`OPENROUTER_API_KEY` by default). Only that named credential is forwarded for
+the task; the provider identity and exact catalogue model ID remain in task and
+Modal provenance, while the key value does not. The sandbox uses the same
+official `https://openrouter.ai/api/v1` route as local execution.
 
 Node overrides use logical topology node IDs and are applied after model and
 strategy fan-out, so every concrete attempt derived from that logical node
@@ -45,10 +54,32 @@ receives the override. Unknown node IDs fail validation before launch.
 
 ## Execution and Retry Model
 
-Each expanded agentic attempt maps to one Smithers sandbox node. A new Modal VM
-is created for its first execution and for every retry. The task and its
-artifact-contract verifier run in that same VM; the controller independently
-verifies the published artifacts before dependent nodes can start.
+Each expanded agentic attempt maps to one Smithers sandbox node. Cloud execution
+currently accepts only a one-rung model chain (`same_agent_attempts = 1` with no
+applicable fallback). Planning rejects longer chains before creating run state;
+this avoids running nominally isolated retry rungs in one VM or sharing sibling
+agent credentials. The shipped default is three attempts, so a cloud project
+must explicitly select a one-attempt profile such as `smoke` or set
+`[retry].same_agent_attempts = 1`. The task and its artifact-contract verifier
+run in the same VM; the controller independently verifies the published
+artifacts before dependent nodes can start.
+
+The configured `timeout_seconds` remains the inner agent execution budget.
+Modal cloud nodes add a fixed 30-minute outer lifecycle reserve for handoff
+construction and upload, sandbox admission, durable workspace initialization,
+and result publication. The generated outer workflow sandbox, controller-side
+provider deadline, and Modal sandbox lifetime all include that reserve; the
+relocated inner task does not. Because Modal limits a sandbox to 24 hours,
+cloud-node `timeout_seconds` may be at most 84,600 seconds; configuration
+validation rejects larger base or per-node values before launch.
+
+The image installs a root-owned, non-writable `/usr/local/bin/ultrafuzz`
+launcher for the same source build under `/opt/ultrafuzz`. Before model work,
+the worker runs `ultrafuzz json validate` on a real known-valid fixture and
+checks the registered schema ID, schema SHA-256, bundle SHA-256, and validator
+build returned by the command. A missing, writable, shadowed, or mismatched
+launcher/schema is a setup failure; the worker does not spend model tokens with
+another validator.
 
 The controller uses stable, bounded provider tags derived from the run and
 attempt identities. On resume it reattaches to one matching live sandbox. If a
@@ -62,9 +93,12 @@ generation and passes the child a `/proc/<worker-pid>/fd/<descriptor>` path.
 Custom images must preserve that procfs view; the worker fails closed when the
 cross-process descriptor anchor is unavailable.
 
-Cancellation terminates the current sandbox. Worker failures and timeouts are
-normalized to provider-scoped workflow errors, then Smithers applies the
-existing node retry policy with a fresh VM.
+Cancellation terminates the current sandbox. Retryable provider failures and
+timeouts become provider-scoped workflow errors. Automatic model retries remain
+local-only until each cloud retry can be projected to a fresh VM with a sealed
+per-rung credential boundary. Once an agent session returns, a missing or
+schema-invalid required artifact is terminal. It does not trigger a correction
+turn, full-node model retry, or compatibility recovery.
 
 `resume` keeps the same workflow run and execution generation, so live attempts
 are reattached and proven publications are reused. `--reset-node` advances a
@@ -85,6 +119,11 @@ traversal, and paths outside the project are rejected. The controller records a
 SHA-256 identity for the archive and the worker verifies it before validated
 streaming extraction.
 
+Cloud launch requires the sealed governance target to record `dirty: false`,
+including for public campaigns. Commit every tracked or untracked source input
+that the cloud agents must analyze; Ultrafuzz rejects a target recorded as dirty
+instead of silently sending only its committed baseline.
+
 Dependency artifacts keep their existing producer directories. Fan-in nodes
 receive the collection of those declared artifact snapshots; Ultrafuzz never
 merges dependency workspaces or silently chooses one producer's tree.
@@ -95,6 +134,12 @@ the complete bundle into place, and flushes the volume. The controller verifies
 the digest and filesystem shape before replacing local attempt directories.
 Downstream nodes therefore see either the prior complete publication or the new
 complete publication, never a partially copied result.
+
+Publication requires the current `ultrafuzz.artifact-verification.v2` marker and
+copies only the exact digest-bound files it names. There is no markerless legacy
+mode, manifest-v1 upgrade, artifact normalization, or fallback to a complete
+directory copy. The controller then validates the corresponding
+`ultrafuzz.artifact-manifest.v3` and its persisted schema bindings.
 
 ## Retention and Cleanup
 

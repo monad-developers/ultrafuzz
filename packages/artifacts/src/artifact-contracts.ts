@@ -1,44 +1,30 @@
 import crypto from "node:crypto";
+import path from "node:path";
+import { TextDecoder } from "node:util";
 
-import { z } from "zod/v4";
-
-import { validateFindingsSchema } from "./findings-schema.js";
-import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
-import { validateGoalPlan } from "./goal-plan.js";
-import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
-import { validateWorkspacePatchSchema } from "./workspace-patch.js";
+import { ARTIFACT_CONTRACT_IDS, type ArtifactContractId } from "./artifact-contract-ids.js";
 import {
-  validateLensPropertiesSchema,
-  validateReferenceExpectationsSchema,
-  validateImplementedPropertiesSchema,
-  validatePropertiesSchema,
-  validatePropertyCampaignSchema
-} from "./property-provenance.js";
-import { validateThreatModel } from "./threat-model.js";
+  validateRegisteredJsonBytesSync,
+  type JsonFileValidationDiagnostic,
+  type JsonFileValidationResult
+} from "./json-file-validator.js";
+import {
+  artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  VALIDATOR_BUILD_IDENTITY
+} from "./schema-registry.js";
+import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
+import {
+  WORKFLOW_CONTRACT_DESCRIPTIONS,
+  WORKFLOW_SCHEMA_FILES,
+  WORKFLOW_VALID_EMPTY_EXAMPLES,
+  workflowContractSchemas,
+  type WorkflowContractId
+} from "./workflow-contracts.js";
 
-export const ARTIFACT_CONTRACT_IDS = [
-  "ultrafuzz/campaign-summary@1",
-  "ultrafuzz/findings@1",
-  "ultrafuzz/generated-tests@1",
-  "ultrafuzz/goal-plan@1",
-  "ultrafuzz/implemented-properties@1",
-  "ultrafuzz/implemented-properties@2",
-  "ultrafuzz/invariant-campaign-plan@1",
-  "ultrafuzz/invariant-ledger@1",
-  "ultrafuzz/json-array@1",
-  "ultrafuzz/json-object@1",
-  "ultrafuzz/nonempty-markdown@1",
-  "ultrafuzz/property-lens@1",
-  "ultrafuzz/reference-expectations@1",
-  "ultrafuzz/properties@1",
-  "ultrafuzz/property-campaign@1",
-  "ultrafuzz/report@1",
-  "ultrafuzz/text@1",
-  "ultrafuzz/threat-model@1",
-  "ultrafuzz/workspace-patch@1"
-] as const;
-
-export type ArtifactContractId = (typeof ARTIFACT_CONTRACT_IDS)[number];
+export { ARTIFACT_CONTRACT_IDS, isArtifactContractId } from "./artifact-contract-ids.js";
+export type { ArtifactContractId } from "./artifact-contract-ids.js";
 
 export interface ArtifactContractDefinition {
   id: ArtifactContractId;
@@ -60,270 +46,124 @@ export interface ArtifactContractValidationResult {
   value?: unknown;
 }
 
-const uniqueReportPathArraySchema = z
-  .array(z.string().min(1))
-  .refine((paths) => new Set(paths).size === paths.length, { message: "Paths must be unique" });
-const reportPropertySourcesSchema = z
-  .array(
-    z.looseObject({
-      source_node_id: z.string().min(1),
-      source_property_id: z.string().min(1)
-    })
-  )
-  .min(1)
-  .refine(
-    (sources) =>
-      new Set(sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)).size ===
-      sources.length,
-    { message: "Property sources must be unique" }
-  );
-const reportPropertyProvenanceSchema = z
-  .array(
-    z
-      .looseObject({
-        finding_id: z.string().min(1),
-        title: z.string().min(1),
-        property_ids: z
-          .array(z.string().min(1))
-          .min(1)
-          .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
-            message: "Property IDs must be unique"
-          }),
-        sources: reportPropertySourcesSchema,
-        implementation_paths: uniqueReportPathArraySchema,
-        test_paths: uniqueReportPathArraySchema,
-        fuzzer_backend: z.string().min(1).optional(),
-        fuzzer_backends: z
-          .array(z.string().min(1))
-          .min(1)
-          .refine((backends) => new Set(backends).size === backends.length, {
-            message: "Fuzzer backends must be unique"
-          })
-          .optional()
-      })
-      .refine((entry) => entry.fuzzer_backend === undefined || entry.fuzzer_backends === undefined, {
-        message: "Use fuzzer_backend or fuzzer_backends, not both"
-      })
-  )
-  .refine((entries) => new Set(entries.map((entry) => entry.finding_id)).size === entries.length, {
-    message: "Property provenance finding IDs must be unique"
-  });
-
-const uniquePropertyIdArraySchema = z
-  .array(z.string().min(1))
-  .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
-    message: "Property implementation IDs must be unique"
-  });
-const propertyImplementationCoverageSchema = z.union([
-  z.literal("unavailable"),
-  z.looseObject({
-    priority_threshold: z.enum(["high", "medium", "low"]),
-    priorities: z
-      .array(z.enum(["high", "medium", "low"]))
-      .min(1)
-      .refine((priorities) => new Set(priorities).size === priorities.length, {
-        message: "Property implementation priorities must be unique"
-      }),
-    selected_property_ids: uniquePropertyIdArraySchema,
-    implemented_property_ids: uniquePropertyIdArraySchema,
-    blocked_property_ids: uniquePropertyIdArraySchema,
-    pending_property_ids: uniquePropertyIdArraySchema,
-    deferred_property_ids: uniquePropertyIdArraySchema,
-    reference_expected_property_ids: uniquePropertyIdArraySchema.optional(),
-    reference_expectation_ids: uniquePropertyIdArraySchema.optional(),
-    blocker_summaries: z.array(z.string().min(1)).optional()
-  })
-]);
-
-const terminalReportSchema = z.looseObject({
-  schema_version: z.string().min(1),
-  run_metadata: z.record(z.string(), z.unknown()),
-  issues: z.array(z.unknown()),
-  non_production_outcomes: z.array(z.unknown()),
-  property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional(),
-  property_implementation_coverage: propertyImplementationCoverageSchema.optional(),
-  campaign_outcome: z
-    .looseObject({
-      outcome: z.string().min(1).max(200),
-      reason: z.string().min(1).max(4000).optional()
-    })
-    .optional()
-});
-const campaignSummarySchema = z.looseObject({
-  failure_counts: z.looseObject({
-    pre_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    post_deduplication: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
-  })
-});
-const invariantCampaignPlanSchema = z.looseObject({
-  schema_version: z.literal("ultrafuzz.invariant-campaign-plan.v2"),
-  configured_fuzzer_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  recon_internal_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  recon_test_limit: z.string().min(1),
-  host_soft_timeout_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  host_force_kill_grace_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  artifact_finalization_reserve_seconds: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  backend_started_at: z.string().datetime({ offset: true }),
-  fuzzing_deadline_utc: z.string().datetime({ offset: true }),
-  force_kill_deadline_utc: z.string().datetime({ offset: true }),
-  final_artifact_deadline_utc: z.string().datetime({ offset: true }),
-  backend: z.looseObject({
-    exact_shell_escaped_command: z.string().min(1)
-  })
-});
-
-const definitions = defineContracts([
-  {
-    id: "ultrafuzz/campaign-summary@1",
-    format: "json",
-    description:
-      "A current invariant campaign summary. failure_counts.pre_deduplication must count every sibling backend failure and failure_counts.post_deduplication must count every sibling finding."
-  },
-  {
-    id: "ultrafuzz/findings@1",
-    format: "json",
-    description:
-      'A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including id, title, status, severity_guess, confidence, and summary. Every finding, including one that is or may become a non-production record, must set severity_guess to exactly "High", "Medium", or "Low"; do not emit lowercase or any other severity vocabulary. schema_version is optional; when present it must be the literal "1.0" or the alias "ultrafuzz.finding.v1". Evidence object paths must be safe relative paths without line selectors. Represent one source span with positive integer line and optional end_line; represent disjoint spans with at least two typed line_ranges entries such as [{"line":105,"end_line":107},{"line":154,"end_line":185}]. Never emit a one-entry line_ranges or combine line_ranges with line or end_line. Every end_line must be no smaller than its line. Keep independent prose in detail. A populated entry looks like {"id":"finding-0","title":"...","status":"candidate","severity_guess":"Medium","confidence":"low","summary":"..."}.',
+export interface ArtifactContractSchemaBinding {
+  schema_file: string;
+  schema_id: string;
+  schema_sha256: string;
+  schema_bundle_sha256: string;
+  validator_build: string;
+}
+const existingJsonContracts = {
+  "ultrafuzz/findings@2": {
+    description: "Canonical structured findings with source-bound evidence and independent explanatory analysis.",
+    schemaFile: "findings.schema.json",
     validEmptyExample: "[]"
   },
-  {
-    id: "ultrafuzz/generated-tests@1",
-    format: "json",
+  "ultrafuzz/generated-tests@3": {
     description:
-      "A generated-test manifest with schema_version, run_id, node_id, and generated_tests. generated_tests is the only test-file list. Every entry path must be a safe forward-slash path with the generated-tests/<file> prefix; mirror the named non-empty regular file at that exact path beneath the node artifact directory.",
-    validEmptyExample: '{"schema_version":"1.0","run_id":"<run-id>","node_id":"<node-id>","generated_tests":[]}'
+      "A strict generated-test bundle manifest whose runnable tests and non-runnable support files live beneath generated-tests/.",
+    schemaFile: "generated-tests.schema.json"
   },
-  {
-    id: "ultrafuzz/goal-plan@1",
-    format: "json",
+  "ultrafuzz/coverage-evidence@1": {
     description:
-      "A validated additive goal plan with one item per modeled threat, one item per applicable vulnerability class, item-scoped MDX replacements, and one fixed roaming goal."
+      "Complete scoped coverage evidence with recon-selected-declaration-completeness and production-declaration-completeness views, explicit source inclusion, attributed counted ranges, and material zero-coverage components.",
+    schemaFile: "coverage-evidence.schema.json"
   },
-  {
-    id: "ultrafuzz/invariant-ledger@1",
-    format: "json",
-    description:
-      "A structured invariant evidence ledger. Every entry preserves verbatim source text, its source path and line or symbol location, and one or more inventory IDs; inventory rows provide the normalized join and each row maps back to one or more ledger entries.",
+  "ultrafuzz/implemented-properties@3": {
+    description: "Strict current property selection and implementation records with typed blockers.",
+    schemaFile: "implemented-properties.schema.json",
     validEmptyExample:
-      '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[{"id":"evidence-example","source_path":"docs/example.md","source_location":"line 1","kind":"invariant","verbatim":"Example relation","inventory_ids":["inventory-example"]}],"inventory_rows":[{"id":"inventory-example","description":"Example relation","ledger_ids":["evidence-example"]}],"scan_probes":[]}'
+      '{"schema_version":"ultrafuzz.implemented-properties.v3","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
   },
-  {
-    id: "ultrafuzz/implemented-properties@1",
-    format: "json",
-    description:
-      "Implementation records keyed by canonical property_id, with implementation status and implementation/test paths. Current runs also emit selection metadata and a typed blocker for every selected property that is not implemented.",
-    validEmptyExample: '{"schema_version":"ultrafuzz.implemented-properties.v1","properties":[]}'
+  "ultrafuzz/invariant-ledger@1": {
+    description: "A structured invariant evidence ledger with verbatim source and inventory joins.",
+    schemaFile: "invariant-evidence-ledger.schema.json"
   },
-  {
-    id: "ultrafuzz/implemented-properties@2",
-    format: "json",
+  "ultrafuzz/properties@2": {
+    description: "A strict canonical property catalog with stable source references.",
+    schemaFile: "properties.schema.json",
+    validEmptyExample: '{"schema_version":"ultrafuzz.properties.v2","properties":[]}'
+  },
+  "ultrafuzz/property-campaign@3": {
     description:
-      "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
+      "A strict backend campaign record with planned identity, status-coupled execution, coverage, exact per-property results, and typed failures.",
+    schemaFile: "property-campaign.schema.json",
     validEmptyExample:
-      '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
+      '{"schema_version":"ultrafuzz.property-campaign.v3","campaign_plan_ref":"campaign-plan.json","implemented_properties_ref":"implemented-properties.json","findings_ref":"findings.json","campaign_summary_ref":"campaign-summary.json","fuzzer_backend":"recon","backend_version":null,"execution":{"status":"unavailable","usable_results":false,"command":"recon fuzz .","config_path":null,"workers":1,"started_at":null,"finished_at":"2026-01-01T00:00:00Z","deadline":"2026-01-01T00:00:00Z","exit_code":null,"failure":{"category":"backend-unavailable","summary":"Recon is unavailable."}},"paths":{"corpus":"backends/recon-fuzzer/corpus","cache":"backends/recon-fuzzer/cache","log":"backends/recon-fuzzer/run.log","raw_results":"backends/recon-fuzzer/results.json","reproducers":"backends/recon-fuzzer/reproducers"},"evidence_files":[],"coverage":{"status":"unavailable","metrics":[],"unavailable_reason":"The backend did not start."},"property_results":[],"failures":[]}'
   },
-  {
-    id: "ultrafuzz/invariant-campaign-plan@1",
-    format: "json",
-    description:
-      "A current invariant campaign plan with the v2 schema marker, configured Recon and host timeouts, a nonbinding test limit, topology-derived finalization reserve, exact command, and start-derived deadlines. This contract opts the campaign into strict runtime timeout-evidence validation."
+  "ultrafuzz/property-lens@2": {
+    description: "A strict typed property-lens catalog.",
+    schemaFile: "property-lens.schema.json"
   },
-  {
-    id: "ultrafuzz/json-array@1",
-    format: "json",
-    description: "A valid JSON array.",
-    validEmptyExample: "[]"
+  "ultrafuzz/reference-expectations@2": {
+    description: "A strict supplied reference expectation catalog.",
+    schemaFile: "reference-expectations.schema.json"
   },
-  {
-    id: "ultrafuzz/json-object@1",
-    format: "json",
-    description: "A valid JSON object (not an array or null).",
-    validEmptyExample: "{}"
-  },
-  {
-    id: "ultrafuzz/nonempty-markdown@1",
-    format: "markdown",
-    description: "A UTF-8 Markdown document containing non-whitespace content."
-  },
-  {
-    id: "ultrafuzz/properties@1",
-    format: "json",
-    description:
-      "A canonical ultrafuzz.properties.v1 catalog whose properties carry stable IDs and one or more source node/property references.",
-    validEmptyExample: '{"schema_version":"ultrafuzz.properties.v1","properties":[]}'
-  },
-  {
-    id: "ultrafuzz/property-lens@1",
-    format: "json",
-    description: "A typed property-lens catalog whose source properties use only high, medium, or low priority."
-  },
-  {
-    id: "ultrafuzz/reference-expectations@1",
-    format: "json",
-    description:
-      "A supplied reference expectation catalog. IDs are trusted provenance only when this declared input artifact is present.",
-    validEmptyExample:
-      '{"schema_version":"ultrafuzz.reference-expectations.v1","expectations":[{"id":"expectation-example"}]}'
-  },
-  {
-    id: "ultrafuzz/property-campaign@1",
-    format: "json",
-    description:
-      "A structured invariant campaign result whose failures may reference implemented canonical properties by property_ids.",
-    validEmptyExample: '{"schema_version":"ultrafuzz.property-campaign.v1","failures":[]}'
-  },
-  {
-    id: "ultrafuzz/report@1",
-    format: "json",
-    description:
-      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. In issue evidence, represent one source span with positive integer line and optional end_line; line_ranges is reserved for at least two disjoint spans, must never contain only one entry, and cannot coexist with line or end_line. Current invariant runs also include property_implementation_coverage from the implementation handoff. Additional adapter fields are allowed.",
-    validEmptyExample: '{"schema_version":"1.0","run_metadata":{},"issues":[],"non_production_outcomes":[]}'
-  },
-  {
-    id: "ultrafuzz/text@1",
-    format: "text",
-    description: "A UTF-8 text file. Empty text is valid.",
-    validEmptyExample: ""
-  },
-  {
-    id: "ultrafuzz/threat-model@1",
-    format: "json",
-    description:
-      "A canonical Web3 threat model with evidence-backed capabilities, assets, actors, trust boundaries, attack surfaces, invariants, threats, assumptions, unknowns, and coverage gaps."
-  },
-  {
-    id: "ultrafuzz/workspace-patch@1",
-    format: "json",
-    description:
-      "A provenance-bound workspace patch manifest with base and result Git trees, a patch digest, and target-relative changed paths."
+  "ultrafuzz/workspace-patch@1": {
+    description: "A provenance-bound workspace patch manifest.",
+    schemaFile: "workspace-patch.schema.json"
   }
-]);
+} as const;
 
-// The checked-in JSON Schema bundle materialized into every task workspace by
-// materializePromptSchemas. A contract appears here only when the bundle ships
-// a schema that describes the whole artifact, so a producer can validate the
-// file it just wrote instead of learning about a bad field from a failed node.
-// Deliberately not part of ArtifactContractDefinition: the contract digest is a
-// hash of that object and is pinned in artifact provenance.
-const contractSchemaFiles: Partial<Record<ArtifactContractId, string>> = {
-  "ultrafuzz/findings@1": "findings.schema.json",
-  "ultrafuzz/generated-tests@1": "generated-tests.schema.json",
-  "ultrafuzz/invariant-ledger@1": "invariant-evidence-ledger.schema.json",
-  "ultrafuzz/properties@1": "properties.schema.json",
-  "ultrafuzz/property-lens@1": "property-lens.schema.json",
-  "ultrafuzz/reference-expectations@1": "reference-expectations.schema.json",
-  "ultrafuzz/workspace-patch@1": "workspace-patch.schema.json"
-};
+const contractInputs: Array<Omit<ArtifactContractDefinition, "digest">> = ARTIFACT_CONTRACT_IDS.map((id) => {
+  if (id === "ultrafuzz/nonempty-markdown@1") {
+    return {
+      id,
+      format: "markdown",
+      description: "A UTF-8 Markdown document containing non-whitespace content."
+    };
+  }
+  if (id === "ultrafuzz/text@1") {
+    return { id, format: "text", description: "A UTF-8 text file. Empty text is valid.", validEmptyExample: "" };
+  }
+  if (id in workflowContractSchemas) {
+    const workflowId = id as WorkflowContractId;
+    return {
+      id,
+      format: "json",
+      description: WORKFLOW_CONTRACT_DESCRIPTIONS[workflowId],
+      ...(WORKFLOW_VALID_EMPTY_EXAMPLES[workflowId] === undefined
+        ? {}
+        : { validEmptyExample: WORKFLOW_VALID_EMPTY_EXAMPLES[workflowId] })
+    };
+  }
+  const existing = existingJsonContracts[id as keyof typeof existingJsonContracts];
+  return {
+    id,
+    format: "json",
+    description: existing.description,
+    ...(Object.prototype.hasOwnProperty.call(existing, "validEmptyExample")
+      ? { validEmptyExample: (existing as { validEmptyExample?: string }).validEmptyExample }
+      : {})
+  };
+});
+
+const definitions = defineContracts(contractInputs);
+
+const contractSchemaFiles = Object.freeze({
+  ...Object.fromEntries(Object.entries(existingJsonContracts).map(([contract, value]) => [contract, value.schemaFile])),
+  ...WORKFLOW_SCHEMA_FILES
+}) as Readonly<Record<Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">, string>>;
 
 export const ARTIFACT_CONTRACT_SCHEMA_FILES: Readonly<Partial<Record<ArtifactContractId, string>>> =
-  Object.freeze(contractSchemaFiles);
-
-export function isArtifactContractId(value: unknown): value is ArtifactContractId {
-  return typeof value === "string" && (ARTIFACT_CONTRACT_IDS as readonly string[]).includes(value);
-}
+  contractSchemaFiles;
 
 export function artifactContractSchemaFile(id: ArtifactContractId): string | undefined {
-  return contractSchemaFiles[id];
+  return ARTIFACT_CONTRACT_SCHEMA_FILES[id];
+}
+
+export function artifactContractSchemaBinding(id: ArtifactContractId): ArtifactContractSchemaBinding | undefined {
+  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[id];
+  if (schemaFile === undefined) return undefined;
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === schemaFile);
+  if (entry === undefined) throw new Error(`Artifact contract ${id} names an unregistered schema ${schemaFile}`);
+  return Object.freeze({
+    schema_file: entry.filename,
+    schema_id: entry.id,
+    schema_sha256: entry.sha256,
+    schema_bundle_sha256: artifactSchemaBundleDigest(),
+    validator_build: VALIDATOR_BUILD_IDENTITY
+  });
 }
 
 export function artifactContractDefinition(id: ArtifactContractId): ArtifactContractDefinition {
@@ -335,218 +175,147 @@ export function validateArtifactContract(
   contents: string,
   artifactPath = "$"
 ): ArtifactContractValidationResult {
+  if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
+    return validateTextContract(contract, contents, artifactPath);
+  }
+
+  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath);
+}
+
+/** Validate the exact immutable artifact bytes, including their UTF-8 encoding. */
+export function validateArtifactContractBytes(
+  contract: ArtifactContractId,
+  contents: Uint8Array,
+  artifactPath = "$"
+): ArtifactContractValidationResult {
+  if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+    } catch (error) {
+      return failure(
+        "ARTIFACT_UTF8_INVALID",
+        `Artifact is not valid UTF-8: ${error instanceof Error ? error.message : String(error)}`,
+        artifactPath
+      );
+    }
+    return validateTextContract(contract, text, artifactPath);
+  }
+
+  return validateJsonContractBytes(contract, contents, artifactPath);
+}
+
+function validateTextContract(
+  contract: "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1",
+  contents: string,
+  artifactPath: string
+): ArtifactContractValidationResult {
   if (contract === "ultrafuzz/nonempty-markdown@1") {
     return contents.trim().length > 0
       ? { ok: true, issues: [], value: contents }
       : failure("ARTIFACT_MARKDOWN_EMPTY", "Markdown artifact must contain non-whitespace content", artifactPath);
   }
-  if (contract === "ultrafuzz/text@1") {
-    return { ok: true, issues: [], value: contents };
-  }
+  return { ok: true, issues: [], value: contents };
+}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents) as unknown;
-  } catch (error) {
+function validateJsonContractBytes(
+  contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">,
+  contents: Uint8Array,
+  artifactPath: string
+): ArtifactContractValidationResult {
+  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
+  if (schemaFile === undefined) {
+    return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
+  }
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) {
+    return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);
+  }
+  const validation = validateRegisteredJsonBytesSync({
+    schemaPath: path.join(artifactSchemaDirectory(), binding.schema_file),
+    instanceBytes: contents
+  });
+  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, binding)) {
     return failure(
-      "ARTIFACT_JSON_INVALID",
-      `Artifact is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator identity does not match ${contract}`,
+      artifactPath
+    );
+  }
+  if (validation.status !== "valid") {
+    return workerValidationFailure(validation, artifactPath);
+  }
+  if (validation.schema === null) {
+    return failure(
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator did not report its schema identity for ${contract}`,
       artifactPath
     );
   }
 
-  if (contract === "ultrafuzz/json-array@1") {
-    return Array.isArray(parsed)
-      ? { ok: true, issues: [], value: parsed }
-      : failure("ARTIFACT_JSON_ARRAY_REQUIRED", "Artifact must be a JSON array", artifactPath);
+  // The isolated worker is the sole shape-acceptance boundary. Parse the same
+  // immutable bytes only after it succeeds so callers can run semantic gates
+  // without serializing, repairing, or otherwise changing the artifact.
+  try {
+    return { ok: true, issues: [], value: parseStrictJsonBytes(contents) };
+  } catch (error) {
+    return strictJsonFailure(error, artifactPath);
   }
-  if (contract === "ultrafuzz/json-object@1") {
-    return isRecord(parsed)
-      ? { ok: true, issues: [], value: parsed }
-      : failure("ARTIFACT_JSON_OBJECT_REQUIRED", "Artifact must be a JSON object", artifactPath);
-  }
-  if (contract === "ultrafuzz/campaign-summary@1") {
-    const result = campaignSummarySchema.safeParse(parsed);
-    if (!result.success) {
-      return {
-        ok: false,
-        issues: expandSchemaIssues(result.error.issues).map((issue) => ({
-          code: "CAMPAIGN_SUMMARY_SCHEMA_INVALID",
-          message: issue.message,
-          path: `${artifactPath}#${issue.path.join(".")}`
-        }))
-      };
-    }
-    return { ok: true, issues: [], value: result.data };
-  }
-  if (contract === "ultrafuzz/invariant-campaign-plan@1") {
-    const result = invariantCampaignPlanSchema.safeParse(parsed);
-    if (!result.success) {
-      return {
-        ok: false,
-        issues: expandSchemaIssues(result.error.issues).map((issue) => ({
-          code: "INVARIANT_CAMPAIGN_PLAN_SCHEMA_INVALID",
-          message: issue.message,
-          path: `${artifactPath}#${issue.path.join(".")}`
-        }))
-      };
-    }
-    return { ok: true, issues: [], value: result.data };
-  }
-  if (contract === "ultrafuzz/findings@1") {
-    const result = validateFindingsSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/generated-tests@1") {
-    const result = validateGeneratedTestManifestSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/goal-plan@1") {
-    const result = validateGoalPlan(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/invariant-ledger@1") {
-    const result = validateInvariantLedgerSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/threat-model@1") {
-    const result = validateThreatModel(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/workspace-patch@1") {
-    const result = validateWorkspacePatchSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/properties@1") {
-    const result = validatePropertiesSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/property-lens@1") {
-    const result = validateLensPropertiesSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/reference-expectations@1") {
-    const result = validateReferenceExpectationsSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/implemented-properties@1" || contract === "ultrafuzz/implemented-properties@2") {
-    const result = validateImplementedPropertiesSchema(parsed, artifactPath, {
-      requireSelection: contract === "ultrafuzz/implemented-properties@2"
-    });
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-  if (contract === "ultrafuzz/property-campaign@1") {
-    const result = validatePropertyCampaignSchema(parsed, artifactPath);
-    return {
-      ok: result.ok,
-      issues: result.issues,
-      ...(result.value === undefined ? {} : { value: result.value })
-    };
-  }
-
-  const result = terminalReportSchema.safeParse(parsed);
-  if (!result.success) {
-    return {
-      ok: false,
-      issues: expandSchemaIssues(result.error.issues).map((issue) => ({
-        code: "TERMINAL_REPORT_SCHEMA_INVALID",
-        message: issue.message,
-        path: `${artifactPath}#${issue.path.join(".")}`
-      }))
-    };
-  }
-  const findingsResult = validateFindingsSchema(result.data.issues, `${artifactPath}#issues`);
-  if (!findingsResult.ok) {
-    return {
-      ok: false,
-      issues: findingsResult.issues,
-      ...(findingsResult.value === undefined ? {} : { value: findingsResult.value })
-    };
-  }
-  return { ok: true, issues: [], value: result.data };
 }
 
-/**
- * Flattens union failures down to the branch the value came closest to matching.
- *
- * A union reports one `invalid_union` issue at the union node itself and buries
- * the per-branch reasons inside it, so a bad field within an object branch is
- * reported only as "Invalid input" at the object's own path. A report whose
- * `property_implementation_coverage.blocker_summaries` held the wrong element
- * type failed a whole run with nothing more specific than
- * `Invalid input at report.json#property_implementation_coverage`, which named
- * neither the field nor the reason.
- */
-function expandSchemaIssues(
-  issues: readonly { code?: string; message: string; path: PropertyKey[]; errors?: unknown }[],
-  basePath: PropertyKey[] = []
-): Array<{ message: string; path: PropertyKey[] }> {
-  return issues.flatMap((issue) => {
-    const path = [...basePath, ...issue.path];
-    if (issue.code === "invalid_union" && Array.isArray(issue.errors)) {
-      const branches = issue.errors
-        .filter((branch): branch is typeof issues => Array.isArray(branch))
-        .map((branch) => expandSchemaIssues(branch, path))
-        .filter((branch) => branch.length > 0);
-      // The deepest path is the branch that matched furthest before failing;
-      // for `"unavailable" | {...}` given an object, that is the object branch.
-      // On a tie no branch got further than another, and picking one would
-      // assert that its shape was intended: a number here would be reported
-      // only as `expected "unavailable"`, and an author who followed that
-      // advice would pass the contract and then fail the gate that requires an
-      // object. Report every branch instead.
-      const deepest = branches.reduce((best, branch) => Math.max(best, branchDepth(branch)), 0);
-      const closest = branches.filter((branch) => branchDepth(branch) === deepest);
-      if (closest.length > 0) {
-        return closest.flat();
-      }
-    }
-    return [{ message: issue.message, path }];
-  });
+function sameSchemaIdentity(
+  actual: NonNullable<JsonFileValidationResult["schema"]>,
+  expected: ArtifactContractSchemaBinding
+): boolean {
+  return (
+    actual.registered &&
+    actual.id === expected.schema_id &&
+    actual.sha256 === expected.schema_sha256 &&
+    actual.bundle_sha256 === expected.schema_bundle_sha256 &&
+    actual.validator_build === expected.validator_build
+  );
 }
 
-function branchDepth(branch: Array<{ path: PropertyKey[] }>): number {
-  return branch.reduce((deepest, issue) => Math.max(deepest, issue.path.length), 0);
+function workerValidationFailure(
+  validation: JsonFileValidationResult,
+  artifactPath: string
+): ArtifactContractValidationResult {
+  const diagnostics: readonly JsonFileValidationDiagnostic[] =
+    validation.diagnostics.length === 0
+      ? [{ code: "JSON_VALIDATOR_INTERNAL_ERROR", message: "Validator failed without a diagnostic" }]
+      : validation.diagnostics;
+  return {
+    ok: false,
+    issues: diagnostics.map((diagnostic) => ({
+      code:
+        diagnostic.code === "JSON_DUPLICATE_KEY"
+          ? "ARTIFACT_JSON_DUPLICATE_KEY"
+          : diagnostic.code === "JSON_INSTANCE_INVALID" || diagnostic.code === "JSON_INSTANCE_UNREADABLE"
+            ? "ARTIFACT_JSON_INVALID"
+            : diagnostic.code === "JSON_SCHEMA_VIOLATION"
+              ? "ARTIFACT_SCHEMA_INVALID"
+              : "ARTIFACT_VALIDATOR_FAILED",
+      message:
+        diagnostic.code === "JSON_DUPLICATE_KEY" ||
+        diagnostic.code === "JSON_INSTANCE_INVALID" ||
+        diagnostic.code === "JSON_INSTANCE_UNREADABLE"
+          ? `Artifact is not strict JSON: ${diagnostic.message}`
+          : diagnostic.keyword === undefined || diagnostic.schemaPath === undefined
+            ? diagnostic.message
+            : `${diagnostic.message} (${diagnostic.keyword}, ${diagnostic.schemaPath})`,
+      path: `${artifactPath}${diagnostic.instancePath ?? ""}`
+    }))
+  };
+}
+
+function strictJsonFailure(error: unknown, artifactPath: string): ArtifactContractValidationResult {
+  return failure(
+    error instanceof StrictJsonError && error.kind === "duplicate-key"
+      ? "ARTIFACT_JSON_DUPLICATE_KEY"
+      : "ARTIFACT_JSON_INVALID",
+    `Artifact is not strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+    artifactPath
+  );
 }
 
 function defineContracts(
@@ -567,16 +336,19 @@ function failure(code: string, message: string, path: string): ArtifactContractV
   return { ok: false, issues: [{ code, message, path }] };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 for (const definition of Object.values(definitions)) {
-  if (definition.validEmptyExample === undefined) {
-    continue;
-  }
+  if (definition.validEmptyExample === undefined) continue;
+  // JSON examples are exhaustively exercised against their registered worker
+  // contract by the fixture suite. Do not start one worker per example during
+  // module evaluation: that would make every CLI invocation pay for unrelated
+  // contracts before it can validate the requested file.
+  if (definition.format === "json") continue;
   const result = validateArtifactContract(definition.id, definition.validEmptyExample);
   if (!result.ok) {
-    throw new Error(`Artifact contract ${definition.id} has an invalid canonical empty example`);
+    throw new Error(
+      `Artifact contract ${definition.id} has an invalid canonical empty example: ${result.issues
+        .map((issue) => issue.message)
+        .join("; ")}`
+    );
   }
 }

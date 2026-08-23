@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:smithers-reset-node:1",
+  "title": "Ultrafuzz Smithers reset-node marker",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "smithers_run_id", "node_id", "applied_at"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.smithers.reset-node.v1"
+    },
+    "smithers_run_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "node_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "applied_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000]+$"
+    }
+  }
+}

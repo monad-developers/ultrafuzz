@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifacts";
+import {
+  readPlannedGraphDocument,
+  readRunPlanDocument,
+  readRunState,
+  writeFileDurable,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import {
   auditProfile,
   loadAuditProfileCatalog,
@@ -9,10 +15,17 @@ import {
   type EvalConfig,
   type RuntimeConfigOverrides
 } from "@ultrafuzz/config";
-import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  effectiveAuditPolicy,
+  loadResolvedProject,
+  startRun,
+  syncRun,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
+import { appendEvalRunRecord, writeEvalMatrix, writeEvalRunManifest, writeEvalRunSummary } from "./eval-durable.js";
 import { evalRunExpansion } from "./expansion.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
@@ -23,21 +36,25 @@ import {
 import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
-import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
+import { evalWorkflowInputSchema, planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
+  EVAL_RUN_SUMMARY_SCHEMA_VERSION,
+  type EvalBenchmarkWorkflowInput,
+  type EvalDurableDiagnostic,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
   type EvalModelProfile,
   type EvalPlanValue,
+  type EvalPublicFullBenchmarkWorkflowInput,
+  type EvalPublicSmokeBenchmarkWorkflowInput,
   type EvalRunRecord,
   type EvalRunValue,
   type EvalSuiteSpec
 } from "./types.js";
 import {
   EvalError,
-  appendJsonLine,
-  boundedEvalId,
+  boundedEvalWorkflowRunId,
   diagnosticFromError,
   evalRunRoot,
   generateEvalRunId,
@@ -60,6 +77,8 @@ export type RowLauncher = (input: {
   runId: string;
   suite: EvalSuiteSpec;
   env?: Record<string, string | undefined>;
+  /** Ultrafuzz CLI entrypoint the launched run gives its schema-backed producers. */
+  ultrafuzzCliEntrypoint?: string;
 }) => Promise<RowLaunchValue>;
 
 export type RowSync = (input: {
@@ -72,6 +91,12 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   evalRunId?: string;
   rowIds?: string[];
   env?: Record<string, string | undefined>;
+  /**
+   * Ultrafuzz CLI entrypoint handed to every launched run. A schema-backed
+   * topology refuses to submit without it, so the caller that owns the CLI
+   * identity must supply it rather than letting a run guess one.
+   */
+  ultrafuzzCliEntrypoint?: string;
   /** CLI `--provider` override; precedence over env and ultrafuzz.toml. */
   provider?: string;
   /** `[eval]` section of the resolved ultrafuzz.toml (provider binding + credentials env names). */
@@ -94,6 +119,7 @@ export interface LaunchEvalRowInput {
   row: EvalMatrixRow;
   suite: EvalSuiteSpec;
   env?: Record<string, string | undefined>;
+  ultrafuzzCliEntrypoint?: string;
   evalRunRoot?: string;
   appendRecord?: boolean;
   launcher?: RowLauncher;
@@ -130,7 +156,9 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       ? resolvedProvenance
       : { ...resolvedProvenance, candidate: input.candidateProvenance };
   const plan: EvalPlanValue = { ...planned, provenance };
-  writeJsonDurable(path.join(root, "eval.json"), {
+  writeFileDurable(path.join(root, "runs.jsonl"), "");
+  writeEvalMatrix(path.join(root, "matrix.json"), plan.matrix);
+  writeEvalRunManifest(path.join(root, "eval.json"), {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: evalRunId,
     suite_path: plan.suite_path,
@@ -139,7 +167,6 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     suite: plan.suite,
     provenance
   });
-  writeJsonDurable(path.join(root, "matrix.json"), plan.matrix);
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
   }
@@ -154,6 +181,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       row,
       suite: plan.suite,
       ...(input.env !== undefined ? { env: input.env } : {}),
+      ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {}),
       appendRecord: true,
       ...(input.launcher !== undefined ? { launcher: input.launcher } : {}),
       ...(plan.provenance?.candidate !== undefined ? { candidateProvenance: plan.provenance.candidate } : {})
@@ -178,16 +206,19 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
 
   const launched = records.filter((record) => record.status === "launched").length;
   const failed = records.length - launched;
-  const incomplete = watch
-    ? records.filter(
-        (record) =>
-          record.status === "launched" &&
-          (record.workflow?.terminal !== true ||
-            record.workflow.status === "timed-out" ||
-            record.workflow.status === "canceled")
-      ).length
-    : 0;
-  writeJsonDurable(path.join(root, "run-summary.json"), {
+  // Derived from the records, never from whether this call watched them. The
+  // persisted summary is read as evidence, and a detached launch that reported
+  // zero incomplete rows while holding unobserved launched records would claim
+  // terminal knowledge it never had.
+  const incomplete = records.filter(
+    (record) =>
+      record.status === "launched" &&
+      (record.workflow?.terminal !== true ||
+        record.workflow.status === "timed-out" ||
+        record.workflow.status === "canceled")
+  ).length;
+  writeEvalRunSummary(path.join(root, "run-summary.json"), {
+    schema_version: EVAL_RUN_SUMMARY_SCHEMA_VERSION,
     eval_run_id: evalRunId,
     launched,
     failed,
@@ -202,6 +233,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     launched,
     failed,
     incomplete,
+    watched: watch,
     records,
     diagnostics
   };
@@ -213,9 +245,9 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", `missing runner model profile ${input.row.runner_model_profile}`);
   }
-  // Smithers prefixes runtime IDs with `ultrafuzz-`; keep the resulting ID at
-  // or below its 128-character limit while retaining row uniqueness.
-  const runId = boundedEvalId([input.evalRunId, input.row.run_id], 118);
+  // Smithers prefixes runtime IDs with `ultrafuzz-`; derive one that satisfies
+  // its current lowercase 64-character contract while retaining row uniqueness.
+  const runId = boundedEvalWorkflowRunId([input.evalRunId, input.row.run_id]);
   const recordBase = {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: input.evalRunId,
@@ -228,8 +260,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           candidate_label: input.candidateProvenance.label,
           candidate_commit: input.candidateProvenance.commit
         }
-      : {}),
-    started_at: startedAt
+      : {})
   } as const;
 
   const launcher = input.launcher ?? runtimeRowLauncher;
@@ -239,26 +270,64 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
       row: input.row,
       runId,
       suite: input.suite,
-      ...(input.env !== undefined ? { env: input.env } : {})
+      ...(input.env !== undefined ? { env: input.env } : {}),
+      ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {})
     });
   } catch (error) {
     launch = { ok: false, workflowIds: [], diagnostics: [diagnosticFromError(error, "EVAL_ROW_LAUNCH_FAILED")] };
+  }
+  if (launch.ok && launch.runId !== runId) {
+    launch = {
+      ok: false,
+      workflowIds: launch.workflowIds,
+      diagnostics: [
+        ...launch.diagnostics,
+        diagnosticFromError(
+          new EvalError(
+            "EVAL_ROW_RUN_ID_MISMATCH",
+            `eval row ${input.row.id} launcher returned run ${JSON.stringify(launch.runId)} instead of requested run ${JSON.stringify(runId)}`,
+            { expected_run_id: runId, actual_run_id: launch.runId }
+          )
+        )
+      ]
+    };
   }
 
   const finishedAt = new Date().toISOString();
   // Everything from here to the `runs.jsonl` append is enrichment read off the
   // run root, and a launch that succeeded has already spent its budget. None of
-  // these reads may be able to keep the row out of the journal: a launched row
-  // missing from `runs.jsonl` reads downstream as a run that never reached a
-  // model -- `publicEvalModelWorkEvidence` would answer `none` for it -- and
-  // buys a relaunch of work that already ran. `readRunFingerprints` swallows its
-  // own faults; `resolveTerminalReportPath` is guarded here instead of there
-  // because its callers elsewhere do want to hear about an unresolvable path.
-  const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunPolicy(launch.runRoot) : {};
+  // these reads may keep the row out of the journal: a launched row missing
+  // from `runs.jsonl` reads downstream as a run that never reached a model and
+  // can buy a relaunch of work that already ran. Invalid-present enrichment is
+  // recorded explicitly; it is neither repaired nor treated as missing.
+  const enrichmentDiagnostics: RuntimeDiagnostic[] = [];
+  let runFingerprints: ReturnType<typeof readRunFingerprints> = {};
+  let runAuditPolicy: ReturnType<typeof readRunAuditPolicy> = {};
+  if (launch.ok && launch.runRoot !== undefined && launch.runId !== undefined) {
+    if (launch.graphFingerprint === undefined || launch.configFingerprint === undefined) {
+      try {
+        runFingerprints = readRunFingerprints(launch.runRoot, launch.runId);
+      } catch (error) {
+        enrichmentDiagnostics.push(rowEnrichmentDiagnostic("state.json", error));
+      }
+    }
+    try {
+      runAuditPolicy = readRunAuditPolicy(launch.runRoot, launch.runId);
+    } catch (error) {
+      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("plan.json", error));
+    }
+  }
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
   const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
   const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
-  const reportJsonPath = launch.ok && launch.runRoot !== undefined ? readTerminalReportPath(launch.runRoot) : undefined;
+  let reportJsonPath: string | undefined;
+  if (launch.ok && launch.runRoot !== undefined) {
+    try {
+      reportJsonPath = readTerminalReportPath(launch.runRoot);
+    } catch (error) {
+      enrichmentDiagnostics.push(rowEnrichmentDiagnostic("graph.json", error));
+    }
+  }
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
@@ -269,30 +338,31 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           status: "launched",
           ...(graphFingerprint !== undefined ? { graph_fingerprint: graphFingerprint } : {}),
           ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),
-          ...(runFingerprints.audit_profile === undefined ? {} : { audit_profile: runFingerprints.audit_profile }),
-          ...(runFingerprints.audit_profile_catalog_digest === undefined
+          ...(runAuditPolicy.audit_profile === undefined ? {} : { audit_profile: runAuditPolicy.audit_profile }),
+          ...(runAuditPolicy.audit_profile_catalog_digest === undefined
             ? {}
-            : { audit_profile_catalog_digest: runFingerprints.audit_profile_catalog_digest }),
-          ...(runFingerprints.topology_digest === undefined
+            : { audit_profile_catalog_digest: runAuditPolicy.audit_profile_catalog_digest }),
+          ...(runAuditPolicy.topology_path_origin === undefined
             ? {}
-            : { topology_digest: runFingerprints.topology_digest }),
-          ...(runFingerprints.prompt_digest === undefined ? {} : { prompt_digest: runFingerprints.prompt_digest }),
+            : { topology_path_origin: runAuditPolicy.topology_path_origin }),
+          ...(runAuditPolicy.topology_digest === undefined ? {} : { topology_digest: runAuditPolicy.topology_digest }),
+          ...(runAuditPolicy.prompt_digest === undefined ? {} : { prompt_digest: runAuditPolicy.prompt_digest }),
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
           launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
-          diagnostics: launch.diagnostics
+          diagnostics: durableEvalDiagnostics([...launch.diagnostics, ...enrichmentDiagnostics])
         }
       : {
           ...recordBase,
           status: "failed",
           workflow_ids: launch.workflowIds,
           launcher: { status: "failed", started_at: startedAt, finished_at: finishedAt },
-          diagnostics: launch.diagnostics
+          diagnostics: durableEvalDiagnostics(launch.diagnostics)
         };
 
   if (input.appendRecord === true) {
     const root = input.evalRunRoot ?? evalRunRoot(input.projectRoot, input.evalRunId);
-    appendJsonLine(path.join(root, "runs.jsonl"), record);
+    appendEvalRunRecord(path.join(root, "runs.jsonl"), record);
   }
   return record;
 }
@@ -346,6 +416,13 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   }
   assertHeldOutPathsAbsent(input.row.target_id, input.row.target.path, input.row.target.held_out_paths);
   const runnerProfile = input.suite.model_profiles[input.row.runner_model_profile];
+  const benchmarkLaunchOverrides = benchmarkModelProfileOverrides(input.row, runnerProfile);
+  await assertPackagedBenchmarkPrelaunchPolicy({
+    row: input.row,
+    projectRoot: input.row.target.path,
+    runtimeOverrides: benchmarkLaunchOverrides.runtimeOverrides,
+    ...(input.env === undefined ? {} : { env: input.env })
+  });
   const result = await startRun({
     projectRoot: input.row.target.path,
     ...(input.row.variant.topology_path === undefined ? {} : { topologyPath: input.row.variant.topology_path }),
@@ -356,9 +433,10 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
     ...(input.suite.run.max_parallel_targets !== undefined
       ? { maxConcurrency: input.suite.run.max_parallel_targets }
       : {}),
+    ...(input.ultrafuzzCliEntrypoint !== undefined ? { ultrafuzzCliEntrypoint: input.ultrafuzzCliEntrypoint } : {}),
     workflowInput: buildWorkflowInput(input.row),
     ...benchmarkTopologyTransform(input.row),
-    ...benchmarkModelProfileOverrides(input.row, runnerProfile),
+    ...benchmarkLaunchOverrides,
     ...(input.env !== undefined ? { env: input.env } : {})
   });
   if (result.ok && result.value) {
@@ -375,30 +453,73 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   return { ok: false, workflowIds: [], diagnostics: result.diagnostics };
 };
 
+/** Fail before `startRun` can create a run or submit model work on mismatched public benchmark policy. */
+export async function assertPackagedBenchmarkPrelaunchPolicy(input: {
+  row: Pick<EvalMatrixRow, "workflow_input" | "variant">;
+  projectRoot: string;
+  runtimeOverrides: RuntimeConfigOverrides | undefined;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  const workflowInput = validatedBenchmarkWorkflowInput(input.row.workflow_input);
+  if (workflowInput === undefined || !("benchmark_lane" in workflowInput)) return;
+  const expectedPolicy = packagedBenchmarkAuditPolicy(workflowInput);
+  if (input.row.variant.topology !== undefined || input.row.variant.topology_path !== undefined) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark variants cannot override the packaged topology`
+    );
+  }
+  const resolved = await loadResolvedProject({
+    projectRoot: input.projectRoot,
+    ...(input.runtimeOverrides === undefined ? {} : { runtimeOverrides: input.runtimeOverrides }),
+    ...(input.env === undefined ? {} : { env: input.env })
+  });
+  if (resolved.config === undefined) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark target configuration could not be resolved before launch`,
+      { diagnostics: resolved.diagnostics }
+    );
+  }
+  let policy: ReturnType<typeof effectiveAuditPolicy>;
+  try {
+    policy = effectiveAuditPolicy({ projectRoot: input.projectRoot, config: resolved.config });
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark target topology could not be resolved before launch`,
+      { reason: error instanceof Error ? error.message : String(error) }
+    );
+  }
+  if (
+    policy.auditProfile !== expectedPolicy.auditProfile ||
+    policy.catalogDigest !== expectedPolicy.catalogDigest ||
+    policy.topologyDigest !== expectedPolicy.topologyDigest ||
+    policy.topologyPathOrigin !== "audit-profile"
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_EXECUTION_INVALID",
+      `${expectedPolicy.auditProfile} public benchmark effective audit profile, catalog digest, and topology digest must match and originate from the current packaged policy`,
+      {
+        effective_audit_profile: policy.auditProfile,
+        effective_audit_profile_catalog_digest: policy.catalogDigest,
+        effective_topology_digest: policy.topologyDigest,
+        effective_topology_origin: policy.topologyPathOrigin
+      }
+    );
+  }
+}
+
 export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_input">): {
   topologyTransform?: { strategyLoops?: number; excludedNodeIds?: string[] };
 } {
-  if (!isRecordValue(row.workflow_input)) return {};
-  const execution = row.workflow_input.benchmark_execution;
-  if (execution === undefined) return {};
-  if (!isRecordValue(execution)) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark execution controls must be an object");
-  }
-  const strategyLoops = execution.strategy_loops;
-  const excludedNodeIds = execution.excluded_node_ids;
-  if (strategyLoops !== undefined && (!Number.isInteger(strategyLoops) || Number(strategyLoops) < 1)) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark strategy loops must be a positive integer");
-  }
-  if (
-    excludedNodeIds !== undefined &&
-    (!Array.isArray(excludedNodeIds) || excludedNodeIds.some((id) => typeof id !== "string" || id.length === 0))
-  ) {
-    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "excluded benchmark node IDs must be non-empty strings");
-  }
+  const input = validatedBenchmarkWorkflowInput(row.workflow_input);
+  if (input === undefined) return {};
+  const execution = input.benchmark_execution;
   return {
     topologyTransform: {
-      ...(strategyLoops === undefined ? {} : { strategyLoops: Number(strategyLoops) }),
-      ...(excludedNodeIds === undefined ? {} : { excludedNodeIds: [...excludedNodeIds] as string[] })
+      strategyLoops: execution.strategy_loops,
+      excludedNodeIds: [...execution.excluded_node_ids]
     }
   };
 }
@@ -407,33 +528,50 @@ export function benchmarkModelProfileOverrides(
   row: Pick<EvalMatrixRow, "workflow_input">,
   runnerProfile: EvalModelProfile | undefined
 ): { runtimeOverrides?: RuntimeConfigOverrides } {
-  if (!isRecordValue(row.workflow_input)) return {};
-  const execution = row.workflow_input.benchmark_execution;
-  if (!isRecordValue(execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
-  assertSmokeAuditPolicy(execution);
+  const input = validatedBenchmarkWorkflowInput(row.workflow_input);
+  if (input === undefined) return { runtimeOverrides: { forbidModelFallback: true } };
+  if (!("benchmark_lane" in input)) {
+    return { runtimeOverrides: { forbidModelFallback: true } };
+  }
+  const expectedPolicy = packagedBenchmarkAuditPolicy(input);
   if (runnerProfile === undefined) {
-    throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
+    throw new EvalError(
+      "EVAL_MODEL_PROFILE_UNKNOWN",
+      `${expectedPolicy.auditProfile} benchmark runner profile is missing`
+    );
   }
   return {
     runtimeOverrides: {
-      auditProfile: "smoke"
+      auditProfile: expectedPolicy.auditProfile,
+      forbidModelFallback: true
     }
   };
 }
 
-function assertSmokeAuditPolicy(execution: Record<string, unknown>): void {
+function packagedBenchmarkAuditPolicy(
+  input: EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput
+): { auditProfile: "smoke" | "full"; catalogDigest: string; topologyDigest: string } {
   const catalog = loadAuditProfileCatalog();
-  const topologyDigest = packagedTopologyDigest(auditProfile("smoke", catalog), catalog);
-  if (
-    execution.audit_profile !== "smoke" ||
-    execution.audit_profile_catalog_digest !== catalog.digest ||
-    execution.topology_digest !== topologyDigest
-  ) {
-    throw new EvalError(
-      "EVAL_BENCHMARK_EXECUTION_INVALID",
-      "smoke benchmark audit profile, catalog digest, and topology digest must match the packaged smoke policy"
-    );
+  const auditProfileId = input.benchmark_lane;
+  const topologyDigest = packagedTopologyDigest(auditProfile(auditProfileId, catalog), catalog);
+  if (topologyDigest === undefined) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", `${auditProfileId} benchmark packaged topology is missing`);
   }
+  if (input.benchmark_lane === "smoke") {
+    const execution = input.benchmark_execution;
+    if (
+      execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE ||
+      execution.audit_profile !== "smoke" ||
+      execution.audit_profile_catalog_digest !== catalog.digest ||
+      execution.topology_digest !== topologyDigest
+    ) {
+      throw new EvalError(
+        "EVAL_BENCHMARK_EXECUTION_INVALID",
+        "smoke benchmark audit profile, workflow profile, catalog digest, and topology digest must match the packaged policy"
+      );
+    }
+  }
+  return { auditProfile: auditProfileId, catalogDigest: catalog.digest, topologyDigest };
 }
 
 export interface WatchEvalRowInput {
@@ -498,7 +636,7 @@ export async function watchEvalRow(
   };
 
   await startRowIfReady(false);
-  let state = readStateSafe(runRoot);
+  let state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   while (state !== undefined && !isTerminalRunStatus(state.status) && Date.now() < deadline) {
     try {
       await sync({
@@ -521,7 +659,7 @@ export async function watchEvalRow(
       const drained = await pump.drain();
       diagnostics.push(...drained.warnings);
     }
-    state = readStateSafe(runRoot);
+    state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
     if (state !== undefined && isTerminalRunStatus(state.status)) {
       break;
     }
@@ -532,7 +670,7 @@ export async function watchEvalRow(
   await startRowIfReady(true);
   const finalDrain = await pump.drain();
   diagnostics.push(...finalDrain.warnings);
-  state = readStateSafe(runRoot);
+  state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
   const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
     syncFailureCount === 0
@@ -586,20 +724,26 @@ export async function watchEvalRow(
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: result.status,
-    workflow: evalWorkflowLifecycle(state),
-    expansion: evalRunExpansion({ ...(runRoot === undefined ? {} : { runRoot }), state }),
+    ...(state === undefined
+      ? {}
+      : {
+          workflow: evalWorkflowLifecycle(state),
+          expansion: evalRunExpansion({ runRoot, state })
+        }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
     ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
       ? {}
       : {
           diagnostics: [
             ...input.record.diagnostics,
-            ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
-            ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
+            ...durableEvalDiagnostics([
+              ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
+              ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
+            ])
           ]
         })
   };
-  appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
+  appendEvalRunRecord(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
     record: updatedRecord,
     diagnostics
@@ -620,59 +764,118 @@ const defaultRowSync: RowSync = async (input) => {
 };
 
 function readGraph(runRoot: string): unknown {
+  const graphPath = path.join(runRoot, "graph.json");
   try {
-    return JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
-  } catch {
-    return undefined;
+    fs.lstatSync(graphPath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
   }
+  return readPlannedGraphDocument(graphPath);
 }
 
-function readStateSafe(runRoot: string): RunState | undefined {
+function readStateSafe(runRoot: string, expectedRunId?: string): RunState | undefined {
+  const statePath = path.join(runRoot, "state.json");
   try {
-    return readRunState(path.join(runRoot, "state.json"));
-  } catch {
-    return undefined;
+    fs.lstatSync(statePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
   }
+  const state = readRunState(statePath);
+  if (expectedRunId !== undefined && state.run_id !== expectedRunId) {
+    throw new Error(`run state identity does not match run ${JSON.stringify(expectedRunId)}`);
+  }
+  return state;
 }
 
 /** The row's terminal report path, or nothing -- never a throw that would cost the row its journal entry. */
 function readTerminalReportPath(runRoot: string): string | undefined {
-  try {
-    return resolveTerminalReportPath({ runRoot }).path;
-  } catch {
-    return undefined;
-  }
+  return resolveTerminalReportPath({ runRoot }).path;
 }
 
-function readRunPolicy(runRoot: string): {
+function readRunFingerprints(
+  runRoot: string,
+  expectedRunId: string
+): {
   graph_fingerprint?: string;
   config_fingerprint?: string;
+} {
+  const value = readStateSafe(runRoot, expectedRunId);
+  if (value === undefined) return {};
+  return {
+    ...(value.graph_fingerprint === undefined ? {} : { graph_fingerprint: value.graph_fingerprint }),
+    ...(value.config_fingerprint === undefined ? {} : { config_fingerprint: value.config_fingerprint })
+  };
+}
+
+/**
+ * The audit policy the run was planned under, read from the run plan document
+ * it declares. An absent plan yields nothing; a present-but-invalid plan throws
+ * so the caller can record the fault rather than record a run whose profile
+ * provenance was guessed.
+ */
+function readRunAuditPolicy(
+  runRoot: string,
+  expectedRunId: string
+): {
   audit_profile?: string;
   audit_profile_catalog_digest?: string;
+  topology_path_origin?: "project-default" | "audit-profile" | "project-config" | "runtime-override";
   topology_digest?: string;
   prompt_digest?: string;
 } {
-  const result: ReturnType<typeof readRunPolicy> = {};
+  const planPath = path.join(runRoot, "plan.json");
   try {
-    const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as Record<string, unknown>;
-    if (typeof state.graph_fingerprint === "string") result.graph_fingerprint = state.graph_fingerprint;
-    if (typeof state.config_fingerprint === "string") result.config_fingerprint = state.config_fingerprint;
-  } catch {
-    // Older or partial launches may not have durable state yet.
-  }
-  try {
-    const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as Record<string, unknown>;
-    const auditPolicy = isRecordValue(plan.audit_profile) ? plan.audit_profile : {};
-    if (typeof auditPolicy.id === "string") result.audit_profile = auditPolicy.id;
-    if (typeof auditPolicy.catalog_digest === "string") {
-      result.audit_profile_catalog_digest = auditPolicy.catalog_digest;
+    fs.lstatSync(planPath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return {};
     }
-    if (typeof auditPolicy.topology_digest === "string") result.topology_digest = auditPolicy.topology_digest;
-    if (typeof plan.prompt_digest === "string") result.prompt_digest = plan.prompt_digest;
-  } catch {
-    // Compatibility with pre-profile and interrupted plans.
+    throw error;
   }
-  return result;
+  const plan = readRunPlanDocument(planPath, expectedRunId);
+  const topologyPathOrigin = evalTopologyPathOrigin(plan.audit_profile.topology_path_origin);
+  return {
+    audit_profile: plan.audit_profile.id,
+    audit_profile_catalog_digest: plan.audit_profile.catalog_digest,
+    topology_path_origin: topologyPathOrigin,
+    topology_digest: plan.audit_profile.topology_digest,
+    prompt_digest: plan.prompt_digest
+  };
+}
+
+function evalTopologyPathOrigin(
+  value: string
+): "project-default" | "audit-profile" | "project-config" | "runtime-override" {
+  switch (value) {
+    case "project-default":
+    case "audit-profile":
+    case "project-config":
+    case "runtime-override":
+      return value;
+    default:
+      throw new Error(`run plan declares unknown topology path origin ${value}`);
+  }
+}
+
+function rowEnrichmentDiagnostic(
+  sourceDocument: "state.json" | "graph.json" | "plan.json",
+  error: unknown
+): RuntimeDiagnostic {
+  const reason = error instanceof Error ? error.message : String(error);
+  const boundedReason = (reason.trim() === "" ? "invalid durable metadata" : reason).slice(0, 1_024);
+  return {
+    code: "EVAL_ROW_ENRICHMENT_INVALID",
+    message: `successful launch has invalid ${sourceDocument} enrichment: ${boundedReason}`,
+    severity: "error",
+    source: "evals",
+    details: { source_document: sourceDocument }
+  };
 }
 
 export function isTerminalRunStatus(status: string): boolean {
@@ -696,7 +899,7 @@ function rowStatus(state: RunState | undefined): EvalRowResult["status"] {
 
 function buildWorkflowInput(row: EvalMatrixRow): unknown {
   return {
-    ...(isRecordValue(row.workflow_input) ? row.workflow_input : {}),
+    ...(row.workflow_input ?? {}),
     ultrafuzz_eval: {
       row_id: row.id,
       target_id: row.target_id,
@@ -709,6 +912,29 @@ function buildWorkflowInput(row: EvalMatrixRow): unknown {
       judge_model_profile: row.judge_model_profile
     }
   };
+}
+
+function validatedBenchmarkWorkflowInput(
+  input: EvalMatrixRow["workflow_input"]
+): EvalBenchmarkWorkflowInput | undefined {
+  if (input === undefined) return undefined;
+  const parsed = evalWorkflowInputSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "workflow input does not satisfy its current contract", {
+      issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+    });
+  }
+  return Object.hasOwn(parsed.data, "benchmark_execution") ? (parsed.data as EvalBenchmarkWorkflowInput) : undefined;
+}
+
+function durableEvalDiagnostics(diagnostics: readonly RuntimeDiagnostic[]): EvalDurableDiagnostic[] {
+  return diagnostics.map(({ code, message, severity, source, path: diagnosticPath }) => ({
+    code,
+    message,
+    severity,
+    source,
+    ...(diagnosticPath === undefined ? {} : { path: diagnosticPath })
+  }));
 }
 
 function selectRows(rows: EvalMatrixRow[], rowIds: string[] | undefined): EvalMatrixRow[] {
@@ -741,10 +967,6 @@ async function mapLimit<T, U>(values: T[], limit: number, worker: (value: T) => 
   });
   await Promise.all(workers);
   return results;
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sleep(ms: number): Promise<void> {

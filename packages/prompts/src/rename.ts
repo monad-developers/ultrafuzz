@@ -243,5 +243,5 @@ function rewriteArtifactSegment(segment: string, oldId: string, newId: string): 
 }
 
 function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  return structuredClone(value);
 }

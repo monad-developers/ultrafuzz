@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  EVAL_JUDGE_PROMPT_VERSION,
-  buildAdjudicatorPrompt,
-  buildAdjudicatorRetryPrompt
-} from "../src/evaluator/adjudicator-prompt.js";
+import { EVAL_JUDGE_PROMPT_VERSION, buildAdjudicatorPrompt } from "../src/evaluator/adjudicator-prompt.js";
 import type { FindingJudgeInput, FindingJudgeResult } from "../src/types.js";
 import { testRow, testSuite } from "./helpers.js";
 
@@ -55,7 +51,8 @@ describe("adjudicator prompt assets", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v9-independent-semantic-boundary-family");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v10-registered-result-schema");
+    expect(rendered).toContain("ultrafuzz.eval.llm-judge-result.v1");
     expect(rendered).toContain("Decide solely from the supplied finding, candidates, evidence, and rubric");
     expect(rendered).toContain("Do not anticipate, defer to, infer, or simulate any other evaluator's decision");
     expect(rendered).toContain("Analyze the candidate finding's demonstrated behavior first");
@@ -92,12 +89,5 @@ describe("adjudicator prompt assets", () => {
     expect(rendered).toContain("authorization-identity collision is outside a canonical accounting-conversion issue");
     expect(rendered).toContain("supported actions execute atomically");
     expect(rendered).toContain("correctly rejects an unauthorized caller");
-  });
-
-  it("renders schema-retry instructions from MDX without rewriting response text", () => {
-    const previousResponse = "literal $& and {{target}}";
-
-    expect(buildAdjudicatorRetryPrompt(previousResponse)).toContain(`Previous response: ${previousResponse}`);
-    expect(buildAdjudicatorRetryPrompt(previousResponse)).toContain("0.0 through 1.0");
   });
 });

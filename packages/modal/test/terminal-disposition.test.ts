@@ -6,7 +6,37 @@ import {
   runBenchmarkExecutionOnce
 } from "../src/terminal-disposition.js";
 
-const task = { attemptId: "task-one", concreteNodeId: "task-one", smithersNodeId: "node:task-one" };
+function taskBinding(attemptId: string, concreteNodeId = attemptId) {
+  return {
+    attemptId,
+    concreteNodeId,
+    preparationSmithersNodeId: `prepare:${attemptId}`,
+    smithersNodeId: `node:${attemptId}`,
+    verifierSmithersNodeId: `verify:${attemptId}`
+  };
+}
+
+function workflow(
+  attemptId: string,
+  overrides: Partial<{
+    run_id: string;
+    task_id: string;
+    agent_task_id: string;
+    verifier_task_id: string;
+    state: string | undefined;
+  }> = {}
+) {
+  return {
+    run_id: "run-one",
+    task_id: `verify:${attemptId}`,
+    agent_task_id: `node:${attemptId}`,
+    verifier_task_id: `verify:${attemptId}`,
+    state: "finished",
+    ...overrides
+  };
+}
+
+const task = taskBinding("task-one");
 const verifiedFailure = {
   node_id: "task-one",
   status: "failed",
@@ -14,8 +44,8 @@ const verifiedFailure = {
   finished_at: "2026-01-01T00:00:00.000Z",
   last_error: "task output did not pass final validation",
   provenance: {
-    workflow: { run_id: "run-one", task_id: "node:task-one", state: "finished" },
-    required_artifacts: { ok: true, missing: [] },
+    workflow: workflow("task-one"),
+    output_contracts: { ok: false, missing: [] },
     terminal_disposition: {
       schema_version: "ultrafuzz.terminal-disposition.v1",
       kind: "task-output-validation-failure"
@@ -48,7 +78,7 @@ describe("terminal benchmark disposition", () => {
     expect(inspect).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps missing artifacts fatal", async () => {
+  it("classifies a verifier-backed missing artifact as a terminal task failure", async () => {
     const disposition = classifyTerminalDisposition(
       {
         nodes: {
@@ -56,7 +86,7 @@ describe("terminal benchmark disposition", () => {
             ...verifiedFailure,
             provenance: {
               ...verifiedFailure.provenance,
-              required_artifacts: { ok: false, missing: ["required"] }
+              output_contracts: { ok: false, missing: ["required"] }
             }
           }
         }
@@ -68,9 +98,30 @@ describe("terminal benchmark disposition", () => {
       throw failure;
     });
 
-    await expect(runBenchmarkExecutionOnce(run, async () => disposition)).rejects.toBe(failure);
-    expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
-    expect(canScoreBenchmarkRow("failed", disposition)).toBe(false);
+    await expect(runBenchmarkExecutionOnce(run, async () => disposition)).resolves.toEqual(disposition);
+    expect(disposition).toEqual({ kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 });
+    expect(canScoreBenchmarkRow("failed", disposition)).toBe(true);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies a verifier-backed schema violation as a terminal task failure", () => {
+    const disposition = classifyTerminalDisposition(
+      {
+        nodes: {
+          "task-one": {
+            ...verifiedFailure,
+            provenance: {
+              ...verifiedFailure.provenance,
+              output_contracts: { ok: false, missing: [] }
+            }
+          }
+        }
+      },
+      { tasks: [task] }
+    );
+
+    expect(disposition).toEqual({ kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 });
+    expect(canScoreBenchmarkRow("failed", disposition)).toBe(true);
   });
 
   it("requires a structured task-output validation marker", () => {
@@ -84,6 +135,53 @@ describe("terminal benchmark disposition", () => {
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
   });
 
+  it("rejects a validation-failure marker paired with successful output-contract evidence", () => {
+    for (const output_contracts of [
+      { ok: true, missing: [] },
+      { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
+    ]) {
+      const disposition = classifyTerminalDisposition(
+        {
+          nodes: {
+            "task-one": {
+              ...verifiedFailure,
+              provenance: { ...verifiedFailure.provenance, output_contracts }
+            }
+          }
+        },
+        { tasks: [task] }
+      );
+      expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
+    }
+  });
+
+  it("validates the complete terminal-disposition root contract", () => {
+    for (const terminal_disposition of [
+      {
+        schema_version: "ultrafuzz.terminal-disposition.v0",
+        kind: "task-output-validation-failure"
+      },
+      {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure",
+        compatibility_alias: true
+      }
+    ]) {
+      const disposition = classifyTerminalDisposition(
+        {
+          nodes: {
+            "task-one": {
+              ...verifiedFailure,
+              provenance: { ...verifiedFailure.provenance, terminal_disposition }
+            }
+          }
+        },
+        { tasks: [task] }
+      );
+      expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
+    }
+  });
+
   it("requires a positive completed-workflow state", () => {
     for (const state of ["failed", "canceled", "running", undefined]) {
       const disposition = classifyTerminalDisposition(
@@ -93,7 +191,7 @@ describe("terminal benchmark disposition", () => {
               ...verifiedFailure,
               provenance: {
                 ...verifiedFailure.provenance,
-                workflow: { run_id: "run-one", task_id: "node:task-one", state }
+                workflow: workflow("task-one", { state })
               }
             }
           }
@@ -124,7 +222,7 @@ describe("terminal benchmark disposition", () => {
             node_id: attemptId,
             provenance: {
               ...verifiedFailure.provenance,
-              workflow: { run_id: "run-one", task_id: `node:${attemptId}`, state: "finished" }
+              workflow: workflow(attemptId)
             }
           },
           group: {
@@ -138,7 +236,7 @@ describe("terminal benchmark disposition", () => {
           }
         }
       },
-      { tasks: [{ attemptId, concreteNodeId: "group", smithersNodeId: `node:${attemptId}` }] }
+      { tasks: [taskBinding(attemptId, "group")] }
     );
 
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 1, operationalFailures: 1 });
@@ -154,12 +252,12 @@ describe("terminal benchmark disposition", () => {
             node_id: attemptId,
             provenance: {
               ...verifiedFailure.provenance,
-              workflow: { run_id: "run-one", task_id: `node:${attemptId}`, state: "finished" }
+              workflow: workflow(attemptId)
             }
           }
         }
       },
-      { tasks: [{ attemptId, concreteNodeId: "group", smithersNodeId: `node:${attemptId}` }] }
+      { tasks: [taskBinding(attemptId, "group")] }
     );
 
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 1, operationalFailures: 1 });
@@ -178,7 +276,7 @@ describe("terminal benchmark disposition", () => {
             ...verifiedFailure,
             provenance: {
               ...verifiedFailure.provenance,
-              workflow: { run_id: "run-one", task_id: "node:alias", state: "finished" }
+              workflow: workflow("task-one", { task_id: "node:alias" })
             }
           }
         }
@@ -196,7 +294,7 @@ describe("terminal benchmark disposition", () => {
     const disposition = classifyTerminalDisposition(
       { nodes: { "task-one": verifiedFailure } },
       {
-        tasks: [task, { attemptId: "task-two", concreteNodeId: "task-two", smithersNodeId: "node:task-one" }]
+        tasks: [task, { ...taskBinding("task-two"), smithersNodeId: "node:task-one" }]
       }
     );
 
@@ -207,7 +305,7 @@ describe("terminal benchmark disposition", () => {
     const disposition = classifyTerminalDisposition(
       { nodes: { "task-one": verifiedFailure } },
       {
-        tasks: [task, { attemptId: "task-two", concreteNodeId: "task-two", smithersNodeId: "node:task-two" }]
+        tasks: [task, taskBinding("task-two")]
       }
     );
 
@@ -244,7 +342,7 @@ describe("terminal benchmark disposition", () => {
             node_id: firstAttempt,
             provenance: {
               ...verifiedFailure.provenance,
-              workflow: { run_id: "run-one", task_id: `node:${firstAttempt}`, state: "finished" }
+              workflow: workflow(firstAttempt)
             }
           },
           [secondAttempt]: {
@@ -253,8 +351,8 @@ describe("terminal benchmark disposition", () => {
             timed_out: false,
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
-              workflow: { run_id: "run-one", task_id: `node:${secondAttempt}`, state: "finished" },
-              required_artifacts: { ok: true, missing: [] }
+              workflow: workflow(secondAttempt),
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           },
           group: {
@@ -272,10 +370,7 @@ describe("terminal benchmark disposition", () => {
         }
       },
       {
-        tasks: [
-          { attemptId: firstAttempt, concreteNodeId: "group", smithersNodeId: `node:${firstAttempt}` },
-          { attemptId: secondAttempt, concreteNodeId: "group", smithersNodeId: `node:${secondAttempt}` }
-        ]
+        tasks: [taskBinding(firstAttempt, "group"), taskBinding(secondAttempt, "group")]
       }
     );
 
@@ -293,14 +388,14 @@ describe("terminal benchmark disposition", () => {
             timed_out: false,
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
-              workflow: { run_id: "run-one", task_id: "node:task-two", state: "failed" },
-              required_artifacts: { ok: true, missing: [] }
+              workflow: workflow("task-two", { state: "failed" }),
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           }
         }
       },
       {
-        tasks: [task, { attemptId: "task-two", concreteNodeId: "task-two", smithersNodeId: "node:task-two" }]
+        tasks: [task, taskBinding("task-two")]
       }
     );
 
@@ -318,14 +413,14 @@ describe("terminal benchmark disposition", () => {
             timed_out: false,
             finished_at: "2026-01-01T00:00:00.000Z",
             provenance: {
-              workflow: { run_id: "run-two", task_id: "node:task-two", state: "finished" },
-              required_artifacts: { ok: true, missing: [] }
+              workflow: workflow("task-two", { run_id: "run-two" }),
+              output_contracts: { ok: true, missing: [], artifact_manifest_sha256: "a".repeat(64) }
             }
           }
         }
       },
       {
-        tasks: [task, { attemptId: "task-two", concreteNodeId: "task-two", smithersNodeId: "node:task-two" }]
+        tasks: [task, taskBinding("task-two")]
       }
     );
 

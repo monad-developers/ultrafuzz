@@ -4,24 +4,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { evmbenchProfileSchema, type EvmbenchProfile } from "./adapter.js";
+import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+
+import {
+  parseEvmbenchProfileBytes,
+  serializeEvmbenchProfile,
+  type EvmbenchCatalogAudit,
+  type EvmbenchOperationalMetrics,
+  type EvmbenchProfile,
+  type EvmbenchRunProvenance
+} from "./contracts.js";
 import {
   benchmarkIdentity,
   buildPinnedAuditDockerfile,
   findUltrafuzzRepoRoot,
   loadEvmbenchDefinition,
   localDockerContextFiles,
-  serializeJson,
   verifyEvmbenchDefinition,
-  type EvmbenchCatalogAudit,
   type EvmbenchDefinition
 } from "./definition.js";
-import {
-  normalizeEvmbenchResult,
-  readNanoevalFinalReport,
-  type EvmbenchOperationalMetrics,
-  type EvmbenchRunProvenance
-} from "./results.js";
+import { normalizeEvmbenchResult, publishNormalizedEvmbenchResult, readNanoevalFinalReport } from "./results.js";
 
 export interface EvmbenchRunnerOptions {
   repoRoot?: string;
@@ -168,8 +170,7 @@ export async function runEvmbench(options: EvmbenchRunnerOptions = {}): Promise<
     concurrency: profile.max_concurrency
   };
   const normalized = normalizeEvmbenchResult({ finalReport, provenance, operational });
-  const normalizedPath = path.join(outputDir, "normalized-summary.json");
-  fs.writeFileSync(normalizedPath, serializeJson(normalized), { encoding: "utf8", mode: 0o644 });
+  const normalizedPath = publishNormalizedEvmbenchResult(outputDir, "normalized-summary.json", normalized).path;
   return { plan, output_dir: outputDir, normalized_summary: normalizedPath };
 }
 
@@ -373,13 +374,14 @@ function runOfficialNanoeval(input: {
 function loadProfile(benchmarkDir: string, options: EvmbenchRunnerOptions): EvmbenchProfile {
   const id = options.profile ?? "smoke";
   const filePath = path.join(benchmarkDir, "profiles", `${id}.json`);
-  const base = evmbenchProfileSchema.parse(JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown);
-  return evmbenchProfileSchema.parse({
+  const base = parseEvmbenchProfileBytes(readRegularFileSnapshot(filePath, 1024 * 1024), filePath);
+  const profile = {
     ...base,
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoning === undefined ? {} : { reasoning: options.reasoning }),
     ...(options.concurrency === undefined ? {} : { max_concurrency: options.concurrency })
-  });
+  };
+  return parseEvmbenchProfileBytes(serializeEvmbenchProfile(profile));
 }
 
 function selectAudits(definition: EvmbenchDefinition, options: EvmbenchRunnerOptions): EvmbenchCatalogAudit[] {
@@ -511,7 +513,10 @@ function assertInside(root: string, target: string, label: string): void {
 }
 
 function sha256File(filePath: string): string {
-  return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")}`;
+  return `sha256:${crypto
+    .createHash("sha256")
+    .update(readRegularFileSnapshot(filePath, 64 * 1024 * 1024))
+    .digest("hex")}`;
 }
 
 function timestamp(): string {

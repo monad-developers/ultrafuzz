@@ -1,7 +1,18 @@
 import crypto from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  readRunMetadataDocument,
+  readRunState,
+  type RunMetadataDocument,
+  type RunState
+} from "@ultrafuzz/artifacts";
+
+import { MODAL_WORKER_RESULT_SCHEMA_ID } from "./modal-contracts.js";
+import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import {
   OperationalDispositionError,
   operationalDispositionForError,
@@ -133,6 +144,8 @@ export class WorkerResultWriter {
     private readonly startedAtMs: number,
     private readonly now: () => number,
     private readonly executionContext: () => WorkerExecutionContext,
+    private readonly generationFloorPath: string | undefined,
+    private readonly writeGuard: WorkerResultWriteGuard | undefined,
     generation: number
   ) {
     this.generation = generation;
@@ -144,11 +157,14 @@ export class WorkerResultWriter {
     startedAtMs?: number;
     now?: () => number;
     executionContext?: () => WorkerExecutionContext;
+    generationFloorPath?: string;
+    writeGuard?: WorkerResultWriteGuard;
   }): Promise<WorkerResultWriter> {
     const now = input.now ?? Date.now;
     const generation = Math.max(
       await persistedGeneration(input.statusPath),
-      await persistedGeneration(input.resultPath)
+      await persistedGeneration(input.resultPath),
+      input.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(input.generationFloorPath)
     );
     return new WorkerResultWriter(
       input.statusPath,
@@ -156,12 +172,19 @@ export class WorkerResultWriter {
       input.startedAtMs ?? now(),
       now,
       input.executionContext ?? (() => ({ launch_generation: 1, attempt: 1, model_work_started: false })),
+      input.generationFloorPath,
+      input.writeGuard,
       generation
     );
   }
 
+  currentGeneration(): number {
+    return this.generation;
+  }
+
   async writePartial(snapshot: WorkerCheckpointSnapshot): Promise<WorkerResultContract> {
     return this.enqueue(async () => {
+      await this.refreshGenerationFloor();
       const contract = this.contract("partial", "live", snapshot);
       await writeJsonAtomic(this.statusPath, contract);
       return contract;
@@ -174,6 +197,7 @@ export class WorkerResultWriter {
     diagnosticCode?: WorkerDiagnosticCode
   ): Promise<WorkerResultContract> {
     return this.enqueue(async () => {
+      await this.refreshGenerationFloor();
       const contract = this.contract("terminal", category, snapshot, diagnosticCode);
       await writeJsonAtomic(this.resultPath, contract);
       await writeJsonAtomic(this.statusPath, contract);
@@ -182,12 +206,22 @@ export class WorkerResultWriter {
   }
 
   private enqueue<T>(write: () => Promise<T>): Promise<T> {
-    const queued = this.pendingWrite.then(write, write);
+    const guardedWrite = this.writeGuard === undefined ? write : () => this.writeGuard!(write);
+    const queued = this.pendingWrite.then(guardedWrite, guardedWrite);
     this.pendingWrite = queued.then(
       () => undefined,
       () => undefined
     );
     return queued;
+  }
+
+  private async refreshGenerationFloor(): Promise<void> {
+    this.generation = Math.max(
+      this.generation,
+      await persistedGeneration(this.statusPath),
+      await persistedGeneration(this.resultPath),
+      this.generationFloorPath === undefined ? 0 : await persistedGenerationFloor(this.generationFloorPath)
+    );
   }
 
   private contract(
@@ -197,84 +231,26 @@ export class WorkerResultWriter {
     diagnosticCode?: WorkerDiagnosticCode
   ): WorkerResultContract {
     this.generation += 1;
-    const sanitized = sanitizedSnapshot(snapshot);
     const context = this.executionContext();
     return {
       schema_version: WORKER_RESULT_SCHEMA_VERSION,
       result_type: resultType,
       generation: this.generation,
-      launch_generation: positiveInteger(context.launch_generation),
-      attempt: positiveInteger(context.attempt),
-      model_work_started: context.model_work_started === true,
-      counts: sanitized.counts,
-      checkpoint: sanitized.checkpoint,
+      launch_generation: context.launch_generation,
+      attempt: context.attempt,
+      model_work_started: context.model_work_started,
+      counts: snapshot.counts,
+      checkpoint: snapshot.checkpoint,
       exit_category: category,
-      runtime_ms: Math.max(0, Math.trunc(this.now() - this.startedAtMs)),
-      usage: sanitized.usage,
-      ...(sanitized.pricing === undefined ? {} : { pricing: sanitized.pricing }),
-      diagnostic_code:
-        diagnosticCode !== undefined && WORKER_DIAGNOSTIC_CODES.includes(diagnosticCode)
-          ? diagnosticCode
-          : DIAGNOSTIC_CODES[category]
+      runtime_ms: this.now() - this.startedAtMs,
+      usage: snapshot.usage,
+      ...(snapshot.pricing === undefined ? {} : { pricing: snapshot.pricing }),
+      diagnostic_code: diagnosticCode ?? DIAGNOSTIC_CODES[category]
     };
   }
 }
 
-function sanitizedSnapshot(snapshot: WorkerCheckpointSnapshot): WorkerCheckpointSnapshot {
-  const digest = snapshot.checkpoint.digest;
-  const pricing = sanitizePricing(snapshot.pricing);
-  return {
-    counts: {
-      succeeded: nonNegativeInteger(snapshot.counts.succeeded),
-      failed: nonNegativeInteger(snapshot.counts.failed),
-      remaining: nonNegativeInteger(snapshot.counts.remaining)
-    },
-    checkpoint: {
-      age_ms: nonNegativeIntegerOrNull(snapshot.checkpoint.age_ms),
-      digest: typeof digest === "string" && /^sha256:[a-f0-9]{64}$/u.test(digest) ? digest : null
-    },
-    usage: sanitizeUsage(snapshot.usage),
-    ...(pricing === undefined ? {} : { pricing })
-  };
-}
-
-function sanitizeUsage(usage: AggregateUsage | null): AggregateUsage | null {
-  if (usage === null) return null;
-  return {
-    input_tokens: nonNegativeInteger(usage.input_tokens),
-    output_tokens: nonNegativeInteger(usage.output_tokens),
-    cache_read_tokens: nonNegativeInteger(usage.cache_read_tokens),
-    cache_write_tokens: nonNegativeInteger(usage.cache_write_tokens),
-    reasoning_tokens: nonNegativeInteger(usage.reasoning_tokens),
-    total_tokens: nonNegativeInteger(usage.total_tokens),
-    estimated_cost_usd: nonNegativeNumber(usage.estimated_cost_usd),
-    partial_pricing: usage.partial_pricing === true,
-    event_count: nonNegativeInteger(usage.event_count),
-    priced_event_count: nonNegativeInteger(usage.priced_event_count),
-    unpriced_event_count: nonNegativeInteger(usage.unpriced_event_count)
-  };
-}
-
-function sanitizePricing(pricing: PricingProvenance | undefined): PricingProvenance | undefined {
-  if (pricing === undefined) return undefined;
-  const source = pricing.source;
-  const status = pricing.status;
-  if (
-    (source !== "models.dev" && source !== "configured-catalog" && source !== "disabled") ||
-    (status !== "available" && status !== "disabled" && status !== "unavailable")
-  ) {
-    return undefined;
-  }
-  const fetchedAt = canonicalTimestamp(pricing.fetched_at);
-  return {
-    source,
-    status,
-    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
-    resolved_model_count: nonNegativeInteger(pricing.resolved_model_count),
-    unresolved_model_count: nonNegativeInteger(pricing.unresolved_model_count)
-  };
-}
-
+export type WorkerResultWriteGuard = <T>(write: () => Promise<T>) => Promise<T>;
 export async function runWithTerminalPersistence(input: {
   writer: WorkerResultWriter;
   snapshot: () => Promise<WorkerCheckpointSnapshot>;
@@ -364,13 +340,11 @@ export async function readWorkerCheckpoint(projectRoot: string, nowMs = Date.now
     const statePath = path.join(runRoot, "state.json");
     try {
       const [contents, stateStats] = await Promise.all([readFile(statePath), stat(statePath)]);
-      const state = record(JSON.parse(contents.toString("utf8")));
-      const nodes = record(state?.nodes);
-      if (nodes === undefined) continue;
-      const metadata = await readJsonRecord(path.join(runRoot, "run.json"));
+      const state = readRunState(statePath);
+      const metadata = readOptionalRunMetadata(path.join(runRoot, "run.json"), state.run_id);
       const pricing = pricingProvenance(metadata);
       return {
-        counts: aggregateCounts(nodes),
+        counts: aggregateCounts(state.nodes),
         checkpoint: {
           age_ms: Math.max(0, Math.trunc(nowMs - stateStats.mtimeMs)),
           digest: `sha256:${crypto.createHash("sha256").update(contents).digest("hex")}`
@@ -379,8 +353,7 @@ export async function readWorkerCheckpoint(projectRoot: string, nowMs = Date.now
         ...(pricing === undefined ? {} : { pricing })
       };
     } catch (error) {
-      if (!isNodeError(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
-      // A missing or mid-write checkpoint is reported as unavailable, never copied into the result.
+      if (!isNodeError(error, "ENOENT")) throw error;
     }
   }
   return emptyWorkerCheckpoint();
@@ -395,43 +368,47 @@ export function emptyWorkerCheckpoint(): WorkerCheckpointSnapshot {
 }
 
 async function writeJsonAtomic(filePath: string, value: WorkerResultContract): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`
-  );
+  const target = path.resolve(filePath);
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_WORKER_RESULT_SCHEMA_ID, value, { trustedRoot });
+}
+
+async function persistedGeneration(filePath: string): Promise<number> {
   try {
-    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    const tempHandle = await open(tempPath, "r");
-    try {
-      await tempHandle.sync();
-    } finally {
-      await tempHandle.close();
-    }
-    await rename(tempPath, filePath);
-    const directoryHandle = await open(path.dirname(filePath), "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
+    return readModalDocument(filePath, MODAL_WORKER_RESULT_SCHEMA_ID).value.generation;
   } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
+    if (isNodeError(error, "ENOENT")) return 0;
     throw error;
   }
 }
 
-async function persistedGeneration(filePath: string): Promise<number> {
-  const value = await readJsonRecord(filePath);
-  const generation = value?.generation;
-  return typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+async function persistedGenerationFloor(filePath: string): Promise<number> {
+  try {
+    const parsed = parseStrictJsonBytes(readRegularFileSnapshot(filePath, 4096), {
+      maxBytes: 4096,
+      maxDepth: 4,
+      maxItems: 4,
+      maxProperties: 4
+    });
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || Object.keys(parsed).length !== 1) {
+      throw new Error("persisted result generation floor is invalid");
+    }
+    const generation = (parsed as Record<string, unknown>).generation;
+    if (typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0) return generation;
+    throw new Error("persisted result generation floor is invalid");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return 0;
+    throw new Error("persisted result generation floor is invalid", { cause: error });
+  }
 }
 
-async function readJsonRecord(filePath: string): Promise<Record<string, unknown> | undefined> {
+function readOptionalRunMetadata(filePath: string, expectedRunId: string): RunMetadataDocument | undefined {
   try {
-    return record(JSON.parse(await readFile(filePath, "utf8")));
-  } catch {
-    return undefined;
+    return readRunMetadataDocument(filePath, expectedRunId);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return undefined;
+    throw error;
   }
 }
 
@@ -445,17 +422,16 @@ async function readdirIfExists(directoryPath: string): Promise<string[]> {
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }
 
-function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {
+function aggregateCounts(nodes: RunState["nodes"]): AggregateCounts {
   const logical = new Map<string, string[]>();
-  for (const [nodeId, value] of Object.entries(nodes)) {
-    const node = record(value);
-    if (node === undefined) continue;
+  for (const [nodeId, node] of Object.entries(nodes)) {
     const status = node.status;
-    if (typeof status !== "string") continue;
-    const logicalId = checkpointLogicalId(nodeId, node);
+    const logicalId = node.logical_node_id ?? nodeId;
     logical.set(logicalId, [...(logical.get(logicalId) ?? []), status]);
   }
 
@@ -470,84 +446,32 @@ function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {
   return { succeeded, failed, remaining };
 }
 
-function checkpointLogicalId(nodeId: string, node: Record<string, unknown>): string {
-  for (const field of ["logical_id", "logical_node_id"] as const) {
-    const value = node[field];
-    if (typeof value === "string" && value.trim() !== "") return value;
-  }
-  return nodeId;
-}
-
-function aggregateUsage(metadata: Record<string, unknown> | undefined): AggregateUsage | null {
-  const accounting = record(metadata?.accounting);
-  const summary = record(accounting?.cumulative) ?? record(accounting?.current);
+function aggregateUsage(metadata: RunMetadataDocument | undefined): AggregateUsage | null {
+  const summary = metadata?.accounting?.cumulative;
   if (summary === undefined) return null;
   return {
-    input_tokens: nonNegativeInteger(summary.input_tokens),
-    output_tokens: nonNegativeInteger(summary.output_tokens),
-    cache_read_tokens: nonNegativeInteger(summary.cache_read_tokens),
-    cache_write_tokens: nonNegativeInteger(summary.cache_write_tokens),
-    reasoning_tokens: nonNegativeInteger(summary.reasoning_tokens),
-    total_tokens: nonNegativeInteger(summary.total_tokens),
-    estimated_cost_usd: nonNegativeNumber(summary.estimated_spend_usd),
-    partial_pricing: summary.partial_pricing === true,
-    event_count: nonNegativeInteger(summary.event_count),
-    priced_event_count: nonNegativeInteger(summary.priced_event_count),
-    unpriced_event_count: nonNegativeInteger(summary.unpriced_event_count)
+    input_tokens: summary.input_tokens,
+    output_tokens: summary.output_tokens,
+    cache_read_tokens: summary.cache_read_tokens,
+    cache_write_tokens: summary.cache_write_tokens,
+    reasoning_tokens: summary.reasoning_tokens,
+    total_tokens: summary.total_tokens,
+    estimated_cost_usd: summary.estimated_spend_usd ?? null,
+    partial_pricing: summary.partial_pricing,
+    event_count: summary.event_count,
+    priced_event_count: summary.priced_event_count,
+    unpriced_event_count: summary.unpriced_event_count
   };
 }
 
-function pricingProvenance(metadata: Record<string, unknown> | undefined): PricingProvenance | undefined {
-  const catalog = record(record(metadata?.accounting)?.pricing_catalog);
+function pricingProvenance(metadata: RunMetadataDocument | undefined): PricingProvenance | undefined {
+  const catalog = metadata?.accounting?.pricing_catalog;
   if (catalog === undefined) return undefined;
-  const source = catalog.source;
-  const status = catalog.status;
-  if (
-    (source !== "models.dev" && source !== "configured-catalog" && source !== "disabled") ||
-    (status !== "available" && status !== "disabled" && status !== "unavailable")
-  ) {
-    return undefined;
-  }
-  const fetchedAt = canonicalTimestamp(catalog.fetched_at);
   return {
-    source,
-    status,
-    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
-    resolved_model_count: stringArrayLength(catalog.resolved_models),
-    unresolved_model_count: stringArrayLength(catalog.unresolved_models)
+    source: catalog.source,
+    status: catalog.status,
+    ...(catalog.fetched_at === undefined ? {} : { fetched_at: catalog.fetched_at }),
+    resolved_model_count: catalog.resolved_models.length,
+    unresolved_model_count: catalog.unresolved_models.length
   };
-}
-
-function nonNegativeInteger(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-
-function positiveInteger(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 1;
-}
-
-function nonNegativeIntegerOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function nonNegativeNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function stringArrayLength(value: unknown): number {
-  return Array.isArray(value) ? value.filter((item) => typeof item === "string").length : 0;
-}
-
-function canonicalTimestamp(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return undefined;
-  const canonical = new Date(parsed).toISOString();
-  return canonical === value ? canonical : undefined;
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }

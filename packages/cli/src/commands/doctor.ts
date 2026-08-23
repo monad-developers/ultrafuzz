@@ -1,15 +1,22 @@
-import { Command } from "@oclif/core";
+import { Command, Flags } from "@oclif/core";
 import { diagnoseProject, type DoctorValue } from "@ultrafuzz/runtime";
 
 import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
 export default class Doctor extends Command {
   static override summary = "Report configuration, toolchain, and workflow engine install posture";
-  static override flags = globalFlags;
+  static override flags = {
+    ...globalFlags,
+    "topology-path": Flags.string({ summary: "Override the selected topology path" })
+  };
 
   async run(): Promise<void> {
     const { flags } = await this.parse(Doctor);
-    const result = await diagnoseProject({ projectRoot: projectRoot(flags), env: cliIo().env });
+    const result = await diagnoseProject({
+      projectRoot: projectRoot(flags),
+      env: cliIo().env,
+      topologyPath: flags["topology-path"]
+    });
     emitCommandResult(this, "doctor", commandFromRuntime("doctor", result, renderDoctor), flags.json === true);
   }
 }
@@ -36,9 +43,7 @@ function renderDoctor(value: DoctorValue): string {
     `- installed: ${engine.installed_version ?? "not installed"}`,
     `- installed bin target: ${engine.installed_bin_target ?? "unknown"}`,
     `- local binary: ${engine.bin_path ?? "not present"}`,
-    `- latest published stable: ${engine.latest_published_version}${
-      engine.latest_published_is_renamed_package ? " (renamed upstream package)" : ""
-    }`,
+    `- latest published stable: ${engine.latest_published_version}`,
     `- dependency layout: ${engine.layout_status}${engine.layout_detail === null ? "" : ` - ${engine.layout_detail}`}`,
     `- compatibility patches: ${renderCompatibilityPatches(engine.compatibility_patches)}`
   ];

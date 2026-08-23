@@ -6,15 +6,28 @@ import { pathToFileURL } from "node:url";
 import lockfile from "proper-lockfile";
 
 import {
+  assertPlannedGraph,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  ensureSafeDirectory,
+  parseStrictJsonBytes,
+  parseSmithersTaskManifestBytes,
   safeResolveInside,
+  writeFileDurable,
   type RunLayout,
-  writeJsonDurable
+  type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
-import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
+import { assertExpandedGraphSchema, fingerprintGraph } from "@ultrafuzz/topology";
 
+import {
+  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+  WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
+  WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+  WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
 import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
 import { verifyDynamicRuntimeMaterialization } from "./dynamic-runtime.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "./smithers.js";
@@ -23,15 +36,22 @@ import {
   type WorkflowExecutionSnapshotProtectedEntry
 } from "./workflow-execution-snapshot-capability.js";
 
-const WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION = "ultrafuzz.workflow-control-integrity.v2" as const;
 const WORKFLOW_CONTROL_INTEGRITY_FILE = "control-integrity.json";
-const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
 const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
 const WORKFLOW_CONTROL_LOCK = ".workflow-control";
+const WORKFLOW_LIFECYCLE_LOCK = ".workflow-lifecycle";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const BUN_MODULE_CONFINEMENT_PATH = "controls/bun-module-confinement.js";
+const BUN_EMPTY_ENVIRONMENT_PATH = "controls/bun-empty.env";
+export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot, descriptorRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"); plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: outside, namespace: "file" }, () => { if (fs.realpathSync(sourceRoot) !== physicalRoot || fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); throw new Error("workflow controller module resolved outside its sealed snapshot"); }); } });\n`;
+const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
+  [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE),
+  [BUN_EMPTY_ENVIRONMENT_PATH]: Buffer.from("\n"),
+  "controls/bunfig.toml": Buffer.from("\n")
+};
 
 const WORKFLOW_CONTROL_FILE_KEYS = [
   "graph",
@@ -97,6 +117,34 @@ export interface VerifiedWorkflowControlSnapshot {
   executionFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[];
   bindings: WorkflowControlBindings;
   integrityContents: Buffer;
+  /**
+   * Digest divergences found against the seal. Always empty unless the caller opted into
+   * `tolerateDivergence`, which only a read-only observer may do. Execution paths leave the
+   * option unset and therefore still fail closed on the first divergence.
+   */
+  divergences: readonly string[];
+}
+
+/**
+ * A read-only caller — `ultrafuzz status` and friends — needs the run's identity and snapshot
+ * environment, not permission to execute it. Gating observability on execution-grade authority made a
+ * single divergent control file hide an otherwise healthy run for the rest of its life (issue #674).
+ * `tolerateDivergence` collects CONTROL-FILE digest divergences instead of throwing so the caller can
+ * report them as warnings. It deliberately does NOT relax:
+ *   - anything structural (an unparseable seal, a mismatched run ID, an unreadable control file), or
+ *   - execution-file divergence, because the snapshot env binds the runner executable and the sealed
+ *     module URLs inside the snapshot, so an observer still executes those files.
+ */
+export interface VerifyWorkflowControlSnapshotOptions {
+  tolerateDivergence?: boolean;
+}
+
+export interface VerifiedSealedTaskManifestSnapshot {
+  tasksPath: string;
+  integrityPath: string;
+  contents: Buffer;
+  integrityContents: Buffer;
+  document: SmithersTaskManifestDocument;
 }
 
 export interface MaterializedWorkflowExecutionSnapshot {
@@ -135,13 +183,22 @@ interface OpenedSnapshotPublicationDirectory {
 
 /** Serializes control sealing and immutable generation publication per run. */
 export async function acquireWorkflowControlLock(layout: RunLayout): Promise<() => Promise<void>> {
-  const root = path.resolve(layout.root);
+  return acquireRunLock(layout.root, WORKFLOW_CONTROL_LOCK, "workflow control");
+}
+
+/** Serializes lifecycle submissions so a controller refresh cannot race a resume. */
+export async function acquireWorkflowLifecycleLock(layout: RunLayout): Promise<() => Promise<void>> {
+  return acquireRunLock(path.join(layout.root, "smithers"), WORKFLOW_LIFECYCLE_LOCK, "workflow lifecycle");
+}
+
+async function acquireRunLock(rootPath: string, lockName: string, label: string): Promise<() => Promise<void>> {
+  const root = path.resolve(rootPath);
   const stat = fs.lstatSync(root);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new Error("workflow control lock requires a physical run root");
+    throw new Error(`${label} lock requires a physical run root`);
   }
   return lockfile.lock(root, {
-    lockfilePath: path.join(root, WORKFLOW_CONTROL_LOCK),
+    lockfilePath: path.join(root, lockName),
     realpath: false,
     stale: 300_000,
     update: 60_000,
@@ -166,7 +223,7 @@ interface WorkflowExecutionDependencyIssuer {
 }
 
 interface WorkflowExecutionDependencyMap {
-  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION;
+  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION;
   modules: WorkflowExecutionDependencyTarget[];
   packages: WorkflowExecutionDependencyPackage[];
   issuers: WorkflowExecutionDependencyIssuer[];
@@ -218,22 +275,23 @@ export function sealWorkflowControlFiles(input: {
   assertExactControlPath(input.inputPath, paths.inputPath, "workflow input");
 
   const contents = controlFileContents(input.projectRoot, input.layout, paths);
+  const executionFiles = withBunStartupControls(input.layout, input.executionFiles);
   const seal: WorkflowControlIntegritySeal = {
     schema_version: WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION,
     run_id: input.layout.runId,
     files: controlFileEntriesFromContents(contents),
-    execution_files: executionFileEntries(input.executionFiles),
+    execution_files: executionFileEntries(executionFiles),
     bindings: deriveWorkflowControlBindings(
       input.layout.runId,
       contents,
       readBoundedRegularFile(input.layout.root, input.layout.statePath, "run state"),
-      readExecutionPlanForSeal(input.layout, input.executionFiles)
+      readExecutionPlanForSeal(input.layout, executionFiles)
     )
   };
   if (pathEntryExists(paths.integrityPath)) {
     throw new Error("workflow control seal already exists");
   }
-  writeJsonDurable(paths.integrityPath, seal);
+  writeRuntimeDocument(paths.integrityPath, WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "workflow control seal");
   return paths;
 }
 
@@ -241,11 +299,85 @@ export function verifyWorkflowControlFiles(projectRoot: string, layout: RunLayou
   return verifyWorkflowControlSnapshot(projectRoot, layout).paths;
 }
 
+/**
+ * Read the task manifest through the workflow-control seal without needing the
+ * external project checkout that owns the generated workflow source. This is
+ * the post-finalization authority needed to rerun artifact gates safely.
+ */
+export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSealedTaskManifestSnapshot {
+  const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
+  const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
+  const integrityPath = safeResolveInside(smithersRoot, WORKFLOW_CONTROL_INTEGRITY_FILE, "workflow control seal");
+  const integrityContents = readBoundedRegularFile(layout.root, integrityPath, "workflow control seal");
+  const seal = parseWorkflowControlIntegritySeal(integrityContents);
+  if (seal.run_id !== layout.runId) throw new Error(`workflow control seal run ID does not match ${layout.runId}`);
+
+  const graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
+  const contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
+  for (const [key, bytes] of [
+    ["graph", graphContents],
+    ["tasks", contents]
+  ] as const) {
+    const observed = digestBytes(bytes);
+    const expected = seal.files[key];
+    if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
+      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+    }
+  }
+
+  const graph = assertPlannedGraph(parseStrictJsonBytes(graphContents));
+  const document = parseSmithersTaskManifestBytes(contents);
+  assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+  if (document.run_id !== layout.runId) throw new Error("workflow task manifest run ID does not match the run root");
+
+  const graphNodeIds = sortedUniqueIds(
+    graph.nodes.map((node) => node.id),
+    "run graph node"
+  );
+  const taskAttemptIds = sortedUniqueIds(
+    document.tasks.map((task) => task.attemptId),
+    "workflow task attempt"
+  );
+  const taskNodeIds = sortedUniqueIds(
+    document.tasks.flatMap((task) => [
+      task.preparationSmithersNodeId,
+      task.smithersNodeId,
+      task.verifierSmithersNodeId
+    ]),
+    "workflow task node"
+  );
+  if (
+    JSON.stringify(graphNodeIds) !== JSON.stringify(seal.bindings.expected_state_node_ids) ||
+    JSON.stringify(taskAttemptIds) !== JSON.stringify(seal.bindings.expected_task_attempt_ids) ||
+    JSON.stringify(taskNodeIds) !== JSON.stringify(seal.bindings.expected_task_node_ids)
+  ) {
+    throw new Error("workflow task manifest no longer matches the sealed completeness binding");
+  }
+  const state = parseRecordJson(readBoundedRegularFile(layout.root, layout.statePath, "run state"), "run state");
+  if (
+    state.run_id !== layout.runId ||
+    state.graph_fingerprint !== seal.bindings.graph_fingerprint ||
+    state.config_fingerprint !== seal.bindings.config_fingerprint
+  ) {
+    throw new Error("run state identity or fingerprints no longer match the sealed task authority");
+  }
+  return { tasksPath, integrityPath, contents, integrityContents, document };
+}
+
 export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
   return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
 }
 
-export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLayout): VerifiedWorkflowControlSnapshot {
+export function verifyWorkflowControlSnapshot(
+  projectRoot: string,
+  layout: RunLayout,
+  options: VerifyWorkflowControlSnapshotOptions = {}
+): VerifiedWorkflowControlSnapshot {
+  const divergences: string[] = [];
+  const reportDivergence = (message: string): void => {
+    if (options.tolerateDivergence !== true) throw new Error(message);
+    divergences.push(message);
+  };
   const paths = workflowControlPaths(projectRoot, layout);
   const sealContents = readBoundedRegularFile(layout.root, paths.integrityPath, "workflow control seal");
   const seal = parseWorkflowControlIntegritySeal(sealContents);
@@ -288,19 +420,27 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     const observed = digestBytes(contents[key]);
     const expected = seal.files[key];
     if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
-      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+      reportDivergence(
+        `sealed workflow control file changed: ${controlFileLabel(key)} (sealed ${expected.sha256} ${expected.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes${hasPublishedSnapshot && key === "workflow" ? ", compared against the published execution snapshot copy" : ""})`
+      );
     }
   }
-
-  const currentGraph = readBoundedRegularFile(layout.root, paths.graphPath, "runtime graph");
-  const currentTasks = readBoundedRegularFile(layout.root, paths.tasksPath, "runtime task plan");
-  const runtimeControlsChanged =
-    digestBytes(currentGraph).sha256 !== seal.files.graph.sha256 ||
-    digestBytes(currentTasks).sha256 !== seal.files.tasks.sha256;
-  let runtimeStateNodeIds: readonly string[] | undefined;
-  if (runtimeControlsChanged) {
-    if (baseGraph === undefined || baseTasks === undefined) {
-      throw new Error("sealed workflow graph or task plan changed");
+  const executionFiles = seal.execution_files.map((entry) => {
+    const bytes = readBoundedRegularFileExact(
+      hasPublishedSnapshot
+        ? snapshotPath(publishedSnapshotRoot, entry.snapshot_path, "published workflow execution file")
+        : entry.source_path,
+      `workflow execution file ${entry.snapshot_path}`
+    );
+    const observed = digestBytes(bytes);
+    if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
+      // Never tolerated, even for an observer. The snapshot env binds SMITHERS_BIN and the sealed
+      // artifacts/runtime module URLs to paths INSIDE this snapshot, so `ultrafuzz status` executes
+      // these files to obtain a status summary. Downgrading this to a warning would mean running
+      // tampered code in order to report that the code was tampered with.
+      throw new Error(
+        `sealed workflow execution file changed: ${entry.snapshot_path} (sealed ${entry.sha256} ${entry.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes)`
+      );
     }
     const taskDocument = parseRecordJson(baseTasks.contents, "sealed base workflow task manifest");
     if (!Array.isArray(taskDocument.tasks) || !Array.isArray(taskDocument.dynamic_groups)) {
@@ -337,7 +477,7 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     runtimeStateNodeIds
   );
   if (JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
-    throw new Error("workflow control completeness binding changed");
+    reportDivergence("workflow control completeness binding changed");
   }
   return {
     paths,
@@ -345,7 +485,8 @@ export function verifyWorkflowControlSnapshot(projectRoot: string, layout: RunLa
     contents: runtimeControlsChanged ? { ...contents, graph: currentGraph, tasks: currentTasks } : contents,
     executionFiles,
     bindings: seal.bindings,
-    integrityContents: sealContents
+    integrityContents: sealContents,
+    divergences
   };
 }
 
@@ -550,9 +691,18 @@ export function materializeWorkflowExecutionSnapshot(input: {
   projectRoot: string;
   layout: RunLayout;
   snapshot: VerifiedWorkflowControlSnapshot;
+  /**
+   * Every immutable generation already authorized for this run. Controller
+   * refresh uses this to retain the launch generation and its append-only
+   * successors without making arbitrary directories executable.
+   */
+  authorizedGenerations?: readonly string[];
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
+  for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS))
+    if (!expectedFiles.get(controlPath)?.equals(contents))
+      throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
   if (expectedFiles.has(workflowRelativePath)) {
     throw new Error("workflow execution snapshot collides with its generated workflow");
   }
@@ -564,11 +714,18 @@ export function materializeWorkflowExecutionSnapshot(input: {
   const snapshotRoot = path.join(snapshotsRoot, input.snapshot.generation);
   let snapshotDescriptor: number | undefined;
   try {
+    const authorizedGenerations = sortedUniqueGenerations(
+      input.authorizedGenerations ?? [input.snapshot.generation],
+      input.snapshot.generation
+    );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
     const snapshotAccessPath = path.join(snapshots.accessPath, input.snapshot.generation);
     const snapshotAlreadyExists = pathEntryExists(snapshotAccessPath);
-    assertSnapshotRootEntries(snapshots, snapshotAlreadyExists ? [input.snapshot.generation] : []);
+    const existingAuthorizedGenerations = authorizedGenerations.filter((generation) =>
+      pathEntryExists(path.join(snapshots.accessPath, generation))
+    );
+    assertSnapshotRootEntries(snapshots, existingAuthorizedGenerations);
     if (!snapshotAlreadyExists) {
       publishWorkflowExecutionSnapshot(
         snapshots,
@@ -578,7 +735,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
         dependencyMap.executable_paths
       );
     }
-    assertSnapshotRootEntries(snapshots, [input.snapshot.generation]);
+    assertSnapshotRootEntries(snapshots, authorizedGenerations);
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     const lexicalStat = fs.lstatSync(snapshotRoot);
     if (lexicalStat.isSymbolicLink() || !lexicalStat.isDirectory()) {
@@ -608,12 +765,19 @@ export function materializeWorkflowExecutionSnapshot(input: {
     );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     assertExactDirectoryIdentity(snapshotRoot, snapshotStat.dev, snapshotStat.ino, "workflow execution snapshot");
-    const env = workflowSnapshotEnvironment(snapshotRoot, workflowRelativePath, dependencyMap, protectedEntries, {
-      snapshotsRootDevice: snapshots.device,
-      snapshotsRootInode: snapshots.inode,
-      snapshotDevice: snapshotStat.dev,
-      snapshotInode: snapshotStat.ino
-    });
+    const env = workflowSnapshotEnvironment(
+      input.projectRoot,
+      snapshotRoot,
+      workflowRelativePath,
+      dependencyMap,
+      protectedEntries,
+      {
+        snapshotsRootDevice: snapshots.device,
+        snapshotsRootInode: snapshots.inode,
+        snapshotDevice: snapshotStat.dev,
+        snapshotInode: snapshotStat.ino
+      }
+    );
     return {
       root: snapshotRoot,
       workflowPath: path.join(snapshotRoot, ...workflowRelativePath.split("/")),
@@ -624,6 +788,17 @@ export function materializeWorkflowExecutionSnapshot(input: {
     if (snapshotDescriptor !== undefined) fs.closeSync(snapshotDescriptor);
     if (snapshots.descriptor !== undefined) fs.closeSync(snapshots.descriptor);
   }
+}
+
+function sortedUniqueGenerations(values: readonly string[], required: string): string[] {
+  const generations = [...new Set(values)].sort(compareCanonicalStrings);
+  if (!generations.includes(required)) {
+    throw new Error("authorized workflow execution snapshots omit the selected generation");
+  }
+  if (generations.some((generation) => !SHA256_PATTERN.test(generation))) {
+    throw new Error("authorized workflow execution snapshot generation is invalid");
+  }
+  return generations;
 }
 
 function publishWorkflowExecutionSnapshot(
@@ -1194,6 +1369,7 @@ function directoryIdentity(relativePath: string, stat: fs.Stats): WorkflowExecut
 }
 
 function workflowSnapshotEnvironment(
+  projectRoot: string,
   snapshotRoot: string,
   workflowRelativePath: string,
   dependencies: WorkflowExecutionDependencyMap,
@@ -1210,7 +1386,13 @@ function workflowSnapshotEnvironment(
     return pathEntryExists(entry) ? pathToFileURL(entry).href : "";
   };
   const configPath = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
-  if (moduleUrl("artifacts") === "" || moduleUrl("runtime") === "" || !pathEntryExists(configPath)) {
+  const governancePath = path.join(snapshotRoot, "controls", "data-governance.json");
+  if (
+    moduleUrl("artifacts") === "" ||
+    moduleUrl("runtime") === "" ||
+    !pathEntryExists(configPath) ||
+    !pathEntryExists(governancePath)
+  ) {
     throw new Error("workflow execution snapshot is missing a required sealed module or config");
   }
   let env: Record<string, string> = {
@@ -1218,12 +1400,15 @@ function workflowSnapshotEnvironment(
     ULTRAFUZZ_RUNTIME_MODULE: moduleUrl("runtime"),
     ...(moduleUrl("modal") === "" ? {} : { ULTRAFUZZ_MODAL_MODULE: moduleUrl("modal") }),
     ULTRAFUZZ_CONFIG_PATH: configPath,
+    ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath,
+    ULTRAFUZZ_BUN_MODULE_CONFINEMENT: path.join(snapshotRoot, ...BUN_MODULE_CONFINEMENT_PATH.split("/")),
     ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ...workflowRelativePath.split("/"))
   };
   if (dependencies.smithers_bin !== null) {
     env = bindSmithersExecutableCapability(
       env,
-      snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable")
+      snapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable"),
+      projectRoot
     );
   }
   return bindWorkflowExecutionSnapshotCapability(env, {
@@ -1431,9 +1616,10 @@ function deriveWorkflowControlBindings(
   planContents: Buffer | undefined,
   runtimeStateNodeIds?: readonly string[]
 ): WorkflowControlBindings {
-  const graph = parseRecordJson(contents.graph, "run graph");
-  const expandedGraph = parseRecordJson(contents.expanded_graph, "expanded workflow graph") as unknown as ExpandedGraph;
-  const tasksDocument = parseRecordJson(contents.tasks, "workflow task manifest");
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
+  const tasksDocument = parseSmithersTaskManifestBytes(contents.tasks);
+  assertSmithersTaskManifestMatchesPlannedGraph(tasksDocument, graph);
   const state = parseRecordJson(stateContents, "run state");
   const graphFingerprint = contents.graph_fingerprint.toString("utf8").trim();
   if (!SHA256_PATTERN.test(graphFingerprint)) throw new Error("run graph fingerprint is invalid");
@@ -1448,12 +1634,7 @@ function deriveWorkflowControlBindings(
     throw new Error("run state config fingerprint does not match the exact resolved config");
   }
   if (!Array.isArray(graph.nodes) || !isRecord(state.nodes)) throw new Error("run graph or state node set is invalid");
-  if (
-    tasksDocument.run_id !== runId ||
-    typeof tasksDocument.smithers_run_id !== "string" ||
-    tasksDocument.smithers_run_id.length === 0 ||
-    !Array.isArray(tasksDocument.tasks)
-  ) {
+  if (tasksDocument.run_id !== runId || tasksDocument.smithers_run_id.length === 0) {
     throw new Error("workflow task manifest identity is invalid");
   }
   const graphNodeIds = sortedUniqueIds(
@@ -1485,20 +1666,9 @@ function deriveWorkflowControlBindings(
   const taskNodes: string[] = [];
   const concreteNodes: string[] = [];
   for (const task of tasksDocument.tasks) {
-    if (
-      !isRecord(task) ||
-      typeof task.attemptId !== "string" ||
-      typeof task.concreteNodeId !== "string" ||
-      typeof task.smithersNodeId !== "string" ||
-      typeof task.verifierSmithersNodeId !== "string" ||
-      task.smithersNodeId !== `node:${task.attemptId}` ||
-      task.verifierSmithersNodeId !== `verify:${task.attemptId}`
-    ) {
-      throw new Error("workflow task manifest contains an invalid task identity");
-    }
     taskAttempts.push(task.attemptId);
     concreteNodes.push(task.concreteNodeId);
-    taskNodes.push(task.smithersNodeId, task.verifierSmithersNodeId);
+    taskNodes.push(task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId);
   }
   const expectedTaskAttemptIds = sortedUniqueIds(taskAttempts, "workflow task attempt");
   const expectedTaskNodeIds = sortedUniqueIds(taskNodes, "workflow task node");
@@ -1517,7 +1687,7 @@ function deriveWorkflowControlBindings(
   );
   if (
     JSON.stringify(declaredTaskNodeIds) !==
-    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => !nodeId.startsWith("verify:")))
+    JSON.stringify(expectedTaskNodeIds.filter((nodeId) => nodeId.startsWith("node:")))
   ) {
     throw new Error("sealed graph workflow task set does not match the task manifest");
   }
@@ -1562,6 +1732,25 @@ function executionFileEntries(files: readonly WorkflowExecutionControlFile[]): W
         ...digestBytes(readBoundedRegularFileExact(file.sourcePath, `workflow execution file ${file.snapshotPath}`))
       };
     });
+}
+
+function withBunStartupControls(
+  layout: RunLayout,
+  files: readonly WorkflowExecutionControlFile[]
+): WorkflowExecutionControlFile[] {
+  const result = [...files],
+    snapshots = new Set(files.map((file) => validateSnapshotPath(file.snapshotPath))),
+    sourceRoot = ensureSafeDirectory(layout.root, "smithers/bun-startup-controls");
+  for (const [snapshotPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) {
+    if (snapshots.has(snapshotPath)) throw new Error("workflow execution files collide with Bun startup controls");
+    const sourcePath = safeResolveInside(sourceRoot, path.basename(snapshotPath), "Bun startup control source");
+    if (pathEntryExists(sourcePath)) {
+      if (!readBoundedRegularFile(layout.root, sourcePath, `Bun startup control ${snapshotPath}`).equals(contents))
+        throw new Error("workflow Bun startup control source changed before sealing");
+    } else writeFileDurable(sourcePath, contents);
+    result.push({ sourcePath, snapshotPath });
+  }
+  return result;
 }
 
 function readBoundedRegularFile(root: string, filePath: string, label: string): Buffer {
@@ -1630,9 +1819,8 @@ function compareCanonicalStrings(left: string, right: string): number {
 }
 
 function parseWorkflowControlIntegritySeal(contents: Buffer): WorkflowControlIntegritySeal {
-  const value = parseRecordJson(contents, "workflow control seal");
+  const value = parseRuntimeDocumentBytes(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, contents, "workflow control seal");
   if (
-    !hasExactKeys(value, ["schema_version", "run_id", "files", "execution_files", "bindings"]) ||
     value.schema_version !== WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION ||
     typeof value.run_id !== "string" ||
     !isRecord(value.files) ||
@@ -1738,10 +1926,13 @@ function parseWorkflowExecutionDependencyMap(
 ): WorkflowExecutionDependencyMap {
   const manifest = executionFiles.find((file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
   if (manifest === undefined) throw new Error("workflow execution snapshot is missing its sealed dependency map");
-  const value = parseRecordJson(manifest.contents, "workflow execution dependency map");
+  const value = parseRuntimeDocumentBytes(
+    WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
+    manifest.contents,
+    "workflow execution dependency map"
+  );
   if (
-    !hasExactKeys(value, ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"]) ||
-    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION ||
+    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION ||
     !Array.isArray(value.modules) ||
     !Array.isArray(value.packages) ||
     !Array.isArray(value.issuers) ||
@@ -1806,7 +1997,7 @@ function parseWorkflowExecutionDependencyMap(
     throw new Error("sealed workflow runner is not a declared executable");
   }
   return {
-    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION,
     modules,
     packages,
     issuers,
@@ -1928,7 +2119,7 @@ function validateIds(values: readonly unknown[], label: string): string[] {
 
 function parseRecordJson(contents: Buffer, label: string): Record<string, unknown> {
   try {
-    const value = JSON.parse(contents.toString("utf8")) as unknown;
+    const value = parseStrictJsonBytes(contents);
     if (!isRecord(value)) throw new Error(`${label} must be a JSON object`);
     return value;
   } catch (error) {

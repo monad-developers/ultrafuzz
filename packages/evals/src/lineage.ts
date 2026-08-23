@@ -5,15 +5,18 @@ import fs from "node:fs";
 import { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
 import { assertGroundTruthSubject, readGroundTruthDocument, type GroundTruthSubject } from "./ground-truth.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
-import type {
-  EvalCandidateProvenance,
-  EvalMatrixRow,
-  EvalPlanValue,
-  EvalRunProvenance,
-  EvalScoringProvenance,
-  EvalSuiteSpec,
-  EvalSummaryProvenance
+import {
+  isEvalBenchmarkWorkflowInput,
+  type EvalBenchmarkExecutionInput,
+  type EvalCandidateProvenance,
+  type EvalMatrixRow,
+  type EvalPlanValue,
+  type EvalRunProvenance,
+  type EvalScoringProvenance,
+  type EvalSuiteSpec,
+  type EvalSummaryProvenance
 } from "./types.js";
+import { EvalError } from "./utils.js";
 
 export const EVAL_BENCHMARK_PROTOCOL_REVISION = "1";
 export const EVAL_EXECUTION_POLICY_REVISION = "ultrafuzz.eval-controller.v1";
@@ -65,15 +68,10 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     trials_per_variant: plan.suite.run.trials_per_variant,
     execution_policy_fingerprint: executionPolicy.fingerprint
   };
-  const benchmarkAvailability =
-    targets.every((target) => target.commit !== "unavailable" && target.dirty === false) &&
-    Object.values(groundTruthSha256).every((digest) => digest !== "unavailable")
-      ? "available"
-      : "incomplete";
   return {
     candidate: resolveCandidateProvenance(plan.project_root),
     benchmark: {
-      availability: benchmarkAvailability,
+      availability: "available",
       series: plan.suite.suite,
       protocol_revision: EVAL_BENCHMARK_PROTOCOL_REVISION,
       cohort_fingerprint: sha256Identity(cohortControls),
@@ -85,15 +83,12 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
   };
 }
 
-function benchmarkExecutionControls(matrix: EvalMatrixRow[]): unknown[] {
-  const controls = new Map<string, unknown>();
+function benchmarkExecutionControls(matrix: EvalMatrixRow[]): EvalBenchmarkExecutionInput[] {
+  const controls = new Map<string, EvalBenchmarkExecutionInput>();
   for (const row of matrix) {
-    const workflowInput =
-      typeof row.workflow_input === "object" && row.workflow_input !== null && !Array.isArray(row.workflow_input)
-        ? (row.workflow_input as Record<string, unknown>)
-        : {};
+    const workflowInput = row.workflow_input;
+    if (workflowInput === undefined || !isEvalBenchmarkWorkflowInput(workflowInput)) continue;
     const value = workflowInput.benchmark_execution;
-    if (value === undefined) continue;
     controls.set(stableJson(value), value);
   }
   return [...controls.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);
@@ -116,10 +111,7 @@ export function buildScoringProvenance(input: {
       )
     )
   ].sort();
-  const implementationRevision =
-    implementation.commit === "unavailable"
-      ? EVAL_SCORING_IMPLEMENTATION_REVISION
-      : `${EVAL_SCORING_IMPLEMENTATION_REVISION}@${implementation.commit}`;
+  const implementationRevision = `${EVAL_SCORING_IMPLEMENTATION_REVISION}@${implementation.commit}`;
   const identity = {
     implementation_revision: implementationRevision,
     implementation_dirty: implementation.dirty,
@@ -137,13 +129,13 @@ export function buildEvalSummaryProvenance(input: {
   projectRoot: string;
   suite: EvalSuiteSpec;
   matrix: EvalMatrixRow[];
-  runProvenance?: EvalRunProvenance;
+  runProvenance: EvalRunProvenance;
   judgeMode?: "deterministic" | "llm";
 }): EvalSummaryProvenance {
   return {
-    availability: input.runProvenance === undefined ? "historical-unavailable" : "available",
-    ...(input.runProvenance?.candidate !== undefined ? { candidate: input.runProvenance.candidate } : {}),
-    ...(input.runProvenance?.benchmark !== undefined ? { benchmark: input.runProvenance.benchmark } : {}),
+    availability: "available",
+    candidate: input.runProvenance.candidate,
+    benchmark: input.runProvenance.benchmark,
     scoring: buildScoringProvenance(input)
   };
 }
@@ -165,7 +157,11 @@ export function resolveCandidateProvenance(projectRoot: string): EvalCandidatePr
       ...(!dirty ? { execution_artifact_id: `git:${commit}` } : {})
     };
   } catch {
-    return { label: "unavailable", commit: "unavailable", dirty: null };
+    throw new EvalError(
+      "EVAL_CANDIDATE_PROVENANCE_UNAVAILABLE",
+      `candidate Git provenance is unavailable for ${projectRoot}`,
+      { project_root: projectRoot }
+    );
   }
 }
 
@@ -199,26 +195,26 @@ function groundTruthDigests(matrix: EvalMatrixRow[]): Record<string, string> {
 function collectGroundTruthSubjects(
   matrix: EvalMatrixRow[],
   requirePrivateBinding: boolean
-): Record<string, GroundTruthSubject | "unavailable"> {
-  const subjects = new Map<string, GroundTruthSubject | "unavailable">();
+): Record<string, GroundTruthSubject> {
+  const subjects = new Map<string, GroundTruthSubject>();
   for (const [targetId, row] of new Map(matrix.map((candidate) => [candidate.target_id, candidate])).entries()) {
-    try {
-      const document = readGroundTruthDocument(row.target.ground_truth_path, {
-        requireSubject: requirePrivateBinding && row.target.sensitivity === "private"
-      });
-      if (document.subject === undefined) {
-        subjects.set(targetId, "unavailable");
-      } else {
-        subjects.set(
-          targetId,
-          row.target.sensitivity === "private"
-            ? assertGroundTruthSubject(document.subject, { repository: row.target.repo, revision: row.target.ref })
-            : document.subject
+    const document = readGroundTruthDocument(row.target.ground_truth_path, {
+      requireSubject: requirePrivateBinding && row.target.sensitivity === "private"
+    });
+    if (document.subject === undefined) {
+      if (requirePrivateBinding && row.target.sensitivity === "private") {
+        throw new EvalError(
+          "EVAL_GROUND_TRUTH_SUBJECT_REQUIRED",
+          `private target ${targetId} requires a bound ground-truth subject`
         );
       }
-    } catch (error) {
-      if (requirePrivateBinding && row.target.sensitivity === "private") throw error;
-      subjects.set(targetId, "unavailable");
+    } else {
+      subjects.set(
+        targetId,
+        row.target.sensitivity === "private"
+          ? assertGroundTruthSubject(document.subject, { repository: row.target.repo, revision: row.target.ref })
+          : document.subject
+      );
     }
   }
   return Object.fromEntries([...subjects.entries()].sort(([left], [right]) => left.localeCompare(right)));
@@ -228,18 +224,17 @@ function sha256File(filePath: string): string {
   try {
     const stat = fs.statSync(filePath);
     if (!stat.isFile()) {
-      return "unavailable";
+      throw new Error("path is not a regular file");
     }
     return `sha256:${crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex")}`;
   } catch {
-    return "unavailable";
+    throw new EvalError("EVAL_GROUND_TRUTH_DIGEST_UNAVAILABLE", `ground-truth digest is unavailable for ${filePath}`, {
+      path: filePath
+    });
   }
 }
 
-function resolveTargetProvenance(
-  targetPath: string | undefined,
-  ref: string
-): { commit: string; dirty: boolean | null } {
+function resolveTargetProvenance(targetPath: string | undefined, ref: string): { commit: string; dirty: boolean } {
   if (targetPath !== undefined) {
     try {
       return {
@@ -247,13 +242,26 @@ function resolveTargetProvenance(
         dirty: git(targetPath, ["status", "--porcelain", "--untracked-files=no"]).length > 0
       };
     } catch {
-      // A failed row still receives deterministic, explicitly unavailable provenance.
-      return { commit: "unavailable", dirty: null };
+      throw new EvalError(
+        "EVAL_TARGET_PROVENANCE_UNAVAILABLE",
+        `target Git provenance is unavailable for ${targetPath}`,
+        {
+          target_path: targetPath
+        }
+      );
     }
   }
   return /^[0-9a-f]{40}$/iu.test(ref)
     ? { commit: ref.toLowerCase(), dirty: false }
-    : { commit: "unavailable", dirty: null };
+    : (() => {
+        throw new EvalError(
+          "EVAL_TARGET_PROVENANCE_UNAVAILABLE",
+          "target requires a local Git checkout or full commit ref",
+          {
+            ref
+          }
+        );
+      })();
 }
 
 function stableJson(value: unknown): string {

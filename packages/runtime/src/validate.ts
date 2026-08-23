@@ -2,11 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  applyDefaultProfileOverrides,
+  applyModelProfileOverrides,
+  hasErrors,
   loadProjectConfig,
   redactDiagnostics,
   resolveConfig,
   validateExecutionNodeOverrides,
+  validateModelProfiles,
   type ResolvedConfig
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
@@ -20,7 +22,8 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
-import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
+import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
+import { transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -52,7 +55,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env, topologyCheck.agentRefs);
+    const policy = evaluatePolicies(projectRoot, resolved.config, resolved.configuredAgentRefs ?? []);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -84,6 +87,7 @@ export async function validateProject(input: ValidateProjectInput) {
 export async function loadResolvedProject(input: ValidateProjectInput): Promise<{
   config?: ResolvedConfig;
   configPath?: string;
+  configuredAgentRefs?: readonly string[];
   diagnostics: RuntimeDiagnostic[];
 }> {
   const loaded = await loadProjectConfig(path.resolve(input.projectRoot));
@@ -101,11 +105,27 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
       diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
     };
   }
+  // Agent references are collected before the overrides land so a run that
+  // switches the default profile still has to satisfy every agent the project
+  // config declares.
+  const configuredAgentRefs = [
+    ...new Set(Object.values(resolved.value.models.profiles).map((profile) => profile.agent))
+  ];
   applyAgentOverrides(resolved.value, input);
+  // resolveConfig validated the pre-override profiles, so the effective config
+  // an override produces must be revalidated before anything consumes it.
+  const overrideDiagnostics = validateModelProfiles(resolved.value);
+  const diagnostics = configDiagnostics(
+    redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics, ...overrideDiagnostics])
+  );
+  if (hasErrors(overrideDiagnostics)) {
+    return { configPath: loaded.value.path, diagnostics };
+  }
   return {
     config: resolved.value,
     configPath: loaded.value.path,
-    diagnostics: configDiagnostics(redactDiagnostics([...loaded.diagnostics, ...resolved.diagnostics]))
+    configuredAgentRefs,
+    diagnostics
   };
 }
 
@@ -140,7 +160,7 @@ export function modelProfilesForTopology(
 }
 
 export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["resolved_config"] {
-  const defaultProfile = config.models.profiles[config.models.default];
+  const defaultProfile = config.models.profiles[config.retry.agents[0] ?? config.models.default];
   return {
     schema_version: config.schemaVersion,
     audit_profile: config.auditProfile,
@@ -206,7 +226,7 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
-  agentRefs?: Set<string>;
+  selectedAgentRefs: string[];
 } {
   try {
     const policy =
@@ -246,10 +266,19 @@ function validateTopologySurface(
       requirePromptFiles: true,
       promptTexts: promptTextsForCatalog(promptCatalog),
       defaultTimeoutSeconds: config?.run.defaultTimeoutSeconds,
+      defaultMaxAttempts: config?.retry.sameAgentAttempts,
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,
-      defaultModelProfileId: config?.models.default
+      defaultModelProfileId: config?.retry.agents[0] ?? config?.models.default
     });
     const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
+    for (const model of expanded.nodes.flatMap((node) => node.modelFanout)) {
+      if (config === undefined) continue;
+      const configuredIndex = config.retry.agents.indexOf(model.modelProfileId);
+      if (configuredIndex < 0) continue;
+      for (const profileId of config.retry.agents.slice(configuredIndex + 1)) {
+        selectedAgents.add(config.models.profiles[profileId]!.agent);
+      }
+    }
     if (config?.execution.mode === "cloud") {
       for (const agentId of [...selectedAgents].sort()) {
         if (config.agents[agentId]?.auth === "subscription") {
@@ -269,6 +298,7 @@ function validateTopologySurface(
         "YAML topology v1 loads, validates, and expands",
         executionDiagnostics
       ),
+      selectedAgentRefs: [...selectedAgents].sort(),
       summary: {
         path: policy?.effectiveTopologyDisplayPath ?? pathToTopology,
         ...(policy === undefined
@@ -280,27 +310,30 @@ function validateTopologySurface(
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length,
         required_commands: [...new Set(expanded.nodes.flatMap((node) => node.requiredCommands ?? []))].sort()
-      },
-      agentRefs: selectedAgents
+      }
     };
   } catch (error) {
     return {
       posture: postureFromDiagnostics("topology", "topology failed validation", [
         diagnosticFromError(error, "topology", "TOPOLOGY_INVALID")
-      ])
+      ]),
+      selectedAgentRefs: []
     };
   }
+}
+
+export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedConfig, topologyPath?: string): string[] {
+  return validateTopologySurface(projectRoot, config, topologyPath).selectedAgentRefs;
 }
 
 function evaluatePolicies(
   projectRoot: string,
   config: ResolvedConfig,
-  _env: Record<string, string | undefined>,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config, selectedAgentRefs);
+  const agentRegistry = validateAgentReferences(projectRoot, config, configuredAgentRefs);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -317,49 +350,49 @@ function evaluatePolicies(
 function validateAgentReferences(
   projectRoot: string,
   config: ResolvedConfig,
-  selectedAgentRefs: Set<string> | undefined
+  configuredAgentRefs: readonly string[]
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const defaultProfile = config.models.profiles[config.models.default];
-  const agentRefs = selectedAgentRefs ?? new Set(defaultProfile === undefined ? [] : [defaultProfile.agent]);
-  const candidates = [
-    path.join(projectRoot, ".smithers", "agents.ts"),
-    path.join(projectRoot, ".smithers", "agents", "index.ts")
-  ];
-  const existing = candidates.filter((candidate) => fs.existsSync(candidate));
-  if (existing.length === 0) {
+  const agentRefs = new Set([
+    ...configuredAgentRefs,
+    ...Object.values(config.models.profiles).map((profile) => profile.agent)
+  ]);
+  const registry = inspectAgentRegistry(projectRoot);
+  if (!registry.exists) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
         message: "project agent registry is missing; rerun ultrafuzz init to restore it",
         severity: "error",
-        source: "agents",
-        path: "agent registry"
+        source: "agents"
       }
     ];
   }
-  const registryText = existing.map((candidate) => fs.readFileSync(candidate, "utf8")).join("\n");
+  if (registry.error !== undefined) {
+    diagnostics.push({
+      code: "AGENT_REGISTRY_INVALID",
+      message: "project agent registry could not be safely inspected; rerun ultrafuzz init or repair it manually",
+      severity: "error",
+      source: "agents"
+    });
+  }
   for (const agentRef of [...agentRefs].sort()) {
-    if (!agentRefExported(registryText, agentRef)) {
+    if (!agentRegistryRegisters(registry, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not exported by the project agent registry`,
+        message: `agent reference ${agentRef} is not registered in agentFactories by the project agent registry`,
         severity: "error",
-        source: "agents",
-        path: "agent registry"
+        source: "agents"
       });
     }
   }
   return diagnostics;
 }
 
-function agentRefExported(registryText: string, agentRef: string): boolean {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(agentRef)) {
-    return false;
-  }
-  return new RegExp(`\\b${agentRef}\\b`, "u").test(registryText);
-}
-
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
+  applyModelProfileOverrides(config, config.retry.agents[0] ?? config.models.default, {
+    agent: input.agent,
+    model: input.model,
+    reasoning: input.reasoning
+  });
 }

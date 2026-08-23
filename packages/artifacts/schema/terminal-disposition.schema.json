@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:terminal-disposition:1",
+  "title": "Ultrafuzz terminal disposition",
+  "type": "object",
+  "required": ["schema_version", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.terminal-disposition.v1" },
+    "kind": { "const": "task-output-validation-failure" }
+  }
+}

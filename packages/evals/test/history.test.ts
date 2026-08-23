@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,23 +12,38 @@ import {
   loadBenchmarkLanesManifest
 } from "../src/benchmark-manifest.js";
 import {
+  EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE,
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
+  EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE,
   aggregateEvalHistoryBenchmarkRuns,
   aggregateEvalHistoryModelPerformanceCost,
   assertPublicBenchmarkGeneration,
+  assertPublicBenchmarkRunPolicy,
   createEvalHistoryObservations,
   emptyEvalHistory,
+  evalHistoryZodSchema,
   formatEvalHistoryJson,
   mergeEvalHistory,
   parseEvalHistory,
+  readEvalHistory,
   renderEvalHistoryCharts,
   type EvalHistoryObservation
 } from "../src/history.js";
+import { EVAL_HISTORY_SCHEMA_ID, evalHistoryJsonSchema, validateEvalJsonSchema } from "../src/eval-schema-registry.js";
+import { executeEvalSchemaSemanticGates } from "../src/eval-semantic-gates.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
 import { safeEvalId } from "../src/utils.js";
-import { cleanRecoveryEquivalence, recoveryEquivalenceSummary, testRow, testSuite } from "./helpers.js";
+import {
+  cleanRecoveryEquivalence,
+  currentEvalRunRecord,
+  currentRunExpansion,
+  recoveryEquivalenceSummary,
+  testReportAuthority,
+  testRow,
+  testSuite
+} from "./helpers.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CANDIDATE = "1111111111111111111111111111111111111111";
@@ -79,11 +96,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
       graded_case_count: 1,
       publication_location: {
         bundle_path: "public-results.json",
-        report_paths: [
-          "reports/target-a-baseline-trial-1/report.md",
-          "reports/target-a-baseline-trial-1/report.json",
-          "reports/target-a-baseline-trial-1/findings.normalized.json"
-        ]
+        report_paths: ["reports/target-a-baseline-trial-1/report.md", "reports/target-a-baseline-trial-1/report.json"]
       }
     },
     source_eval_run_id: "run-1",
@@ -132,7 +145,7 @@ function supersessionRun(input: {
   sourceRunId: string;
   timestamp: string;
   commitCharacter: string;
-  legacyPartialLastTarget?: boolean;
+  partialLastTarget?: boolean;
   model?: string;
   cohortFingerprint?: string;
   executionPolicyFingerprint?: string;
@@ -141,9 +154,8 @@ function supersessionRun(input: {
   return SUPERSESSION_TARGETS.map((target, index) => {
     const base = observation();
     const revision = SUPERSESSION_TARGET_REVISIONS.find((candidate) => candidate.target === target)!.revision;
-    const partial = input.legacyPartialLastTarget === true && index === SUPERSESSION_TARGETS.length - 1;
+    const partial = input.partialLastTarget === true && index === SUPERSESSION_TARGETS.length - 1;
     return observation({
-      schema_version: partial ? "ultrafuzz.eval.history.observation.v4" : EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
       id: `${input.sourceRunId}:${target}:baseline:benchmark-smoke`,
       benchmark: "ultrafuzz-bench",
       target,
@@ -158,7 +170,7 @@ function supersessionRun(input: {
       candidate_commit: input.commitCharacter.repeat(40),
       source_eval_run_id: input.sourceRunId,
       source_artifact: `artifact-${input.sourceRunId}`,
-      cost_usd: partial ? null : 0.2,
+      cost_usd: 0.2,
       cost_completeness: partial
         ? { status: "partial", reasons: ["pricing-incomplete"] }
         : { status: "complete", reasons: [] },
@@ -180,6 +192,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
     target_id: "target-a",
     variant_id: "baseline",
     trial_id: "trial-1",
+    report_authority: testReportAuthority({ run_id: rowId }),
     report_schema_valid: true,
     ground_truth_bug_count: 2,
     finding_count: 2,
@@ -195,8 +208,6 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
     severity_accuracy: 1,
     true_positive_accuracy: 1,
     duplicate_rate: 0,
-    runtime_seconds: 60,
-    cost_estimate: 0.5,
     lifecycle: {
       launcher: {
         status: "succeeded",
@@ -220,6 +231,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
       usage: { status: "complete", reason: null },
       cost: { status: "complete", reason: null }
     },
+    expansion: currentRunExpansion(),
     recovery_equivalence: cleanRecoveryEquivalence(),
     ...overrides
   };
@@ -227,6 +239,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
 
 function summary(rows: EvalRowScore[]): EvalScoreSummary {
   return {
+    schema_version: "ultrafuzz.eval.score-summary.v2",
     eval_run_id: "run-1-benchmark-smoke",
     eval_run_root: "/tmp/run-1-benchmark-smoke",
     recall_threshold: 0.7,
@@ -261,6 +274,12 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
           }
         ],
         ground_truth_sha256: { "target-a": "c".repeat(64) },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/target-a",
+            revision: TARGET_REVISION
+          }
+        },
         execution_policy: {
           revision: "ultrafuzz.eval.execution-policy.v1",
           fingerprint: EXECUTION_POLICY_FINGERPRINT,
@@ -279,7 +298,14 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
         judge_mode: "deterministic",
         judge_prompt_version: "v1",
         judge_models: ["gpt-5.6-luna"],
+        judge_panel: { total: 1, quorum: 1 },
         ground_truth_sha256: { "target-a": "c".repeat(64) },
+        ground_truth_subjects: {
+          "target-a": {
+            repository: "https://example.com/target-a",
+            revision: TARGET_REVISION
+          }
+        },
         fingerprint: SCORING_FINGERPRINT
       }
     }
@@ -356,6 +382,84 @@ function publicDiagnostics(
 }
 
 describe("longitudinal eval history", () => {
+  it("keeps history v2 and observation v6 structurally exact across JSON Schema and retained Zod", () => {
+    const fixture = JSON.parse(fs.readFileSync(new URL("./fixtures/eval-history.valid.json", import.meta.url), "utf8"));
+    const definitions = evalHistoryJsonSchema.$defs as Record<string, Record<string, unknown>>;
+    expect(definitions.timestamp?.pattern).toBe(EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE);
+    expect(definitions.githubRepositoryUrl?.pattern).toBe(EVAL_HISTORY_CANDIDATE_REPOSITORY_PATTERN_SOURCE);
+    expectHistoryStructuralParity(fixture, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, fixture)).toEqual([]);
+    expect(parseEvalHistory(fixture)).toEqual(fixture);
+
+    const extraRoot = { ...fixture, migrated: true };
+    const extraObservation = structuredClone(fixture);
+    extraObservation.observations[0].legacy_cost = 1.25;
+    const wrongVersion = structuredClone(fixture);
+    wrongVersion.observations[0].schema_version = "ultrafuzz.eval.history.observation.v5";
+    const unsafeCount = structuredClone(fixture);
+    unsafeCount.observations[0].trial_count = Number.MAX_SAFE_INTEGER + 1;
+    const invalidPath = structuredClone(fixture);
+    invalidPath.observations[0].target_publication.publication_location.bundle_path = "../public-results.json";
+    const oversizedId = structuredClone(fixture);
+    oversizedId.observations[0].id = "🙂".repeat(501);
+    const offsetTimestamp = structuredClone(fixture);
+    offsetTimestamp.observations[0].run_timestamp = "2026-07-19T00:00:00.000+00:00";
+    const missingMilliseconds = structuredClone(fixture);
+    missingMilliseconds.observations[0].run_timestamp = "2026-07-19T00:00:00Z";
+    const trailingRepositorySlash = structuredClone(fixture);
+    trailingRepositorySlash.observations[0].candidate_repository_url = "https://github.com/monad-developers/ultrafuzz/";
+    for (const invalid of [
+      extraRoot,
+      extraObservation,
+      wrongVersion,
+      unsafeCount,
+      invalidPath,
+      oversizedId,
+      offsetTimestamp,
+      missingMilliseconds,
+      trailingRepositorySlash
+    ]) {
+      expectHistoryStructuralParity(invalid, false);
+    }
+
+    const impossibleDate = structuredClone(fixture);
+    impossibleDate.observations[0].run_timestamp = "2026-02-30T00:00:00.000Z";
+    expectHistoryStructuralParity(impossibleDate, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, impossibleDate)).toEqual([
+      expect.objectContaining({ gate: "eval-history-integrity", path: "$" })
+    ]);
+    expect(() => parseEvalHistory(impossibleDate)).toThrow(/invalid run timestamp/u);
+
+    const inconsistent = structuredClone(fixture);
+    inconsistent.observations[0].target_publication.target = "other-target";
+    expectHistoryStructuralParity(inconsistent, true);
+    expect(executeEvalSchemaSemanticGates(EVAL_HISTORY_SCHEMA_ID, inconsistent)).toEqual([
+      expect.objectContaining({ gate: "eval-history-integrity", path: "$" })
+    ]);
+    expect(() => parseEvalHistory(inconsistent)).toThrow();
+  });
+
+  it("treats only a directly absent history file as empty", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-eval-history-"));
+    const historyPath = path.join(directory, "history.json");
+    try {
+      expect(readEvalHistory(historyPath)).toEqual(emptyEvalHistory());
+
+      fs.writeFileSync(
+        historyPath,
+        '{"schema_version":"ultrafuzz.eval.history.v2","schema_version":"ultrafuzz.eval.history.v2"}',
+        "utf8"
+      );
+      expect(() => readEvalHistory(historyPath)).toThrowError(/failed to parse eval history/u);
+
+      fs.rmSync(historyPath);
+      fs.mkdirSync(historyPath);
+      expect(() => readEvalHistory(historyPath)).toThrowError(/failed to read eval history/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("merges immutable observations idempotently and rejects conflicts", () => {
     const first = observation();
     const once = mergeEvalHistory(emptyEvalHistory(), [first]);
@@ -365,14 +469,10 @@ describe("longitudinal eval history", () => {
       expect.objectContaining({ code: "EVAL_HISTORY_CONFLICT" })
     );
 
-    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v2"
-    });
-    const publishedHistory = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [publishedV2]
-    });
-    expect(mergeEvalHistory(publishedHistory, [publishedV2])).toEqual(publishedHistory);
+    const oldVersion = { ...observation(), schema_version: "ultrafuzz.eval.history.observation.v2" };
+    expect(() =>
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: [oldVersion] })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("activates a source-run supersession only after its matching replacement is merged", () => {
@@ -388,7 +488,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const pending = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
@@ -398,9 +498,11 @@ describe("longitudinal eval history", () => {
 
     const pendingCharts = renderEvalHistoryCharts(pending);
     expect(pendingCharts.get("performance-cost.svg")).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(pendingCharts.get("cost.svg")).toContain("partial n/a 7777777");
+    expect(pendingCharts.get("cost.svg")).toContain(
+      'data-status="partial" data-available-count="1" data-expected-count="1"'
+    );
 
     const replacement = supersessionRun({
       sourceRunId: replacementSourceRun,
@@ -411,9 +513,11 @@ describe("longitudinal eval history", () => {
     expect(partiallyMerged.supersessions).toEqual([supersession]);
     expect(partiallyMerged.observations).toHaveLength(5);
     expect(renderEvalHistoryCharts(partiallyMerged).get("performance-cost.svg")).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="3"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain(
+      'data-status="partial" data-available-count="1" data-expected-count="1"'
+    );
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
@@ -448,7 +552,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const pending = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
@@ -463,7 +567,10 @@ describe("longitudinal eval history", () => {
     });
 
     const partiallyMerged = mergeEvalHistory(pending, replacement.slice(0, 2));
-    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain("partial n/a 7777777");
+    const partialCost = renderEvalHistoryCharts(partiallyMerged).get("cost.svg")!;
+    expect(partialCost).toContain('data-completeness-marker="partial"');
+    expect(partialCost).toContain("0.2 partial (pricing-incomplete)");
+    expect(partialCost).not.toContain("partial n/a 7777777");
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
@@ -478,7 +585,7 @@ describe("longitudinal eval history", () => {
       sourceRunId: supersededSourceRun,
       timestamp: "2026-08-04T00:00:00.000Z",
       commitCharacter: "7",
-      legacyPartialLastTarget: true
+      partialLastTarget: true
     });
     const replacement = supersessionRun({
       sourceRunId: replacementSourceRun,
@@ -665,13 +772,14 @@ describe("longitudinal eval history", () => {
     });
     const parsed = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [historical]
     });
     expect(parsed.observations).toEqual([historical]);
     expect(parsed.observations[0]?.trial_count).toBe(10);
   });
 
-  it("preserves legacy v1 observations without publication metadata", () => {
+  it("rejects historical observation versions instead of converting them", () => {
     const {
       status: _status,
       executed_case_count: _executedCaseCount,
@@ -680,23 +788,32 @@ describe("longitudinal eval history", () => {
       target_publication: _targetPublication,
       ground_truth_bug_count: _groundTruthBugCount,
       ...legacy
-    } = observation({ schema_version: "ultrafuzz.eval.history.observation.v1" });
-    const parsed = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [legacy]
-    });
-    expect(parsed.observations).toEqual([legacy]);
+    } = observation();
+    for (const schemaVersion of [
+      "ultrafuzz.eval.history.observation.v1",
+      "ultrafuzz.eval.history.observation.v2",
+      "ultrafuzz.eval.history.observation.v3",
+      "ultrafuzz.eval.history.observation.v4",
+      "ultrafuzz.eval.history.observation.v5"
+    ]) {
+      expect(() =>
+        parseEvalHistory({
+          schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+          supersessions: [],
+          observations: [{ ...legacy, schema_version: schemaVersion }]
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    }
   });
 
-  it("preserves published v2 observations without ground-truth counts", () => {
-    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v2"
-    });
-    const parsed = parseEvalHistory({
-      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-      observations: [publishedV2]
-    });
-    expect(parsed.observations).toEqual([publishedV2]);
+  it("rejects the pre-report-authority history root version", () => {
+    expect(() =>
+      parseEvalHistory({
+        schema_version: "ultrafuzz.eval.history.v1",
+        supersessions: [],
+        observations: []
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("requires ground-truth counts for current observations and bounds unique matches", () => {
@@ -704,27 +821,31 @@ describe("longitudinal eval history", () => {
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [missingGroundTruth]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [observation({ cumulative_unique_true_positives: 3, ground_truth_bug_count: 2 })]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [observation({ cumulative_unique_true_positives: 0, ground_truth_bug_count: 0 })]
       })
     ).not.toThrow();
   });
 
-  it("versions failed publication statuses without widening older observations", () => {
+  it("accepts failed publication status only in the current exact version", () => {
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({
             status: "failed",
@@ -733,30 +854,23 @@ describe("longitudinal eval history", () => {
         ]
       })
     ).not.toThrow();
-    expect(() =>
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [
-          observation({
-            schema_version: "ultrafuzz.eval.history.observation.v4",
-            status: "failed",
-            target_publication: { ...observation().target_publication!, status: "failed" }
-          })
-        ]
-      })
-    ).not.toThrow();
-    expect(() =>
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [
-          observation({
-            schema_version: "ultrafuzz.eval.history.observation.v3",
-            status: "failed",
-            target_publication: { ...observation().target_publication!, status: "failed" }
-          })
-        ]
-      })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    for (const schemaVersion of ["ultrafuzz.eval.history.observation.v3", "ultrafuzz.eval.history.observation.v4"]) {
+      expect(() =>
+        parseEvalHistory({
+          schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+          supersessions: [],
+          observations: [
+            {
+              ...observation({
+                status: "failed",
+                target_publication: { ...observation().target_publication!, status: "failed" }
+              }),
+              schema_version: schemaVersion
+            }
+          ]
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    }
   });
 
   it("enforces the complete, partial, and unavailable value/reason matrix for current observations", () => {
@@ -773,6 +887,7 @@ describe("longitudinal eval history", () => {
           const parse = () =>
             parseEvalHistory({
               schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+              supersessions: [],
               observations: [
                 observation({
                   cost_usd,
@@ -787,24 +902,30 @@ describe("longitudinal eval history", () => {
     }
   });
 
-  it("preserves the v4 partial-null contract while requiring v5 for partial values", () => {
-    const partialNullV4 = observation({
-      schema_version: "ultrafuzz.eval.history.observation.v4",
+  it("rejects partial-null and historical-version observations", () => {
+    const partialNull = {
+      ...observation(),
       cost_usd: null,
       cost_completeness: { status: "partial", reasons: ["pricing-incomplete"] }
-    });
-    expect(() =>
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: [partialNullV4] })
-    ).not.toThrow();
+    };
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        observations: [{ ...partialNullV4, cost_usd: 1.25 }]
+        supersessions: [],
+        observations: [partialNull]
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
     expect(() =>
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
+        observations: [{ ...partialNull, schema_version: "ultrafuzz.eval.history.observation.v4", cost_usd: 1.25 }]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({
             cost_usd: 1.25,
@@ -815,9 +936,11 @@ describe("longitudinal eval history", () => {
     ).not.toThrow();
   });
 
-  it("continues to parse the checked-in history containing the legacy Flash partial-null row", () => {
-    const checkedIn = JSON.parse(fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "history.json"), "utf8"));
-    const parsed = parseEvalHistory(checkedIn, "benchmarks/history.json");
+  it("parses the fully migrated checked-in history", () => {
+    const checkedIn = JSON.parse(
+      fs.readFileSync(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "history.json"), "utf8")
+    );
+    const parsed = parseEvalHistory(checkedIn, "benchmarks/ultrafuzzbench/history.json");
     const legacySourceRun = "ci-31264673583-1-smoke-ultrafuzz-bench-deepseek-benchmark-smoke-deepseek-v4-flash-max";
     const legacyObservations = parsed.observations.filter(
       (candidate) => candidate.source_eval_run_id === legacySourceRun
@@ -836,9 +959,11 @@ describe("longitudinal eval history", () => {
     expect(charts.get("performance-cost.svg")).toContain(
       'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 23.7% · $0.41 · n=1 · targets 2/3 · partial'
     );
-    expect(charts.get("cost.svg")).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
-    expect(charts.get("cost.svg")).toContain('data-completeness-marker="partial-null"');
-    expect(charts.get("cost.svg")).toContain("partial n/a 70646d2");
+    expect(charts.get("cost.svg")).toContain(
+      'data-status="unavailable" data-available-count="0" data-expected-count="1"'
+    );
+    expect(charts.get("cost.svg")).not.toContain('data-completeness-marker="partial-null"');
+    expect(charts.get("cost.svg")).toContain("n/a 70646d2");
     expect(charts.get("latest-summary.svg")).toContain(
       'data-metric="cost_usd" data-status="partial" data-available-target-count="2" data-expected-target-count="3"'
     );
@@ -903,7 +1028,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         suite,
@@ -915,10 +1040,10 @@ describe("longitudinal eval history", () => {
         ])
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_SOURCE_INVALID" }));
-    const observations = createEvalHistoryObservations({
+    const generationInput: Parameters<typeof createEvalHistoryObservations>[0] = {
       benchmark: "evmbench",
       lane: "smoke",
-      runTimestamp: "2026-07-19T00:00:00Z",
+      runTimestamp: "2026-07-19T00:00:00.000Z",
       candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
       sourceArtifact: "artifact-1",
       publicationUrl: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts",
@@ -929,8 +1054,21 @@ describe("longitudinal eval history", () => {
         [first.id, new Set(["bug-a", "bug-b"])],
         [second.id, new Set(["bug-b"])]
       ])
-    });
+    };
+    const observations = createEvalHistoryObservations(generationInput);
     expect(observations).toHaveLength(1);
+    expect(observations[0]?.run_timestamp).toBe(generationInput.runTimestamp);
+    for (const runTimestamp of ["2026-07-19T00:00:00Z", "2026-07-19T00:00:00.000+00:00", "2026-02-30T00:00:00.000Z"]) {
+      expect(() => createEvalHistoryObservations({ ...generationInput, runTimestamp })).toThrowError(
+        expect.objectContaining({ code: "EVAL_HISTORY_TIMESTAMP_INVALID" })
+      );
+    }
+    expect(() =>
+      createEvalHistoryObservations({
+        ...generationInput,
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz/"
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_REPOSITORY_INVALID" }));
     expect(observations[0]).toMatchObject({
       status: "succeeded",
       trial_count: 2,
@@ -956,10 +1094,8 @@ describe("longitudinal eval history", () => {
           report_paths: [
             "reports/target-a-baseline-trial-1/report.md",
             "reports/target-a-baseline-trial-1/report.json",
-            "reports/target-a-baseline-trial-1/findings.normalized.json",
             "reports/target-a-baseline-trial-2/report.md",
-            "reports/target-a-baseline-trial-2/report.json",
-            "reports/target-a-baseline-trial-2/findings.normalized.json"
+            "reports/target-a-baseline-trial-2/report.json"
           ]
         }
       }
@@ -982,7 +1118,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1012,7 +1148,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1041,7 +1177,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1061,7 +1197,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1086,7 +1222,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1105,7 +1241,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1124,7 +1260,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1142,7 +1278,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1162,7 +1298,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1225,7 +1361,7 @@ describe("longitudinal eval history", () => {
         efficiency: {
           ...base.efficiency,
           cost_usd: null,
-          cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+          cost: { status: "partial" as const, reason: "pricing-incomplete" as const }
         }
       };
     });
@@ -1234,7 +1370,7 @@ describe("longitudinal eval history", () => {
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
-        runTimestamp: "2026-07-19T00:00:00Z",
+        runTimestamp: "2026-07-19T00:00:00.000Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
         publicationUrl: PUBLICATION_URL,
@@ -1250,7 +1386,7 @@ describe("longitudinal eval history", () => {
         cost_usd: 0.75,
         cost_completeness: {
           status: "partial",
-          reasons: ["pricing-incomplete", "pricing-unavailable"]
+          reasons: ["pricing-incomplete"]
         }
       }
     ]);
@@ -1260,20 +1396,22 @@ describe("longitudinal eval history", () => {
       efficiency: {
         ...score.efficiency,
         cost_usd: null,
-        cost: { status: "unavailable" as const, reason: "pricing-unavailable" as const }
+        cost: { status: "partial" as const, reason: "pricing-incomplete" as const }
       }
     }));
     expect(generate(unavailable)).toMatchObject([
       {
         cost_usd: null,
-        cost_completeness: { status: "unavailable", reasons: ["pricing-unavailable"] }
+        cost_completeness: { status: "unavailable", reasons: ["pricing-incomplete"] }
       }
     ]);
   });
 
   it("requires the exact public target, variant, and trial matrix", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
-    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json"));
+    const cohort = loadBenchmarkCohortManifest(
+      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "cohort.json")
+    );
+    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json"));
     const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "ultrafuzz-bench", lane: "smoke", cohort, lanes });
     const matrix = publicMatrix(suite);
 
@@ -1312,9 +1450,129 @@ describe("longitudinal eval history", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" }));
   });
 
+  it("requires every public full row to attest its actual packaged run policy before publication", () => {
+    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench", "cohort.json"));
+    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json"));
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
+    const matrix = publicMatrix(suite);
+    const catalog = loadAuditProfileCatalog(path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml"));
+    const topologyDigest = packagedTopologyDigest(auditProfile("full", catalog), catalog);
+    expect(topologyDigest).toMatch(/^[0-9a-f]{64}$/u);
+    if (topologyDigest === undefined) throw new Error("missing packaged full topology");
+    const records = matrix.map((row) =>
+      currentEvalRunRecord({
+        row,
+        runRoot: path.join("/tmp/public-runs", row.id),
+        evalRunId: "eval-full",
+        overrides: {
+          audit_profile: "full",
+          audit_profile_catalog_digest: catalog.digest,
+          topology_path_origin: "audit-profile",
+          topology_digest: topologyDigest
+        }
+      })
+    );
+
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records
+      })
+    ).not.toThrow();
+
+    for (const overrides of [
+      { audit_profile: "default" },
+      { audit_profile_catalog_digest: "0".repeat(64) },
+      { topology_path_origin: "project-config" as const },
+      { topology_digest: "0".repeat(64) }
+    ]) {
+      const mismatched = records.map((record, index) => (index === 0 ? { ...record, ...overrides } : record));
+      expect(() =>
+        assertPublicBenchmarkRunPolicy({
+          benchmarkPolicyRoot: REPOSITORY_ROOT,
+          evalRunId: "eval-full",
+          lane: "full",
+          matrix,
+          records: mismatched
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+    }
+
+    const staleMismatch = { ...records[0]!, topology_digest: "0".repeat(64) };
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [staleMismatch, ...records]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [...records, staleMismatch]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    const staleFailed = {
+      ...records[0]!,
+      status: "failed" as const,
+      launcher: { ...records[0]!.launcher, status: "failed" as const }
+    };
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [staleFailed, ...records]
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: [...records, staleFailed]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    const wrongIdentity = records.map((record, index) =>
+      index === 0 ? { ...record, target_id: "another-target" } : record
+    );
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: wrongIdentity
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+
+    expect(() =>
+      assertPublicBenchmarkRunPolicy({
+        benchmarkPolicyRoot: REPOSITORY_ROOT,
+        evalRunId: "eval-full",
+        lane: "full",
+        matrix,
+        records: records.slice(1)
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_RUN_POLICY_INVALID" }));
+  });
+
   it("renders deterministic linked SVGs and marks missing efficiency unavailable", () => {
     const history = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [
         observation({
           benchmark: "ultrafuzz-bench",
@@ -1464,8 +1722,8 @@ describe("longitudinal eval history", () => {
       ["luna-5", "2026-07-31T18:52:13.635Z", "6", 0.5, 18],
       ["luna-6", "2026-07-31T19:52:13.635Z", "7", 0.6, 20]
     ] as const;
-    const legacyFlash = completeRun({
-      id: "legacy-flash",
+    const partialFlash = completeRun({
+      id: "partial-flash",
       timestamp: "2026-08-01T12:00:00.000Z",
       commitCharacter: "c",
       model: "deepseek-v4-flash",
@@ -1476,8 +1734,7 @@ describe("longitudinal eval history", () => {
         ? entry
         : {
             ...entry,
-            schema_version: "ultrafuzz.eval.history.observation.v4" as const,
-            cost_usd: null,
+            cost_usd: 0.2,
             cost_completeness: { status: "partial" as const, reasons: ["pricing-incomplete"] }
           }
     );
@@ -1501,7 +1758,7 @@ describe("longitudinal eval history", () => {
         completeRun({ id, timestamp, commitCharacter, model: "gpt-5.6-luna", f1, costUsd })
       ),
       ...partialDeepseek,
-      ...legacyFlash,
+      ...partialFlash,
       ...completeRun({
         id: "kimi",
         timestamp: "2026-08-02T00:00:00.000Z",
@@ -1518,10 +1775,10 @@ describe("longitudinal eval history", () => {
         model: "deepseek-v4-flash",
         runCount: 1,
         expectedRunCount: 1,
-        availableTargetCount: 1,
+        availableTargetCount: 2,
         expectedTargetCount: 2,
         costCompleteness: { status: "partial", reasons: ["pricing-incomplete"] },
-        costUsd: { q1: 0.2, median: 0.2, q3: 0.2 },
+        costUsd: { q1: 0.4, median: 0.4, q3: 0.4 },
         f1: { q1: 0.25, median: 0.25, q3: 0.25 }
       },
       {
@@ -1548,24 +1805,24 @@ describe("longitudinal eval history", () => {
     ]);
 
     const svg = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations })
     ).get("performance-cost.svg")!;
     expect(svg).toContain('data-model="gpt-5.6-luna" data-status="complete" data-run-count="6"');
     expect(svg).toContain('data-cost-q1="12.5" data-cost-median="15" data-cost-q3="17.5"');
     expect(svg).toContain('data-f1-q1="0.225" data-f1-median="0.35" data-f1-q3="0.475"');
     expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable · targets 0/2");
     expect(svg).toContain(
-      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="1" data-expected-target-count="2"'
+      'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="2" data-expected-target-count="2"'
     );
     expect(svg).toContain('data-completeness-marker="partial"');
     expect(svg).toContain(
-      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.20 · n=1 · targets 1/2 · partial'
+      'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.40 · n=1 · targets 2/2 · partial'
     );
     const costSvg = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations: legacyFlash })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: partialFlash })
     ).get("cost.svg")!;
-    expect(costSvg).toContain('data-status="partial" data-available-count="0" data-expected-count="1"');
-    expect(costSvg).toContain("partial (value unavailable) (pricing-incomplete)");
+    expect(costSvg).toContain('data-status="partial" data-available-count="1" data-expected-count="1"');
+    expect(costSvg).toContain("partial (pricing-incomplete)");
     const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
     expect(deepseek).toBeDefined();
     expect(deepseek).not.toContain('data-iqr="');
@@ -1573,6 +1830,7 @@ describe("longitudinal eval history", () => {
     const currentUnpricedLuna = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           ...completeRun({
             id: "old-priced-luna",
@@ -1637,6 +1895,7 @@ describe("longitudinal eval history", () => {
     const charts = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [...firstRun, ...secondRun, ...thirdRun, ...thirdRunAlternateProfile]
       })
     );
@@ -1685,7 +1944,7 @@ describe("longitudinal eval history", () => {
     ];
 
     const quality = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations })
     ).get("quality.svg")!;
 
     expect(quality).toContain('<circle data-metric="f1" data-profile="benchmark-smoke-alpha" fill="#2563eb"');
@@ -1710,7 +1969,7 @@ describe("longitudinal eval history", () => {
       )
     );
     const quality = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations })
     ).get("quality.svg")!;
 
     expect(quality).toContain("latest 12 of 13 complete runs");
@@ -1723,6 +1982,7 @@ describe("longitudinal eval history", () => {
   it("formats published history JSON compatibly with repository Prettier checks", () => {
     const history = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      supersessions: [],
       observations: [
         observation({
           cost_usd: null,
@@ -1740,6 +2000,7 @@ describe("longitudinal eval history", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({ id: "first-series" }),
           observation({
@@ -1763,6 +2024,7 @@ describe("longitudinal eval history", () => {
     const charts = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations: [
           observation({ id: "later", benchmark: "evmbench", run_timestamp: "2026-07-19T12:00:00.000Z" }),
           observation({
@@ -1790,6 +2052,7 @@ describe("longitudinal eval history", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        supersessions: [],
         observations
       })
     ).get("precision.svg")!;
@@ -1806,6 +2069,14 @@ describe("longitudinal eval history", () => {
     expect(svg).toContain(">2026-07-29</text>");
   });
 });
+
+function expectHistoryStructuralParity(value: unknown, expected: boolean): void {
+  const canonical = validateEvalJsonSchema(EVAL_HISTORY_SCHEMA_ID, value).ok;
+  const retained = evalHistoryZodSchema.safeParse(value);
+  expect(canonical).toBe(expected);
+  expect(retained.success).toBe(expected);
+  if (retained.success) expect(retained.data).toEqual(value);
+}
 
 function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
   const rows: EvalMatrixRow[] = [];
@@ -1833,8 +2104,7 @@ function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
             ...variant,
             ...(variant.topology === undefined
               ? {}
-              : { topology_path: path.join("/tmp/modal-worker/candidate", variant.topology) }),
-            prompt_overlay_paths: []
+              : { topology_path: path.join("/tmp/modal-worker/candidate", variant.topology) })
           },
           runner_model_profile: runnerProfileId,
           judge_model_profile: judgeProfileId,

@@ -6,7 +6,6 @@ groups:
     label: Smoke context
     color: "#2563eb"
     defaults:
-      max_attempts: 2
       model_profiles:
         - default
   strategies:
@@ -14,14 +13,12 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 1
-      max_attempts: 2
       model_profiles:
         - default
   review:
     label: Bounded smoke review
     color: "#0f766e"
     defaults:
-      max_attempts: 2
       model_profiles:
         - default
 nodes:
@@ -44,6 +41,16 @@ nodes:
       - path: smoke-context.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+  - id: json-validation-correction
+    kind: agentic
+    prompt: smoke/json-validation-correction.md
+    group: setup
+    depends_on:
+      - __start__
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
   - id: time-warp-sequences
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -52,10 +59,10 @@ nodes:
       - smoke-context
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: external-dependency-boundaries
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -64,10 +71,10 @@ nodes:
       - smoke-context
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: externalized-state-accounting
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -76,10 +83,10 @@ nodes:
       - smoke-context
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -88,38 +95,38 @@ nodes:
       - smoke-context
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: dedupe-findings
     kind: agentic
-    prompt: smoke/smoke-dedupe-findings.md
+    prompt: review/dedupe-findings.md
     group: review
     depends_on:
+      - json-validation-correction
       - time-warp-sequences
       - external-dependency-boundaries
       - externalized-state-accounting
       - lifecycle-view-boundaries
     outputs:
       - path: deduped-findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: strategy-detections.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/strategy-detections@1
       - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/finding-lifecycle-ledger@1
   - id: final-report
     kind: agentic
-    prompt: smoke/smoke-final-report.md
+    prompt: review/final-report.md
     group: review
     depends_on:
       - dedupe-findings
+      - smoke-context
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@1
-      - path: findings.normalized.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/report@3

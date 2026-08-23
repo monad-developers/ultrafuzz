@@ -31,10 +31,20 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+
+      - name: Build trusted qualification dependency
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @ultrafuzz/artifacts... build
 
       - name: Qualify the exact completed producer attempt
         id: qualify
@@ -96,7 +106,7 @@ jobs:
       - name: Download exact benchmark control metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: modal-benchmark-control-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
           path: ${{ runner.temp }}/trusted-modal-publication/control
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
@@ -109,7 +119,22 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
+      - name: Classify exact benchmark publication readiness
+        id: publication-readiness
+        env:
+          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control/benchmark-control
+          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/results
+          PRODUCER_EVENT: ${{ github.event.workflow_run.event }}
+        run: >-
+          node scripts/ci/classify-modal-benchmark-publication.mjs
+          "$BENCHMARK_CONTROL"
+          "$BENCHMARK_RESULTS"
+          "$BENCHMARK_MODE"
+          "$PRODUCER_EVENT"
+          "$GITHUB_OUTPUT"
+
       - name: Check out the exact candidate benchmark policy
+        if: steps.publication-readiness.outputs.ready == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.CANDIDATE_COMMIT }}
@@ -117,6 +142,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify the candidate remains reachable from main
+        if: steps.publication-readiness.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -129,8 +155,9 @@ jobs:
           fi
 
       - name: Validate the atomic Modal benchmark generation
+        if: steps.publication-readiness.outputs.ready == 'true'
         env:
-          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control
+          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control/benchmark-control
           BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/results
           PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
           PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
@@ -149,6 +176,8 @@ jobs:
             "$BENCHMARK_MODE" \
             "$PUBLICATION_GENERATION" \
             "$PUBLICATION_PLAN"
+          publication_rows="$RUNNER_TEMP/eval-history-publication-rows.tsv"
+          node scripts/ci/prepare-eval-history-publication.mjs plan-rows "$PUBLICATION_PLAN" > "$publication_rows"
           mkdir "$PUBLICATION_UNPACKED"
           while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
             metadata="$(node packages/modal/dist/cli.js unpack-public \
@@ -166,10 +195,10 @@ jobs:
                .model_slug == $model_slug and
                .candidate_commit == $candidate_commit' \
               <<< "$metadata" > /dev/null
-          done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
-            "$PUBLICATION_PLAN")
+          done < "$publication_rows"
 
       - name: Create the narrowly scoped eval-history publisher token
+        if: steps.publication-readiness.outputs.ready == 'true'
         id: publisher-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -181,6 +210,7 @@ jobs:
           skip-token-revoke: false
 
       - name: Publish the validated generation with remote-tip compare-and-swap retries
+        if: steps.publication-readiness.outputs.ready == 'true'
         env:
           PUBLISHER_TOKEN: ${{ steps.publisher-token.outputs.token }}
           PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json

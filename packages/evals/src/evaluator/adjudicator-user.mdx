@@ -1,5 +1,5 @@
 Score the finding with this rubric:
-Return exactly one JSON object with matched_ground_truth_bug_id (a candidate label string or null), score, signals, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.
+Return exactly one `ultrafuzz.eval.llm-judge-result.v1` JSON object with schema_version, matched_ground_truth_bug_id (a candidate label string or null), score, signals, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.
 
 Apply the candidate-first canonical-family-containment test before scoring. First derive the finding's demonstrated domain boundary or admitted-state family, externally observable violated guarantee, and impact from the finding itself. Then infer each catalog issue's canonical scope from the issue as a whole. Treat its proof path as a demonstrated family member, not automatically an exhaustive scope definition, unless the catalog language expressly narrows the issue to that mechanism.
 
@@ -12,7 +12,7 @@ For a nonmatch against a plausible selected canonical candidate, give a concise 
 - 0.7: same root cause and impact, but incomplete localization or evidence
 - 1.0: same root cause, affected area, impact, and concrete PoC/test/evidence
 
-Return JSON with matched_ground_truth_bug_id, score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, rationale, and confidence.
+Return JSON with schema_version=`ultrafuzz.eval.llm-judge-result.v1`, matched_ground_truth_bug_id, score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, rationale, and confidence.
 
 Target: {{target}}
 Recall threshold: {{threshold}}

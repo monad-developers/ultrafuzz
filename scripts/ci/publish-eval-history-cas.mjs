@@ -4,20 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+import {
+  EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+  parseEvalHistoryPublicationGeneration,
+  readEvalHistoryPublicationGeneration,
+  readStrictJsonDocument
+} from "../../packages/evals/dist/index.js";
+
+export { EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION, parseEvalHistoryPublicationGeneration };
 
 const TARGET_BRANCH = "main";
 const TARGET_REF = `refs/heads/${TARGET_BRANCH}`;
 const TARGET_REMOTE_REF = `refs/remotes/origin/${TARGET_BRANCH}`;
 const MAX_ATTEMPTS = 12;
-const MAX_GENERATION_BYTES = 1024 * 1024;
-const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const COMMIT_MESSAGE = "Update published eval history";
 const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
 const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
 const HISTORY_PATHS = [
-  "benchmarks/history.json",
+  "benchmarks/ultrafuzzbench/history.json",
   "docs/assets/eval-history/latest-summary.svg",
   "docs/assets/eval-history/quality.svg",
   "docs/assets/eval-history/performance-cost.svg",
@@ -29,92 +33,9 @@ const HISTORY_PATHS = [
   "docs/assets/eval-history/cost.svg"
 ];
 
-export function parseEvalHistoryPublicationGeneration(value) {
-  const generation = strictRecord(value, "publication generation", [
-    "schema_version",
-    "candidate_commit",
-    "candidate_repository_url",
-    "source_artifact",
-    "runs"
-  ]);
-  if (generation.schema_version !== EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION) {
-    throw new Error(
-      `publication generation schema_version must be ${EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION}`
-    );
-  }
-  const candidateCommit = fullCommit(generation.candidate_commit, "publication candidate commit");
-  const candidateRepositoryUrl = canonicalGitHubRepositoryUrl(generation.candidate_repository_url);
-  const sourceArtifact = canonicalGitHubActionsRunUrl(generation.source_artifact, candidateRepositoryUrl);
-  if (!Array.isArray(generation.runs) || generation.runs.length === 0 || generation.runs.length > 64) {
-    throw new Error("publication generation runs must contain between 1 and 64 entries");
-  }
-  const ids = new Set();
-  const inputPaths = new Set();
-  const runs = generation.runs.map((value, index) => {
-    const run = strictRecord(
-      value,
-      `publication run ${index}`,
-      ["eval_run_id", "benchmark", "lane", "input_path"],
-      ["status", "target_ids", "executed_case_count", "graded_case_count", "publication_url"]
-    );
-    const evalRunId = safeId(run.eval_run_id, `publication run ${index} eval_run_id`);
-    if (ids.has(evalRunId)) throw new Error(`publication generation repeats eval run ${evalRunId}`);
-    ids.add(evalRunId);
-    if (run.benchmark !== "evmbench" && run.benchmark !== "ultrafuzz-bench") {
-      throw new Error(`publication run ${evalRunId} benchmark must be evmbench or ultrafuzz-bench`);
-    }
-    if (run.lane !== "smoke" && run.lane !== "full") {
-      throw new Error(`publication run ${evalRunId} lane must be smoke or full`);
-    }
-    const inputPath = canonicalRelativePath(run.input_path, `publication run ${evalRunId} input_path`);
-    if (inputPaths.has(inputPath)) throw new Error(`publication generation repeats input path ${inputPath}`);
-    inputPaths.add(inputPath);
-    const targetIds = run.target_ids === undefined ? undefined : targetIdsForPublicationRun(run.target_ids, evalRunId);
-    const status = run.status === undefined ? undefined : publicationStatus(run.status, evalRunId);
-    const executedCaseCount =
-      run.executed_case_count === undefined
-        ? undefined
-        : positiveSafeInteger(run.executed_case_count, `publication run ${evalRunId} executed_case_count`);
-    const gradedCaseCount =
-      run.graded_case_count === undefined
-        ? undefined
-        : positiveSafeInteger(run.graded_case_count, `publication run ${evalRunId} graded_case_count`);
-    if (
-      executedCaseCount !== undefined &&
-      gradedCaseCount !== undefined &&
-      (gradedCaseCount > executedCaseCount ||
-        (targetIds !== undefined && (targetIds.length > executedCaseCount || targetIds.length > gradedCaseCount)))
-    ) {
-      throw new Error(`publication run ${evalRunId} case counts do not cover its target set`);
-    }
-    const publicationUrl =
-      run.publication_url === undefined
-        ? sourceArtifact
-        : canonicalGitHubActionsPublicationUrl(run.publication_url, candidateRepositoryUrl, sourceArtifact);
-    return {
-      eval_run_id: evalRunId,
-      benchmark: run.benchmark,
-      lane: run.lane,
-      input_path: inputPath,
-      ...(status === undefined ? {} : { status }),
-      ...(targetIds === undefined ? {} : { target_ids: targetIds }),
-      ...(executedCaseCount === undefined ? {} : { executed_case_count: executedCaseCount }),
-      ...(gradedCaseCount === undefined ? {} : { graded_case_count: gradedCaseCount }),
-      publication_url: publicationUrl
-    };
-  });
-  return {
-    schema_version: EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
-    candidate_commit: candidateCommit,
-    candidate_repository_url: candidateRepositoryUrl,
-    source_artifact: sourceArtifact,
-    runs
-  };
-}
-
 export function publishEvalHistoryGeneration(input) {
   const generationPath = regularFilePath(input.generationPath, "publication generation JSON");
-  const generation = parseEvalHistoryPublicationGeneration(readGeneration(generationPath));
+  const generation = readEvalHistoryPublicationGeneration(generationPath);
   const inputRoot = realDirectory(input.inputRoot, "publication input root");
   const repositoryRoot = gitRepositoryRoot(input.repositoryRoot ?? process.cwd());
   const benchmarkPolicyRoot = gitRepositoryRoot(input.benchmarkPolicyRoot ?? repositoryRoot);
@@ -351,9 +272,9 @@ function validateEvalRunIdentity(root, evalRunId, candidateCommit) {
   const manifestPath = regularFilePath(path.join(root, "eval.json"), `eval manifest for ${evalRunId}`);
   let manifest;
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifest = readStrictJsonDocument(manifestPath);
   } catch (error) {
-    throw new Error(`eval manifest for ${evalRunId} is not valid JSON`, { cause: error });
+    throw new Error(`eval manifest for ${evalRunId} is not valid strict JSON`, { cause: error });
   }
   if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
     throw new Error(`eval manifest for ${evalRunId} must be an object`);
@@ -391,138 +312,11 @@ function copyTree(source, destination) {
   }
 }
 
-function canonicalGitHubRepositoryUrl(value) {
-  const text = requiredString(value, "candidate_repository_url");
-  let url;
-  try {
-    url = new URL(text);
-  } catch (error) {
-    throw new Error("candidate_repository_url must be a valid URL", { cause: error });
-  }
-  const parts = url.pathname.split("/").filter(Boolean);
-  if (
-    url.protocol !== "https:" ||
-    url.hostname !== "github.com" ||
-    url.port !== "" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    parts.length !== 2 ||
-    !SAFE_ID.test(parts[0]) ||
-    !SAFE_ID.test(parts[1])
-  ) {
-    throw new Error("candidate_repository_url must be a canonical public GitHub repository URL");
-  }
-  const canonical = `https://github.com/${parts[0]}/${parts[1]}`;
-  if (text !== canonical && text !== `${canonical}/`) {
-    throw new Error("candidate_repository_url must be a canonical public GitHub repository URL");
-  }
-  return canonical;
-}
-
-function canonicalGitHubActionsRunUrl(value, repositoryUrl) {
-  const text = requiredString(value, "source_artifact");
-  const escaped = repositoryUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  if (!new RegExp(`^${escaped}/actions/runs/[1-9][0-9]*$`, "u").test(text)) {
-    throw new Error("source_artifact must be a canonical GitHub Actions run URL for candidate_repository_url");
-  }
-  return text;
-}
-
-function canonicalGitHubActionsPublicationUrl(value, repositoryUrl, sourceArtifact) {
-  const text = requiredString(value, "publication_url");
-  const escapedRepository = repositoryUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const escapedRun = sourceArtifact.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  if (
-    !new RegExp(
-      `^(?:${escapedRun}|${escapedRun}/artifacts|${escapedRepository}/actions/runs/[1-9][0-9]*/artifacts)$`,
-      "u"
-    ).test(text)
-  ) {
-    throw new Error("publication_url must be a canonical GitHub Actions run or artifact URL");
-  }
-  return text;
-}
-
-function canonicalRelativePath(value, label) {
-  const text = requiredString(value, label);
-  if (text.length > 512 || text.includes("\\") || path.posix.isAbsolute(text) || path.win32.isAbsolute(text)) {
-    throw new Error(`${label} must be a canonical relative POSIX path`);
-  }
-  const parts = text.split("/");
-  if (parts.some((part) => !SAFE_ID.test(part))) {
-    throw new Error(`${label} must contain only safe path segments`);
-  }
-  return parts.join("/");
-}
-
-function targetIdsForPublicationRun(value, evalRunId) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 2_048) {
-    throw new Error(`publication run ${evalRunId} target_ids must be a non-empty array`);
-  }
-  const seen = new Set();
-  return value.map((entry, index) => {
-    const id = safeId(entry, `publication run ${evalRunId} target_ids ${index}`);
-    if (seen.has(id)) throw new Error(`publication run ${evalRunId} repeats target ${id}`);
-    seen.add(id);
-    return id;
-  });
-}
-
-function positiveSafeInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${label} must be a positive safe integer`);
-  }
-  return value;
-}
-
-function publicationStatus(value, evalRunId) {
-  if (value !== "succeeded" && value !== "genuine-task-failures" && value !== "failed") {
-    throw new Error(`publication run ${evalRunId} status is invalid`);
-  }
-  return value;
-}
-
-function strictRecord(value, label, keys, optionalKeys = []) {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  const allowed = new Set([...keys, ...optionalKeys]);
-  const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
-  if (unexpected.length > 0) throw new Error(`${label} contains unexpected fields: ${unexpected.join(", ")}`);
-  for (const key of keys) {
-    if (!Object.hasOwn(value, key)) throw new Error(`${label} is missing ${key}`);
-  }
-  return value;
-}
-
-function safeId(value, label) {
-  const id = requiredString(value, label);
-  if (!SAFE_ID.test(id)) throw new Error(`${label} is not a safe ID`);
-  return id;
-}
-
-function fullCommit(value, label) {
-  const commit = requiredString(value, label);
-  if (!FULL_COMMIT.test(commit)) throw new Error(`${label} must be a full lowercase commit SHA`);
-  return commit;
-}
-
 function requiredString(value, label) {
   if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) {
     throw new Error(`${label} must be a non-empty string without surrounding whitespace`);
   }
   return value;
-}
-
-function readGeneration(filePath) {
-  const stat = fs.statSync(filePath);
-  if (stat.size > MAX_GENERATION_BYTES) throw new Error("publication generation JSON is too large");
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
-    throw new Error(`failed to read publication generation JSON ${filePath}`, { cause: error });
-  }
 }
 
 function gitRepositoryRoot(cwd) {

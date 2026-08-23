@@ -29,7 +29,7 @@ import {
   modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
   modalRunnerAbandonmentMessage,
-  parseCompatibleModalLaunchState,
+  parseModalLaunchState,
   parseModalWorkerStatus,
   readModalLaunchState,
   reserveModalLaunchAttempt,
@@ -84,7 +84,7 @@ function streak(attempt: number): ModalPreModelAttempt {
 
 function workerStatus(category: ModalWorkerStatus["category"], modelWorkStarted: boolean): ModalWorkerStatus {
   return {
-    schema_version: "ultrafuzz.modal.worker-status.v2",
+    schema_version: WORKER_RESULT_SCHEMA_VERSION,
     updated_at: "2026-01-01T00:00:00.000Z",
     stage: "fixture",
     terminal: false,
@@ -163,6 +163,20 @@ describe("Modal launch ownership", () => {
     expect(fs.readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 
+  it.each(["", " padded-token ", "x".repeat(257)])(
+    "rejects an invalid explicit launch lock token before creating evidence",
+    async (token) => {
+      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-invalid-lock-token-"));
+      const statePath = path.join(root, "launch-state.json");
+
+      await expect(withModalLaunchStateLock(statePath, async () => undefined, { token })).rejects.toThrow(
+        /lock token/u
+      );
+
+      expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+    }
+  );
+
   it("reclaims a crashed owner before admitting the restarted process", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-crashed-lock-"));
     const statePath = path.join(root, "launch-state.json");
@@ -193,6 +207,46 @@ describe("Modal launch ownership", () => {
 
     await expect(withModalLaunchStateLock(statePath, async () => "new-owner")).resolves.toBe("new-owner");
     expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+
+  it("never reclaims malformed-present or duplicate-key launch lock evidence", async () => {
+    for (const [name, contents] of [
+      ["malformed", '{"token":"owner"'],
+      ["duplicate", '{"token":"owner","token":"shadow","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z"}\n'],
+      ["underspecified", '{"token":"owner","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z","extra":true}\n']
+    ] as const) {
+      const root = mkdtempSync(path.join(tmpdir(), `ultrafuzz-modal-${name}-lock-`));
+      const statePath = path.join(root, "launch-state.json");
+      const lockPath = `${statePath}.lock`;
+      fs.writeFileSync(lockPath, contents, { mode: 0o600 });
+      fs.utimesSync(lockPath, new Date(0), new Date(0));
+      let operationRan = false;
+
+      await expect(
+        withModalLaunchStateLock(statePath, async () => {
+          operationRan = true;
+        })
+      ).rejects.toThrow(/lock metadata/u);
+
+      expect(operationRan).toBe(false);
+      expect(fs.readFileSync(lockPath, "utf8")).toBe(contents);
+      expect(fs.readdirSync(root).filter((entry) => entry.includes(".reclaim-"))).toEqual([]);
+    }
+  });
+
+  it("does not unlink lock metadata that becomes malformed while the owner is running", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-mutated-lock-"));
+    const statePath = path.join(root, "launch-state.json");
+    const lockPath = `${statePath}.lock`;
+    const malformed = '{"token":"truncated"';
+
+    await expect(
+      withModalLaunchStateLock(statePath, async () => {
+        fs.writeFileSync(lockPath, malformed, { mode: 0o600 });
+      })
+    ).rejects.toThrow(/lock metadata/u);
+
+    expect(fs.readFileSync(lockPath, "utf8")).toBe(malformed);
   });
 
   // Three Aave v4 runs lost their sandbox at `stateful-invariant-setup` and none could be diagnosed,
@@ -322,7 +376,7 @@ describe("Modal launch ownership", () => {
 });
 
 describe("Modal lineage", () => {
-  it("surfaces missing v2 recovery fields as unknown during migration", () => {
+  it("rejects v2 launch state instead of migrating missing recovery fields", () => {
     const state = launchState();
     reserveModalLaunchAttempt({
       state,
@@ -339,24 +393,12 @@ describe("Modal lineage", () => {
       recovery_lifecycle: _recoveryLifecycle,
       ...previous
     } = state;
-    const migrated = parseCompatibleModalLaunchState({
-      ...previous,
-      schema_version: "ultrafuzz.modal.launch-state.v2"
-    });
-
-    expect(migrated).toMatchObject({
-      schema_version: "ultrafuzz.modal.launch-state.v3",
-      generation_start_reason: "unknown",
-      recovery_lifecycle: [
-        {
-          start_reason: "unknown",
-          terminal_reason: "unknown",
-          model_work_started: "unknown",
-          progress_made: "unknown",
-          controller_requested: "unknown"
-        }
-      ]
-    });
+    expect(() =>
+      parseModalLaunchState({
+        ...previous,
+        schema_version: "ultrafuzz.modal.launch-state.v2"
+      })
+    ).toThrow();
   });
 
   it("rejects lifecycle fingerprints that diverge from launch provenance", () => {
@@ -371,10 +413,10 @@ describe("Modal lineage", () => {
     });
     state.recovery_lifecycle[0]!.fingerprints.source = "f".repeat(64);
 
-    expect(() => parseCompatibleModalLaunchState(state)).toThrow(/mismatched lifecycle/u);
+    expect(() => parseModalLaunchState(state)).toThrow(/trusted semantic gates/u);
   });
 
-  it("adapts legacy launch state files for inspection and guarded resume", async () => {
+  it("rejects legacy launch state files without conversion", async () => {
     const legacy = {
       schema_version: "ultrafuzz.modal.launch-state.v1",
       run_id: "logical-run",
@@ -396,58 +438,21 @@ describe("Modal lineage", () => {
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
-    const migrated = await readModalLaunchState(statePath, {
-      imageId: "image-id-placeholder",
-      fingerprints: {
-        config: CONFIG_FINGERPRINT,
-        source: SOURCE_FINGERPRINT,
-        image: IMAGE_FINGERPRINT
-      }
-    });
+    await expect(readModalLaunchState(statePath)).rejects.toThrow();
+    expect(() => parseModalLaunchState(legacy)).toThrow();
+  });
 
-    expect(migrated).toMatchObject({
-      schema_version: "ultrafuzz.modal.launch-state.v3",
-      logical_run_id: "logical-run",
-      generation: 1,
-      generation_mode: "resume",
-      image_id: "image-id-placeholder",
-      timeout_ms: 60_000,
-      fingerprints: {
-        config: CONFIG_FINGERPRINT,
-        source: SOURCE_FINGERPRINT,
-        image: IMAGE_FINGERPRINT
-      },
-      launches: [
-        expect.objectContaining({
-          slug: MODEL.slug,
-          generation: 1,
-          attempt: 1,
-          phase: "launched",
-          sandbox_id: "sandbox-one",
-          launched_at: "2026-01-01T00:00:00.000Z"
-        })
-      ],
-      attempt_history: [],
-      generation_start_reason: "unknown",
-      recovery_lifecycle: [
-        expect.objectContaining({
-          start_reason: "unknown",
-          terminal_reason: "unknown",
-          progress_made: "unknown"
-        })
-      ]
-    });
-    expect(migrated!.launches[0]!.attempt_id).toBe(
-      parseCompatibleModalLaunchState(legacy, {
-        imageId: "image-id-placeholder",
-        fingerprints: {
-          config: CONFIG_FINGERPRINT,
-          source: SOURCE_FINGERPRINT,
-          image: IMAGE_FINGERPRINT
-        }
-      }).launches[0]!.attempt_id
-    );
-    expect(() => parseCompatibleModalLaunchState(legacy)).toThrow(/legacy Modal launch state/u);
+  it("rejects duplicate launch-state keys through the canonical strict JSON reader", async () => {
+    const state = launchState();
+    const serialized = JSON.stringify(state);
+    const field = `"logical_run_id":"${state.logical_run_id}"`;
+    const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
+    expect(duplicate).not.toBe(serialized);
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-duplicate-state-"));
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(statePath, duplicate, { mode: 0o600 });
+
+    await expect(readModalLaunchState(statePath)).rejects.toThrow(/duplicate|strict JSON/u);
   });
 
   it("fails closed on every incompatible checkpoint fingerprint", () => {
@@ -526,20 +531,12 @@ describe("Modal runner status", () => {
       result_generation: 2
     });
     expect(parseModalWorkerStatus(workerResult(), { generation: 1, attempt: 2 })).toBeUndefined();
-    // The `sandbox-exited` pairings below are legacy contracts, not contracts a
-    // worker can still write: `namedFaultDisposition` now records `unreachable`
-    // for any fault the worker named, so a contract written today pairs each of
-    // these codes with `unreachable` (see "classifies a sandbox exit by the exit
-    // and a named fault by its name" below). They stay asserted because Modal
-    // volumes outlive a deploy: a contract persisted by a pre-#320 worker is
-    // still read by this parser, and it must keep classifying by the code it
-    // names rather than by the exit category that was never a determination.
-    expect(
+    expect(() =>
       parseModalWorkerStatus(
         workerResult({ exit_category: "sandbox-exited", diagnostic_code: "checkpoint-incompatible" })
       )
-    ).toMatchObject({ category: "incompatible-checkpoint", retryable: false });
-    expect(
+    ).toThrow(/diagnostic_code/u);
+    expect(() =>
       parseModalWorkerStatus(
         workerResult({
           model_work_started: true,
@@ -547,16 +544,11 @@ describe("Modal runner status", () => {
           diagnostic_code: "public-eval-diagnostics-invalid"
         })
       )
-    ).toMatchObject({
-      category: "permanent-operational-failure",
-      model_work_started: true,
-      retryable: false,
-      error_code: "public-eval-diagnostics-invalid"
-    });
+    ).toThrow(/diagnostic_code/u);
     const nonResumable = parseModalWorkerStatus(
       workerResult({
         model_work_started: true,
-        exit_category: "sandbox-exited",
+        exit_category: "unreachable",
         diagnostic_code: "terminal-run-non-resumable"
       })
     );
@@ -590,7 +582,7 @@ describe("Modal runner status", () => {
         })
       )
     ).toMatchObject({ category: "permanent-operational-failure", retryable: false });
-    expect(
+    expect(() =>
       parseModalWorkerStatus({
         schema_version: "ultrafuzz.modal.worker-status.v2",
         updated_at: "2026-01-01T00:00:00.000Z",
@@ -599,28 +591,10 @@ describe("Modal runner status", () => {
         model_work_started: false,
         retryable: true,
         generation: 1,
-        attempt: 1,
-        eval_run_id: "generic-evaluation",
-        run_status: "running",
-        node_counts: { running: 1 },
-        error_code: "worker-live"
+        attempt: 1
       })
-    ).toEqual({
-      schema_version: "ultrafuzz.modal.worker-status.v2",
-      updated_at: "2026-01-01T00:00:00.000Z",
-      stage: "preparing",
-      terminal: false,
-      category: "preparing",
-      model_work_started: false,
-      retryable: true,
-      generation: 1,
-      attempt: 1,
-      eval_run_id: "generic-evaluation",
-      run_status: "running",
-      node_counts: { running: 1 },
-      error_code: "worker-live"
-    });
-    expect(
+    ).toThrow(/worker-result/u);
+    expect(() =>
       parseModalWorkerStatus({
         schema_version: "ultrafuzz.modal.worker-status.v2",
         updated_at: "2026-01-01T00:00:00.000Z",
@@ -631,7 +605,7 @@ describe("Modal runner status", () => {
         generation: 1,
         attempt: 1
       })
-    ).toMatchObject({ stage: "succeeded", terminal: true, category: "succeeded" });
+    ).toThrow(/worker-result/u);
   });
 
   it("classifies a sandbox exit by the exit and a named fault by its name", () => {

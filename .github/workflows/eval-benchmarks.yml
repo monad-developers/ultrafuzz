@@ -3,10 +3,10 @@ name: Modal Eval Benchmarks
 on:
   push:
     branches:
-      - "**"
+      - main
     paths-ignore:
-      - benchmarks/history.json
-      - benchmarks/public-results/**
+      - benchmarks/ultrafuzzbench/history.json
+      - benchmarks/ultrafuzzbench/results/**
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
@@ -36,6 +36,7 @@ on:
           - anthropic
           - deepseek
           - kimi
+          - openrouter
       smoke_model:
         description: smoke lane only, runner model
         required: true
@@ -143,11 +144,12 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_API_KEY || secrets.MOONSHOT_API_KEY) || '' }}
-          KIMI_BASE_URL: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_BASE_URL || vars.KIMI_BASE_URL) || '' }}
-          BENCHMARK_SMOKE_PROVIDER: ${{ inputs.benchmark_lane == 'smoke' && (inputs.smoke_provider || 'openai') || 'openai' }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
         run: |
           # The judge profile is always gpt-5.6-sol on CodexAgent, so OPENAI_API_KEY is
           # required for every lane regardless of which runner provider is selected.
@@ -159,6 +161,7 @@ jobs:
               anthropic) required+=(ANTHROPIC_API_KEY) ;;
               deepseek) required+=(DEEPSEEK_API_KEY) ;;
               kimi) required+=(KIMI_API_KEY) ;;
+              openrouter) required+=(OPENROUTER_API_KEY) ;;
             esac
           fi
           for name in "${required[@]}"; do
@@ -259,10 +262,11 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_API_KEY || secrets.MOONSHOT_API_KEY) || '' }}
-          KIMI_BASE_URL: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_BASE_URL || vars.KIMI_BASE_URL) || '' }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -287,6 +291,17 @@ jobs:
               >> "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
 
+      - name: Seal the absolute Modal control deadline
+        run: |
+          candidate="$(git rev-parse HEAD)"
+          node scripts/ci/modal-benchmark-control-window.mjs create \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_CONTROL/control-window.json" \
+            "$candidate" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            "$BENCHMARK_MODE"
+
       - name: Persist detached launch state
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -297,13 +312,110 @@ jobs:
           overwrite: true
           retention-days: 30
 
-  collect:
+  monitor_full:
     needs: launch
     if: >-
       !cancelled() &&
-      needs.launch.result != 'skipped'
+      needs.launch.result != 'skipped' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.benchmark_mode || 'full') == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      BENCHMARK_CONTROL: ${{ github.workspace }}/ci-modal/benchmark-control
+      # Leave five hours of the one 37,500-second full-lane window for the
+      # final hosted job. The first phase therefore uses at most 19,500 seconds
+      # (5h25m), leaving 35 minutes below its own six-hour hosted limit for the
+      # handoff and 60 minutes in the final job for setup, collection and upload.
+      FULL_FINAL_CONTROL_RESERVE_SECONDS: 18000
+
+    steps:
+      - name: Check out the benchmark candidate for full monitoring
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.BENCHMARK_CANDIDATE }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install and build the candidate
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -w build
+
+      - name: Restore the exact detached launch state for full monitoring
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate restored full benchmark control and deadline
+        run: |
+          node scripts/ci/validate-modal-benchmark-launch.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            . \
+            full
+          node scripts/ci/modal-benchmark-control-window.mjs deadline \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_CONTROL/control-window.json" \
+            "$BENCHMARK_CANDIDATE" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            full
+
+      - name: Monitor the first bounded full control phase
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY || secrets.MOONSHOT_API_KEY }}
+          KIMI_BASE_URL: ${{ secrets.KIMI_BASE_URL || vars.KIMI_BASE_URL }}
+        run: |
+          bash scripts/ci/watch-modal-benchmark.sh \
+            "$BENCHMARK_CONTROL" \
+            . \
+            "$BENCHMARK_CANDIDATE" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            full \
+            "$FULL_FINAL_CONTROL_RESERVE_SECONDS"
+
+      - name: Persist the full control-plane handoff
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: modal-benchmark-handoff-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  collect:
+    needs:
+      - launch
+      - monitor_full
+    if: >-
+      !cancelled() &&
+      needs.launch.result != 'skipped' &&
+      (needs.monitor_full.result == 'success' || needs.monitor_full.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      incomplete: ${{ steps.final_gate.outputs.incomplete }}
     env:
       BENCHMARK_CONTROL: ${{ github.workspace }}/ci-modal/benchmark-control
       BENCHMARK_RESULTS: ${{ github.workspace }}/ci-modal/benchmark-results
@@ -332,45 +444,96 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm -w build
 
-      - name: Restore detached launch state candidates
+      - name: Restore the exact detached launch state
         id: restore_launch
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-*
-          path: ${{ github.workspace }}/ci-modal/recovery-candidates
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-modal/benchmark-launch
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
 
-      - name: Select the newest compatible detached launch state
-        if: steps.restore_launch.outcome == 'success'
+      - name: Restore the exact full control-plane handoff
+        id: restore_handoff
+        if: env.BENCHMARK_MODE == 'full'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: modal-benchmark-handoff-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-modal/benchmark-handoff
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Assemble control from the authoritative launch artifact
+        if: >-
+          steps.restore_launch.outcome == 'success' &&
+          (env.BENCHMARK_MODE == 'smoke' || steps.restore_handoff.outcome == 'success')
         run: |
-          candidate_root='${{ github.workspace }}/ci-modal/recovery-candidates'
+          launch_root='${{ github.workspace }}/ci-modal/benchmark-launch'
+          handoff_root='${{ github.workspace }}/ci-modal/benchmark-handoff'
           control_root='${{ github.workspace }}/ci-modal/benchmark-control'
-          artifact_prefix='modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-'
-          current_attempt='${{ github.run_attempt }}'
-          selected=
-          selected_attempt=0
-          if [ -f "$candidate_root/manifest.json" ]; then
-            selected="$candidate_root"
-          else
-            shopt -s nullglob
-            for candidate in "$candidate_root"/"$artifact_prefix"*; do
-              [ -d "$candidate" ] || continue
-              artifact_name="${candidate##*/}"
-              attempt="${artifact_name#"$artifact_prefix"}"
-              if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]] || (( attempt > current_attempt )); then
-                continue
-              fi
-              if (( attempt > selected_attempt )); then
-                selected="$candidate"
-                selected_attempt="$attempt"
+
+          node scripts/ci/validate-modal-benchmark-launch.mjs \
+            "$launch_root/manifest.json" \
+            . \
+            "$BENCHMARK_MODE"
+          node scripts/ci/modal-benchmark-control-window.mjs deadline \
+            "$launch_root/manifest.json" \
+            "$launch_root/control-window.json" \
+            "$BENCHMARK_CANDIDATE" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            "$BENCHMARK_MODE"
+
+          immutable_paths=(manifest.json control-window.json launch-attempts.jsonl)
+          mutable_paths=()
+          path_is_listed() {
+            local candidate="$1"
+            shift
+            local listed
+            for listed in "$@"; do
+              if [ "$candidate" = "$listed" ]; then
+                return 0
               fi
             done
+            return 1
+          }
+          while IFS=$'\t' read -r config state pair; do
+            immutable_paths+=("$config")
+            mutable_paths+=("$state" "$pair.status.json" "outcomes/$pair.json")
+          done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$launch_root/manifest.json")
+
+          if [ "$BENCHMARK_MODE" = full ]; then
+            for relative in "${immutable_paths[@]}"; do
+              if ! cmp --silent -- "$launch_root/$relative" "$handoff_root/$relative"; then
+                echo "Full monitor handoff changed immutable launch control: $relative" >&2
+                exit 1
+              fi
+            done
+            if find "$handoff_root" ! -type d ! -type f -print -quit | grep -q .; then
+              echo "Full monitor handoff contains a non-regular filesystem entry" >&2
+              exit 1
+            fi
           fi
-          if [ -n "$selected" ]; then
-            mkdir -p "$control_root"
-            cp -a -- "$selected"/. "$control_root"/
+
+          mkdir -p "$control_root"
+          cp -a -- "$launch_root"/. "$control_root"/
+          if [ "$BENCHMARK_MODE" = full ]; then
+            while IFS= read -r -d '' source; do
+              relative="${source#"$handoff_root"/}"
+              if path_is_listed "$relative" "${immutable_paths[@]}"; then
+                continue
+              fi
+              if ! path_is_listed "$relative" "${mutable_paths[@]}" && \
+                 [[ "$relative" != diagnostics/* ]] && \
+                 [[ "$relative" != failures/* ]]; then
+                echo "Full monitor handoff contains an unsupported mutable path: $relative" >&2
+                exit 1
+              fi
+              destination="$control_root/$relative"
+              mkdir -p "$(dirname "$destination")"
+              cp -- "$source" "$destination"
+            done < <(find "$handoff_root" -type f -print0)
           fi
 
       - name: Discover recoverable launch control
@@ -378,7 +541,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$BENCHMARK_CONTROL/diagnostics" "$BENCHMARK_CONTROL/failures" "$BENCHMARK_CONTROL/outcomes" "$BENCHMARK_RESULTS"
-          if [ -f "$BENCHMARK_CONTROL/manifest.json" ]; then
+          if [ -f "$BENCHMARK_CONTROL/manifest.json" ] && [ -f "$BENCHMARK_CONTROL/control-window.json" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
@@ -388,220 +551,54 @@ jobs:
               > "$BENCHMARK_CONTROL/failures/launch-control-unavailable.json"
           fi
 
-      - name: Wait for Modal compute and retry only pre-model launch failures
+      - name: Validate restored benchmark control and absolute deadline
+        id: validate_control
         if: steps.launch_control.outputs.available == 'true'
+        run: |
+          node scripts/ci/validate-modal-benchmark-launch.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            . \
+            "$BENCHMARK_MODE"
+          node scripts/ci/modal-benchmark-control-window.mjs deadline \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_CONTROL/control-window.json" \
+            "$BENCHMARK_CANDIDATE" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            "$BENCHMARK_MODE"
+
+      - name: Wait for Modal compute and retry only pre-model launch failures
+        if: steps.validate_control.outcome == 'success'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_API_KEY || secrets.MOONSHOT_API_KEY) || '' }}
-          KIMI_BASE_URL: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_BASE_URL || vars.KIMI_BASE_URL) || '' }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
-          control_timeout_seconds="$(jq -er \
-            '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
-            "$BENCHMARK_CONTROL/manifest.json")"
-          deadline=$((SECONDS + control_timeout_seconds))
-          while true; do
-            all_terminal=true
-            while IFS=$'\t' read -r config state pair; do
-              outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
-              if [ -f "$outcome_file" ]; then
-                continue
-              fi
-
-              initial_outcome=unknown
-              if [ -f "$BENCHMARK_CONTROL/launch-attempts.jsonl" ]; then
-                initial_outcome="$(jq -r --arg pair "$pair" 'select(.pair == $pair) | .outcome' \
-                  "$BENCHMARK_CONTROL/launch-attempts.jsonl" | tail -n 1)"
-              fi
-              recovery_mode=
-              if [ ! -f "$BENCHMARK_CONTROL/$state" ]; then
-                recovery_mode=fresh
-              elif jq -e '.launches | type == "array" and length == 0' \
-                "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                recovery_mode=resume
-              fi
-              recovery_category=
-              if [ "$initial_outcome" = failed ] && [ -n "$recovery_mode" ]; then
-                recovery_exit=0
-                if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
-                  recovery_exit=66
-                else
-                  timeout --signal=TERM --kill-after=30s 5m \
-                    node packages/modal/dist/cli.js launch \
-                    --config "$BENCHMARK_CONTROL/$config" \
-                    --state "$BENCHMARK_CONTROL/$state" \
-                    --mode "$recovery_mode" \
-                    --repo-root . || recovery_exit=$?
-                fi
-                recovery_category=initial-launch-recovery-failed
-                if [ "$recovery_exit" -eq 0 ]; then
-                  recovery_category=initial-launch-recovery-succeeded
-                elif [ "$recovery_exit" -eq 124 ] || [ "$recovery_exit" -eq 137 ]; then
-                  recovery_category=initial-launch-recovery-timeout
-                fi
-                if { [ "$recovery_exit" -eq 0 ] || [ "$recovery_exit" -eq 124 ] || [ "$recovery_exit" -eq 137 ]; } && \
-                  jq -e '.launches | any(.phase == "reserved" or .phase == "sandbox-created" or .phase == "launched")' \
-                    "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                  deadline=$((SECONDS + control_timeout_seconds))
-                fi
-                jq -n \
-                  --arg pair "$pair" \
-                  --arg mode "$recovery_mode" \
-                  --arg category "$recovery_category" \
-                  --argjson exit_code "$recovery_exit" \
-                  '{pair: $pair, mode: $mode, category: $category, exit_code: $exit_code}' \
-                  > "$BENCHMARK_CONTROL/diagnostics/$pair.initial-launch-recovery.json"
-              fi
-              if [ ! -f "$BENCHMARK_CONTROL/$state" ]; then
-                category=launch-state-missing
-                if [ "$recovery_category" = initial-launch-recovery-succeeded ]; then
-                  category=initial-launch-recovery-incomplete
-                elif [ -n "$recovery_category" ]; then
-                  category="$recovery_category"
-                fi
-                jq -n \
-                  --arg pair "$pair" \
-                  --arg category "$category" \
-                  '{pair: $pair, terminal_status: "failed", category: $category}' \
-                  > "$outcome_file"
-                continue
-              fi
-              if jq -e '.launches | type == "array" and length == 0' \
-                "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                category=launch-state-empty
-                if [ "$recovery_category" = initial-launch-recovery-succeeded ]; then
-                  category=initial-launch-recovery-incomplete
-                elif [ -n "$recovery_category" ]; then
-                  category="$recovery_category"
-                fi
-                jq -n \
-                  --arg pair "$pair" \
-                  --arg category "$category" \
-                  '{pair: $pair, terminal_status: "failed", category: $category}' \
-                  > "$outcome_file"
-                continue
-              fi
-
-              status_file="$BENCHMARK_CONTROL/$pair.status.json"
-              status_exit=0
-              timeout --signal=TERM --kill-after=30s 30s \
-                node packages/modal/dist/cli.js status \
-                --state "$BENCHMARK_CONTROL/$state" \
-                > "$status_file.tmp" || status_exit=$?
-              if [ "$status_exit" -ne 0 ]; then
-                rm -f "$status_file.tmp"
-                all_terminal=false
-                status_category=status-query-failed
-                if [ "$status_exit" -eq 124 ] || [ "$status_exit" -eq 137 ]; then
-                  status_category=status-query-timeout
-                fi
-                jq -n \
-                  --arg pair "$pair" \
-                  --arg category "$status_category" \
-                  '{pair: $pair, category: $category}' \
-                  > "$BENCHMARK_CONTROL/diagnostics/$pair.$status_category.json"
-                continue
-              fi
-              mv "$status_file.tmp" "$status_file"
-              if ! category="$(jq -er '.[0].runner_status.category' "$status_file")"; then
-                jq -n \
-                  --arg pair "$pair" \
-                  --arg category "runner-status-invalid" \
-                  '{pair: $pair, terminal_status: "failed", category: $category}' \
-                  > "$outcome_file"
-                continue
-              fi
-              case "$category" in
-                succeeded)
-                  jq -n \
-                    --arg pair "$pair" \
-                    --arg category "$category" \
-                    '{pair: $pair, terminal_status: "succeeded", category: $category}' \
-                    > "$outcome_file"
-                  ;;
-                live)
-                  all_terminal=false
-                  ;;
-                transient-operational-failure)
-                  if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
-                    jq -n \
-                      --arg pair "$pair" \
-                      --arg category "launch-config-missing" \
-                      '{pair: $pair, terminal_status: "failed", category: $category}' \
-                      > "$outcome_file"
-                  else
-                    all_terminal=false
-                    resume_exit=0
-                    timeout --signal=TERM --kill-after=30s 5m \
-                    node packages/modal/dist/cli.js launch \
-                    --config "$BENCHMARK_CONTROL/$config" \
-                    --state "$BENCHMARK_CONTROL/$state" \
-                    --mode resume \
-                    --repo-root . || resume_exit=$?
-                    if [ "$resume_exit" -eq 0 ]; then
-                      deadline=$((SECONDS + control_timeout_seconds))
-                    else
-                      resume_category=resume-attempt-failed
-                      if [ "$resume_exit" -eq 124 ] || [ "$resume_exit" -eq 137 ]; then
-                        resume_category=resume-attempt-timeout
-                      fi
-                      jq -n \
-                        --arg pair "$pair" \
-                        --arg category "$resume_category" \
-                        --argjson exit_code "$resume_exit" \
-                        '{pair: $pair, category: $category, exit_code: $exit_code}' \
-                        > "$BENCHMARK_CONTROL/diagnostics/$pair.$resume_category.json"
-                    fi
-                    if { [ "$resume_exit" -eq 124 ] || [ "$resume_exit" -eq 137 ]; } && \
-                      jq -e '.launches | any(.phase == "reserved" or .phase == "sandbox-created" or .phase == "launched")' \
-                        "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                      deadline=$((SECONDS + control_timeout_seconds))
-                    fi
-                  fi
-                  ;;
-                *)
-                  echo "Modal pair $pair ended as $category" >&2
-                  jq -n \
-                    --arg pair "$pair" \
-                    --arg category "$category" \
-                    '{pair: $pair, terminal_status: "failed", category: $category}' \
-                    > "$outcome_file"
-                  ;;
-              esac
-            done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
-            if [ "$all_terminal" = true ]; then
-              break
-            fi
-            if (( SECONDS >= deadline )); then
-              echo "Modal benchmark matrix exceeded its ${control_timeout_seconds}-second control-plane deadline" >&2
-              while IFS=$'\t' read -r pair; do
-                outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
-                if [ ! -f "$outcome_file" ]; then
-                  jq -n \
-                    --arg pair "$pair" \
-                    --arg category "control-plane-timeout" \
-                    '{pair: $pair, terminal_status: "failed", category: $category}' \
-                    > "$outcome_file"
-                fi
-              done < <(jq -r '.pairs[] | [.pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
-              break
-            fi
-            sleep 60
-          done
+          bash scripts/ci/watch-modal-benchmark.sh \
+            "$BENCHMARK_CONTROL" \
+            . \
+            "$BENCHMARK_CANDIDATE" \
+            "${{ github.server_url }}/${{ github.repository }}" \
+            "${{ github.run_id }}-${{ github.run_attempt }}" \
+            "$BENCHMARK_MODE" \
+            0
 
       - name: Collect and validate public finding bundles
-        if: always() && steps.launch_control.outputs.available == 'true'
+        if: always() && steps.validate_control.outcome == 'success'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.ANTHROPIC_API_KEY || '' }}
-          DEEPSEEK_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && secrets.DEEPSEEK_API_KEY || '' }}
-          KIMI_API_KEY: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_API_KEY || secrets.MOONSHOT_API_KEY) || '' }}
-          KIMI_BASE_URL: ${{ (inputs.benchmark_lane == 'full' || inputs.benchmark_lane == 'smoke') && (secrets.KIMI_BASE_URL || vars.KIMI_BASE_URL) || '' }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.OPENROUTER_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {
@@ -702,26 +699,20 @@ jobs:
             "$BENCHMARK_RESULTS"
 
       - name: Fail an incomplete matrix after preserving artifacts
+        id: final_gate
         if: always()
         env:
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_REF_NAME: ${{ github.ref_name }}
-          CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           matrix_failed=false
-          smoke_model_soft_fail=false
-          # A failed pair is scoring evidence only when the target itself
-          # produced the outcome. Every other category reports that the
-          # benchmark plane broke, so on a non-default branch it must stay
-          # visible without gating an unrelated PR. Stated once here so a new
-          # operational category cannot silently fall outside it, as
-          # permanent-operational-failure did after #255.
-          smoke_soft_fail_filter='.terminal_status == "failed" and .category != "genuine-task-outcome"'
-          if [ "$BENCHMARK_MODE" = smoke ] && \
-            [ "$CI_EVENT_NAME" = push ] && \
-            [ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]; then
-            smoke_model_soft_fail=true
-          fi
+          matrix_incomplete=false
+          # A recoverable operational pair failure is not scoring evidence, so
+          # an automatic post-merge smoke run keeps it visible without turning
+          # CI red. Manual runs, task outcomes, and control/integrity failures
+          # stay strict. The executable policy lives in
+          # describe-smoke-soft-fail.mjs so event, mode, and outcome handling
+          # are covered together (#554).
           if [ ! -f "$BENCHMARK_CONTROL/manifest.json" ]; then
             echo "Detached launch control was unavailable" >&2
             matrix_failed=true
@@ -748,14 +739,20 @@ jobs:
                   echo "Modal pair $pair is missing its validated public result bundle" >&2
                   matrix_failed=true
                 fi
-              elif [ "$smoke_model_soft_fail" = true ] && \
-                jq -e "$smoke_soft_fail_filter" "$outcome_file" > /dev/null; then
+              else
+                matrix_incomplete=true
                 soft_fail_category="$(jq -r '.category' "$outcome_file")"
                 readiness_decision="$(node scripts/ci/describe-smoke-soft-fail.mjs --json \
                   --ref "$CI_REF_NAME" \
+                  --mode "$BENCHMARK_MODE" \
+                  --event "$CI_EVENT_NAME" \
+                  --outcome "$outcome_file" \
                   "$BENCHMARK_RESULTS/$pair/$slug/public-eval-diagnostics.json")"
                 readiness="$(jq -r '.detail' <<< "$readiness_decision")"
-                if jq -e '.blocks_gate == true' <<< "$readiness_decision" > /dev/null; then
+                if jq -e '.soft_fail != true' <<< "$readiness_decision" > /dev/null; then
+                  echo "Modal pair $pair did not finish and collect successfully" >&2
+                  matrix_failed=true
+                elif jq -e '.blocks_gate == true' <<< "$readiness_decision" > /dev/null; then
                   echo "::error::Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness"
                   echo "Modal smoke pair $pair failed operationally as $soft_fail_category; blocking validation-ref smoke gate because scoring readiness is required — $readiness" >&2
                   matrix_failed=true
@@ -763,12 +760,9 @@ jobs:
                   echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness"
                   echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking validation-ref smoke gate because scoring readiness was validated — $readiness" >&2
                 else
-                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness"
-                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking non-default branch smoke gate — $readiness" >&2
+                  echo "::warning::Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking automatic smoke gate — $readiness"
+                  echo "Modal smoke pair $pair failed operationally as $soft_fail_category; not blocking automatic smoke gate — $readiness" >&2
                 fi
-              else
-                echo "Modal pair $pair did not finish and collect successfully" >&2
-                matrix_failed=true
               fi
             done < <(jq -r '.pairs[] | [.pair, .model_slug] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
           fi
@@ -778,6 +772,7 @@ jobs:
             find "$BENCHMARK_CONTROL/failures" -type f -print >&2
             matrix_failed=true
           fi
+          echo "incomplete=$matrix_incomplete" >> "$GITHUB_OUTPUT"
           if [ "$matrix_failed" = true ]; then
             exit 1
           fi
@@ -785,10 +780,14 @@ jobs:
   cleanup_incomplete_run:
     needs:
       - launch
+      - monitor_full
       - collect
     if: >-
       !cancelled() &&
-      (needs.launch.result == 'failure' || needs.collect.result == 'failure')
+      (needs.launch.result == 'failure' ||
+       needs.monitor_full.result == 'failure' ||
+       needs.collect.result == 'failure' ||
+       needs.collect.outputs.incomplete == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 75
 
@@ -909,7 +908,18 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/incomplete-modal-benchmark-state
+          path: ${{ runner.temp }}/incomplete-modal-benchmark-launch
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore any persisted full monitor handoff
+        id: restore_incomplete_handoff
+        if: steps.incomplete_plan.outputs.available == 'true' && env.BENCHMARK_MODE == 'full'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: modal-benchmark-handoff-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/incomplete-modal-benchmark-handoff
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
 
@@ -937,10 +947,10 @@ jobs:
         if: always() && steps.validate_incomplete_plan.outcome == 'success'
         env:
           BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
-          BENCHMARK_STATE: ${{ runner.temp }}/incomplete-modal-benchmark-state
+          BENCHMARK_STATE: ${{ steps.restore_incomplete_handoff.outcome == 'success' && format('{0}/incomplete-modal-benchmark-handoff', runner.temp) || format('{0}/incomplete-modal-benchmark-launch', runner.temp) }}
           CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
           BUILD_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}
-          STATE_AVAILABLE: ${{ steps.restore_incomplete_launch.outcome == 'success' && 'true' || 'false' }}
+          STATE_AVAILABLE: ${{ (steps.restore_incomplete_handoff.outcome == 'success' || steps.restore_incomplete_launch.outcome == 'success') && 'true' || 'false' }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |

@@ -4,11 +4,29 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
-import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { validateRegisteredJsonSchema, type JsonSchemaValidationIssue } from "./json-schema-validator.js";
+import { canonicalTimestampSchema } from "./portable-json-primitives.js";
+import { schemaErrorMessage, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
+import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
+import { executeSemanticGate, type SemanticGateName } from "./semantic-gates.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
 export const ANALYSIS_BUNDLE_POLICY_VERSION = "ultrafuzz.analysis-bundle-policy.v1" as const;
+export const ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:analysis-bundle:1" as const;
+export const ANALYSIS_BUNDLE_TERMINAL_STATUS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-terminal-status:1" as const;
+export const ANALYSIS_BUNDLE_EVALUATION_METRICS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-evaluation-metrics:1" as const;
+export const ANALYSIS_BUNDLE_ACCOUNTING_SUMMARY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-accounting-summary:1" as const;
+export const ANALYSIS_BUNDLE_ATTEMPT_HISTORY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-attempt-history:1" as const;
+export const ANALYSIS_BUNDLE_RECOVERY_SUMMARY_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-recovery-summary:1" as const;
+export const ANALYSIS_BUNDLE_OMISSIONS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:artifacts:analysis-bundle-omissions:1" as const;
 export const ANALYSIS_BUNDLE_MANIFEST_FILE = "analysis-bundle.json" as const;
 export const ANALYSIS_BUNDLE_OMISSIONS_FILE = "omissions.json" as const;
 
@@ -61,67 +79,44 @@ const ATTEMPT_WORKFLOW_STATUS_VALUES = [
   "unknown"
 ] as const;
 
-const nonNegativeInteger = z.number().int().nonnegative();
+const nonNegativeInteger = z.number().nonnegative().refine(Number.isInteger, { message: "Expected an integer" });
+const nonNegativeSafeInteger = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const positiveSafeInteger = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const nonNegativeNumber = z.number().finite().nonnegative();
 const unitMetric = z.number().finite().min(0).max(1);
-const isoTimestamp = z.string().datetime({ offset: true });
+const isoTimestamp = canonicalTimestampSchema;
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 
-export const analysisTerminalStatusSchema = z
-  .strictObject({
-    schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-    terminal: z.boolean(),
-    status: z.enum(TERMINAL_STATUS_VALUES),
-    run_count: nonNegativeInteger,
-    status_counts: z.strictObject({
-      pending: nonNegativeInteger,
-      running: nonNegativeInteger,
-      paused: nonNegativeInteger,
-      succeeded: nonNegativeInteger,
-      failed: nonNegativeInteger,
-      "timed-out": nonNegativeInteger,
-      canceled: nonNegativeInteger,
-      unknown: nonNegativeInteger
-    }),
-    started_at: isoTimestamp.optional(),
-    finished_at: isoTimestamp.optional()
-  })
-  .superRefine((value, ctx) => {
-    const counted = Object.values(value.status_counts).reduce((total, count) => total + count, 0);
-    if (counted !== value.run_count) {
-      ctx.addIssue({ code: "custom", path: ["status_counts"], message: "counts must sum to run_count" });
-    }
-    const terminalCount =
-      value.status_counts.succeeded +
-      value.status_counts.failed +
-      value.status_counts["timed-out"] +
-      value.status_counts.canceled;
-    if (value.terminal !== (value.run_count > 0 && terminalCount === value.run_count)) {
-      ctx.addIssue({ code: "custom", path: ["terminal"], message: "must match the aggregate status counts" });
-    }
-    if (value.status !== aggregateStatusFromCounts(value.status_counts)) {
-      ctx.addIssue({ code: "custom", path: ["status"], message: "must match the aggregate status counts" });
-    }
-    if (
-      value.started_at !== undefined &&
-      value.finished_at !== undefined &&
-      Date.parse(value.started_at) > Date.parse(value.finished_at)
-    ) {
-      ctx.addIssue({ code: "custom", path: ["finished_at"], message: "cannot precede started_at" });
-    }
-  });
+export const analysisTerminalStatusSchema = z.strictObject({
+  schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
+  terminal: z.boolean(),
+  status: z.enum(TERMINAL_STATUS_VALUES),
+  run_count: nonNegativeSafeInteger,
+  status_counts: z.strictObject({
+    pending: nonNegativeSafeInteger,
+    running: nonNegativeSafeInteger,
+    paused: nonNegativeSafeInteger,
+    succeeded: nonNegativeSafeInteger,
+    failed: nonNegativeSafeInteger,
+    "timed-out": nonNegativeSafeInteger,
+    canceled: nonNegativeSafeInteger,
+    unknown: nonNegativeSafeInteger
+  }),
+  started_at: isoTimestamp.optional(),
+  finished_at: isoTimestamp.optional()
+});
 
 export const analysisEvaluationMetricsSchema = z.strictObject({
   schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-  row_count: z.number().int().positive(),
+  row_count: positiveSafeInteger,
   totals: z.strictObject({
-    ground_truth_bug_count: nonNegativeInteger,
-    finding_count: nonNegativeInteger,
-    true_positives: nonNegativeInteger,
-    false_positives: nonNegativeInteger,
-    missed: nonNegativeInteger,
-    human_review_queue_count: nonNegativeInteger,
-    duplicate_count: nonNegativeInteger
+    ground_truth_bug_count: nonNegativeSafeInteger,
+    finding_count: nonNegativeSafeInteger,
+    true_positives: nonNegativeSafeInteger,
+    false_positives: nonNegativeSafeInteger,
+    missed: nonNegativeSafeInteger,
+    human_review_queue_count: nonNegativeSafeInteger,
+    duplicate_count: nonNegativeSafeInteger
   }),
   metrics: z.strictObject({
     precision: unitMetric,
@@ -135,196 +130,90 @@ export const analysisEvaluationMetricsSchema = z.strictObject({
   })
 });
 
-export const analysisAccountingSummarySchema = z
-  .strictObject({
-    schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-    run_count: nonNegativeInteger,
-    accounted_run_count: nonNegativeInteger,
-    runtime_observed_run_count: nonNegativeInteger,
-    runtime_seconds: nonNegativeNumber.nullable(),
-    input_tokens: nonNegativeInteger,
-    output_tokens: nonNegativeInteger,
-    cache_read_tokens: nonNegativeInteger,
-    cache_write_tokens: nonNegativeInteger,
-    reasoning_tokens: nonNegativeInteger,
-    total_tokens: nonNegativeInteger,
-    estimated_spend_usd: nonNegativeNumber.nullable(),
-    partial_pricing: z.boolean(),
-    event_count: nonNegativeInteger,
-    priced_event_count: nonNegativeInteger,
-    unpriced_event_count: nonNegativeInteger
-  })
-  .superRefine((value, ctx) => {
-    if (value.accounted_run_count > value.run_count) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["accounted_run_count"],
-        message: "cannot exceed run_count"
-      });
-    }
-    if (value.runtime_observed_run_count > value.run_count) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["runtime_observed_run_count"],
-        message: "cannot exceed run_count"
-      });
-    }
-    if (value.event_count !== value.priced_event_count + value.unpriced_event_count) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["event_count"],
-        message: "must equal priced_event_count plus unpriced_event_count"
-      });
-    }
-    if (value.unpriced_event_count > 0 && !value.partial_pricing) {
-      ctx.addIssue({ code: "custom", path: ["partial_pricing"], message: "must be true when events are unpriced" });
-    }
-    if ((value.runtime_seconds === null) !== (value.runtime_observed_run_count === 0)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["runtime_seconds"],
-        message: "must be present exactly when runtime observations exist"
-      });
-    }
-  });
+export const analysisAccountingSummarySchema = z.strictObject({
+  schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
+  run_count: nonNegativeSafeInteger,
+  accounted_run_count: nonNegativeSafeInteger,
+  runtime_observed_run_count: nonNegativeSafeInteger,
+  runtime_seconds: nonNegativeNumber.nullable(),
+  input_tokens: nonNegativeSafeInteger,
+  output_tokens: nonNegativeSafeInteger,
+  cache_read_tokens: nonNegativeSafeInteger,
+  cache_write_tokens: nonNegativeSafeInteger,
+  reasoning_tokens: nonNegativeSafeInteger,
+  total_tokens: nonNegativeSafeInteger,
+  estimated_spend_usd: nonNegativeNumber.nullable(),
+  partial_pricing: z.boolean(),
+  event_count: nonNegativeSafeInteger,
+  priced_event_count: nonNegativeSafeInteger,
+  unpriced_event_count: nonNegativeSafeInteger
+});
 
-export const analysisAttemptHistorySchema = z
-  .strictObject({
-    schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-    attempts: z.array(
-      z.strictObject({
-        ordinal: z.number().int().positive(),
-        launcher_status: z.enum(["launched", "failed"]),
-        workflow_status: z.enum(ATTEMPT_WORKFLOW_STATUS_VALUES),
-        started_at: isoTimestamp.optional(),
-        finished_at: isoTimestamp.optional()
-      })
-    )
-  })
-  .superRefine((value, ctx) => {
-    value.attempts.forEach((attempt, index) => {
-      if (attempt.ordinal !== index + 1) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["attempts", index, "ordinal"],
-          message: "must be a contiguous one-based ordinal"
-        });
-      }
-      if (
-        attempt.started_at !== undefined &&
-        attempt.finished_at !== undefined &&
-        Date.parse(attempt.started_at) > Date.parse(attempt.finished_at)
-      ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["attempts", index, "finished_at"],
-          message: "cannot precede started_at"
-        });
-      }
-    });
-  });
+export const analysisAttemptHistorySchema = z.strictObject({
+  schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
+  attempts: z.array(
+    z.strictObject({
+      ordinal: positiveSafeInteger,
+      launcher_status: z.enum(["launched", "failed"]),
+      workflow_status: z.enum(ATTEMPT_WORKFLOW_STATUS_VALUES),
+      started_at: isoTimestamp.optional(),
+      finished_at: isoTimestamp.optional()
+    })
+  )
+});
 
 const recoveryStartReasonsSchema = z.strictObject({
-  initial: nonNegativeInteger,
-  "pre-model-retry": nonNegativeInteger,
-  "post-model-resume": nonNegativeInteger,
-  "image-rollout": nonNegativeInteger,
-  "stale-probe-rotation": nonNegativeInteger,
-  "operator-restart": nonNegativeInteger,
-  unknown: nonNegativeInteger
+  initial: nonNegativeSafeInteger,
+  "pre-model-retry": nonNegativeSafeInteger,
+  "post-model-resume": nonNegativeSafeInteger,
+  "image-rollout": nonNegativeSafeInteger,
+  "stale-probe-rotation": nonNegativeSafeInteger,
+  "operator-restart": nonNegativeSafeInteger,
+  unknown: nonNegativeSafeInteger
 });
 const recoveryTerminalReasonsSchema = z.strictObject({
-  active: nonNegativeInteger,
-  succeeded: nonNegativeInteger,
-  "genuine-worker-failure": nonNegativeInteger,
-  "operational-failure": nonNegativeInteger,
-  "image-rollout": nonNegativeInteger,
-  "stale-probe-rotation": nonNegativeInteger,
-  "operator-request": nonNegativeInteger,
-  timeout: nonNegativeInteger,
-  "resource-termination": nonNegativeInteger,
-  "recovery-budget-exhausted": nonNegativeInteger,
-  unknown: nonNegativeInteger
+  active: nonNegativeSafeInteger,
+  succeeded: nonNegativeSafeInteger,
+  "genuine-worker-failure": nonNegativeSafeInteger,
+  "operational-failure": nonNegativeSafeInteger,
+  "image-rollout": nonNegativeSafeInteger,
+  "stale-probe-rotation": nonNegativeSafeInteger,
+  "operator-request": nonNegativeSafeInteger,
+  timeout: nonNegativeSafeInteger,
+  "resource-termination": nonNegativeSafeInteger,
+  "recovery-budget-exhausted": nonNegativeSafeInteger,
+  unknown: nonNegativeSafeInteger
 });
 const recoveryTerminalClassesSchema = z.strictObject({
-  active: nonNegativeInteger,
-  succeeded: nonNegativeInteger,
-  "genuine-worker-failure": nonNegativeInteger,
-  "operational-failure": nonNegativeInteger,
-  "controller-rotation": nonNegativeInteger,
-  timeout: nonNegativeInteger,
-  "resource-termination": nonNegativeInteger,
-  "recovery-budget-exhausted": nonNegativeInteger,
-  unknown: nonNegativeInteger
+  active: nonNegativeSafeInteger,
+  succeeded: nonNegativeSafeInteger,
+  "genuine-worker-failure": nonNegativeSafeInteger,
+  "operational-failure": nonNegativeSafeInteger,
+  "controller-rotation": nonNegativeSafeInteger,
+  timeout: nonNegativeSafeInteger,
+  "resource-termination": nonNegativeSafeInteger,
+  "recovery-budget-exhausted": nonNegativeSafeInteger,
+  unknown: nonNegativeSafeInteger
 });
 
-export const analysisRecoverySummarySchema = z
-  .strictObject({
-    schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-    total_generations: nonNegativeInteger,
-    terminal_generations: nonNegativeInteger,
-    active_generations: nonNegativeInteger,
-    progress_generations: nonNegativeInteger,
-    no_progress_generations: nonNegativeInteger,
-    unknown_progress_generations: nonNegativeInteger,
-    model_work_generations: nonNegativeInteger,
-    no_model_work_generations: nonNegativeInteger,
-    unknown_model_work_generations: nonNegativeInteger,
-    genuine_failures: nonNegativeInteger,
-    rotations: nonNegativeInteger,
-    resumptions: nonNegativeInteger,
-    start_reasons: recoveryStartReasonsSchema,
-    terminal_reasons: recoveryTerminalReasonsSchema,
-    terminal_classes: recoveryTerminalClassesSchema
-  })
-  .superRefine((value, ctx) => {
-    const totals = [
-      value.terminal_generations + value.active_generations,
-      value.progress_generations + value.no_progress_generations + value.unknown_progress_generations,
-      value.model_work_generations + value.no_model_work_generations + value.unknown_model_work_generations,
-      sumObject(value.start_reasons),
-      sumObject(value.terminal_reasons),
-      sumObject(value.terminal_classes)
-    ];
-    if (totals.some((total) => total !== value.total_generations)) {
-      ctx.addIssue({ code: "custom", path: ["total_generations"], message: "must reconcile with every count group" });
-    }
-    if (value.genuine_failures !== value.terminal_classes["genuine-worker-failure"]) {
-      ctx.addIssue({ code: "custom", path: ["genuine_failures"], message: "must match terminal classes" });
-    }
-    if (value.rotations !== value.terminal_classes["controller-rotation"]) {
-      ctx.addIssue({ code: "custom", path: ["rotations"], message: "must match terminal classes" });
-    }
-    if (value.resumptions !== value.start_reasons["post-model-resume"]) {
-      ctx.addIssue({ code: "custom", path: ["resumptions"], message: "must match start reasons" });
-    }
-    if (value.active_generations !== value.terminal_reasons.active) {
-      ctx.addIssue({ code: "custom", path: ["active_generations"], message: "must match active terminal reasons" });
-    }
-    const expectedTerminalClasses = {
-      active: value.terminal_reasons.active,
-      succeeded: value.terminal_reasons.succeeded,
-      "genuine-worker-failure": value.terminal_reasons["genuine-worker-failure"],
-      "operational-failure": value.terminal_reasons["operational-failure"],
-      "controller-rotation":
-        value.terminal_reasons["image-rollout"] +
-        value.terminal_reasons["stale-probe-rotation"] +
-        value.terminal_reasons["operator-request"],
-      timeout: value.terminal_reasons.timeout,
-      "resource-termination": value.terminal_reasons["resource-termination"],
-      "recovery-budget-exhausted": value.terminal_reasons["recovery-budget-exhausted"],
-      unknown: value.terminal_reasons.unknown
-    };
-    for (const [terminalClass, expected] of Object.entries(expectedTerminalClasses)) {
-      if (value.terminal_classes[terminalClass as keyof typeof value.terminal_classes] !== expected) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["terminal_classes", terminalClass],
-          message: "must reconcile with terminal reasons"
-        });
-      }
-    }
-  });
+export const analysisRecoverySummarySchema = z.strictObject({
+  schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
+  total_generations: nonNegativeSafeInteger,
+  terminal_generations: nonNegativeSafeInteger,
+  active_generations: nonNegativeSafeInteger,
+  progress_generations: nonNegativeSafeInteger,
+  no_progress_generations: nonNegativeSafeInteger,
+  unknown_progress_generations: nonNegativeSafeInteger,
+  model_work_generations: nonNegativeSafeInteger,
+  no_model_work_generations: nonNegativeSafeInteger,
+  unknown_model_work_generations: nonNegativeSafeInteger,
+  genuine_failures: nonNegativeSafeInteger,
+  rotations: nonNegativeSafeInteger,
+  resumptions: nonNegativeSafeInteger,
+  start_reasons: recoveryStartReasonsSchema,
+  terminal_reasons: recoveryTerminalReasonsSchema,
+  terminal_classes: recoveryTerminalClassesSchema
+});
 
 function manifestEntryForKind(kind: AnalysisBundleFileKind) {
   return z.strictObject({
@@ -357,46 +246,42 @@ export const analysisBundleManifestSchema = z
   .strictObject({
     schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
     policy_version: z.literal(ANALYSIS_BUNDLE_POLICY_VERSION),
-    files: z.array(manifestEntrySchema)
+    files: z.array(manifestEntrySchema).min(1).max(6)
   })
-  .superRefine((value, ctx) => {
-    if (!isSorted(value.files.map((entry) => entry.path))) {
-      ctx.addIssue({ code: "custom", path: ["files"], message: "must be sorted by path" });
-    }
+  .superRefine((value, context) => {
     const seenKinds = new Set<AnalysisBundleFileKind>();
     const seenPaths = new Set<string>();
     for (const [index, entry] of value.files.entries()) {
       if (seenKinds.has(entry.kind)) {
-        ctx.addIssue({ code: "custom", path: ["files", index, "kind"], message: "must be unique" });
+        context.addIssue({ code: "custom", path: ["files", index, "kind"], message: "must be unique" });
       }
       if (seenPaths.has(entry.path)) {
-        ctx.addIssue({ code: "custom", path: ["files", index, "path"], message: "must be unique" });
+        context.addIssue({ code: "custom", path: ["files", index, "path"], message: "must be unique" });
       }
       seenKinds.add(entry.kind);
       seenPaths.add(entry.path);
     }
     if (!seenKinds.has("omissions")) {
-      ctx.addIssue({ code: "custom", path: ["files"], message: "must include the omission manifest" });
+      context.addIssue({ code: "custom", path: ["files"], message: "must include the omission manifest" });
     }
   });
 
 export const analysisBundleOmissionsSchema = z
   .strictObject({
     schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-    omissions: z.array(
-      z.discriminatedUnion("kind", [
-        omissionEntryForKind("terminal-status"),
-        omissionEntryForKind("evaluation-metrics"),
-        omissionEntryForKind("accounting-summary"),
-        omissionEntryForKind("attempt-history"),
-        omissionEntryForKind("recovery-summary")
-      ])
-    )
+    omissions: z
+      .array(
+        z.discriminatedUnion("kind", [
+          omissionEntryForKind("terminal-status"),
+          omissionEntryForKind("evaluation-metrics"),
+          omissionEntryForKind("accounting-summary"),
+          omissionEntryForKind("attempt-history"),
+          omissionEntryForKind("recovery-summary")
+        ])
+      )
+      .max(5)
   })
   .superRefine((value, ctx) => {
-    if (!isSorted(value.omissions.map((entry) => entry.path))) {
-      ctx.addIssue({ code: "custom", path: ["omissions"], message: "must be sorted by path" });
-    }
     const seenKinds = new Set<AnalysisBundleDataKind>();
     const seenPaths = new Set<string>();
     for (const [index, entry] of value.omissions.entries()) {
@@ -419,6 +304,66 @@ export type AnalysisRecoverySummary = z.infer<typeof analysisRecoverySummarySche
 export type AnalysisBundleManifest = z.infer<typeof analysisBundleManifestSchema>;
 export type AnalysisBundleOmissions = z.infer<typeof analysisBundleOmissionsSchema>;
 
+export function assertAnalysisTerminalStatus(value: unknown): AnalysisTerminalStatus {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle terminal-status",
+    ANALYSIS_BUNDLE_TERMINAL_STATUS_JSON_SCHEMA_ID,
+    analysisTerminalStatusSchema,
+    ["analysis-bundle-terminal-status-reconciliation"],
+    value
+  );
+}
+
+export function assertAnalysisEvaluationMetrics(value: unknown): AnalysisEvaluationMetrics {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle evaluation-metrics",
+    ANALYSIS_BUNDLE_EVALUATION_METRICS_JSON_SCHEMA_ID,
+    analysisEvaluationMetricsSchema,
+    ["analysis-bundle-evaluation-count-reconciliation"],
+    value
+  );
+}
+
+export function assertAnalysisAccountingSummary(value: unknown): AnalysisAccountingSummary {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle accounting-summary",
+    ANALYSIS_BUNDLE_ACCOUNTING_SUMMARY_JSON_SCHEMA_ID,
+    analysisAccountingSummarySchema,
+    ["analysis-bundle-accounting-reconciliation"],
+    value
+  );
+}
+
+export function assertAnalysisAttemptHistory(value: unknown): AnalysisAttemptHistory {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle attempt-history",
+    ANALYSIS_BUNDLE_ATTEMPT_HISTORY_JSON_SCHEMA_ID,
+    analysisAttemptHistorySchema,
+    ["analysis-bundle-attempt-order"],
+    value
+  );
+}
+
+export function assertAnalysisRecoverySummary(value: unknown): AnalysisRecoverySummary {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle recovery-summary",
+    ANALYSIS_BUNDLE_RECOVERY_SUMMARY_JSON_SCHEMA_ID,
+    analysisRecoverySummarySchema,
+    ["analysis-bundle-recovery-reconciliation"],
+    value
+  );
+}
+
+export function assertAnalysisBundleOmissions(value: unknown): AnalysisBundleOmissions {
+  return assertRegisteredAnalysisBundleDocument(
+    "analysis bundle omissions",
+    ANALYSIS_BUNDLE_OMISSIONS_JSON_SCHEMA_ID,
+    analysisBundleOmissionsSchema,
+    ["analysis-bundle-omission-order"],
+    value
+  );
+}
+
 const analysisBundleFilesJsonSchema = {
   type: "array",
   minItems: 1,
@@ -434,18 +379,38 @@ const analysisBundleFilesJsonSchema = {
     ]
   },
   allOf: [
-    { contains: { properties: { kind: { const: "terminal-status" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "evaluation-metrics" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "accounting-summary" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "attempt-history" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "recovery-summary" } } }, minContains: 0, maxContains: 1 },
-    { contains: { properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
+    {
+      contains: { type: "object", properties: { kind: { const: "terminal-status" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "evaluation-metrics" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "accounting-summary" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "attempt-history" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    {
+      contains: { type: "object", properties: { kind: { const: "recovery-summary" } } },
+      minContains: 0,
+      maxContains: 1
+    },
+    { contains: { type: "object", properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
   ]
 } as const;
 
 export const analysisBundleManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle",
+  $id: ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID,
   title: "Ultrafuzz privacy-safe analysis bundle manifest",
   type: "object",
   required: ["schema_version", "policy_version", "files"],
@@ -456,6 +421,44 @@ export const analysisBundleManifestJsonSchema = {
     files: analysisBundleFilesJsonSchema
   }
 } as const;
+
+export const analysisTerminalStatusJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-terminal-status.schema.json",
+  ANALYSIS_BUNDLE_TERMINAL_STATUS_JSON_SCHEMA_ID
+);
+export const analysisEvaluationMetricsJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-evaluation-metrics.schema.json",
+  ANALYSIS_BUNDLE_EVALUATION_METRICS_JSON_SCHEMA_ID
+);
+export const analysisAccountingSummaryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-accounting-summary.schema.json",
+  ANALYSIS_BUNDLE_ACCOUNTING_SUMMARY_JSON_SCHEMA_ID
+);
+export const analysisAttemptHistoryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-attempt-history.schema.json",
+  ANALYSIS_BUNDLE_ATTEMPT_HISTORY_JSON_SCHEMA_ID
+);
+export const analysisRecoverySummaryJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-recovery-summary.schema.json",
+  ANALYSIS_BUNDLE_RECOVERY_SUMMARY_JSON_SCHEMA_ID
+);
+export const analysisBundleOmissionsJsonSchema = loadAnalysisBundleSchemaDocument(
+  "analysis-bundle-omissions.schema.json",
+  ANALYSIS_BUNDLE_OMISSIONS_JSON_SCHEMA_ID
+);
+
+function loadAnalysisBundleSchemaDocument(filename: string, expectedId: string): Readonly<Record<string, unknown>> {
+  const schemaPath = path.join(artifactSchemaDirectory(), filename);
+  const parsed = parseStrictJsonBytes(readRegularFileSnapshot(schemaPath, 1024 * 1024));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`analysis bundle schema must be an object: ${filename}`);
+  }
+  const document = parsed as Readonly<Record<string, unknown>>;
+  if (document.$id !== expectedId) {
+    throw new Error(`analysis bundle schema has an invalid identity: ${filename}`);
+  }
+  return document;
+}
 
 function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativePath: string): object {
   return {
@@ -472,17 +475,104 @@ function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativ
   };
 }
 
-function sumObject(value: Record<string, number>): number {
-  return Object.values(value).reduce((total, count) => total + count, 0);
+function assertAnalysisBundlePayload(kind: AnalysisBundleDataKind, value: unknown): unknown {
+  switch (kind) {
+    case "terminal-status":
+      return assertAnalysisTerminalStatus(value);
+    case "evaluation-metrics":
+      return assertAnalysisEvaluationMetrics(value);
+    case "accounting-summary":
+      return assertAnalysisAccountingSummary(value);
+    case "attempt-history":
+      return assertAnalysisAttemptHistory(value);
+    case "recovery-summary":
+      return assertAnalysisRecoverySummary(value);
+  }
 }
 
-const PAYLOAD_SCHEMAS = {
-  "terminal-status": analysisTerminalStatusSchema,
-  "evaluation-metrics": analysisEvaluationMetricsSchema,
-  "accounting-summary": analysisAccountingSummarySchema,
-  "attempt-history": analysisAttemptHistorySchema,
-  "recovery-summary": analysisRecoverySummarySchema
-} as const;
+function assertRegisteredAnalysisBundleDocument<T>(
+  label: string,
+  schemaId: string,
+  schema: z.ZodType<T>,
+  semanticGates: readonly SemanticGateName[],
+  value: unknown
+): T {
+  const result = validateRegisteredAnalysisBundleDocument(schemaId, schema, semanticGates, value);
+  if (!result.ok || result.value === undefined) {
+    throw new Error(schemaErrorMessage(label, result.issues));
+  }
+  return result.value;
+}
+
+function validateRegisteredAnalysisBundleDocument<T>(
+  schemaId: string,
+  schema: z.ZodType<T>,
+  semanticGates: readonly SemanticGateName[],
+  value: unknown,
+  issueCode?: string
+): SchemaValidationResult<T> {
+  const structural = validateRegisteredJsonSchema(schemaId, value);
+  if (!structural.ok) {
+    return {
+      ok: false,
+      issues: structural.issues.map((issue) => withIssueCode(jsonSchemaValidationIssue(issue), issueCode))
+    };
+  }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      issues: validationIssues(parsed.error).map((issue) => ({
+        ...withIssueCode(issue, issueCode),
+        message: `registered schema and retained Zod parser disagree: ${issue.message}`
+      }))
+    };
+  }
+  for (const gate of semanticGates) {
+    const result = executeSemanticGate(gate, { document: parsed.data });
+    if (result.status === "failed") {
+      return {
+        ok: false,
+        issues: result.issues.map((semanticIssue) => ({
+          path: semanticIssue.path,
+          code: issueCode ?? gate,
+          message: semanticIssue.message
+        }))
+      };
+    }
+    if (result.status === "requires-context") {
+      throw new Error(`analysis bundle semantic gate unexpectedly requires context: ${gate}`);
+    }
+  }
+  return { ok: true, issues: [], value: parsed.data };
+}
+
+function withIssueCode(issue: SchemaValidationIssue, issueCode: string | undefined): SchemaValidationIssue {
+  return issueCode === undefined ? issue : { ...issue, code: issueCode };
+}
+
+function jsonSchemaValidationIssue(issue: JsonSchemaValidationIssue): SchemaValidationIssue {
+  return {
+    path: jsonPointerPath("$", issue.instancePath),
+    code: issue.keyword,
+    message: issue.message
+  };
+}
+
+function jsonPointerPath(root: string, pointer: string): string {
+  if (pointer === "") return root;
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .reduce(
+      (current, segment) =>
+        /^(?:0|[1-9][0-9]*)$/u.test(segment)
+          ? `${current}[${segment}]`
+          : `${current}${/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`}`,
+      root
+    );
+}
 
 const FORBIDDEN_BUNDLE_KEYS = new Set([
   "agent_output",
@@ -534,18 +624,15 @@ export function writeAnalysisBundle(input: WriteAnalysisBundleInput): WriteAnaly
       omissionEntries.push({ kind, path: DATA_PATHS[kind], reason: omission ?? "data-unavailable" });
       continue;
     }
-    const parsed = PAYLOAD_SCHEMAS[kind].safeParse(candidate);
-    if (!parsed.success) {
-      throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
-    }
-    assertPolicySafeValue(parsed.data, kind);
-    serialized.set(DATA_PATHS[kind], { kind, contents: serializeJson(parsed.data) });
+    const parsed = assertAnalysisBundlePayload(kind, candidate);
+    assertPolicySafeValue(parsed, kind);
+    serialized.set(DATA_PATHS[kind], { kind, contents: serializeJson(parsed) });
   }
 
-  const omissions: AnalysisBundleOmissions = {
+  const omissions = assertAnalysisBundleOmissions({
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     omissions: omissionEntries.sort((left, right) => left.path.localeCompare(right.path))
-  };
+  });
   assertPolicySafeValue(omissions, "omissions");
   serialized.set(ANALYSIS_BUNDLE_OMISSIONS_FILE, {
     kind: "omissions",
@@ -643,34 +730,40 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
     }
     omittedKinds.add(omission.kind);
   }
+  assertAnalysisBundleCoverage(manifest, omissions);
 
   for (const kind of ANALYSIS_BUNDLE_DATA_KINDS) {
     const entry = entriesByKind.get(kind);
-    if (kind === "recovery-summary" && entry === undefined && !omittedKinds.has(kind)) {
-      // recovery-summary was added additively to v1. Bundles written before
-      // that addition remain valid; new writers surface the missing source in
-      // omissions.json instead of inventing recovery evidence.
-      continue;
-    }
-    if ((entry === undefined) === !omittedKinds.has(kind)) {
-      throw new Error(`analysis bundle ${kind} must be either included or omitted exactly once`);
-    }
     if (entry !== undefined) {
       const value = readJsonBounded(safeResolveInside(root, entry.path, "analysis bundle payload"));
-      const parsed = PAYLOAD_SCHEMAS[kind].safeParse(value);
-      if (!parsed.success) {
-        throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
-      }
-      assertPolicySafeValue(parsed.data, kind);
+      const parsed = assertAnalysisBundlePayload(kind, value);
+      assertPolicySafeValue(parsed, kind);
     }
   }
   return manifest;
 }
 
-export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
-  return validateWithZod(analysisBundleManifestSchema, value, {
-    code: "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"
+function assertAnalysisBundleCoverage(manifest: AnalysisBundleManifest, omissions: AnalysisBundleOmissions): void {
+  const result = executeSemanticGate("analysis-bundle-inclusion-omission-coverage", {
+    document: omissions,
+    context: { analysisBundle: { manifest } }
   });
+  if (result.status === "failed") {
+    throw new Error(result.issues.map((entry) => entry.message).join("; "));
+  }
+  if (result.status === "requires-context") {
+    throw new Error("analysis bundle coverage gate unexpectedly requires context");
+  }
+}
+
+export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
+  return validateRegisteredAnalysisBundleDocument(
+    ANALYSIS_BUNDLE_MANIFEST_JSON_SCHEMA_ID,
+    analysisBundleManifestSchema,
+    ["analysis-bundle-path-order"],
+    value,
+    "ANALYSIS_BUNDLE_MANIFEST_SCHEMA_INVALID"
+  );
 }
 
 export function assertAnalysisBundleManifest(value: unknown): AnalysisBundleManifest {
@@ -679,14 +772,6 @@ export function assertAnalysisBundleManifest(value: unknown): AnalysisBundleMani
     throw new Error(schemaErrorMessage("analysis bundle manifest", result.issues));
   }
   return result.value;
-}
-
-function assertAnalysisBundleOmissions(value: unknown): AnalysisBundleOmissions {
-  const parsed = analysisBundleOmissionsSchema.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(schemaErrorMessage("analysis bundle omissions", validationIssues(parsed.error)));
-  }
-  return parsed.data;
 }
 
 function assertKnownKinds(value: object, label: string): void {
@@ -786,10 +871,12 @@ function replaceDirectoryAtomically(staging: string, output: string): void {
 }
 
 function readJsonBounded(filePath: string): unknown {
-  if (fs.statSync(filePath).size > 1024 * 1024) {
-    throw new Error(`analysis bundle JSON exceeds the size limit: ${path.basename(filePath)}`);
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+  return parseStrictJsonBytes(readRegularFileSnapshot(filePath, 1024 * 1024), {
+    maxBytes: 1024 * 1024,
+    maxDepth: 128,
+    maxItems: 100_000,
+    maxProperties: 100_000
+  });
 }
 
 function assertStrictBundleTree(root: string, expectedFiles: string[]): void {
@@ -820,22 +907,6 @@ function assertStrictBundleTree(root: string, expectedFiles: string[]): void {
   walk(root, "");
 }
 
-function isSorted(values: string[]): boolean {
-  return values.every((value, index) => index === 0 || values[index - 1]!.localeCompare(value) <= 0);
-}
-
 function serializeJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-function aggregateStatusFromCounts(
-  counts: Record<(typeof ATTEMPT_WORKFLOW_STATUS_VALUES)[number], number>
-): (typeof TERMINAL_STATUS_VALUES)[number] {
-  const populated = ATTEMPT_WORKFLOW_STATUS_VALUES.filter((status) => counts[status] > 0);
-  if (populated.length === 0) return "unknown";
-  if (populated.length === 1) return populated[0]!;
-  for (const active of ["running", "paused", "pending"] as const) {
-    if (counts[active] > 0) return active;
-  }
-  return "mixed";
 }

@@ -38,7 +38,7 @@ nodes:
       - setup-foundry
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: final-report
     kind: agentic
@@ -51,7 +51,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: report.json
-        contract: ultrafuzz/report@1
+        contract: ultrafuzz/report@3
   - id: __finish__
     kind: meta
     role: finish
@@ -75,18 +75,32 @@ colors such as `#7c3aed`.
 
 Group defaults may include:
 
-| Field             | Meaning                                             |
-| ----------------- | --------------------------------------------------- |
-| `loops`           | Default loop count for nodes in the group.          |
-| `timeout_seconds` | Default timeout for nodes in the group.             |
-| `max_attempts`    | Maximum attempts for an agent task.                 |
-| `model_profiles`  | Explicit model profile list for nodes in the group. |
+| Field             | Meaning                                               |
+| ----------------- | ----------------------------------------------------- |
+| `loops`           | Default loop count for nodes in the group.            |
+| `timeout_seconds` | Default timeout for nodes in the group.               |
+| `max_attempts`    | Maximum attempts for an agent task.                   |
+| `model_profiles`  | Explicit model profile list for nodes in the group.   |
+| `failure_policy`  | `halt` (default) or `continue` for optional branches. |
 
 Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
 profiles, the node uses the configured default model profile only.
-`max_attempts` defaults to `1`; values greater than one retry the same agent task
-and its artifact-contract validation with Smithers' bounded retry policy.
+`max_attempts` defaults to the resolved `[retry].same_agent_attempts` value,
+including the selected audit profile's budget. Values greater than one retry the
+same agent task for retryable provider or execution failures that occur before
+agent completion under Smithers' bounded policy. A node value overrides its
+group and the project retry count. `max_attempts` and the complete chain after
+optional project fallback profiles are added are capped at 100. Fallback
+profiles run only after this primary budget. These settings do not retry a
+completed agent session whose required output is missing or schema-invalid;
+that post-agent contract failure is terminal.
+
+`failure_policy: continue` marks every node in that group as nonblocking. The
+generated workflow waits for such a node to settle, consumes its artifacts only
+when its verifier succeeded, and lets unrelated or downstream reconciliation
+continue when it failed or was skipped. Use this only for optional specialist
+lanes; ordinary groups retain fail-closed `halt` semantics.
 
 ## Node Fields
 
@@ -129,16 +143,38 @@ another node attempt or model invocation.
 Meta and reference nodes cannot require commands because they do not
 execute workflow commands.
 
-Built-in contracts include `ultrafuzz/findings@1`,
-`ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,
-`ultrafuzz/implemented-properties@1`, `ultrafuzz/implemented-properties@2`,
-`ultrafuzz/property-campaign@1`,
-`ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
-`ultrafuzz/invariant-campaign-plan@1`,
-`ultrafuzz/json-array@1`, `ultrafuzz/goal-plan@1`,
-`ultrafuzz/threat-model@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
-Contract definitions supply both runtime validation and the shape and
-valid-empty guidance appended to prompts.
+Current JSON contracts include `ultrafuzz/findings@2`,
+`ultrafuzz/generated-tests@3`, `ultrafuzz/properties@2`,
+`ultrafuzz/implemented-properties@3`, `ultrafuzz/property-campaign@3`,
+`ultrafuzz/invariant-campaign-plan@2`, `ultrafuzz/property-lens@2`,
+`ultrafuzz/reference-expectations@2`, and `ultrafuzz/report@3`, plus named
+contracts for the other workflow-specific JSON documents.
+`ultrafuzz/json-object@1` and `ultrafuzz/json-array@1` were removed; they are not
+generic escape hatches. See the
+[strict contract migration inventory](artifact-contract-migration-v2.md) for
+the breaking-version decisions. Non-JSON outputs use the explicit
+`ultrafuzz/nonempty-markdown@1` or `ultrafuzz/text@1` contracts.
+
+`ultrafuzz/generated-tests@3` is an atomic text bundle. Its manifest requires
+one root-level canonical ASCII `framework` for the entire bundle, including an
+empty bundle, plus both `generated_tests` for runnable tests/reproducers and
+`support_files` for their imported helpers, mocks, fixtures, scripts, and text
+data. Entry rows cannot carry or override `framework`. Every path is under
+`generated-tests/`, unique across both arrays, and bound to a non-empty,
+singly linked, non-symlink, strict UTF-8 regular companion. Every entry requires the
+companion's exact positive `size_bytes` and lowercase `sha256`; no file path may
+be the slash-delimited prefix of another. Support-only manifests are invalid;
+aggregation preserves the declared framework per atomic source bundle without
+inference or conversion. V2 manifests are rejected without conversion.
+
+Every retained JSON contract maps to one complete checked-in Draft 2020-12
+schema. Contract definitions supply runtime validation plus the shape,
+valid-empty form, and exact validation command appended to producer prompts.
+Only current contract IDs are accepted. Invariant campaigns use
+`ultrafuzz/invariant-campaign-plan@2`, whose schema accepts only v2 timeout
+evidence. The old `ultrafuzz/invariant-campaign-plan@1` contract and v1 document
+shape are unsupported. Other old schema versions, aliases, conversion readers,
+and generic JSON contracts are unsupported.
 
 ## Meta Nodes
 
@@ -176,7 +212,7 @@ Reference nodes materialize pinned cached reference content into run artifacts.
       contract: ultrafuzz/nonempty-markdown@1
       primary: true
     - path: references/manifest.json
-      contract: ultrafuzz/json-object@1
+      contract: ultrafuzz/reference-manifest@1
 ```
 
 Reference nodes must:
@@ -332,7 +368,7 @@ nodes:
       - base-test-setup
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
 ```
 
@@ -369,3 +405,42 @@ Topology validation rejects:
   executable names.
 - Prompt artifact references to unknown producers, non-ancestors, or producers
   without declared artifacts.
+
+## JSON Schema Bindings And Producer Validation
+
+Users declare `path`, `contract`, and `primary` in topology; they do not paste a
+schema path or digest into YAML. During planning, Ultrafuzz resolves each JSON
+contract through the checked-in registry and persists this complete binding on
+the planned output:
+
+- schema filename and fragment-free `$id`;
+- SHA-256 of the exact schema bytes;
+- package schema-bundle digest; and
+- validator build identity.
+
+The expanded graph, run state, verification marker, and
+`artifact-manifest.json` carry the same identity. The host rejects a missing,
+partial, stale, or mismatched binding before publication.
+
+Topology YAML remains version `2`; the persisted expanded graph uses
+`graphVersion: "4"` and schema ID
+`urn:ultrafuzz:schema:topology:expanded-graph:4` for this binding-bearing shape.
+
+The rendered output contract gives the producer two safely quoted commands per
+JSON output:
+
+```bash
+ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absolute artifact path>'
+ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
+```
+
+The first checks the pinned schema and the second adds document-local contract
+semantics. The producer runs every command after its final write and before
+returning. Exit `1` means it must correct its own draft and rerun during that
+same agent session; exit `2` is a setup failure; all commands must exit `0`. Any
+later edit requires another run. After the session returns, Ultrafuzz validates
+the exact bytes again and applies named filesystem, Git, digest, uniqueness,
+and cross-artifact gates. It never converts, normalizes, synthesizes, or repairs
+a missing or invalid agent output, and it does not fall back to another file or
+the model's final message. A post-session shape failure is terminal for that
+attempt.

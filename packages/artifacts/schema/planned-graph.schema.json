@@ -1,0 +1,449 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:planned-graph:4",
+  "title": "Ultrafuzz planned graph",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "graph_version", "topology_version", "groups", "nodes"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.planned-graph.v4"
+    },
+    "graph_version": {
+      "const": "4"
+    },
+    "topology_version": {
+      "const": 2
+    },
+    "groups": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/topologyGroup"
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "logical_id",
+          "display_name",
+          "kind",
+          "depends_on",
+          "artifact_dir",
+          "outputs",
+          "prompt_id",
+          "prompt_path",
+          "loop",
+          "model_fanout"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/safeId"
+          },
+          "logical_id": {
+            "$ref": "#/$defs/safeId"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": ["agentic", "reference"]
+          },
+          "group": {
+            "$ref": "#/$defs/safeId"
+          },
+          "depends_on": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/safeId"
+            }
+          },
+          "artifact_dir": {
+            "type": "string",
+            "pattern": "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "outputs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "contract", "contract_digest", "primary"],
+              "properties": {
+                "path": {
+                  "$ref": "#/$defs/safePath"
+                },
+                "contract": {
+                  "enum": [
+                    "ultrafuzz/admin-config-boundary-matrix@1",
+                    "ultrafuzz/aggregation-manifest@1",
+                    "ultrafuzz/audited-differential-lanes@1",
+                    "ultrafuzz/boundary-recipes@1",
+                    "ultrafuzz/campaign-summary@2",
+                    "ultrafuzz/coverage-evidence@1",
+                    "ultrafuzz/coverage-goal@2",
+                    "ultrafuzz/dependency-scope-matrix@1",
+                    "ultrafuzz/differential-gap-review@1",
+                    "ultrafuzz/differential-lane-result@1",
+                    "ultrafuzz/differential-plan@1",
+                    "ultrafuzz/differential-red-triage@1",
+                    "ultrafuzz/differential-repair-summary@1",
+                    "ultrafuzz/differential-report-review@1",
+                    "ultrafuzz/dynamic-enumerator-outputs@1",
+                    "ultrafuzz/dynamic-strategy-plan@1",
+                    "ultrafuzz/dynamic-strategy-provenance@1",
+                    "ultrafuzz/externalized-state-accounting@1",
+                    "ultrafuzz/finding-lifecycle-ledger@1",
+                    "ultrafuzz/findings@2",
+                    "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/harness-repairs@1",
+                    "ultrafuzz/implemented-properties@3",
+                    "ultrafuzz/invariant-campaign-plan@2",
+                    "ultrafuzz/invariant-ledger@1",
+                    "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/properties@2",
+                    "ultrafuzz/property-campaign@3",
+                    "ultrafuzz/property-lens@2",
+                    "ultrafuzz/reference-expectations@2",
+                    "ultrafuzz/reference-harness@1",
+                    "ultrafuzz/reference-manifest@1",
+                    "ultrafuzz/report@3",
+                    "ultrafuzz/selected-strategies@1",
+                    "ultrafuzz/semantic-red-registry@1",
+                    "ultrafuzz/severity-classified-findings@1",
+                    "ultrafuzz/strategy-detections@1",
+                    "ultrafuzz/text@1",
+                    "ultrafuzz/triaged-findings@1",
+                    "ultrafuzz/workspace-patch@1"
+                  ]
+                },
+                "contract_digest": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "schema_file": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$"
+                },
+                "schema_id": {
+                  "type": "string",
+                  "pattern": "^urn:ultrafuzz:schema:",
+                  "minLength": 1
+                },
+                "schema_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "schema_bundle_sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "validator_build": {
+                  "type": "string",
+                  "pattern": "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$"
+                },
+                "primary": {
+                  "type": "boolean"
+                }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "contract": {
+                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                      }
+                    },
+                    "required": ["contract"]
+                  },
+                  "then": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "schema_file": true
+                          },
+                          "required": ["schema_file"]
+                        },
+                        {
+                          "properties": {
+                            "schema_id": true
+                          },
+                          "required": ["schema_id"]
+                        },
+                        {
+                          "properties": {
+                            "schema_sha256": true
+                          },
+                          "required": ["schema_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "schema_bundle_sha256": true
+                          },
+                          "required": ["schema_bundle_sha256"]
+                        },
+                        {
+                          "properties": {
+                            "validator_build": true
+                          },
+                          "required": ["validator_build"]
+                        }
+                      ]
+                    }
+                  },
+                  "else": {
+                    "required": ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256", "validator_build"]
+                  }
+                }
+              ]
+            }
+          },
+          "prompt_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt_path": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reference_revision": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["provider", "repo", "commit", "paths"],
+            "properties": {
+              "provider": {
+                "const": "github"
+              },
+              "repo": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+              },
+              "commit": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/safePath"
+                }
+              }
+            }
+          },
+          "loop": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "count", "mode", "attempt_index"],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "mode": {
+                "enum": ["parallel", "series"]
+              },
+              "attempt_index": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "model_fanout": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["model_profile_id", "agent_ref", "model_index", "loop_index", "attempt_index"],
+              "properties": {
+                "attempt_id": {
+                  "$ref": "#/$defs/workflowTaskId"
+                },
+                "model_profile_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "agent_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "model_name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "reasoning_effort": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "timeout_seconds": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "model_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "loop_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "attempt_index": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "workflow": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node_id", "task_node_ids"],
+            "properties": {
+              "node_id": {
+                "$ref": "#/$defs/workflowTaskId"
+              },
+              "task_node_ids": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/workflowTaskId"
+                }
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "reference"
+                }
+              },
+              "required": ["kind"]
+            },
+            "then": {
+              "required": ["reference", "reference_revision"],
+              "properties": {
+                "reference": {},
+                "reference_revision": {},
+                "prompt_path": {
+                  "const": ""
+                },
+                "model_fanout": {
+                  "type": "array",
+                  "maxItems": 0
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "prompt_path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "not": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "reference": true
+                    },
+                    "required": ["reference"]
+                  },
+                  {
+                    "properties": {
+                      "reference_revision": true
+                    },
+                    "required": ["reference_revision"]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "workflowTaskId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$"
+    },
+    "safePath": {
+      "type": "string",
+      "pattern": "^(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}(?:\\/(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128})*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "topologyGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "color": {
+          "type": "string",
+          "minLength": 1
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "loops": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "model_profiles": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "failure_policy": {
+              "enum": ["halt", "continue"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

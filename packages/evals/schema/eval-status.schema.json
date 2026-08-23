@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:status:1",
+  "title": "Ultrafuzz eval status snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "snapshot_at", "stale_after_seconds", "completed_node_statuses", "rows"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.status.v1" },
+    "snapshot_at": { "type": "string", "format": "date-time" },
+    "stale_after_seconds": { "$ref": "#/$defs/positiveInteger" },
+    "completed_node_statuses": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"]
+      }
+    },
+    "rows": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/row" }
+    }
+  },
+  "$defs": {
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nullableNonNegativeInteger": {
+      "oneOf": [{ "$ref": "#/$defs/nonNegativeInteger" }, { "type": "null" }]
+    },
+    "nullableTimestamp": {
+      "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row",
+        "status",
+        "terminal",
+        "executed_nodes",
+        "total_nodes",
+        "progress_percent",
+        "eta_remaining_seconds",
+        "eta_at",
+        "checkpoint_age_seconds",
+        "checkpoint_stale",
+        "active_node_ids",
+        "waiting_nodes",
+        "linked_workflow_status",
+        "eta_basis",
+        "eta_unavailable_reason"
+      ],
+      "properties": {
+        "row": { "type": "string", "pattern": "^row-[0-9]{2,}$", "maxLength": 32 },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "paused",
+            "succeeded",
+            "failed",
+            "timed-out",
+            "canceled",
+            "not-launched",
+            "inaccessible",
+            "invalid"
+          ]
+        },
+        "terminal": { "type": "boolean" },
+        "executed_nodes": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "total_nodes": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "progress_percent": {
+          "oneOf": [{ "type": "number", "minimum": 0, "maximum": 100 }, { "type": "null" }]
+        },
+        "eta_remaining_seconds": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "eta_at": { "$ref": "#/$defs/nullableTimestamp" },
+        "checkpoint_age_seconds": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "checkpoint_stale": { "type": ["boolean", "null"] },
+        "active_node_ids": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "waiting_nodes": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/waitingNode" }
+        },
+        "linked_workflow_status": {
+          "enum": [
+            "running",
+            "in-progress",
+            "started",
+            "retrying",
+            "queued",
+            "waiting-approval",
+            "waiting-event",
+            "waiting-quota",
+            "waiting-timer",
+            "paused",
+            "continued",
+            "finished",
+            "succeeded",
+            "success",
+            "complete",
+            "completed",
+            "stopped",
+            "failed",
+            "error",
+            "timeout",
+            "timed-out",
+            "timedout",
+            "heartbeat-timeout",
+            "cancelled",
+            "canceled",
+            "unknown",
+            null
+          ]
+        },
+        "eta_basis": { "enum": ["observed-terminal-node-throughput", "terminal", null] },
+        "eta_unavailable_reason": {
+          "enum": ["progress-unavailable", "no-completed-nodes", "timing-unavailable", "checkpoint-stale", null]
+        }
+      }
+    },
+    "waitingNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "status", "wait_reason", "next_eligible_action"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "runnable",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped",
+            "timed-out",
+            "reused-from-prior-run",
+            "invalidated"
+          ]
+        },
+        "wait_reason": {
+          "enum": [
+            "ready",
+            "capacity",
+            "dependency",
+            "backoff",
+            "approval",
+            "event",
+            "timer",
+            "controller-loss",
+            "active",
+            null
+          ]
+        },
+        "next_eligible_action": {
+          "enum": [
+            "dispatch",
+            "capacity-available",
+            "dependency-complete",
+            "retry",
+            "approve",
+            "signal",
+            "timer-fire",
+            "controller-takeover",
+            "task-complete",
+            null
+          ]
+        }
+      }
+    }
+  }
+}

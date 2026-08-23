@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:node-input:2",
+  "title": "Ultrafuzz Modal node worker input",
+  "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nodeInput"
+}

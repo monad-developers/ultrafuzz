@@ -7,23 +7,23 @@ import test from "node:test";
 
 import {
   CACHE_MANIFEST_FILE,
-  REFERENCE_GITHUB_REPOS_ENV,
-  REFERENCE_GITHUB_TOKEN_ENV,
-  REFERENCE_TOKEN_REDACTION,
+  REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
+  REFERENCE_CACHE_SCHEMA_VERSION,
   RUN_REFERENCE_MANIFEST_FILE,
   defaultReferenceCatalogYaml,
   materializeReferenceArtifacts,
   parseReferenceCatalog,
+  referenceCacheManifestJsonSchema,
+  referenceSchemaBundleDigest,
+  referenceSchemaDirectory,
+  referenceSchemaRegistry,
+  readCacheManifest,
+  serializeReferenceCacheManifest,
   statusReferenceCatalog,
   syncReferenceCatalog,
   updateProjectReferencesLatest
 } from "../src/index.js";
-import type { ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
-import { fakeGitCommands, fakeGitIsolationEnv, installFakeGit, withProcessEnv } from "./fake-git.js";
-
-const PRIVATE_REFERENCE_TOKEN = "ghs_privatefilteredreferencetoken0123456789";
-const PRIVATE_REFERENCE_REPO = "example/private-reference";
-const PRIVATE_REFERENCE_COMMIT = "cccccccccccccccccccccccccccccccccccccccc";
+import type { ReferenceCacheManifest, ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
 
 function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -68,7 +68,7 @@ function writeCacheFixture(cacheRoot: string, reference = fixtureReference()): s
     path.join(cacheDir, CACHE_MANIFEST_FILE),
     `${JSON.stringify(
       {
-        schema_version: "1.0",
+        schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
         provider: "github",
         repo: reference.repo,
         commit: reference.commit,
@@ -83,7 +83,92 @@ function writeCacheFixture(cacheRoot: string, reference = fixtureReference()): s
   return cacheDir;
 }
 
-test("default catalog pins the property references and the reviewed vulnerability database", () => {
+test("cache manifest reader accepts only the exact current version and canonical shape", () => {
+  const cacheRoot = tempDir("ufz-ref-manifest-contract-");
+  const cacheDir = writeCacheFixture(cacheRoot);
+  const manifestPath = path.join(cacheDir, CACHE_MANIFEST_FILE);
+  const canonical = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+
+  assert.deepEqual(readCacheManifest("properties.example", cacheDir), canonical);
+
+  const { schema_version: _schemaVersion, ...unversioned } = canonical;
+  const variants: unknown[] = [
+    unversioned,
+    { ...canonical, schema_version: "1.0" },
+    { ...canonical, legacy: true },
+    { ...canonical, fetched_at: "yesterday" },
+    { ...canonical, commit: "A".repeat(40) },
+    { ...canonical, files: [] },
+    {
+      ...canonical,
+      files: [{ ...((canonical.files as Array<Record<string, unknown>>)[0] ?? {}), legacy_path: "README.md" }]
+    }
+  ];
+  for (const value of variants) {
+    fs.writeFileSync(manifestPath, `${JSON.stringify(value)}\n`, "utf8");
+    assert.throws(
+      () => readCacheManifest("properties.example", cacheDir),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "INVALID_CACHE_MANIFEST",
+      JSON.stringify(value)
+    );
+  }
+});
+
+test("cache manifest semantic gates reject repeated and noncanonical path order", () => {
+  const cacheRoot = tempDir("ufz-ref-manifest-semantics-");
+  const cacheDir = writeCacheFixture(cacheRoot);
+  const manifestPath = path.join(cacheDir, CACHE_MANIFEST_FILE);
+  const canonical = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ReferenceCacheManifest;
+  const [first, second] = canonical.files;
+  assert.ok(first);
+  assert.ok(second);
+
+  for (const files of [
+    [first, { ...first, size_bytes: first.size_bytes + 1 }],
+    [second, first]
+  ]) {
+    fs.writeFileSync(manifestPath, `${JSON.stringify({ ...canonical, files })}\n`, "utf8");
+    assert.throws(
+      () => readCacheManifest("properties.example", cacheDir),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "INVALID_CACHE_MANIFEST"
+    );
+  }
+});
+
+test("reference cache schema is registered, byte-pinned, and matches its TypeScript export", () => {
+  const registry = referenceSchemaRegistry();
+  assert.equal(registry.length, 1);
+  const entry = registry[0];
+  assert.ok(entry);
+  assert.equal(entry.id, REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID);
+  assert.equal(entry.role, "runtime-state");
+  assert.deepEqual(entry.schema, referenceCacheManifestJsonSchema);
+  assert.match(entry.sha256, /^[0-9a-f]{64}$/u);
+  assert.match(referenceSchemaBundleDigest(), /^[0-9a-f]{64}$/u);
+  assert.equal(
+    path.resolve(referenceSchemaDirectory(), entry.filename),
+    path.resolve(referenceSchemaDirectory(), "reference-cache-manifest.schema.json")
+  );
+});
+
+test("cache manifest publisher validates the exact serialized bytes", () => {
+  const cacheRoot = tempDir("ufz-ref-manifest-publisher-");
+  const cacheDir = writeCacheFixture(cacheRoot);
+  const manifest = readCacheManifest("properties.example", cacheDir);
+  const bytes = serializeReferenceCacheManifest("properties.example", manifest);
+  assert.deepEqual(readCacheManifest("properties.example", cacheDir), JSON.parse(bytes.toString("utf8")));
+
+  assert.throws(
+    () =>
+      serializeReferenceCacheManifest("properties.example", {
+        ...manifest,
+        schema_version: "1.0" as typeof REFERENCE_CACHE_SCHEMA_VERSION
+      }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "INVALID_CACHE_MANIFEST"
+  );
+});
+
+test("default catalog restores original pinned property references", () => {
   const catalog = parseReferenceCatalog(defaultReferenceCatalogYaml());
 
   const ids = Object.keys(catalog.references).sort();

@@ -1,38 +1,41 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import lockfile from "proper-lockfile";
-
 import {
   appendEvent,
+  assertPlannedGraph,
   assertNoSymlinkComponents,
   assertRegularFileInside,
   createInitialRunState,
+  executeSemanticGate,
   artifactContractDefinition,
-  artifactContractSchemaFile,
+  artifactContractSchemaBinding,
   createRunLayout,
   getNodeArtifactDir,
-  layoutForRunRoot,
-  publishFileDurableExclusive,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  RUN_PLAN_SCHEMA_VERSION,
   safeResolveInside,
   sha256Bytes,
   validateReferenceExpectationsSchema,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
-  writeJsonDurable,
+  writeRunPlanDocument,
+  PLANNED_GRAPH_SCHEMA_VERSION,
+  type ArtifactContractId,
   type NodeStateInput,
+  type ReferenceArtifactProvenanceMetadata,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import {
-  applyDefaultProfileOverrides,
+  applyModelProfileOverrides,
   invariantPropertyPrioritySelection,
   redactResolvedConfig,
   serializeRedactedResolvedConfigToml
 } from "@ultrafuzz/config";
 import {
   loadPromptCatalog,
-  RENDERED_PROMPT_FILE,
   renderPrompt,
   writeRenderedPrompt,
   type PromptCatalog,
@@ -50,7 +53,6 @@ import {
 } from "@ultrafuzz/topology";
 
 import {
-  RUNTIME_SCHEMA_VERSION,
   type PlanRunInput,
   type PlanRunValue,
   type PlannedGraph,
@@ -58,7 +60,8 @@ import {
   type RenderedPromptPlan,
   type RuntimeDiagnostic
 } from "./types.js";
-import { projectArtifactSchemaDir } from "./init.js";
+
+const REFERENCE_EXPECTATIONS_CONTRACT = "ultrafuzz/reference-expectations@2" as ArtifactContractId;
 import { validateProject } from "./validate.js";
 import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
 import {
@@ -73,20 +76,23 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
+import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import {
-  materializeVulnerabilityDatabasePlannerCatalog,
-  VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
-  type MaterializedVulnerabilityDatabaseCatalog
-} from "./vulnerability-database.js";
-import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
-
-export { promptTextsForCatalog, transformPromptCatalogForRun } from "./topology-transform.js";
+  assertLaunchCheckoutRevision,
+  captureLaunchSourceRevision,
+  deleteRunSourceRevision,
+  publishRunSourceRevision
+} from "./source-revision.js";
+import { transformTopologyForRun } from "./topology-transform.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
-const PROMPT_REPAIR_LOCK = ".prompt-repair";
 
 interface PlanRunHooks {
+  enforceDataGovernance?: boolean;
+  afterSourceCapture?(source: ReturnType<typeof captureLaunchSourceRevision>): Promise<void> | void;
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
@@ -95,6 +101,20 @@ interface PlanRunHooks {
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const projectRoot = path.resolve(input.projectRoot);
+  const runId = input.runId ?? generateRunId(input.mode ?? "run");
+  let sourceRevision: ReturnType<typeof captureLaunchSourceRevision>;
+  try {
+    sourceRevision = captureLaunchSourceRevision(projectRoot, runId);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_FAILED")]);
+  }
+  try {
+    await hooks.afterSourceCapture?.(sourceRevision);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CAPTURE_HOOK_FAILED")
+    ]);
+  }
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
     return runtimeFailure<PlanRunValue>(validation.diagnostics);
@@ -105,6 +125,18 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>(resolved.diagnostics);
   }
   applyWorkflowRunOverrides(resolved.config, input);
+  if (input.runtimeOverrides?.forbidModelFallback === true && resolved.config.retry.agents.length > 1) {
+    return runtimeFailure<PlanRunValue>([
+      {
+        code: "MODEL_FALLBACK_FORBIDDEN",
+        message:
+          "this run forbids model fallback, but retry.agents configures fallback profiles; remove every entry after retry.agents[0]",
+        severity: "error",
+        source: "runtime",
+        path: "retry.agents"
+      }
+    ]);
+  }
 
   let auditPolicy: ReturnType<typeof effectiveAuditPolicy>;
   try {
@@ -124,7 +156,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       : { excludedNodeIds: input.topologyTransform.excludedNodeIds })
   };
 
-  const runId = input.runId ?? generateRunId(input.mode ?? "run");
   const configFingerprint = sha256Stable(resolved.config);
   const redacted = redactResolvedConfig(resolved.config);
   const redactedConfigFingerprint = sha256Stable(redacted.config);
@@ -159,10 +190,12 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       requirePromptFiles: true,
       promptTexts: promptTextsForCatalog(catalog),
       defaultTimeoutSeconds: resolved.config.run.defaultTimeoutSeconds,
+      defaultMaxAttempts: resolved.config.retry.sameAgentAttempts,
       modelProfiles: modelProfilesForTopology(resolved.config),
-      defaultModelProfileId: resolved.config.models.default,
+      defaultModelProfileId: resolved.config.retry.agents[0] ?? resolved.config.models.default,
       configFingerprint: redactedConfigFingerprint
     });
+    assertExpandedGraphRetryChains(resolved.config, expandedGraph);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
   }
@@ -184,6 +217,44 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
+  let controllerSource: ReturnType<typeof inspectControllerSource>;
+  try {
+    controllerSource = inspectControllerSource(projectRoot);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_UNTRUSTED")]);
+  }
+  const graphFingerprint = fingerprintGraph(expandedGraph);
+  const governanceConfig = resolved.config;
+  const prepareGovernance = () =>
+    prepareDataGovernance({
+      projectRoot,
+      config: governanceConfig,
+      graph,
+      graphFingerprint,
+      configFingerprint,
+      promptDigest,
+      sourceRunId: input.sourceRunId,
+      referenceExpectationsDigest: referenceExpectationsSource?.sourceDigest,
+      operatorPrompt: input.prompt,
+      workflowInput: input.workflowInput,
+      env: input.env,
+      controllerOwnedPaths: [
+        runRoot,
+        path.join(projectRoot, ".ultrafuzz", "runs"),
+        path.join(projectRoot, ".smithers", "node_modules"),
+        path.join(projectRoot, ".smithers", "workflows")
+      ]
+    });
+  let governance: ReturnType<typeof prepareDataGovernance>;
+  try {
+    governance = prepareGovernance();
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]);
+  }
+  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics))
+    return runtimeFailure<PlanRunValue>(governance.diagnostics);
+  // Authenticate disclosure before provider preflight can create a cloud app
+  // or otherwise contact an external execution environment.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =
@@ -194,7 +265,46 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   if (hasRuntimeErrors(preMaterializeDiagnostics)) {
     return runtimeFailure<PlanRunValue>(preMaterializeDiagnostics);
   }
-  const graphFingerprint = fingerprintGraph(expandedGraph);
+  try {
+    assertControllerSourceDigest(projectRoot, controllerSource.digest);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_CHANGED_DURING_PREFLIGHT")
+    ]);
+  }
+  if (hooks.enforceDataGovernance === true && hooks.beforeMaterialize !== undefined) {
+    let current: ReturnType<typeof prepareDataGovernance>;
+    try {
+      current = prepareGovernance();
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")
+      ]);
+    }
+    if (
+      current.provenance.policy_digest !== governance.provenance.policy_digest ||
+      current.provenance.input_digest !== governance.provenance.input_digest
+    ) {
+      const changed = new Error(
+        "campaign policy or effective input changed during preflight; review and acknowledge it again"
+      );
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(changed, "governance", "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT")
+      ]);
+    }
+    if (hasRuntimeErrors(current.diagnostics)) return runtimeFailure<PlanRunValue>(current.diagnostics);
+    governance = current;
+  }
+  const governanceBytes = Buffer.from(`${JSON.stringify(governance.provenance, null, 2)}\n`, "utf8");
+  const governanceReference = {
+    schema_version: governance.provenance.schema_version,
+    path: DATA_GOVERNANCE_PROVENANCE_PATH,
+    sha256: sha256Bytes(governanceBytes),
+    policy_digest: governance.provenance.policy_digest,
+    input_digest: governance.provenance.input_digest,
+    sensitivity: governance.provenance.policy.sensitivity,
+    acknowledgement_status: governance.provenance.acknowledgement_status
+  };
   const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,
@@ -239,6 +349,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       runMetadata: {
         mode: input.mode ?? "run",
         workflow_ids: [],
+        ...(sourceRevision === undefined
+          ? {}
+          : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
         redacted_config_fingerprint: redactedConfigFingerprint,
         prompt_digest: promptDigest,
         audit_profile: {
@@ -263,6 +376,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
+    writeFileDurable(path.join(layout.root, DATA_GOVERNANCE_PROVENANCE_PATH), governanceBytes);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
   }
@@ -320,81 +434,96 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   }
 
   const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
-  try {
-    persistDeferredPromptTemplates(layout, catalog, expandedGraph);
-  } catch (error) {
-    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);
+  if (validation.value.topology === undefined) {
+    throw new Error("validated run plan is missing its topology summary");
   }
-  writeJsonDurable(path.join(layout.root, "plan.json"), {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    run_id: runId,
-    mode: input.mode ?? "run",
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    prompt_digest: promptDigest,
-    execution: resolved.config.execution,
-    ...(vulnerabilityDatabase === undefined
-      ? {}
-      : {
-          vulnerability_database: {
-            catalog_path: vulnerabilityDatabase.relative_path,
-            catalog_sha256: vulnerabilityDatabase.sha256,
-            planner_catalog_schema_version: vulnerabilityDatabase.schema_version,
-            database_schema_version: vulnerabilityDatabase.database_schema_version,
-            aggregate_sha256: vulnerabilityDatabase.aggregate_sha256,
-            repo: vulnerabilityDatabase.repo,
-            commit: vulnerabilityDatabase.commit,
-            resolved_at: vulnerabilityDatabase.resolved_at,
-            reference_artifact_dir: path.relative(layout.root, vulnerabilityDatabase.reference_artifact_dir)
-          }
-        }),
-    topology: validation.value.topology,
-    audit_profile: {
-      id: auditPolicy.auditProfile,
-      catalog_digest: auditPolicy.catalogDigest,
-      effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
-      topology_path_origin: auditPolicy.topologyPathOrigin,
-      topology_digest: auditPolicy.topologyDigest,
+  if (sourceRevision !== undefined) {
+    try {
+      assertLaunchCheckoutRevision(projectRoot, sourceRevision);
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_CHANGED")]);
+    }
+  }
+  let sourceRefCreated = false;
+  try {
+    if (sourceRevision !== undefined) sourceRefCreated = publishRunSourceRevision(projectRoot, sourceRevision);
+    writeRunPlanDocument(path.join(layout.root, "plan.json"), {
+      schema_version: RUN_PLAN_SCHEMA_VERSION,
+      run_id: runId,
+      mode: input.mode ?? "run",
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      ...(sourceRevision === undefined
+        ? {}
+        : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
       prompt_digest: promptDigest,
-      expanded_graph_fingerprint: graphFingerprint,
-      effective_settings: auditPolicy.effectiveSettings,
-      setting_origins: auditPolicy.settingOrigins,
-      overridden_settings: auditPolicy.overriddenSettings,
-      topology_overridden: auditPolicy.topologyOverridden
-    },
-    rendered_prompts: persistedRenderedPrompts,
-    policy_posture: Object.fromEntries(
-      Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
-    )
-  });
+      controller_source_digest: controllerSource.digest,
+      execution: resolved.config.execution,
+      topology: validation.value.topology,
+      audit_profile: {
+        id: auditPolicy.auditProfile,
+        catalog_digest: auditPolicy.catalogDigest,
+        effective_topology_path: auditPolicy.effectiveTopologyDisplayPath,
+        topology_path_origin: auditPolicy.topologyPathOrigin,
+        topology_digest: auditPolicy.topologyDigest,
+        prompt_digest: promptDigest,
+        expanded_graph_fingerprint: graphFingerprint,
+        effective_settings: auditPolicy.effectiveSettings,
+        setting_origins: auditPolicy.settingOrigins,
+        overridden_settings: auditPolicy.overriddenSettings,
+        topology_overridden: auditPolicy.topologyOverridden
+      },
+      data_governance: governanceReference,
+      rendered_prompts: persistedRenderedPrompts,
+      policy_posture: Object.fromEntries(
+        Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
+      ) as Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">
+    });
+  } catch (error) {
+    if (sourceRefCreated && sourceRevision !== undefined) {
+      try {
+        deleteRunSourceRevision(projectRoot, sourceRevision);
+      } catch (rollbackError) {
+        return runtimeFailure<PlanRunValue>([
+          diagnosticFromError(
+            new AggregateError([error, rollbackError], "run plan persistence and source ref rollback failed"),
+            "runtime",
+            "RUN_SOURCE_REVISION_ROLLBACK_FAILED"
+          )
+        ]);
+      }
+    }
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_SOURCE_REVISION_PERSIST_FAILED")]);
+  }
 
-  return runtimeResult(true, {
-    run_id: runId,
-    run_root: layout.root,
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph,
-    expanded_graph: expandedGraph,
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    prompt_digest: promptDigest,
-    output_root: outputRoot,
-    state_nodes: stateNodes,
-    resolved_config: resolved.config,
-    validation: validation.value,
-    layout,
-    rendered_prompts: renderedPrompts,
-    ...(vulnerabilityDatabase === undefined
-      ? {}
-      : {
-          vulnerability_database: {
-            relative_path: vulnerabilityDatabase.relative_path,
-            sha256: vulnerabilityDatabase.sha256
-          }
-        })
-  });
+  return runtimeResult(
+    true,
+    {
+      run_id: runId,
+      run_root: layout.root,
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      ...(sourceRevision === undefined
+        ? {}
+        : { source_revision: sourceRevision.revision, source_ref: sourceRevision.ref }),
+      graph,
+      expanded_graph: expandedGraph,
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
+      prompt_digest: promptDigest,
+      data_governance: governanceReference,
+      controller_source_digest: controllerSource.digest,
+      output_root: outputRoot,
+      state_nodes: stateNodes,
+      resolved_config: resolved.config,
+      validation: validation.value,
+      layout,
+      rendered_prompts: renderedPrompts
+    },
+    preMaterializeDiagnostics
+  );
 }
 
 function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): string {
@@ -413,322 +542,6 @@ function promptDigestForGraph(graph: PlannedGraph, catalog: PromptCatalog): stri
       };
     })
   );
-}
-
-export async function repairMissingRenderedPromptsForRun(input: {
-  projectRoot: string;
-  runId: string;
-  runRoot: string;
-}): Promise<number> {
-  const projectRoot = path.resolve(input.projectRoot);
-  const layout = layoutForRunRoot(path.resolve(input.runRoot), input.runId);
-  const rootStat = fs.lstatSync(layout.root);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-    throw new Error("cannot repair rendered prompts from an unsafe run root");
-  }
-  const release = await lockfile.lock(layout.root, {
-    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
-    realpath: false,
-    stale: 300_000,
-    update: 60_000,
-    retries: {
-      retries: 120,
-      factor: 1,
-      minTimeout: 250,
-      maxTimeout: 1_000
-    }
-  });
-  try {
-    return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
-  } finally {
-    await release();
-  }
-}
-
-/**
- * Restores presentation copies of missing rendered prompts from the already
- * authenticated execution generation. Existing mutable artifact copies are
- * deliberately ignored: Smithers consumes the retained snapshot, so they are
- * neither an execution input nor allowed to veto lifecycle recovery.
- */
-export async function repairMissingRenderedPromptsFromExecutionSnapshot(input: {
-  projectRoot: string;
-  runId: string;
-  runRoot: string;
-  executionFiles: readonly { snapshotPath: string; contents: Buffer }[];
-}): Promise<number> {
-  const projectRoot = path.resolve(input.projectRoot);
-  const layout = layoutForRunRoot(path.resolve(input.runRoot), input.runId);
-  const rootStat = fs.lstatSync(layout.root);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-    throw new Error("cannot repair rendered prompts from an unsafe run root");
-  }
-  const release = await lockfile.lock(layout.root, {
-    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
-    realpath: false,
-    stale: 300_000,
-    update: 60_000,
-    retries: {
-      retries: 120,
-      factor: 1,
-      minTimeout: 250,
-      maxTimeout: 1_000
-    }
-  });
-  try {
-    const sealedPlan = input.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
-    if (sealedPlan === undefined) throw new Error("sealed execution snapshot is missing its run plan");
-    const plan = parsePersistedPromptPlan(sealedPlan.contents.toString("utf8"));
-    if (plan.run_id !== input.runId) {
-      throw new Error("cannot repair rendered prompts from incompatible sealed run metadata");
-    }
-    const promptsBySnapshotPath = new Map(input.executionFiles.map((file) => [file.snapshotPath, file.contents]));
-    const attempts = new Set<string>();
-    const repairs: Array<{ attemptId: string; promptPath: string; contents: string; digest: string }> = [];
-    for (const expected of plan.rendered_prompts) {
-      if (attempts.has(expected.attempt_id)) throw new Error("sealed run plan contains duplicate prompt attempts");
-      attempts.add(expected.attempt_id);
-      const promptPath = path.join(getNodeArtifactDir(layout, expected.attempt_id), RENDERED_PROMPT_FILE);
-      const projectRelativePromptPath = path.relative(projectRoot, promptPath);
-      const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
-      if (
-        path.isAbsolute(projectRelativePromptPath) ||
-        projectRelativePromptPath.startsWith(`..${path.sep}`) ||
-        (persistedPromptPath !== projectRelativePromptPath &&
-          !persistedPromptPath.endsWith(`${path.sep}${projectRelativePromptPath}`))
-      ) {
-        throw new Error(`persisted rendered prompt path is incompatible for ${expected.attempt_id}`);
-      }
-      if (expected.rendered_prompt_digest === undefined) {
-        throw new Error(`sealed rendered prompt lacks a digest for ${expected.attempt_id}`);
-      }
-      if (fs.existsSync(promptPath)) continue;
-      assertNoSymlinkComponents(layout.root, promptPath, `rendered prompt for ${expected.attempt_id}`);
-      const sealedPrompt = promptsBySnapshotPath.get(`controls/rendered-prompts/${expected.attempt_id}.md`);
-      if (sealedPrompt === undefined) {
-        throw new Error(`sealed execution snapshot is missing the rendered prompt for ${expected.attempt_id}`);
-      }
-      const contents = sealedPrompt.toString("utf8");
-      if (sha256Stable(contents) !== expected.rendered_prompt_digest) {
-        throw new Error(`sealed rendered prompt does not match persisted task metadata for ${expected.attempt_id}`);
-      }
-      repairs.push({
-        attemptId: expected.attempt_id,
-        promptPath,
-        contents,
-        digest: expected.rendered_prompt_digest
-      });
-    }
-
-    let repaired = 0;
-    for (const repair of repairs) {
-      if (fs.existsSync(repair.promptPath)) continue;
-      const relativePromptPath = path.relative(layout.root, repair.promptPath).split(path.sep).join("/");
-      const publication = publishFileDurableExclusive(layout.root, relativePromptPath, repair.contents);
-      validateRenderedPromptFile(layout, repair.promptPath, repair.digest, repair.attemptId);
-      if (publication.created) repaired += 1;
-    }
-    if (repaired > 0) {
-      appendEvent(layout, {
-        eventType: "rendered-prompts-repaired",
-        status: "succeeded",
-        payload: { count: repaired, source: "sealed-execution-snapshot" }
-      });
-    }
-    return repaired;
-  } finally {
-    await release();
-  }
-}
-
-function repairRenderedPromptsForRun(input: { projectRoot: string; runId: string; layout: RunLayout }): number {
-  const { projectRoot, layout } = input;
-  readPersistedPlannedGraph(layout.graphPath);
-  const plan = readPersistedPromptPlan(path.join(layout.root, "plan.json"));
-  if (plan.run_id !== input.runId) {
-    throw new Error("cannot repair rendered prompts from incompatible run metadata");
-  }
-
-  const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
-  const repairs: Array<{ attemptId: string; promptPath: string; contents: string }> = [];
-  for (const [attemptId, expected] of expectedByAttempt) {
-    const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
-    assertNoSymlinkComponents(layout.root, promptPath, `rendered prompt for ${attemptId}`);
-    const projectRelativePromptPath = path.relative(projectRoot, promptPath);
-    const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
-    if (
-      path.isAbsolute(projectRelativePromptPath) ||
-      projectRelativePromptPath.startsWith(`..${path.sep}`) ||
-      (persistedPromptPath !== projectRelativePromptPath &&
-        !persistedPromptPath.endsWith(`${path.sep}${projectRelativePromptPath}`))
-    ) {
-      throw new Error(`persisted rendered prompt path is incompatible for ${attemptId}`);
-    }
-    if (expected.rendered_prompt_digest === undefined) {
-      throw new Error(
-        `cannot validate legacy rendered prompt for ${attemptId} without a persisted digest; start a new run`
-      );
-    }
-    if (!fs.existsSync(promptPath)) {
-      if (expected.rendered_prompt_snapshot_path === undefined) {
-        throw new Error(`cannot repair rendered prompt for ${attemptId} without an immutable snapshot`);
-      }
-      const snapshotPath = safeResolveInside(
-        layout.root,
-        expected.rendered_prompt_snapshot_path,
-        `rendered prompt snapshot for ${attemptId}`
-      );
-      assertRegularFileInside(layout.root, snapshotPath, `rendered prompt snapshot for ${attemptId}`);
-      const contents = fs.readFileSync(snapshotPath, "utf8");
-      if (sha256Stable(contents) !== expected.rendered_prompt_digest) {
-        throw new Error(`immutable rendered prompt snapshot does not match persisted task metadata for ${attemptId}`);
-      }
-      repairs.push({ attemptId, promptPath, contents });
-      continue;
-    }
-    validateRenderedPromptFile(layout, promptPath, expected.rendered_prompt_digest, attemptId);
-  }
-
-  let repaired = 0;
-  for (const repair of repairs) {
-    // Every cooperating lifecycle command holds the per-run lock. If an
-    // external writer created the prompt meanwhile, validate it instead of
-    // overwriting or deleting content that this invocation does not own.
-    if (fs.existsSync(repair.promptPath)) {
-      const expected = expectedByAttempt.get(repair.attemptId)!;
-      validateRenderedPromptFile(layout, repair.promptPath, expected.rendered_prompt_digest!, repair.attemptId);
-      continue;
-    }
-    writeFileDurable(repair.promptPath, repair.contents);
-    validateRenderedPromptFile(
-      layout,
-      repair.promptPath,
-      expectedByAttempt.get(repair.attemptId)!.rendered_prompt_digest!,
-      repair.attemptId
-    );
-    repaired += 1;
-  }
-  if (repaired > 0) {
-    appendEvent(layout, {
-      eventType: "rendered-prompts-repaired",
-      status: "succeeded",
-      payload: { count: repaired }
-    });
-  }
-  return repaired;
-}
-
-interface PersistedPromptPlanEntry {
-  attempt_id: string;
-  prompt_id: string;
-  prompt_path: string;
-  rendered_prompt_path: string;
-  rendered_prompt_digest?: string;
-  rendered_prompt_snapshot_path?: string;
-  variables_used: string[];
-}
-
-function readPersistedPromptPlan(planPath: string): {
-  run_id: string;
-  config_fingerprint: string;
-  rendered_prompts: PersistedPromptPlanEntry[];
-} {
-  return parsePersistedPromptPlan(fs.readFileSync(planPath, "utf8"));
-}
-
-function parsePersistedPromptPlan(contents: string): {
-  run_id: string;
-  config_fingerprint: string;
-  rendered_prompts: PersistedPromptPlanEntry[];
-} {
-  const value = JSON.parse(contents) as Record<string, unknown>;
-  if (
-    typeof value.run_id !== "string" ||
-    typeof value.config_fingerprint !== "string" ||
-    !Array.isArray(value.rendered_prompts)
-  ) {
-    throw new Error("persisted run plan is missing rendered prompt metadata");
-  }
-  const entries = value.rendered_prompts.map((entry) => {
-    const candidate = entry as Record<string, unknown>;
-    if (
-      typeof candidate.attempt_id !== "string" ||
-      typeof candidate.prompt_id !== "string" ||
-      typeof candidate.prompt_path !== "string" ||
-      typeof candidate.rendered_prompt_path !== "string" ||
-      (candidate.rendered_prompt_digest !== undefined &&
-        (typeof candidate.rendered_prompt_digest !== "string" ||
-          !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest))) ||
-      (candidate.rendered_prompt_snapshot_path !== undefined &&
-        typeof candidate.rendered_prompt_snapshot_path !== "string") ||
-      !Array.isArray(candidate.variables_used) ||
-      !candidate.variables_used.every((item) => typeof item === "string")
-    ) {
-      throw new Error("persisted rendered prompt metadata is invalid");
-    }
-    return {
-      attempt_id: candidate.attempt_id,
-      prompt_id: candidate.prompt_id,
-      prompt_path: candidate.prompt_path,
-      rendered_prompt_path: candidate.rendered_prompt_path,
-      ...(candidate.rendered_prompt_digest === undefined
-        ? {}
-        : { rendered_prompt_digest: candidate.rendered_prompt_digest }),
-      ...(candidate.rendered_prompt_snapshot_path === undefined
-        ? {}
-        : { rendered_prompt_snapshot_path: candidate.rendered_prompt_snapshot_path }),
-      variables_used: candidate.variables_used
-    };
-  });
-  return { run_id: value.run_id, config_fingerprint: value.config_fingerprint, rendered_prompts: entries };
-}
-
-function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
-  const value = JSON.parse(fs.readFileSync(graphPath, "utf8")) as Partial<PlannedGraph>;
-  if (value.schema_version !== "1.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
-    throw new Error("persisted planned graph is invalid");
-  }
-  return value as PlannedGraph;
-}
-
-/**
- * Persists the exact transformed prompt bodies that planning hashed and validated.
- *
- * Compilation defers rendering for dynamic templates and for static descendants of a dynamic group,
- * so it must snapshot this immutable value instead of rereading the project file: a run-scoped
- * prompt transform (for example an excluded artifact reference) makes the project bytes differ from
- * the bytes the plan is bound to.
- */
-function persistDeferredPromptTemplates(
-  layout: RunLayout,
-  catalog: PromptCatalog,
-  graph: ExpandedGraph
-): Map<string, string> {
-  const digests = graph.fingerprintInputs?.promptDigests ?? {};
-  const persisted = new Map<string, string>();
-  for (const node of graph.nodes) {
-    if (node.kind !== "agentic" || node.promptPath === undefined) continue;
-    const expected = digests[node.promptPath] ?? node.dynamic?.templateDigest;
-    if (expected === undefined) continue;
-    const body = promptEntryForPath(catalog, node.promptPath, node.logicalId).body;
-    const digest = sha256Text(body);
-    if (digest !== expected) {
-      throw new Error(`transformed prompt template digest does not match the plan for ${node.promptPath}`);
-    }
-    if (persisted.has(digest)) continue;
-    const relativePath = `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`;
-    const snapshotPath = safeResolveInside(layout.root, relativePath, "deferred prompt template snapshot");
-    if (fs.existsSync(snapshotPath)) {
-      assertRegularFileInside(layout.root, snapshotPath, "deferred prompt template snapshot");
-      if (sha256Text(fs.readFileSync(snapshotPath, "utf8")) !== digest) {
-        throw new Error(`immutable deferred prompt template snapshot digest collision for ${node.promptPath}`);
-      }
-    } else {
-      writeFileDurable(snapshotPath, body);
-    }
-    persisted.set(digest, snapshotPath);
-  }
-  return persisted;
 }
 
 function persistRenderedPromptSnapshots(
@@ -754,16 +567,32 @@ function persistRenderedPromptSnapshots(
   });
 }
 
-function validateRenderedPromptFile(
-  layout: RunLayout,
-  promptPath: string,
-  expectedDigest: string,
-  attemptId: string
-): void {
-  assertRegularFileInside(layout.root, promptPath, `rendered prompt for ${attemptId}`);
-  if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expectedDigest) {
-    throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
-  }
+export function transformPromptCatalogForRun(
+  catalog: PromptCatalog,
+  transform: PlanRunInput["topologyTransform"]
+): PromptCatalog {
+  const excluded = transform?.excludedNodeIds ?? [];
+  if (excluded.length === 0) return catalog;
+  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
+  const entries = new Map(
+    [...catalog.entries].map(([id, entry]) => {
+      const body = entry.body
+        .split("\n")
+        .filter((line) => !tokens.some((token) => line.includes(token)))
+        .join("\n");
+      return [id, { ...entry, body }];
+    })
+  );
+  return { ...catalog, entries };
+}
+
+export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
+  return Object.fromEntries(
+    [...catalog.entries.values()].flatMap((entry) => [
+      [entry.id, entry.body],
+      [entry.relativePath, entry.body]
+    ])
+  );
 }
 
 interface ReferenceExpectationProvision {
@@ -784,12 +613,23 @@ function provisionReferenceExpectationOutput(
   }
   const sourcePath = safeResolveInside(projectRoot, sourcePathInput, "reference expectation catalog");
   assertNoSymlinkComponents(projectRoot, sourcePath, "reference expectation catalog");
-  const stat = fs.lstatSync(sourcePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
-    throw new Error(`reference expectation catalog must be a regular file: ${sourcePath}`);
+  let sourceContents: Buffer;
+  let sourceValue: unknown;
+  try {
+    sourceContents = readRegularFileSnapshot(sourcePath, 64 * 1024 * 1024);
+    sourceValue = parseStrictJsonBytes(sourceContents, {
+      maxBytes: 64 * 1024 * 1024,
+      maxDepth: 128,
+      maxItems: 1_000_000,
+      maxProperties: 1_000_000
+    });
+  } catch (error) {
+    throw new Error(
+      `reference expectation catalog must be one stable regular strict-JSON file: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
-  const sourceContents = fs.readFileSync(sourcePath);
-  const parsed = validateReferenceExpectationsSchema(JSON.parse(sourceContents.toString("utf8")), sourcePath);
+  const parsed = validateReferenceExpectationsSchema(sourceValue, sourcePath);
   if (!parsed.ok || parsed.value === undefined) {
     // Include the field path. Mapping `message` alone reproduced the #328 symptom exactly on a
     // USER-SUPPLIED catalog: 40 malformed entries became 40 identical copies of
@@ -802,7 +642,19 @@ function provisionReferenceExpectationOutput(
         .join("; ")}`
     );
   }
-  const contract = artifactContractDefinition("ultrafuzz/reference-expectations@1");
+  const uniqueness = executeSemanticGate("reference-expectation-id-uniqueness", { document: parsed.value });
+  if (uniqueness.status !== "passed") {
+    if (uniqueness.status === "requires-context") {
+      throw new Error("internal reference expectation semantic gate unexpectedly requires host context");
+    }
+    throw new Error(
+      `reference expectation catalog is invalid: ${uniqueness.issues
+        .map((issue) => `${sourcePath}#${issue.path} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const contract = artifactContractDefinition(REFERENCE_EXPECTATIONS_CONTRACT);
+  const schemaBinding = artifactContractSchemaBinding(REFERENCE_EXPECTATIONS_CONTRACT);
   const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
     throw new Error("reference expectation catalog requires at least one pinned reference node");
@@ -811,7 +663,7 @@ function provisionReferenceExpectationOutput(
     const existingOutput = node.outputs.find((output) => output.path === "references/expectations.json");
     if (
       existingOutput !== undefined &&
-      (existingOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+      (existingOutput.contract !== REFERENCE_EXPECTATIONS_CONTRACT ||
         existingOutput.contract_digest !== contract.digest)
     ) {
       throw new Error(
@@ -821,8 +673,9 @@ function provisionReferenceExpectationOutput(
     if (existingOutput === undefined) {
       node.outputs.push({
         path: "references/expectations.json",
-        contract: "ultrafuzz/reference-expectations@1",
+        contract: REFERENCE_EXPECTATIONS_CONTRACT,
         contract_digest: contract.digest,
+        ...(schemaBinding ?? {}),
         primary: false
       });
     }
@@ -831,7 +684,7 @@ function provisionReferenceExpectationOutput(
       const expandedOutput = expandedNode.outputs.find((output) => output.path === "references/expectations.json");
       if (
         expandedOutput !== undefined &&
-        (expandedOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+        (expandedOutput.contract !== REFERENCE_EXPECTATIONS_CONTRACT ||
           expandedOutput.contractDigest !== contract.digest)
       ) {
         throw new Error(
@@ -841,8 +694,17 @@ function provisionReferenceExpectationOutput(
       if (expandedOutput === undefined) {
         expandedNode.outputs.push({
           path: "references/expectations.json",
-          contract: "ultrafuzz/reference-expectations@1",
+          contract: REFERENCE_EXPECTATIONS_CONTRACT,
           contractDigest: contract.digest,
+          ...(schemaBinding === undefined
+            ? {}
+            : {
+                schemaFile: schemaBinding.schema_file,
+                schemaId: schemaBinding.schema_id,
+                schemaSha256: schemaBinding.schema_sha256,
+                schemaBundleSha256: schemaBinding.schema_bundle_sha256,
+                validatorBuild: schemaBinding.validator_build
+              }),
           primary: false
         });
       }
@@ -893,6 +755,28 @@ function materializeReferenceNodesForPlan(input: {
       outputs: node.outputs
     });
     const finishedAt = new Date().toISOString();
+    const referenceMetadataBase = {
+      reference: node.reference,
+      reference_artifact: materialized.referenceArtifact,
+      manifest_artifact: materialized.manifestArtifact,
+      ...(input.provision === undefined
+        ? {}
+        : {
+            reference_expectations: {
+              source: "operator-supplied" as const,
+              path: input.provision.sourceRelativePath,
+              sha256: input.provision.sourceDigest
+            }
+          })
+    };
+    const referenceMetadata: ReferenceArtifactProvenanceMetadata =
+      node.reference_revision === undefined
+        ? referenceMetadataBase
+        : {
+            ...referenceMetadataBase,
+            repo: node.reference_revision.repo,
+            commit: node.reference_revision.commit
+          };
     writeArtifactManifest({
       layout: input.layout,
       nodeId: node.id,
@@ -900,22 +784,7 @@ function materializeReferenceNodesForPlan(input: {
       provenance: {
         logical_node_id: node.logical_id,
         origin: "pinned-reference",
-        metadata: {
-          reference: node.reference,
-          repo: node.reference_revision?.repo,
-          commit: node.reference_revision?.commit,
-          reference_artifact: materialized.referenceArtifact,
-          manifest_artifact: materialized.manifestArtifact,
-          ...(input.provision === undefined
-            ? {}
-            : {
-                reference_expectations: {
-                  source: "operator-supplied",
-                  path: input.provision.sourceRelativePath,
-                  sha256: input.provision.sourceDigest
-                }
-              })
-        }
+        metadata: referenceMetadata
       }
     });
     updateNodeState(input.layout, node.id, {
@@ -928,8 +797,9 @@ function materializeReferenceNodesForPlan(input: {
       provenance: {
         origin: "pinned-reference",
         reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit,
+        ...(node.reference_revision === undefined
+          ? {}
+          : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
         ...(input.provision === undefined
           ? {}
           : {
@@ -947,8 +817,9 @@ function materializeReferenceNodesForPlan(input: {
       status: "succeeded",
       payload: {
         reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit,
+        ...(node.reference_revision === undefined
+          ? {}
+          : { repo: node.reference_revision.repo, commit: node.reference_revision.commit }),
         artifact: materialized.referenceArtifact,
         manifest: materialized.manifestArtifact
       }
@@ -957,19 +828,21 @@ function materializeReferenceNodesForPlan(input: {
 }
 
 export function toPlannedGraph(expanded: ExpandedGraph, catalog?: PromptCatalog): PlannedGraph {
-  const executableNodes = expanded.nodes.filter((node) => node.kind !== "meta");
+  const executableNodes = expanded.nodes.filter(
+    (node): node is ExpandedNode & { kind: "agentic" | "reference" } => node.kind !== "meta"
+  );
   const nodeById = new Map(expanded.nodes.map((node) => [node.id, node]));
-  return {
-    schema_version: "1.0",
+  return assertPlannedGraph({
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: expanded.graphVersion,
     topology_version: expanded.topologyVersion,
     groups: expanded.groups,
     nodes: executableNodes.map((node) => toPlannedGraphNode(node, nodeById, catalog))
-  };
+  });
 }
 
 function toPlannedGraphNode(
-  node: ExpandedNode,
+  node: ExpandedNode & { kind: "agentic" | "reference" },
   nodeById: Map<string, ExpandedNode>,
   catalog: PromptCatalog | undefined
 ): PlannedGraphNode {
@@ -980,6 +853,7 @@ function toPlannedGraphNode(
     logical_id: node.logicalId,
     display_name: node.label,
     kind: node.kind,
+    ...(node.group === undefined ? {} : { group: node.group }),
     depends_on: node.dependsOn.filter((dependency) => nodeById.get(dependency)?.kind !== "meta"),
     artifact_dir: node.artifactDir,
     ...(node.timeoutSeconds === undefined ? {} : { timeout_seconds: node.timeoutSeconds }),
@@ -987,6 +861,15 @@ function toPlannedGraphNode(
       path: output.path,
       contract: output.contract,
       contract_digest: output.contractDigest,
+      ...(output.schemaFile === undefined
+        ? {}
+        : {
+            schema_file: output.schemaFile,
+            schema_id: output.schemaId!,
+            schema_sha256: output.schemaSha256!,
+            schema_bundle_sha256: output.schemaBundleSha256!,
+            validator_build: output.validatorBuild!
+          }),
       primary: output.primary
     })),
     prompt_id: promptEntry?.id ?? node.logicalId,
@@ -1003,7 +886,6 @@ function toPlannedGraphNode(
           }
         }
       : {}),
-    ...(node.role ? { role: node.role } : {}),
     loop: {
       index: node.loop.index,
       count: node.loop.count,
@@ -1095,7 +977,6 @@ function renderPromptsForPlan(input: {
           metadataPath: input.layout.runMetadataPath
         },
         outputs: {
-          findingsPath: path.join(attempt.artifactDir, "findings.json"),
           patchPath: path.join(attempt.artifactDir, "patch.diff")
         },
         resolvedConfig: {
@@ -1154,7 +1035,11 @@ function nodesWithDynamicAncestors(graph: PlannedGraph): Set<string> {
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
+  applyModelProfileOverrides(config, config.retry.agents[0] ?? config.models.default, {
+    agent: input.agent,
+    model: input.model,
+    reasoning: input.reasoning
+  });
 }
 
 function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {
@@ -1177,17 +1062,17 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
     ).sort();
     nodes.set(node.logical_id, {
       id: node.logical_id,
+      kind: previous?.kind === "reference" ? "reference" : node.kind,
       dependsOn: dependencies,
       outputs: node.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);
-        const schemaFile = artifactContractSchemaFile(output.contract);
         return {
           path: output.path,
           contract: output.contract,
           primary: output.primary,
           description: definition.description,
           ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample }),
-          ...(schemaFile === undefined ? {} : { schemaFile })
+          ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file })
         };
       }),
       artifactDirs,
@@ -1263,17 +1148,13 @@ function promptEntryForNode(catalog: PromptCatalog | undefined, node: ExpandedNo
   return promptEntryForPath(catalog, node.promptPath, node.logicalId);
 }
 
-function promptEntryForPath(catalog: PromptCatalog, promptPath: string, fallbackId: string): PromptCatalogEntry {
+function promptEntryForPath(catalog: PromptCatalog, promptPath: string, nodeId: string): PromptCatalogEntry {
   for (const entry of catalog.entries.values()) {
     if (entry.relativePath === promptPath) {
       return entry;
     }
   }
-  const fallback = catalog.entries.get(fallbackId);
-  if (fallback) {
-    return fallback;
-  }
-  throw new Error(`prompt ${promptPath} for ${fallbackId} was not found`);
+  throw new Error(`prompt ${promptPath} for ${nodeId} was not found`);
 }
 
 function projectPromptCatalogPath(promptPath: string): string {

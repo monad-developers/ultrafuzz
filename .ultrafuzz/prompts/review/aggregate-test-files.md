@@ -20,7 +20,7 @@ generated tests are later materialized.
 
 Use these review handoffs:
 
-Prefer the Read tool for the exact manifest files listed below. If you use
+Prefer the Read tool for the exact manifest files selected below. If you use
 Bash to inspect artifact directories or copied files, run one command at a
 time and inspect the output as-is. Do not use shell pipelines or chained
 commands. Wrong: `ls {{artifact_path}} | sort`. Use `ls {{artifact_path}}` by
@@ -40,47 +40,86 @@ Project discovery:
 Base test setup (when rendered):
 {{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
-Strategy generated-test manifests declared by ancestor nodes in the effective
-topology:
+Use this sealed JSON authority to select every generated-test manifest declared
+by ancestor nodes in the effective topology without expanding an unbounded path
+list or source-authority table into this prompt:
 
-{{ancestor_generated_test_manifests}}
+{{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}
+
+When that exact selector yields no outputs, no generated-test manifest is
+declared by any ancestor: copy nothing and write the schema-defined empty
+`aggregation.json` with zero source bundles. That is a successful aggregation
+for a findings-only topology, not an error.
 
 Use only files reported by strategy-owned generated-test manifests. Read every
-manifest listed above, including manifests with empty `generated_tests` arrays. Treat each manifest's
-`generated_tests` array as the source of truth and ignore any non-canonical file
-list arrays. Do not rely on the current working tree or a strategy workspace
-scan as a substitute for a missing manifest entry.
+selected manifest, including empty manifests. Validate each one against the
+exact pinned `{{schema_path}}/generated-tests.schema.json`; that schema alone
+defines its JSON version, fields, types, enums, required members, and empty
+bundle. Treat the schema-defined runnable and support entries together as one
+atomic source bundle. Bind its one framework to the checked-in native
+framework for the whole bundle. Do not rely on the current working tree, a
+non-canonical file list, or a strategy workspace scan as a substitute for a
+missing manifest entry.
 
-For each `generated_tests` entry, accept the exact byte-for-byte companion only
-when its `path` is a normalized relative POSIX path beginning with
-`generated-tests/`, contains no empty, `.` or `..` segment or backslash, and
-resolves to a regular file inside the source node's artifact directory. Reject
-absolute paths, path escapes, and every symlink even when its target remains
-inside the artifact directory. Record rejected entries in `skipped_files`;
-never search for or substitute another file with the same basename.
+For every schema-defined entry, accept the exact byte-for-byte companion only
+when it resolves to a non-empty strict UTF-8 text regular file inside the source
+node's artifact directory. This text-only rule also applies to data fixtures.
+Reject path escapes, every symlink even when its target remains inside
+the artifact directory, and every multiply linked file. Require both
+the recorded byte size and digest to match the companion exactly.
+Record rejected entries in `skipped_files` with the corresponding
+`generated-test` or `support-file` kind; never search for or substitute another
+file with the same basename. The manifest is one atomic bundle: if any entry
+fails these checks, copy none of its entries and record every row from that
+manifest as skipped, using the specific failure for invalid rows and a
+bundle-rejected reason for the remaining rows.
 
-Determine the destination from the entry's `framework` and `language`, checked
-against project discovery, base setup, and the target's checked-in test
-configuration. Accept framework-native test extensions: Foundry `.t.sol`;
+Determine each bundle's destination from its required root-level `framework`,
+checked against project discovery, base setup, and the target's checked-in test
+configuration. Use an entry's optional `language` only as corroborating
+metadata. Accept framework-native runnable test extensions: Foundry `.t.sol`;
 Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`; and Vyper projects'
-existing native Python test `.py` files. Infer a missing framework only when the
-extension and discovered test stack identify it unambiguously; otherwise skip
-the entry with a reason. Do not introduce a new framework or test root.
+existing native Python test `.py` files. Never infer, synthesize, normalize, or
+convert a missing or mismatched framework. If the declared bundle framework is
+missing, invalid, mixed, or incompatible with the checked-in test stack, skip
+the whole bundle. Do not introduce a new framework or test root.
 
 Copy Foundry tests under the configured Foundry aggregation destination (for
 example `test/foundry/<strategy>/attempt-<n>/`). Copy Hardhat tests under the
 repository's existing JavaScript or TypeScript test root and Vyper tests under
 its existing pytest, Ape, Brownie, or other native test root, in both cases
-using `ultrafuzz/<strategy>/attempt-<n>/` below that root. Keep every destination
-under `{{workspace_path}}`. Preserve the companion's relative tail when safe
-and use a stable source-derived suffix when two entries would otherwise collide;
-never overwrite one entry with another.
+using `ultrafuzz/<strategy>/attempt-<n>/` below that root. Treat each accepted
+manifest as one atomic bundle: copy its accepted runnable tests and all required
+support files beneath one destination root while preserving every companion's
+relative tail below `generated-tests/`, so relative imports continue to
+resolve. Keep every destination under `{{workspace_path}}`. Use a stable
+source-derived suffix on the whole bundle when two manifests would otherwise
+collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.
-Also preserve every manifest entry's `language`, `framework`, `description`,
-and `provenance` fields without rewriting them. Do not copy unknown manifest
-entry fields into `aggregation.json`.
+The sealed selector above is binding: for each selected manifest, write its
+producer's exact `logical_node_id` as `source node_id` into every
+corresponding `source_bundles`, copied-entry, and skipped-entry row. Then
+confirm it is byte-for-byte equal to that manifest's root-level `node_id`. For
+each source-bundle and entry row, write `source_manifest_relative_path`
+byte-for-byte from the selected output's declared `path` (for this contract,
+normally `generated-tests.json`) and write `source_manifest_path` as its exact
+producer `artifact_dir` joined with that declared path. The latter is the
+manifest's absolute location; it is not a valid relative path. Never insert an
+artifact directory prefix such as `artifacts/<source-node>/` into
+`source_manifest_relative_path`. Only an entry's `source_artifact_path` names
+its absolute companion location below the source artifact directory, while its
+`source_relative_path` comes byte-for-byte from the source manifest entry.
+Do not use a destination directory segment, an ordinal, a strategy attempt, or
+this aggregating node's own id as an identity. In particular, a directory
+segment such as `attempt-<n>` is never a `node_id`. Read `source_run_id` and
+`framework` from the source manifest's root fields. Never abbreviate,
+normalize, or reorder any source identity.
+Preserve the manifest's one `framework` only on its `source_bundles` record.
+Preserve every entry's `language`, `description`, and `provenance` fields without
+rewriting them; copied and skipped entry rows must not repeat `framework`. Do
+not copy unknown manifest entry fields into `aggregation.json`.
 
 Do not merge, rewrite, or "fix" generated test logic during aggregation. The
 isolated workspace may receive unstaged generated test files, but the git index
@@ -93,13 +132,29 @@ Before finishing, verify from `{{workspace_path}}` that each copied
 with Bash, use one standalone `wc -c <destination_path>` command per file or
 per small group of files, with no pipes or command chaining.
 
-Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with this shape:
+Save the aggregation manifest to {{artifact_path}}/aggregation.json. Read the
+exact pinned `{{schema_path}}/aggregation-manifest.schema.json`; it alone
+defines the JSON version, fields, types, enums, required members, and empty
+forms. Record one source-bundle row for every declared manifest, including an
+empty or rejected bundle. Bind each row to the source manifest's logical node,
+attempt, run, framework, exact path, immutable digest, entry counts, and actual
+disposition. For copied and skipped entries, preserve the source identity,
+attempt, manifest identity, artifact-relative path, byte size, digest, and any
+source metadata exactly; add destination identity only to copied entries and a
+specific reason only to skipped entries. Preserve the source framework at the
+bundle level rather than copying it onto individual entry rows.
 
-- `schema_version`: `"1.0"`
-- `source_generated_tests`: total number of manifest `generated_tests` entries considered
-- `copied_generated_tests`: number of framework-native test files copied into the workspace
-- `source_support_files`: total number of manifest `support_files` entries considered, or `0`
-- `copied_support_files`: number of explicitly manifested native support files copied into the workspace, or `0`
-- `files`: array of copied native test records with `strategy`, `node_id`, `attempt_index`, `source_manifest_path`, `source_artifact_path`, `source_relative_path`, `destination_path`, `destination_relative_path`, `bytes`, and preserved `language`, `framework`, `description`, and `provenance` fields when present
-- `support_files`: array of explicitly manifested native support-file records with the same attribution, path-safety, framework, and provenance fields as `files`, or `[]`
-- `skipped_files`: array of skipped file records with `reason`, or `[]`
+Every considered source entry appears exactly once across its typed copied
+array or `skipped_files`; do not omit, fabricate, duplicate, or swap the kind
+of an entry. A bundle is atomic: `copied` means all of its generated tests and
+support files appear once in their copied arrays and none are skipped;
+`skipped` means all appear once in `skipped_files` and none are copied; `empty`
+means both source counts are zero and no row refers to the bundle.
+`source_generated_tests` and `source_support_files` equal the sums of the
+corresponding `source_bundles` counts. The copied counts equal their
+corresponding copied-array lengths. Keep all four arrays whole-item unique and
+keep source identities unique across the copied/skipped union.
+
+After the final write, run the exact `ultrafuzz json validate` command rendered
+for `aggregation.json` in the central output contract. Correct any exit-1
+artifact yourself and rerun its command after any later edit.

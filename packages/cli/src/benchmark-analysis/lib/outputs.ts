@@ -1,6 +1,15 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  BENCHMARK_PROVENANCE_SCHEMA_VERSION,
+  BENCHMARK_SOURCE_MANIFEST_SCHEMA_VERSION,
+  parseBenchmarkProvenance,
+  parseBenchmarkSourceManifest,
+  type BenchmarkProvenance,
+  type BenchmarkSourceManifest
+} from "@ultrafuzz/evals";
+
 import type { AnalysisResult, ConditionSummary, RowMetric } from "../types.js";
 import { fixed, percent, safeJson, toCsv } from "./format.js";
 
@@ -90,19 +99,18 @@ export async function writeProvenanceOutputs(result: AnalysisResult, outputDir: 
     detection_count: entity.members.length,
     qualified_findings: entity.members.map((member) => member.qualifiedId)
   }));
+  const provenance = parseBenchmarkProvenance({
+    schema_version: BENCHMARK_PROVENANCE_SCHEMA_VERSION,
+    privacy: "private-analysis-output-do-not-commit",
+    rows_are_sets: true,
+    finding_instances: findingRows,
+    root_cause_entities: entityRows,
+    row_statuses: result.rowStatuses
+  } satisfies BenchmarkProvenance);
   return [
     await writeText(join(outputDir, "findings_row_provenance.csv"), toCsv(findingRows)),
     await writeText(join(outputDir, "root_cause_provenance.csv"), toCsv(entityRows)),
-    await writeText(
-      join(outputDir, "provenance.json"),
-      safeJson({
-        privacy: "private-analysis-output-do-not-commit",
-        rows_are_sets: true,
-        finding_instances: findingRows,
-        root_cause_entities: entityRows,
-        row_statuses: result.rowStatuses
-      })
-    )
+    await writeText(join(outputDir, "provenance.json"), safeJson(provenance))
   ];
 }
 
@@ -387,8 +395,8 @@ export async function writeMethodOutputs(result: AnalysisResult, outputDir: stri
 - Average, median, and sample standard deviation use finalized rows.
 - Compute cost is total tokens from each nested row \`run.json\`; reported USD values may be partial.
 `;
-  const sourceManifest = {
-    schema_version: "ultrafuzz.benchmark-analysis.source.v1",
+  const sourceManifest = parseBenchmarkSourceManifest({
+    schema_version: BENCHMARK_SOURCE_MANIFEST_SCHEMA_VERSION,
     privacy: "private-analysis-output-do-not-commit",
     source_archive: result.sourceArchive,
     source_size_bytes: result.sourceSizeBytes,
@@ -400,10 +408,11 @@ export async function writeMethodOutputs(result: AnalysisResult, outputDir: stri
       row_id: row.rowId,
       row_label: row.label,
       condition: row.condition,
-      variant: row.variant
+      variant: row.variant,
+      order: row.order
     })),
     ground_truth_count: result.groundTruthCount
-  };
+  } satisfies BenchmarkSourceManifest);
   return [
     await writeText(join(outputDir, "METHOD.md"), method),
     await writeText(join(outputDir, "source_manifest.json"), safeJson(sourceManifest))

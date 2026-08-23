@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/references",
   "version": "0.1.0",
   "private": true,
-  "description": "Pinned reference materialization and validation for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,7 +13,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "schema"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/references.yml dist/default-references.yml",

@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.differential-plan.v1"
+    },
+    "planner_attempt_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "candidate_surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_entrypoints": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "public_evidence_paths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "oracle_basis": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "in_scope_behavior": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "out_of_scope_behavior": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "ambiguities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        },
+        "required": [
+          "surface_id",
+          "public_entrypoints",
+          "public_evidence_paths",
+          "oracle_basis",
+          "in_scope_behavior",
+          "out_of_scope_behavior",
+          "ambiguities",
+          "priority"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reference_model_rules": {
+      "type": "object",
+      "properties": {
+        "allowed_structures": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "forbidden_sources": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": ["allowed_structures", "forbidden_sources"],
+      "additionalProperties": false
+    },
+    "deployment_assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "phase_priorities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "assigned_differential_lanes": {
+      "maxItems": 3,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "planner_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "intended_t_sol_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "focused_command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_evidence_paths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "observable_equality_assertions": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "oracle_type": {
+            "type": "string",
+            "enum": ["independent_reference", "metamorphic", "self_consistency", "sanity_probe"]
+          },
+          "calibration_bucket": {
+            "type": "string",
+            "enum": ["red_seeking_adversarial", "green_safe_sanity"]
+          },
+          "red_seeking_priority": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        },
+        "required": [
+          "lane_id",
+          "planner_attempt_index",
+          "surface_id",
+          "intended_t_sol_path",
+          "focused_command",
+          "public_evidence_paths",
+          "observable_equality_assertions",
+          "oracle_type",
+          "calibration_bucket",
+          "red_seeking_priority"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "deferred_lane_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["lane_id", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "out_of_scope_surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["surface_id", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "planner_attempt_index",
+    "candidate_surfaces",
+    "reference_model_rules",
+    "deployment_assumptions",
+    "phase_priorities",
+    "assigned_differential_lanes",
+    "deferred_lane_candidates",
+    "out_of_scope_surfaces"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:differential-plan:1",
+  "title": "Ultrafuzz differential oracle plan"
+}

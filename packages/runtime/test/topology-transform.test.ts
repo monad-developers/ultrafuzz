@@ -4,10 +4,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { packagedTopology } from "@ultrafuzz/config";
-import { loadPromptCatalog } from "@ultrafuzz/prompts";
-import { expandTopology, loadTopology, validateTopology, type ProjectTopology } from "@ultrafuzz/topology";
+import { loadPromptCatalog, type PromptCatalog } from "@ultrafuzz/prompts";
+import {
+  expandTopology,
+  loadTopology,
+  validateTopology,
+  type ExpandedGraph,
+  type ProjectTopology
+} from "@ultrafuzz/topology";
 
-import { promptTextsForCatalog, transformPromptCatalogForRun } from "../src/plan-run.js";
+import { promptTextsForCatalog, toPlannedGraph, transformPromptCatalogForRun } from "../src/plan-run.js";
 import { transformTopologyForRun } from "../src/topology-transform.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -134,6 +140,51 @@ test("an empty topology transform preserves the production topology object", () 
   assert.equal(transformTopologyForRun(source, { excludedNodeIds: [] }), source);
 });
 
+test("planned prompt binding never falls back from the declared path to a matching node ID", () => {
+  const catalog: PromptCatalog = {
+    entries: new Map([
+      [
+        "declared-node",
+        {
+          id: "declared-node",
+          displayName: "Wrong path",
+          relativePath: "other/wrong-path.md",
+          source: "project",
+          frontmatter: { id: "declared-node" },
+          body: "wrong path\n",
+          markdown: "wrong path\n"
+        }
+      ]
+    ]),
+    orderedIds: ["declared-node"]
+  };
+  const expanded: ExpandedGraph = {
+    graphVersion: "4",
+    topologyVersion: 2,
+    groups: {},
+    nodes: [
+      {
+        id: "declared-node",
+        logicalId: "declared-node",
+        label: "Declared node",
+        kind: "agentic",
+        promptPath: "declared/exact-path.md",
+        dependsOn: [],
+        artifactDir: "artifacts/declared-node",
+        retryPolicy: { maxAttempts: 1 },
+        loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+        outputs: [],
+        modelFanout: []
+      }
+    ]
+  };
+
+  assert.throws(
+    () => toPlannedGraph(expanded, catalog),
+    /prompt declared\/exact-path\.md for declared-node was not found/u
+  );
+});
+
 test("the exact smoke exclusions produce a valid filtered production topology", () => {
   const repositoryRoot = REPOSITORY_ROOT;
   const smokeExcludedNodeIds = [
@@ -157,10 +208,13 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
     "class-goals",
     "goal-plan"
   ];
-  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
-    strategyLoops: 1,
-    excludedNodeIds: smokeExcludedNodeIds
-  });
+  const transformed = transformTopologyForRun(
+    loadTopology(repositoryRoot, { topologyPath: packagedTopology("full").path, requirePromptFiles: true }),
+    {
+      strategyLoops: 1,
+      excludedNodeIds: smokeExcludedNodeIds
+    }
+  );
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
     strategyLoops: 1,
     excludedNodeIds: smokeExcludedNodeIds
@@ -230,12 +284,18 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
   // The inverse of the smoke exclusions: invariant-only campaigns drop every
   // strategy except the stateful-invariant chain, so the retained chain still
   // has to reach the review fan-in through its own surviving dependencies.
-  const source = loadTopology(REPOSITORY_ROOT, { requirePromptFiles: true });
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const source = loadTopology(repositoryRoot, {
+    topologyPath: packagedTopology("full").path,
+    requirePromptFiles: true
+  });
   const invariantNodeIds = source.nodes
-    .filter((node) => node.group === "strategies" && node.id.startsWith("stateful-invariant-"))
+    .filter((node) => node.id.startsWith("stateful-invariant-"))
     .map((node) => node.id);
   const invariantOnlyExcludedNodeIds = source.nodes
-    .filter((node) => node.group === "strategies" && !invariantNodeIds.includes(node.id))
+    .filter(
+      (node) => (node.group === "strategies" || node.group === "specialists") && !invariantNodeIds.includes(node.id)
+    )
     .map((node) => node.id);
   const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
   const transformed = transformTopologyForRun(source, transform);

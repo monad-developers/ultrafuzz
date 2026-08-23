@@ -1,8 +1,9 @@
-import fs from "node:fs";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 
 import { Args, Command } from "@oclif/core";
-import { evalRunRoot, jsonFile, type EvalScoreSummary } from "@ultrafuzz/evals";
+import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import { evalRunRoot, readEvalScoreSummary } from "@ultrafuzz/evals";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
 
@@ -16,9 +17,12 @@ export default class EvalReport extends Command {
     const root = projectRoot(flags);
     try {
       const runRoot = evalRunRoot(root, args.evalRunId);
-      const summary = jsonFile<EvalScoreSummary>(path.join(runRoot, "summary.json"));
+      const summary = readEvalScoreSummary(path.join(runRoot, "summary.json"));
       const markdownPath = path.join(runRoot, "summary.md");
-      const markdown = fs.existsSync(markdownPath) ? fs.readFileSync(markdownPath, "utf8") : "";
+      const markdown = new TextDecoder("utf-8", { fatal: true }).decode(
+        readRegularFileSnapshot(markdownPath, 16 * 1024 * 1024)
+      );
+      if (markdown.trim().length === 0) throw new Error(`eval report Markdown is empty: ${markdownPath}`);
       emitCommandResult(
         this,
         "eval report",

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { artifactContractDefinition } from "@ultrafuzz/artifacts";
+import { artifactContractDefinition, artifactContractSchemaBinding } from "@ultrafuzz/artifacts";
 import { loadReferenceCatalog, type ReferenceCatalog, type ReferenceEntry } from "@ultrafuzz/references";
 
 import { topologyError } from "./errors.js";
@@ -19,6 +19,7 @@ import type {
   ReferenceRevision
 } from "./types.js";
 import { titleFromId } from "./path-utils.js";
+import { assertExpandedGraphSchema } from "./expanded-graph-schema.js";
 
 export function expandTopology(topologyInput: unknown, options: ExpandTopologyOptions = {}): ExpandedGraph {
   const { topology, effectiveLoopCounts } = validateTopology(topologyInput, options);
@@ -37,14 +38,14 @@ export function expandTopology(topologyInput: unknown, options: ExpandTopologyOp
     });
   }
 
-  return {
+  return assertExpandedGraphSchema({
     graphVersion: GRAPH_VERSION,
     ...(options.runId ? { runId: options.runId } : {}),
     topologyVersion: TOPOLOGY_VERSION,
     groups: topology.groups,
     nodes,
     fingerprintInputs: buildFingerprintInputs(topology, options)
-  };
+  });
 }
 
 function expandNode(
@@ -82,28 +83,30 @@ function expandNode(
     ...(node.required_commands.length === 0 ? {} : { requiredCommands: [...node.required_commands] }),
     artifactDir: deterministicArtifactDir(concreteId),
     ...timeoutSecondsFor(node, topology),
-    retryPolicy: { maxAttempts: maxAttemptsFor(node, topology) },
+    retryPolicy: { maxAttempts: maxAttemptsFor(node, topology, options) },
     loop: {
       index: loopIndex,
       count: loopCount,
       mode: node.loop_mode,
       attemptIndex: loopIndex
     },
-    outputs: node.outputs.map((output) => ({
-      ...output,
-      contractDigest: artifactContractDefinition(output.contract).digest
-    })),
-    modelFanout: modelFanoutFor(node, topology, loopIndex, options),
-    ...(node.dynamic === undefined
-      ? {}
-      : {
-          dynamic: {
-            from: { ...node.dynamic.from },
-            key: node.dynamic.key,
-            nodeIdTemplate: node.dynamic.node_id,
-            ...(promptText === undefined ? {} : { templateDigest: sha256(promptText) })
-          }
-        })
+    outputs: node.outputs.map((output) => {
+      const binding = artifactContractSchemaBinding(output.contract);
+      return {
+        ...output,
+        contractDigest: artifactContractDefinition(output.contract).digest,
+        ...(binding === undefined
+          ? {}
+          : {
+              schemaFile: binding.schema_file,
+              schemaId: binding.schema_id,
+              schemaSha256: binding.schema_sha256,
+              schemaBundleSha256: binding.schema_bundle_sha256,
+              validatorBuild: binding.validator_build
+            })
+      };
+    }),
+    modelFanout: modelFanoutFor(node, topology, loopIndex, options)
   };
 }
 
@@ -190,11 +193,20 @@ function timeoutSecondsFor(
   return timeoutSeconds === undefined ? {} : { timeoutSeconds };
 }
 
-function maxAttemptsFor(node: NormalizedTopologyNode, topology: NormalizedProjectTopology): number {
+function maxAttemptsFor(
+  node: NormalizedTopologyNode,
+  topology: NormalizedProjectTopology,
+  options: ExpandTopologyOptions
+): number {
   if (node.kind !== "agentic") {
     return 1;
   }
-  return node.max_attempts ?? (node.group ? topology.groups[node.group]?.defaults?.max_attempts : undefined) ?? 1;
+  return (
+    node.max_attempts ??
+    (node.group ? topology.groups[node.group]?.defaults?.max_attempts : undefined) ??
+    options.defaultMaxAttempts ??
+    1
+  );
 }
 
 function modelFanoutFor(

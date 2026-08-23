@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/prompts",
   "version": "0.1.0",
   "private": true,
-  "description": "Packaged prompt catalog and rendering contracts for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,12 +16,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-prompt-assets.mjs",
-    "prepack": "pnpm run build",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "tsc -p tsconfig.json && rm -rf dist/prompts && cp -R ../../.ultrafuzz/prompts dist/prompts",
+    "test": "pnpm --filter @ultrafuzz/prompts^... build && vitest run",
+    "typecheck": "pnpm --filter @ultrafuzz/prompts^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
     "yaml": "^2.8.0"
   },
   "homepage": "https://github.com/monad-developers/ultrafuzz#readme",

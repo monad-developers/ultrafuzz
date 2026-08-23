@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:analysis-bundle-omissions:1",
+  "title": "Ultrafuzz analysis bundle omissions manifest",
+  "type": "object",
+  "required": ["schema_version", "omissions"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+    "omissions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/terminal_status" },
+          { "$ref": "#/$defs/evaluation_metrics" },
+          { "$ref": "#/$defs/accounting_summary" },
+          { "$ref": "#/$defs/attempt_history" },
+          { "$ref": "#/$defs/recovery_summary" }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "terminal-status" } },
+            "required": ["kind"]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "evaluation-metrics" } },
+            "required": ["kind"]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "accounting-summary" } },
+            "required": ["kind"]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "attempt-history" } },
+            "required": ["kind"]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "recovery-summary" } },
+            "required": ["kind"]
+          },
+          "minContains": 0,
+          "maxContains": 1
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "terminal_status": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "terminal-status" },
+        "path": { "const": "data/terminal-status.json" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "evaluation_metrics": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "evaluation-metrics" },
+        "path": { "const": "data/evaluation-metrics.json" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "accounting_summary": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "accounting-summary" },
+        "path": { "const": "data/accounting-summary.json" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "attempt_history": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "attempt-history" },
+        "path": { "const": "data/attempt-history.json" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "recovery_summary": {
+      "type": "object",
+      "required": ["kind", "path", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "recovery-summary" },
+        "path": { "const": "data/recovery-summary.json" },
+        "reason": { "$ref": "#/$defs/reason" }
+      }
+    },
+    "reason": { "enum": ["source-missing", "source-invalid", "not-terminal", "data-unavailable"] }
+  }
+}

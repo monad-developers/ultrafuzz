@@ -98,6 +98,20 @@ describe("validateTopology", () => {
     expect(validateTopology(topology).effectiveLoopCounts.strategy).toBe(1);
   });
 
+  it("normalizes the explicit group failure policy and rejects unknown policies", () => {
+    const topology = validTopology();
+    topology.groups = {
+      ...topology.groups,
+      strategies: { ...topology.groups?.strategies, defaults: { failure_policy: "continue" } }
+    };
+    expect(validateTopology(topology).topology.groups.strategies?.defaults?.failure_policy).toBe("continue");
+
+    topology.groups.strategies = {
+      defaults: { failure_policy: "ignore" as never }
+    };
+    expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+  });
+
   it("rejects duplicate IDs, unknown dependencies, duplicate dependencies, and cycles", () => {
     expect(() =>
       validateTopology(validTopology({ nodes: [...validTopology().nodes, validTopology().nodes[1]!] }))
@@ -131,6 +145,25 @@ describe("validateTopology", () => {
     zeroAttempts.nodes[1] = { ...zeroAttempts.nodes[1]!, max_attempts: 0 };
     expect(() => validateTopology(zeroAttempts)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
 
+    const maximumAttempts = validTopology();
+    maximumAttempts.nodes[1] = { ...maximumAttempts.nodes[1]!, max_attempts: 100 };
+    expect(validateTopology(maximumAttempts).topology.nodes[1]?.max_attempts).toBe(100);
+
+    const excessiveNodeAttempts = validTopology();
+    excessiveNodeAttempts.nodes[1] = { ...excessiveNodeAttempts.nodes[1]!, max_attempts: 101 };
+    expect(() => validateTopology(excessiveNodeAttempts)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
+    );
+
+    const excessiveGroupAttempts = validTopology();
+    excessiveGroupAttempts.groups = {
+      ...excessiveGroupAttempts.groups,
+      setup: { label: "Setup", defaults: { max_attempts: 101 } }
+    };
+    expect(() => validateTopology(excessiveGroupAttempts)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
+    );
+
     const unsafeArtifact = validTopology();
     unsafeArtifact.nodes[1] = {
       ...unsafeArtifact.nodes[1]!,
@@ -143,7 +176,7 @@ describe("validateTopology", () => {
     const reservedManifest = validTopology();
     reservedManifest.nodes[1] = {
       ...reservedManifest.nodes[1]!,
-      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/json-object@1", primary: true }]
+      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/findings@2", primary: true }]
     };
     expect(() => validateTopology(reservedManifest)).toThrow(
       expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
@@ -177,6 +210,22 @@ describe("validateTopology", () => {
       ]
     };
     expect(() => validateTopology(duplicate)).toThrow(expect.objectContaining({ code: "DUPLICATE_OUTPUT_PATH" }));
+
+    const mixedPropertyRoles = validTopology();
+    mixedPropertyRoles.nodes[1] = {
+      ...mixedPropertyRoles.nodes[1]!,
+      outputs: [
+        {
+          path: "implemented-properties.json",
+          contract: "ultrafuzz/implemented-properties@3",
+          primary: true
+        },
+        { path: "campaign.json", contract: "ultrafuzz/property-campaign@3" }
+      ]
+    };
+    expect(() => validateTopology(mixedPropertyRoles)).toThrow(
+      expect.objectContaining({ code: "PROPERTY_ROLE_DECLARATION_CONFLICT" })
+    );
   });
 
   it("rejects wrong types for optional topology v2 fields instead of silently dropping them", () => {
@@ -215,7 +264,7 @@ describe("validateTopology", () => {
           depends_on: ["__start__"],
           outputs: [
             { path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
-            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/json-object@1" }
+            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/reference-manifest@1" }
           ]
         },
         { ...validTopology().nodes[2]!, depends_on: ["setup", "reference-properties-example"] },

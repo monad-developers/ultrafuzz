@@ -4,8 +4,21 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import {
+  artifactSchemaDirectory,
+  artifactSchemaRegistry,
+  artifactValidatorSmokeFixturePath,
+  assertArtifactVerificationMarkerSemantics,
+  parseJsonValidatorPreflightSuccessEnvelope,
+  parseStrictJsonBytes,
+  validateArtifactVerificationMarker,
+  type ArtifactVerificationMarker
+} from "@ultrafuzz/artifacts";
+
+import {
+  modalNodeContinuationIdentity,
   modalAttemptVerificationMarkerName,
   modalNodeDispatchFingerprint,
   modalNodeHandoffContentFingerprint,
@@ -13,7 +26,22 @@ import {
   readModalExecutionDependencyClosure,
   verifyModalExecutionSnapshotClosure
 } from "./node-provider.js";
-import type { parseModalNodeSandboxInput } from "./node-provider.js";
+import {
+  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
+  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
+  MODAL_NODE_INPUT_SCHEMA_ID,
+  MODAL_NODE_RESTORE_SCHEMA_ID,
+  MODAL_NODE_RESULT_SCHEMA_ID,
+  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
+  type StrictModalNodeCheckpointDocument,
+  type StrictModalNodeCheckpointIndexDocument,
+  type StrictModalNodeCheckpointStage,
+  type StrictModalNodeInputDocument,
+  type StrictModalNodeResultDocument,
+  type StrictModalNodeRestoreDocument,
+  type StrictModalNodeWorkerErrorDocument
+} from "./modal-contracts.js";
+import { readModalDocument, serializeModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const TRUSTED_MOUNT_ROOT = "/data";
@@ -23,51 +51,11 @@ const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
-const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
-const MAX_PUBLICATION_MANIFEST_BYTES = 4 * 1024 * 1024;
-const MAX_PUBLICATION_MANIFEST_ENTRIES = 4_096;
 const MAX_VERIFICATION_MARKER_BYTES = 4 * 1024 * 1024;
-const MAX_WORKFLOW_MARKER_PROBE_BYTES = 16 * 1024 * 1024;
 
-type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
-
-interface DurableCheckpointRecord {
-  schema_version: "ultrafuzz.modal.node-checkpoint.v1";
-  checkpoint_id: string;
-  sequence: number;
-  stage: DurableCheckpointStage;
-  created_at: string;
-  storage_lineage: string;
-  /**
-   * The logical dispatch this record belongs to, independent of the generation it ran under.
-   *
-   * The storage lineage already names the generation, which a reset intentionally changes. This names
-   * what the workspace actually executed, so a durable resume, a cross-generation restore, and the
-   * controller reading the published result all compare the same value.
-   */
-  logical_dispatch_fingerprint: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  restored_from?: string;
-  error?: string;
-}
-
-interface DurableCheckpointIndex {
-  schema_version: "ultrafuzz.modal.node-checkpoint-index.v1";
-  storage_lineage: string;
-  logical_dispatch_fingerprint: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  checkpoints: Array<
-    Pick<DurableCheckpointRecord, "checkpoint_id" | "sequence" | "stage" | "created_at"> & { manifest: string }
-  >;
-}
+type DurableCheckpointStage = StrictModalNodeCheckpointStage;
+type DurableCheckpointRecord = StrictModalNodeCheckpointDocument;
+type DurableCheckpointIndex = StrictModalNodeCheckpointIndexDocument;
 
 export interface DurableNodeWorkspace {
   projectRoot: string;
@@ -86,14 +74,15 @@ export interface DurableNodeWorkspace {
   checkpointIndex: string;
   input: ReturnType<typeof parseModalNodeWorkerInput>;
   hasCompletedCheckpoint: boolean;
-  recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): DurableCheckpointRecord;
+  recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): Promise<DurableCheckpointRecord>;
 }
 
 async function main(): Promise<void> {
   const requestPath = requiredOption("--request");
   const archivePath = requiredOption("--project-archive");
   const dataRoot = requiredOption("--data-root");
-  const requestedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+  const requestedInput = readModalDocument(requestPath, MODAL_NODE_INPUT_SCHEMA_ID)
+    .value as StrictModalNodeInputDocument;
   let durableWorkspace: DurableNodeWorkspace | undefined;
   let publishing: string | undefined;
   try {
@@ -102,37 +91,28 @@ async function main(): Promise<void> {
     const projectRoot = durableWorkspace.projectRoot;
     const attemptRoot = durableWorkspace.attemptRoot;
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      durableWorkspace.recordCheckpoint("prepared");
+      await durableWorkspace.recordCheckpoint("prepared");
     }
     syncDurableData(projectRoot);
+    preflightModalJsonValidator();
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
     if (!durableWorkspace.hasCompletedCheckpoint) {
-      durableWorkspace.recordCheckpoint("running");
+      await durableWorkspace.recordCheckpoint("running");
       syncDurableData(projectRoot);
       await runDurableWorkflow(projectRoot, localRunId, input);
     }
 
     const artifactDir = anchoredProjectPath(projectRoot, input.artifact_dir);
     const workspaceDir = anchoredProjectPath(projectRoot, input.workspace_dir);
-    mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
-    const resultPublicationMode = workerResultPublicationMode(
-      projectRoot,
-      input,
-      durableWorkspace.hasCompletedCheckpoint
-    );
-    const completedCheckpoint = durableWorkspace.recordCheckpoint("completed");
+    const completedCheckpoint = await durableWorkspace.recordCheckpoint("completed");
     syncDurableData(projectRoot);
     cleanupStalePublicationDirectories(attemptRoot);
     publishing = path.join(attemptRoot, `.result-publishing-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
     fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
-    if (resultPublicationMode === "legacy-markerless-v1") {
-      copyPublishedEvidenceTree(artifactDir, path.join(staging, "artifacts"));
-    } else {
-      const stagedMarker = copyAttemptVerificationMarker(projectRoot, input, path.join(staging, "verification"));
-      copyVerifiedPublishedEvidenceTree(artifactDir, path.join(staging, "artifacts"), stagedMarker, input.attempt_id);
-    }
+    const stagedMarker = copyAttemptVerificationMarker(projectRoot, input, path.join(staging, "verification"));
+    copyVerifiedPublishedEvidenceTree(artifactDir, path.join(staging, "artifacts"), stagedMarker, input.attempt_id);
     const sourceProofRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, "source-proofs"));
     assertSafeDirectoryTarget(sourceProofRoot);
     for (const suffix of [".json", ".invariant.json"] as const) {
@@ -226,7 +206,7 @@ async function main(): Promise<void> {
   } catch (error) {
     if (durableWorkspace !== undefined) {
       try {
-        durableWorkspace.recordCheckpoint("failed", error);
+        await durableWorkspace.recordCheckpoint("failed", error);
         syncDurableData(durableWorkspace.projectRoot);
       } catch {
         // Preserve the original worker failure; the durable workspace itself remains mounted on the Volume.
@@ -237,24 +217,52 @@ async function main(): Promise<void> {
   }
 }
 
-export function workerResultPublicationMode(
-  projectRoot: string,
-  input: { run_root: string; attempt_id: string; workflow_path: string },
-  hasCompletedCheckpoint: boolean
-): "verified-v2" | "legacy-markerless-v1" {
-  if (hasAttemptVerificationMarker(projectRoot, input)) return "verified-v2";
-  if (hasCompletedCheckpoint && !workflowSupportsArtifactVerificationMarkers(projectRoot, input)) {
-    return "legacy-markerless-v1";
+export function preflightModalJsonValidator(cliPath = "/usr/local/bin/ultrafuzz"): void {
+  assertRootOwnedReadOnlyFile(cliPath, "Modal Ultrafuzz launcher");
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  if (findings === undefined) throw new Error("Modal validator preflight schema is not registered");
+  const schemaPath = path.join(artifactSchemaDirectory(), findings.filename);
+  assertRootOwnedReadOnlyFile(schemaPath, "Modal validator schema");
+  let stdout: string;
+  try {
+    stdout = execFileSync(
+      cliPath,
+      ["json", "validate", "--schema", schemaPath, "--file", artifactValidatorSmokeFixturePath(), "--json"],
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 15_000, windowsHide: true }
+    );
+  } catch (error) {
+    throw new Error(
+      `Modal JSON validator preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error
+      }
+    );
   }
-  return "verified-v2";
+  try {
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+  } catch (error) {
+    throw new Error("Modal JSON validator preflight returned an invalid success envelope", { cause: error });
+  }
 }
 
+function assertRootOwnedReadOnlyFile(filePath: string, label: string): void {
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || (stat.mode & 0o022) !== 0) {
+    throw new Error(`${label} must be a root-owned, non-writable regular file`);
+  }
+}
 function sealedSmithersExecutable(snapshotRoot: string): string {
   const closure = readModalExecutionDependencyClosure(snapshotRoot);
   const smithers = regularSnapshotFile(snapshotRoot, closure.smithersBin, "sealed Smithers executable");
   const stat = fs.lstatSync(smithers);
   if ((stat.mode & 0o111) === 0) throw new Error("sealed Smithers executable is not executable");
   return smithers;
+}
+
+function trustedCloudBunExecutable(): string {
+  const executable = "/usr/local/bin/bun";
+  assertRootOwnedReadOnlyFile(executable, "Modal Bun interpreter");
+  return executable;
 }
 
 function sealedSnapshotModuleUrl(snapshotRoot: string, name: "artifacts" | "runtime"): string {
@@ -618,7 +626,8 @@ function cleanupStalePublicationDirectories(dataRoot: string): void {
 export async function runDurableWorkflow(
   projectRoot: string,
   localRunId: string,
-  input: ReturnType<typeof parseModalNodeWorkerInput>
+  input: ReturnType<typeof parseModalNodeWorkerInput>,
+  bunExecutable: () => string = trustedCloudBunExecutable
 ): Promise<void> {
   const canonicalSnapshotRoot = anchoredProjectPath(projectRoot, input.execution_snapshot_root);
   const canonicalWorkflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
@@ -630,9 +639,26 @@ export async function runDurableWorkflow(
       openedSnapshotRoot.opened
     );
     verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
+    const bun = bunExecutable();
     const smithers = sealedSmithersExecutable(snapshotAccessRoot);
+    const confinement = regularSnapshotFile(
+      snapshotAccessRoot,
+      "controls/bun-module-confinement.js",
+      "sealed Bun module confinement"
+    );
+    const bunArguments = [
+      `--config=${regularSnapshotFile(snapshotAccessRoot, "controls/bunfig.toml", "sealed Bun config")}`,
+      "--no-env-file",
+      "--no-install",
+      "--no-addons",
+      "--preserve-symlinks",
+      "--preserve-symlinks-main",
+      `--preload=${confinement}`,
+      smithers
+    ];
     const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
     const environment = {
+      PATH: ["/usr/local/bin", process.env.PATH ?? ""].filter((entry) => entry.length > 0).join(path.delimiter),
       ULTRAFUZZ_CLOUD_WORKER: "1",
       ULTRAFUZZ_ARTIFACTS_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: sealedSnapshotModuleUrl(snapshotAccessRoot, "runtime"),
@@ -642,8 +668,8 @@ export async function runDurableWorkflow(
     try {
       await runChecked(
         "resume-workflow",
-        smithers,
-        workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true),
+        bun,
+        [...bunArguments, ...workflowCommandArguments(workflowPath, projectRoot, localRunId, input, true)],
         projectRoot,
         environment
       );
@@ -804,7 +830,6 @@ export async function initializeDurableNodeWorkspace(
   const projectRoot = path.join(root, DURABLE_WORKSPACE_DIRECTORY);
   const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
   const handoffArchive = path.join(handoffDirectory, "project.tgz");
-  const durableRequest = path.join(handoffDirectory, "request.json");
   const checkpointsDirectory = path.join(root, DURABLE_CHECKPOINT_DIRECTORY);
   const checkpointIndex = path.join(checkpointsDirectory, DURABLE_CHECKPOINT_INDEX);
   // The controller validates the published result, its durable checkpoint, and the checkpoint index
@@ -814,40 +839,12 @@ export async function initializeDurableNodeWorkspace(
   const handoffArchiveIdentity = path.posix.join(dataRoot, DURABLE_INPUT_DIRECTORY, "project.tgz");
 
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(handoffDirectory, { recursive: true, mode: 0o700 });
+  assertDurableDirectory(root, "durable data root");
+  const input = await openOrCreateDurableHandoff(root, archivePath, requestedInput);
   fs.mkdirSync(checkpointsDirectory, { recursive: true, mode: 0o700 });
-  const hasDurableHandoff = fs.existsSync(handoffArchive);
-  let input: ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
-  if (hasDurableHandoff) {
-    const durable = readDurableInput(durableRequest, requestedInput);
-    if (sha256File(handoffArchive) !== durable.input.project_archive_sha256) {
-      throw new Error("durable cloud handoff archive digest mismatch");
-    }
-    input = durable.needsContentFingerprintMigration
-      ? await migrateLegacyContentFingerprint(handoffArchive, durableRequest, durable.input, requestedInput)
-      : durable.input;
-  } else {
-    input = validateFreshHandoff(archivePath, requestedInput);
-  }
+  assertDurableDirectory(checkpointsDirectory, "durable checkpoints directory");
   const projectArchiveSha256 = input.project_archive_sha256;
   const storageLineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
-  const logicalDispatchFingerprint = modalNodeDispatchFingerprint(input);
-  if (!hasDurableHandoff) {
-    const handoffPublishing = path.join(handoffDirectory, ".project.tgz.publishing");
-    writeJsonAtomic(durableRequest, input);
-    if (fs.existsSync(handoffPublishing)) {
-      if (sha256File(handoffPublishing) === projectArchiveSha256) {
-        fs.renameSync(handoffPublishing, handoffArchive);
-      } else {
-        fs.rmSync(handoffPublishing, { force: true });
-      }
-    }
-    if (!fs.existsSync(handoffArchive)) {
-      fs.copyFileSync(archivePath, handoffPublishing, fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(handoffPublishing, 0o600);
-      fs.renameSync(handoffPublishing, handoffArchive);
-    }
-  }
 
   const hadDurableWorkspace = fs.existsSync(projectRoot);
   if (hadDurableWorkspace) {
@@ -870,7 +867,8 @@ export async function initializeDurableNodeWorkspace(
   sealCloudExecutionSnapshot(projectRoot, input);
   verifyModalExecutionSnapshotClosure(projectRoot, input, { requireSealedPermissions: true });
 
-  const index = loadDurableCheckpointIndex(checkpointIndex, {
+  let index = loadDurableCheckpointIndex(
+    checkpointIndex,
     storageLineage,
     logicalDispatchFingerprint,
     projectRoot: workspaceIdentity,
@@ -880,11 +878,17 @@ export async function initializeDurableNodeWorkspace(
     archiveSha256: projectArchiveSha256
   });
   const restoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
-  let restoredFrom = readRestoreMarker(restoreMarker, path.dirname(root));
+  let restoredFrom = readRestoreMarker(restoreMarker, root, input);
   if (restoredFrom === undefined) {
     restoredFrom = restorePriorAttemptOutputs(root, projectRoot, input);
     if (restoredFrom !== undefined) {
-      writeJsonAtomic(restoreMarker, { schema_version: "ultrafuzz.modal.node-restore.v1", source_root: restoredFrom });
+      const restoreDocument: StrictModalNodeRestoreDocument = {
+        schema_version: "ultrafuzz.modal.node-restore.v1",
+        source_root: restoredFrom
+      };
+      await writeModalDocumentAtomic(restoreMarker, MODAL_NODE_RESTORE_SCHEMA_ID, restoreDocument, {
+        trustedRoot: root
+      });
     }
   }
   const hasCompletedCheckpoint = index.checkpoints.some((checkpoint) => checkpoint.stage === "completed");
@@ -894,7 +898,8 @@ export async function initializeDurableNodeWorkspace(
     checkpointIndex,
     input,
     hasCompletedCheckpoint,
-    recordCheckpoint(stage, error) {
+    async recordCheckpoint(stage, error) {
+      assertDurableCheckpointManifestBijection(index, checkpointIndex, true);
       const sequence = index.checkpoints.length + 1;
       const checkpointId = `${String(sequence).padStart(4, "0")}-${stage}`;
       const createdAt = new Date().toISOString();
@@ -923,21 +928,112 @@ export async function initializeDurableNodeWorkspace(
         created_at: createdAt,
         manifest: path.posix.join(dataRoot, DURABLE_CHECKPOINT_DIRECTORY, `${checkpointId}.json`)
       });
-      writeJsonAtomic(checkpointIndex, index);
+      const nextIndex: DurableCheckpointIndex = {
+        ...index,
+        checkpoints: [
+          ...index.checkpoints,
+          {
+            checkpoint_id: checkpointId,
+            sequence,
+            stage,
+            created_at: createdAt,
+            manifest: manifestPath
+          }
+        ]
+      };
+      await writeModalDocumentAtomic(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID, nextIndex, {
+        trustedRoot: root
+      });
+      index = nextIndex;
       return checkpoint;
     }
   };
+}
+
+async function openOrCreateDurableHandoff(
+  root: string,
+  archivePath: string,
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>
+): Promise<ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string }> {
+  const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
+  const publishingDirectory = path.join(root, `.${DURABLE_INPUT_DIRECTORY}.publishing`);
+  const finalState = lstatWorkerPath(handoffDirectory);
+  const publishingState = lstatWorkerPath(publishingDirectory);
+  if (finalState !== undefined) {
+    if (publishingState !== undefined) {
+      throw new Error("durable cloud handoff has conflicting committed and publishing state");
+    }
+    return readCommittedDurableHandoff(handoffDirectory, requestedInput, true);
+  }
+  if (publishingState !== undefined) {
+    const input = readCommittedDurableHandoff(publishingDirectory, requestedInput, false);
+    fs.renameSync(publishingDirectory, handoffDirectory);
+    syncDirectory(root);
+    return input;
+  }
+  if (
+    lstatWorkerPath(path.join(root, DURABLE_WORKSPACE_DIRECTORY)) !== undefined ||
+    durableCheckpointStateExists(path.join(root, DURABLE_CHECKPOINT_DIRECTORY))
+  ) {
+    throw new Error("durable cloud handoff is missing for existing worker state");
+  }
+
+  const input = validateFreshHandoff(archivePath, requestedInput);
+  fs.mkdirSync(publishingDirectory, { mode: 0o700 });
+  try {
+    const publishingArchive = path.join(publishingDirectory, "project.tgz");
+    fs.copyFileSync(archivePath, publishingArchive, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(publishingArchive, 0o600);
+    if (sha256File(publishingArchive) !== input.project_archive_sha256) {
+      throw new Error("published durable cloud handoff archive digest mismatch");
+    }
+    await writeModalDocumentAtomic(path.join(publishingDirectory, "request.json"), MODAL_NODE_INPUT_SCHEMA_ID, input, {
+      trustedRoot: publishingDirectory
+    });
+    syncDirectory(publishingDirectory);
+    fs.renameSync(publishingDirectory, handoffDirectory);
+    syncDirectory(root);
+    return input;
+  } catch (error) {
+    fs.rmSync(publishingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function readCommittedDurableHandoff(
+  directory: string,
+  requestedInput: ReturnType<typeof parseModalNodeWorkerInput>,
+  allowRestoreMarker: boolean
+): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
+  assertDurableDirectory(directory, "durable cloud handoff directory");
+  const allowed = new Set(["project.tgz", "request.json", ...(allowRestoreMarker ? [DURABLE_RESTORE_MARKER] : [])]);
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!allowed.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error("durable cloud handoff directory contains invalid present state");
+    }
+  }
+  const handoffArchive = path.join(directory, "project.tgz");
+  assertDurableRegularFile(handoffArchive, "durable cloud handoff archive");
+  const input = readDurableInput(path.join(directory, "request.json"), requestedInput);
+  if (sha256File(handoffArchive) !== input.project_archive_sha256) {
+    throw new Error("durable cloud handoff archive digest mismatch");
+  }
+  return input;
+}
+
+function durableCheckpointStateExists(checkpointsDirectory: string): boolean {
+  const state = lstatWorkerPath(checkpointsDirectory);
+  if (state === undefined) return false;
+  assertDurableDirectory(checkpointsDirectory, "durable checkpoints directory");
+  return fs.readdirSync(checkpointsDirectory).length > 0;
 }
 
 function validateFreshHandoff(
   archivePath: string,
   input: ReturnType<typeof parseModalNodeWorkerInput>
 ): ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string } {
-  if (
-    input.project_content_sha256 === undefined ||
-    input.project_archive_sha256 === undefined ||
-    sha256File(archivePath) !== input.project_archive_sha256
-  ) {
+  assertDurableRegularFile(archivePath, "cloud handoff archive");
+  if (input.project_archive_sha256 === undefined || sha256File(archivePath) !== input.project_archive_sha256) {
     throw new Error("cloud handoff archive digest mismatch");
   }
   return input as ReturnType<typeof parseModalNodeWorkerInput> & { project_archive_sha256: string };
@@ -952,7 +1048,8 @@ function readDurableInput(
 } {
   let persistedInput: ReturnType<typeof parseModalNodeWorkerInput>;
   try {
-    persistedInput = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
+    persistedInput = readModalDocument(durableRequest, MODAL_NODE_INPUT_SCHEMA_ID)
+      .value as StrictModalNodeInputDocument;
   } catch (error) {
     throw new Error("durable cloud handoff request is unavailable", { cause: error });
   }
@@ -1018,7 +1115,32 @@ function sameDurableNodeAttempt(
   left: ReturnType<typeof parseModalNodeSandboxInput>,
   right: ReturnType<typeof parseModalNodeSandboxInput>
 ): boolean {
-  return left.execution_generation === right.execution_generation && sameLogicalNodeDispatch(left, right);
+  return (
+    left.schema_version === right.schema_version &&
+    left.run_id === right.run_id &&
+    left.task_id === right.task_id &&
+    left.attempt_id === right.attempt_id &&
+    left.source_revision === right.source_revision &&
+    left.source_ref === right.source_ref &&
+    (ignoreExecutionGeneration || left.execution_generation === right.execution_generation) &&
+    left.workflow_path === right.workflow_path &&
+    left.prompt_path === right.prompt_path &&
+    left.execution_snapshot_root === right.execution_snapshot_root &&
+    left.run_root === right.run_root &&
+    left.artifact_dir === right.artifact_dir &&
+    left.workspace_dir === right.workspace_dir &&
+    sameStrings(left.dependency_artifact_dirs, right.dependency_artifact_dirs) &&
+    sameStrings(left.optional_dependency_artifact_dirs ?? [], right.optional_dependency_artifact_dirs ?? []) &&
+    sameDependencyVerificationAuthorities(
+      left.dependency_verification_authorities,
+      right.dependency_verification_authorities
+    ) &&
+    left.resources.cpu === right.resources.cpu &&
+    left.resources.memory_mib === right.resources.memory_mib &&
+    left.resources.timeout_seconds === right.resources.timeout_seconds &&
+    sameStrings(left.agent_credential_env, right.agent_credential_env) &&
+    left.operator_prompt === right.operator_prompt
+  );
 }
 
 /**
@@ -1035,23 +1157,44 @@ function sameLogicalNodeDispatch(
   return modalNodeDispatchFingerprint(left) === modalNodeDispatchFingerprint(right);
 }
 
-function readRestoreMarker(markerPath: string, allowedParent: string): string | undefined {
-  if (!fs.existsSync(markerPath)) return undefined;
+function sameDependencyVerificationAuthorities(
+  left: StrictModalNodeInputDocument["dependency_verification_authorities"],
+  right: StrictModalNodeInputDocument["dependency_verification_authorities"]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (value, index) =>
+        value.attempt_id === right[index]?.attempt_id &&
+        value.marker_sha256 === right[index]?.marker_sha256 &&
+        value.size_bytes === right[index]?.size_bytes
+    )
+  );
+}
+
+function readRestoreMarker(
+  markerPath: string,
+  currentRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>
+): string | undefined {
+  if (lstatWorkerPath(markerPath) === undefined) return undefined;
+  let marker: StrictModalNodeRestoreDocument;
   try {
-    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as unknown;
-    if (
-      isRecord(marker) &&
-      marker.schema_version === "ultrafuzz.modal.node-restore.v1" &&
-      typeof marker.source_root === "string" &&
-      path.isAbsolute(marker.source_root) &&
-      marker.source_root.startsWith(`${allowedParent}${path.sep}`)
-    ) {
-      return marker.source_root;
-    }
-  } catch {
-    // Re-run restoration when an interrupted marker cannot be parsed.
+    marker = readModalDocument(markerPath, MODAL_NODE_RESTORE_SCHEMA_ID).value as StrictModalNodeRestoreDocument;
+  } catch (error) {
+    throw new Error("durable restore marker is invalid", { cause: error });
   }
-  return undefined;
+  const sourceRoot = path.resolve(marker.source_root);
+  if (
+    !path.isAbsolute(marker.source_root) ||
+    sourceRoot !== marker.source_root ||
+    sourceRoot === currentRoot ||
+    path.dirname(sourceRoot) !== path.dirname(currentRoot) ||
+    compatiblePriorAttempt(sourceRoot, currentRoot, input, false) === undefined
+  ) {
+    throw new Error("durable restore marker is invalid");
+  }
+  return sourceRoot;
 }
 
 function restorePriorAttemptOutputs(
@@ -1060,34 +1203,17 @@ function restorePriorAttemptOutputs(
   input: ReturnType<typeof parseModalNodeWorkerInput>
 ): string | undefined {
   const parent = path.dirname(currentRoot);
-  const candidates: Array<{ root: string; mtimeMs: number; input: ReturnType<typeof parseModalNodeWorkerInput> }> = [];
+  const candidates: CompatiblePriorAttempt[] = [];
   for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
     const candidateRoot = path.join(parent, entry.name);
     if (candidateRoot === currentRoot) continue;
-    const requestPath = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY, "request.json");
-    try {
-      const persisted = parseModalNodeWorkerInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
-      if (
-        persisted.project_archive_sha256 !== undefined &&
-        persisted.execution_generation !== input.execution_generation &&
-        sameLogicalNodeDispatch(persisted, input) &&
-        // The candidate's own durable index must record that same logical dispatch. Its request file
-        // alone is a claim; the index is the evidence the workspace actually ran under it.
-        priorAttemptRecordedLogicalDispatch(candidateRoot, persisted) &&
-        priorAttemptHasEvidence(candidateRoot, persisted)
-      ) {
-        candidates.push({
-          root: candidateRoot,
-          mtimeMs: fs.statSync(path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY)).mtimeMs,
-          input: persisted
-        });
-      }
-    } catch {
-      // Ignore unrelated or incomplete generation directories; the current generation remains recoverable.
-    }
+    const candidate = compatiblePriorAttempt(candidateRoot, currentRoot, input, true);
+    if (candidate !== undefined) candidates.push(candidate);
   }
-  const prior = candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
+  const prior = candidates.sort(
+    (left, right) => right.mtimeMs - left.mtimeMs || (left.root < right.root ? -1 : left.root > right.root ? 1 : 0)
+  )[0];
   if (prior === undefined) return undefined;
 
   const priorProjectRoot = path.join(prior.root, DURABLE_WORKSPACE_DIRECTORY);
@@ -1096,69 +1222,160 @@ function restorePriorAttemptOutputs(
     path.join(".ultrafuzz", "recovered", path.basename(prior.root))
   );
   const sourceWorkspace = anchoredProjectPath(priorProjectRoot, input.workspace_dir);
-  if (fs.existsSync(sourceWorkspace)) {
-    copySafeTree(sourceWorkspace, path.join(recoveryBase, "workspace"));
-  }
+  copyOptionalPriorEvidence(sourceWorkspace, path.join(recoveryBase, "workspace"));
   for (const [label, relative] of [
     ["artifacts", input.artifact_dir],
     ["logs", path.join(input.run_root, "logs")]
   ] as const) {
     const source = anchoredProjectPath(priorProjectRoot, relative);
-    if (fs.existsSync(source)) copySafeTree(source, path.join(recoveryBase, label));
+    copyOptionalPriorEvidence(source, path.join(recoveryBase, label));
   }
   const priorRecovered = anchoredProjectPath(priorProjectRoot, path.join(".ultrafuzz", "recovered"));
-  if (fs.existsSync(priorRecovered)) copySafeTree(priorRecovered, path.join(recoveryBase, "previous-recovered"));
+  copyOptionalPriorEvidence(priorRecovered, path.join(recoveryBase, "previous-recovered"));
   return prior.root;
 }
 
-/**
- * True when a prior generation's durable index records the logical dispatch its request file claims.
- *
- * A restore copies another generation's workspace outputs into this attempt, so the source must be a
- * generation of this same logical dispatch by its own persisted record -- not merely by a request
- * document sitting next to it.
- */
-function priorAttemptRecordedLogicalDispatch(
+interface CompatiblePriorAttempt {
+  readonly root: string;
+  readonly mtimeMs: number;
+  readonly input: ReturnType<typeof parseModalNodeWorkerInput>;
+}
+
+function compatiblePriorAttempt(
   candidateRoot: string,
-  persisted: ReturnType<typeof parseModalNodeSandboxInput>
-): boolean {
-  const indexPath = path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY, DURABLE_CHECKPOINT_INDEX);
-  if (!fs.existsSync(indexPath)) return false;
+  currentRoot: string,
+  input: ReturnType<typeof parseModalNodeWorkerInput>,
+  allowMissingOrUnrelated: boolean
+): CompatiblePriorAttempt | undefined {
+  assertDurableDirectory(candidateRoot, "prior generation durable root");
+  const handoffDirectory = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY);
+  const requestPath = path.join(handoffDirectory, "request.json");
+  const handoffState = lstatWorkerPath(handoffDirectory);
+  if (handoffState === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("prior generation handoff directory is missing");
+  }
+  assertDurableDirectory(handoffDirectory, "prior generation handoff directory");
+  if (lstatWorkerPath(requestPath) === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("prior generation cloud handoff request is missing");
+  }
+  let persisted: StrictModalNodeInputDocument;
   try {
-    const index = JSON.parse(fs.readFileSync(indexPath, "utf8")) as unknown;
-    return (
-      isRecord(index) &&
-      index.schema_version === "ultrafuzz.modal.node-checkpoint-index.v1" &&
-      index.logical_dispatch_fingerprint === modalNodeDispatchFingerprint(persisted) &&
-      index.storage_lineage === `${persisted.run_id}/${persisted.attempt_id}/${persisted.execution_generation}`
-    );
-  } catch {
+    persisted = readModalDocument(requestPath, MODAL_NODE_INPUT_SCHEMA_ID).value as StrictModalNodeInputDocument;
+  } catch (error) {
+    throw new Error("prior generation cloud handoff request is invalid", { cause: error });
+  }
+  if (
+    persisted.project_archive_sha256 === undefined ||
+    persisted.execution_generation === input.execution_generation ||
+    !sameCompatiblePriorNodeInput(candidateRoot, currentRoot, persisted, input)
+  ) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker does not reference a compatible prior generation");
+  }
+  const allowedHandoffEntries = new Set(["project.tgz", "request.json", DURABLE_RESTORE_MARKER]);
+  for (const entry of fs.readdirSync(handoffDirectory, { withFileTypes: true })) {
+    if (!allowedHandoffEntries.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error("prior generation handoff directory contains invalid present state");
+    }
+  }
+  const priorRestoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
+  if (lstatWorkerPath(priorRestoreMarker) !== undefined) {
+    try {
+      readModalDocument(priorRestoreMarker, MODAL_NODE_RESTORE_SCHEMA_ID);
+    } catch (error) {
+      throw new Error("prior generation restore marker is invalid", { cause: error });
+    }
+  }
+  const handoffArchive = path.join(handoffDirectory, "project.tgz");
+  assertDurableRegularFile(handoffArchive, "prior generation handoff archive");
+  if (sha256File(handoffArchive) !== persisted.project_archive_sha256) {
+    throw new Error("prior generation handoff archive digest mismatch");
+  }
+  const checkpointDirectory = path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY);
+  const checkpointIndex = path.join(checkpointDirectory, DURABLE_CHECKPOINT_INDEX);
+  if (lstatWorkerPath(checkpointIndex) === undefined) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker references a generation without a checkpoint index");
+  }
+  assertDurableDirectory(checkpointDirectory, "prior generation checkpoints directory");
+  const index = loadDurableCheckpointIndex(
+    checkpointIndex,
+    `${persisted.run_id}/${persisted.attempt_id}/${persisted.execution_generation}`,
+    path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY),
+    persisted.run_root,
+    persisted.execution_snapshot_root,
+    handoffArchive,
+    persisted.project_archive_sha256
+  );
+  if (index.checkpoints.length === 0 || !priorAttemptHasEvidence(candidateRoot, persisted)) {
+    if (allowMissingOrUnrelated) return undefined;
+    throw new Error("durable restore marker references a generation without recoverable evidence");
+  }
+  return {
+    root: candidateRoot,
+    mtimeMs: fs.statSync(checkpointDirectory).mtimeMs,
+    input: persisted
+  };
+}
+
+function sameCompatiblePriorNodeInput(
+  candidateRoot: string,
+  currentRoot: string,
+  prior: ReturnType<typeof parseModalNodeWorkerInput>,
+  current: ReturnType<typeof parseModalNodeWorkerInput>
+): boolean {
+  if (sameResumableNodeInput(prior, current, true)) return true;
+  if (prior.run_id !== current.run_id || prior.task_id !== current.task_id || prior.attempt_id !== current.attempt_id) {
     return false;
   }
+
+  const priorProjectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
+  const currentProjectRoot = path.join(currentRoot, DURABLE_WORKSPACE_DIRECTORY);
+  verifyModalExecutionSnapshotClosure(priorProjectRoot, prior, { requireSealedPermissions: true });
+  const priorIdentity = modalNodeContinuationIdentity(priorProjectRoot, prior);
+  const currentIdentity = modalNodeContinuationIdentity(currentProjectRoot, current);
+  if (
+    priorIdentity.taskIdentitySha256 !== currentIdentity.taskIdentitySha256 ||
+    priorIdentity.nonControllerInputsSha256 !== currentIdentity.nonControllerInputsSha256 ||
+    priorIdentity.targetGitTree !== currentIdentity.targetGitTree ||
+    priorIdentity.controlGeneration !== currentIdentity.controlGeneration ||
+    !currentIdentity.authorizedGenerations.includes(priorIdentity.controllerGeneration) ||
+    currentIdentity.semanticFingerprint === undefined
+  ) {
+    return false;
+  }
+  // A refreshed ancestor authenticates its own semantic fingerprint. The
+  // original control generation has no manifest field of its own; the current
+  // committed manifest was admitted only after matching those sealed semantics.
+  return (
+    priorIdentity.semanticFingerprint === undefined ||
+    priorIdentity.semanticFingerprint === currentIdentity.semanticFingerprint
+  );
 }
 
 function priorAttemptHasEvidence(candidateRoot: string, input: ReturnType<typeof parseModalNodeWorkerInput>): boolean {
   const projectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
-  const candidates: string[] = [];
   for (const relative of [
     input.workspace_dir,
     input.artifact_dir,
     path.join(input.run_root, "logs"),
     path.join(".ultrafuzz", "recovered")
   ]) {
-    try {
-      candidates.push(anchoredProjectPath(projectRoot, relative));
-    } catch {
-      return false;
-    }
+    const candidate = anchoredProjectPath(projectRoot, relative);
+    const state = lstatWorkerPath(candidate);
+    if (state === undefined) continue;
+    assertDurableDirectory(candidate, "prior generation evidence directory");
+    if (fs.readdirSync(candidate).length > 0) return true;
   }
-  return candidates.some((candidate) => {
-    try {
-      return fs.statSync(candidate).isDirectory() && fs.readdirSync(candidate).length > 0;
-    } catch {
-      return false;
-    }
-  });
+  return false;
+}
+
+function copyOptionalPriorEvidence(source: string, destination: string): void {
+  if (lstatWorkerPath(source) === undefined) return;
+  assertDurableDirectory(source, "prior generation evidence directory");
+  copySafeTree(source, destination);
 }
 
 export function resolveDurableDataRoot(dataRoot: string, trustedMountRoot = TRUSTED_MOUNT_ROOT): string {
@@ -1195,6 +1412,15 @@ function assertDurableDirectory(directory: string, label: string): void {
   }
 }
 
+function assertDurableRegularFile(filePath: string, label: string): void {
+  const resolved = path.resolve(filePath);
+  const stat = lstatWorkerPath(resolved);
+  if (stat === undefined) throw new Error(`${label} is missing`);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || fs.realpathSync(resolved) !== resolved) {
+    throw new Error(`${label} is unsafe`);
+  }
+}
+
 function loadDurableCheckpointIndex(
   checkpointIndex: string,
   identity: {
@@ -1207,7 +1433,14 @@ function loadDurableCheckpointIndex(
     archiveSha256: string;
   }
 ): DurableCheckpointIndex {
-  if (!fs.existsSync(checkpointIndex)) {
+  if (lstatWorkerPath(checkpointIndex) === undefined) {
+    const checkpointDirectory = path.dirname(checkpointIndex);
+    const hasOrphanedManifest = fs
+      .readdirSync(checkpointDirectory, { withFileTypes: true })
+      .some((entry) => entry.name !== DURABLE_CHECKPOINT_INDEX && entry.name.endsWith(".json"));
+    if (hasOrphanedManifest) {
+      throw new Error("durable checkpoint index is missing for existing checkpoint manifests");
+    }
     return {
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
       storage_lineage: identity.storageLineage,
@@ -1220,49 +1453,104 @@ function loadDurableCheckpointIndex(
       checkpoints: []
     };
   }
-  const parsed = JSON.parse(fs.readFileSync(checkpointIndex, "utf8")) as unknown;
-  const missingLogicalDispatchFingerprint = isRecord(parsed) && parsed.logical_dispatch_fingerprint === undefined;
+  let parsed: StrictModalNodeCheckpointIndexDocument;
+  try {
+    parsed = readModalDocument(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID)
+      .value as StrictModalNodeCheckpointIndexDocument;
+  } catch (error) {
+    throw new Error("durable checkpoint index is invalid", { cause: error });
+  }
   if (
-    !isRecord(parsed) ||
-    parsed.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
-    parsed.storage_lineage !== identity.storageLineage ||
-    // An existing index is only this attempt's index when it records the same logical dispatch. The
-    // storage lineage alone cannot say so: it names the generation, not what the dispatch asked for.
-    (!missingLogicalDispatchFingerprint &&
-      parsed.logical_dispatch_fingerprint !== identity.logicalDispatchFingerprint) ||
-    parsed.workspace_path !== identity.projectRoot ||
-    parsed.run_root !== identity.runRoot ||
-    parsed.execution_snapshot_root !== identity.executionSnapshotRoot ||
-    parsed.handoff_archive !== identity.handoffArchive ||
-    parsed.project_archive_sha256 !== identity.archiveSha256 ||
-    !Array.isArray(parsed.checkpoints)
+    parsed.storage_lineage !== storageLineage ||
+    parsed.workspace_path !== projectRoot ||
+    parsed.run_root !== runRoot ||
+    parsed.execution_snapshot_root !== executionSnapshotRoot ||
+    parsed.handoff_archive !== handoffArchive ||
+    parsed.project_archive_sha256 !== archiveSha256
   ) {
     throw new Error("durable checkpoint index is invalid");
   }
-  if (missingLogicalDispatchFingerprint) {
-    // The previous v1 worker persisted every identity above but predated the logical fingerprint.
-    // `readDurableInput` has already required the same generation and whole logical dispatch, and the
-    // caller has already verified the persisted archive digest, so only that exact legacy shape may
-    // be upgraded in place. A present mismatch is rejected above and is never rewritten.
-    parsed.logical_dispatch_fingerprint = identity.logicalDispatchFingerprint;
-    writeJsonAtomic(checkpointIndex, parsed);
-  }
-  return parsed as unknown as DurableCheckpointIndex;
+  assertDurableCheckpointManifestBijection(parsed, checkpointIndex);
+  return parsed;
 }
 
-function writeJsonAtomic(destination: string, value: unknown): void {
-  const parent = path.dirname(destination);
-  assertDurableDirectory(parent, "durable checkpoint parent");
-  const publishing = path.join(parent, `.${path.basename(destination)}.${crypto.randomUUID()}.publishing`);
-  const descriptor = fs.openSync(publishing, "wx", 0o600);
-  try {
-    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`, "utf8");
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
+function assertDurableCheckpointManifestBijection(
+  index: StrictModalNodeCheckpointIndexDocument,
+  checkpointIndex: string,
+  verifyPersistedIndex = false
+): void {
+  if (verifyPersistedIndex) {
+    const persistedState = lstatWorkerPath(checkpointIndex);
+    if (persistedState === undefined) {
+      if (index.checkpoints.length !== 0) throw new Error("durable checkpoint index disappeared before append");
+    } else {
+      let persisted: StrictModalNodeCheckpointIndexDocument;
+      try {
+        persisted = readModalDocument(checkpointIndex, MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID)
+          .value as StrictModalNodeCheckpointIndexDocument;
+      } catch (error) {
+        throw new Error("durable checkpoint index changed to invalid present bytes before append", { cause: error });
+      }
+      if (!isDeepStrictEqual(persisted, index)) {
+        throw new Error("durable checkpoint index changed before append");
+      }
+    }
   }
-  fs.renameSync(publishing, destination);
-  syncDirectory(parent);
+  const checkpointDirectory = path.dirname(checkpointIndex);
+  const expectedNames = new Set<string>();
+  let restoredFrom: string | undefined;
+  let observedRestoreState = false;
+  for (const entry of index.checkpoints) {
+    const expectedName = `${entry.checkpoint_id}.json`;
+    const manifestPath = path.join(checkpointDirectory, expectedName);
+    if (entry.manifest !== manifestPath || expectedNames.has(expectedName)) {
+      throw new Error("durable checkpoint index has a noncanonical manifest reference");
+    }
+    expectedNames.add(expectedName);
+    let checkpoint: StrictModalNodeCheckpointDocument;
+    try {
+      checkpoint = readModalDocument(manifestPath, MODAL_NODE_CHECKPOINT_SCHEMA_ID)
+        .value as StrictModalNodeCheckpointDocument;
+    } catch (error) {
+      throw new Error("durable checkpoint manifest is invalid", { cause: error });
+    }
+    if (
+      checkpoint.checkpoint_id !== entry.checkpoint_id ||
+      checkpoint.sequence !== entry.sequence ||
+      checkpoint.stage !== entry.stage ||
+      checkpoint.created_at !== entry.created_at ||
+      checkpoint.storage_lineage !== index.storage_lineage ||
+      checkpoint.workspace_path !== index.workspace_path ||
+      checkpoint.run_root !== index.run_root ||
+      checkpoint.execution_snapshot_root !== index.execution_snapshot_root ||
+      checkpoint.handoff_archive !== index.handoff_archive ||
+      checkpoint.project_archive_sha256 !== index.project_archive_sha256
+    ) {
+      throw new Error("durable checkpoint manifest does not match its index entry or trusted context");
+    }
+    if (!observedRestoreState) {
+      restoredFrom = checkpoint.restored_from;
+      observedRestoreState = true;
+    } else if (checkpoint.restored_from !== restoredFrom) {
+      throw new Error("durable checkpoint manifests disagree on restore lineage");
+    }
+  }
+  const presentNames = new Set<string>();
+  for (const entry of fs.readdirSync(checkpointDirectory, { withFileTypes: true })) {
+    if (entry.name === DURABLE_CHECKPOINT_INDEX || !entry.name.endsWith(".json")) continue;
+    const manifestPath = path.join(checkpointDirectory, entry.name);
+    const stat = fs.lstatSync(manifestPath);
+    if (!entry.isFile() || entry.isSymbolicLink() || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+      throw new Error("durable checkpoint directory contains an unsafe manifest");
+    }
+    presentNames.add(entry.name);
+  }
+  if (
+    presentNames.size !== expectedNames.size ||
+    [...presentNames].some((manifestName) => !expectedNames.has(manifestName))
+  ) {
+    throw new Error("durable checkpoint manifests do not match the checkpoint index");
+  }
 }
 
 function replacePublishedFile(source: string, destination: string): void {
@@ -1304,7 +1592,7 @@ async function runChecked(
 ): Promise<{ stdout: string; stderr: string }> {
   const child = spawn(command, args, {
     cwd,
-    env: { ...process.env, ...env },
+    env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const stdout = readBoundedText(child.stdout, outputLimit);
@@ -1349,13 +1637,13 @@ function readBoundedText(stream: Readable | null, limit = 4_096): Promise<string
   });
 }
 
-function workerErrorPayload(error: unknown): Record<string, unknown> {
+function workerErrorPayload(error: unknown): StrictModalNodeWorkerErrorDocument {
   if (error instanceof CloudWorkerCommandError) {
     return {
       schema_version: "ultrafuzz.modal.node-worker-error.v1",
-      message: error.message,
-      phase: error.phase,
-      command: error.command,
+      message: boundedWorkerErrorText(error.message, 4_096, "cloud worker command failed"),
+      phase: boundedWorkerErrorText(error.phase, 256, "unknown-phase"),
+      command: boundedWorkerErrorText(error.command, 1_024, "unknown-command"),
       exit_code: error.exitCode,
       ...(error.stdout.trim() === "" ? {} : { stdout: error.stdout.trim().slice(0, 2_000) }),
       ...(error.stderr.trim() === "" ? {} : { stderr: error.stderr.trim().slice(0, 2_000) })
@@ -1363,17 +1651,24 @@ function workerErrorPayload(error: unknown): Record<string, unknown> {
   }
   return {
     schema_version: "ultrafuzz.modal.node-worker-error.v1",
-    message: error instanceof Error ? error.message : String(error)
+    message: boundedWorkerErrorText(describeWorkerError(error), 4_096, "cloud worker failed")
   };
 }
 
-function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, attemptId: string): void {
-  const mirror = path.join(workspaceDir, "artifacts", attemptId);
-  if (!fs.existsSync(mirror)) return;
-  copySafeTree(mirror, artifactDir, true);
+function describeWorkerError(error: unknown): string {
+  try {
+    return error instanceof Error ? String(error.message) : String(error);
+  } catch {
+    return "cloud worker failed";
+  }
 }
 
-export function copySafeTree(source: string, destination: string, onlyMissing = false): void {
+function boundedWorkerErrorText(value: string, limit: number, fallback: string): string {
+  const bounded = value.slice(0, limit);
+  return bounded.length === 0 ? fallback : bounded;
+}
+
+export function copySafeTree(source: string, destination: string): void {
   const resolvedSource = path.resolve(source);
   const sourceStat = fs.lstatSync(resolvedSource);
   const root = fs.realpathSync(resolvedSource);
@@ -1386,47 +1681,14 @@ export function copySafeTree(source: string, destination: string, onlyMissing = 
     const sourcePath = path.join(root, entry.name);
     const destinationPath = path.join(destination, entry.name);
     if (entry.isDirectory()) {
-      copySafeTree(sourcePath, destinationPath, onlyMissing);
+      copySafeTree(sourcePath, destinationPath);
     } else if (entry.isFile()) {
       const stat = fs.lstatSync(sourcePath);
       if (stat.nlink !== 1) throw new Error("cloud publication file is hard-linked");
-      if (onlyMissing && fs.existsSync(destinationPath)) continue;
       fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
       fs.copyFileSync(sourcePath, destinationPath);
     } else {
       throw new Error("cloud publication excludes links and special files");
-    }
-  }
-}
-
-/**
- * Publish the complete artifact tree and verify every manifest declaration
- * against both the source tree and the staged copy.  The normal worker
- * archive must be self-contained: a terminal result is not considered
- * publishable when a declared property, harness, or provenance file is
- * missing or altered.
- */
-export function copyPublishedEvidenceTree(source: string, destination: string): void {
-  copySafeTree(source, destination);
-  const sourceRoot = path.resolve(source);
-  const destinationRoot = path.resolve(destination);
-  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter(
-    (filePath) => path.basename(filePath) === "artifact-manifest.json" && path.dirname(filePath) === sourceRoot
-  )) {
-    const manifest = parsePublicationManifest(manifestPath);
-    const nodeRoot = path.dirname(manifestPath);
-    for (const entry of manifest.files) {
-      const sourcePath = safeManifestFilePath(nodeRoot, entry.path);
-      assertManifestFile(sourcePath, entry, "source");
-      const relative = path.relative(sourceRoot, sourcePath);
-      const destinationPath = path.resolve(destinationRoot, relative);
-      if (destinationPath === destinationRoot || !destinationPath.startsWith(`${destinationRoot}${path.sep}`)) {
-        throw new Error(`artifact manifest destination path escapes publication root: ${entry.path}`);
-      }
-      assertManifestFile(destinationPath, entry, "published");
-      // Recheck the source after publication to detect a source mutation
-      // between the initial digest and the staged copy.
-      assertManifestFile(sourcePath, entry, "source");
     }
   }
 }
@@ -1501,32 +1763,6 @@ function attemptVerificationMarkerSource(
   return { markerName, markerPath };
 }
 
-function hasAttemptVerificationMarker(projectRoot: string, input: { run_root: string; attempt_id: string }): boolean {
-  try {
-    attemptVerificationMarkerSource(projectRoot, input);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && /verification marker is missing/u.test(error.message)) {
-      return false;
-    }
-    throw error;
-  }
-}
-
-function workflowSupportsArtifactVerificationMarkers(projectRoot: string, input: { workflow_path: string }): boolean {
-  try {
-    const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
-    const stat = fs.lstatSync(workflowPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > MAX_WORKFLOW_MARKER_PROBE_BYTES) {
-      return true;
-    }
-    const source = fs.readFileSync(workflowPath, "utf8");
-    return source.includes(ARTIFACT_VERIFICATION_SCHEMA_VERSION) || source.includes(ARTIFACT_VERIFICATION_DIRECTORY);
-  } catch {
-    return true;
-  }
-}
-
 function readVerificationMarkerPublications(markerPath: string, attemptId: string): Map<string, string> {
   const markerFile = assertRegularUnlinkedFile(markerPath, "cloud publication verification marker is unavailable");
   const markerStat = fs.statSync(markerFile);
@@ -1535,66 +1771,30 @@ function readVerificationMarkerPublications(markerPath: string, attemptId: strin
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(markerFile, "utf8"));
+    parsed = parseStrictJsonBytes(fs.readFileSync(markerFile));
   } catch (error) {
     throw new Error("cloud publication verification marker is invalid JSON", { cause: error });
   }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    (parsed as { schema_version?: unknown }).schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
-    (parsed as { attempt_id?: unknown }).attempt_id !== attemptId ||
-    !Array.isArray((parsed as { publications?: unknown }).publications)
-  ) {
+  const shape = validateArtifactVerificationMarker(parsed);
+  if (!shape.ok) {
     throw new Error("cloud publication verification marker is invalid");
   }
+  const marker = parsed as ArtifactVerificationMarker;
+  if (marker.attempt_id !== attemptId) throw new Error("cloud publication verification marker is invalid");
+  assertArtifactVerificationMarkerSemantics(marker);
   const publications = new Map<string, string>();
-  for (const publication of (parsed as { publications: unknown[] }).publications) {
-    if (
-      typeof publication !== "object" ||
-      publication === null ||
-      Array.isArray(publication) ||
-      typeof (publication as { path?: unknown }).path !== "string" ||
-      typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
-      !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256)
-    ) {
-      throw new Error("cloud publication verification marker publication is invalid");
-    }
-    const relativePath = (publication as { path: string }).path;
+  for (const publication of marker.publications) {
+    const relativePath = publication.path;
     assertSafeVerifiedPublicationRelativePath(relativePath);
     if (publications.has(relativePath)) {
       throw new Error(`cloud publication verification marker has duplicate publication: ${relativePath}`);
     }
-    publications.set(relativePath, (publication as { sha256: string }).sha256);
+    publications.set(relativePath, publication.sha256);
   }
   if (publications.size === 0) {
     throw new Error("cloud publication verification marker has no publications");
   }
   return publications;
-}
-
-function recursiveRegularFiles(root: string): string[] {
-  const files: string[] = [];
-  const visit = (directory: string): void => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const fullPath = path.join(directory, entry.name);
-      const stat = fs.lstatSync(fullPath);
-      if (entry.isDirectory()) {
-        if (stat.isSymbolicLink() || fs.realpathSync(fullPath) !== fullPath) {
-          throw new Error("cloud publication source is unsafe");
-        }
-        visit(fullPath);
-      } else if (entry.isFile() && !stat.isSymbolicLink()) {
-        if (stat.nlink !== 1) throw new Error("cloud publication file is hard-linked");
-        files.push(fullPath);
-      } else {
-        throw new Error("cloud publication excludes links and special files");
-      }
-    }
-  };
-  visit(root);
-  return files;
 }
 
 function assertRegularUnlinkedFile(filePath: string, label: string): string {
@@ -1630,110 +1830,6 @@ function assertSafeVerifiedPublicationRelativePath(relativePath: string): void {
     relativePath.split("/").includes("..")
   ) {
     throw new Error(`unsafe verified publication path: ${relativePath}`);
-  }
-}
-
-function parsePublicationManifest(manifestPath: string): {
-  files: Array<{ path: string; size_bytes: number; sha256: string }>;
-} {
-  const manifestStat = fs.lstatSync(manifestPath);
-  if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1) {
-    throw new Error(`artifact manifest is unsafe: ${manifestPath}`);
-  }
-  if (manifestStat.size > MAX_PUBLICATION_MANIFEST_BYTES) {
-    throw new Error(`artifact manifest exceeds the size limit: ${manifestPath}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-  } catch (error) {
-    throw new Error(`artifact manifest is not valid JSON: ${manifestPath}`, { cause: error });
-  }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    !Array.isArray((parsed as { files?: unknown }).files)
-  ) {
-    throw new Error(`artifact manifest is missing its files array: ${manifestPath}`);
-  }
-  const files = (parsed as { files: unknown[] }).files;
-  if (files.length === 0) {
-    throw new Error(`artifact manifest must declare at least one file: ${manifestPath}`);
-  }
-  if (files.length > MAX_PUBLICATION_MANIFEST_ENTRIES) {
-    throw new Error(`artifact manifest has too many file entries: ${manifestPath}`);
-  }
-  const paths = new Set<string>();
-  for (const entry of files) {
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      Array.isArray(entry) ||
-      typeof (entry as { path?: unknown }).path !== "string" ||
-      !Number.isSafeInteger((entry as { size_bytes?: unknown }).size_bytes) ||
-      ((entry as { size_bytes: number }).size_bytes ?? -1) < 0 ||
-      typeof (entry as { sha256?: unknown }).sha256 !== "string" ||
-      !/^[a-f0-9]{64}$/u.test((entry as { sha256: string }).sha256) ||
-      typeof (entry as { provenance?: unknown }).provenance !== "object" ||
-      (entry as { provenance?: unknown }).provenance === null ||
-      typeof (entry as { provenance?: { producer_node_id?: unknown } }).provenance?.producer_node_id !== "string" ||
-      (entry as { provenance: { producer_node_id: string } }).provenance.producer_node_id.length === 0
-    ) {
-      throw new Error(`artifact manifest entry is invalid: ${manifestPath}`);
-    }
-    const relativePath = (entry as { path: string }).path;
-    if (paths.has(relativePath)) {
-      throw new Error(`artifact manifest contains duplicate file path: ${manifestPath}`);
-    }
-    paths.add(relativePath);
-  }
-  return { files: files as Array<{ path: string; size_bytes: number; sha256: string }> };
-}
-
-function safeManifestFilePath(nodeRoot: string, relativePath: string): string {
-  if (
-    relativePath.length === 0 ||
-    relativePath.includes("\0") ||
-    relativePath.includes("\\") ||
-    path.isAbsolute(relativePath) ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(relativePath)
-  ) {
-    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
-  }
-  const normalized = path.normalize(relativePath);
-  if (
-    normalized !== relativePath ||
-    normalized === "." ||
-    normalized === ".." ||
-    normalized.startsWith(`..${path.sep}`)
-  ) {
-    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
-  }
-  const resolvedRoot = path.resolve(nodeRoot);
-  const resolved = path.resolve(resolvedRoot, normalized);
-  if (resolved === resolvedRoot || !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
-    throw new Error(`unsafe artifact manifest path: ${relativePath}`);
-  }
-  return resolved;
-}
-
-function assertManifestFile(
-  filePath: string,
-  entry: { path: string; size_bytes: number; sha256: string },
-  label: string
-): void {
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(filePath);
-  } catch (error) {
-    throw new Error(`artifact manifest file is unavailable in ${label}: ${entry.path}`, { cause: error });
-  }
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
-    throw new Error(`artifact manifest file is unsafe in ${label}: ${entry.path}`);
-  }
-  if (stat.size !== entry.size_bytes || sha256File(filePath) !== entry.sha256) {
-    throw new Error(`artifact manifest file digest mismatch in ${label}: ${entry.path}`);
   }
 }
 
@@ -1775,10 +1871,6 @@ function anchoredProjectPath(projectRoot: string, value: string): string {
   return resolved;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function requiredOption(name: string): string {
   const index = process.argv.indexOf(name);
   const value = index < 0 ? undefined : process.argv[index + 1];
@@ -1792,7 +1884,8 @@ function isDirectExecution(): boolean {
 
 if (isDirectExecution()) {
   void main().catch((error: unknown) => {
-    process.stderr.write(`${JSON.stringify(workerErrorPayload(error))}\n`);
     process.exitCode = 1;
+    const { bytes } = serializeModalDocument(MODAL_NODE_WORKER_ERROR_SCHEMA_ID, workerErrorPayload(error));
+    process.stderr.write(bytes);
   });
 }

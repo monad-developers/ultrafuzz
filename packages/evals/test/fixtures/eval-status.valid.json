@@ -1,0 +1,25 @@
+{
+  "schema_version": "ultrafuzz.eval.status.v1",
+  "snapshot_at": "2026-08-09T12:00:00.000Z",
+  "stale_after_seconds": 300,
+  "completed_node_statuses": ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"],
+  "rows": [
+    {
+      "row": "row-01",
+      "status": "succeeded",
+      "terminal": true,
+      "executed_nodes": 2,
+      "total_nodes": 2,
+      "progress_percent": 100,
+      "eta_remaining_seconds": 0,
+      "eta_at": "2026-08-09T11:59:59.000Z",
+      "checkpoint_age_seconds": 1,
+      "checkpoint_stale": false,
+      "active_node_ids": [],
+      "waiting_nodes": [],
+      "linked_workflow_status": "succeeded",
+      "eta_basis": "terminal",
+      "eta_unavailable_reason": null
+    }
+  ]
+}

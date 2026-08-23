@@ -29,6 +29,7 @@ describe("Modal storage layout", () => {
     expect(remoteAuthPath("openai")).toBe("/run/ultrafuzz-auth/codex/auth.json");
     expect(remoteAuthPath("anthropic")).toBe("/run/ultrafuzz-auth/claude/.credentials.json");
     expect(remoteAuthPath("deepseek")).toBe("/run/ultrafuzz-auth/deepseek/api-key");
+    expect(remoteAuthPath("openrouter")).toBe("/run/ultrafuzz-auth/openrouter/api-key");
     expect(remoteAuthPath("kimi")).toBe("/run/ultrafuzz-auth/kimi/config.toml");
   });
 

@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/runtime",
   "version": "0.1.0",
   "private": true,
-  "description": "Durable topology planning and workflow runtime for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
-    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated (Codex|Kimi|DeepSeek|OpenCode|Pi)'",
+    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated (Codex|Kimi|DeepSeek|Pi)'",
     "test:kimi-contract": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated Kimi'",
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
@@ -28,24 +28,16 @@
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
+    "entities": "7.0.1",
+    "mdast-util-from-markdown": "2.0.3",
+    "npm": "11.19.0",
     "proper-lockfile": "4.1.2",
+    "typescript": "6.0.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
     "@types/proper-lockfile": "^4.1.4",
-    "smithers-orchestrator": "0.32.0"
-  },
-  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
-    "directory": "packages/runtime"
-  },
-  "bugs": {
-    "url": "https://github.com/monad-developers/ultrafuzz/issues"
-  },
-  "engines": {
-    "node": ">=22.19.0"
+    "smthrs": "0.34.0"
   }
 }

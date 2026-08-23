@@ -9,12 +9,17 @@ import {
   assertRegularFileInside,
   readRunState,
   replayEvents,
-  writeJsonDurable,
+  type AppendEventInput,
   type EventRecord,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 
-const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
+import {
+  WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
+  WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION
+} from "./runtime-contracts.js";
+import { parseRuntimeDocumentBytes, writeRuntimeDocument } from "./runtime-document-codec.js";
+
 const WORKFLOW_RUN_LINK_JOURNAL_FILE = "workflow-run-link-journal.json";
 const WORKFLOW_RUN_LINK_JOURNAL_MAX_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -282,7 +287,9 @@ function verifyWorkflowRunLinkEvent(layout: RunLayout, entry: WorkflowRunLinkJou
   }
 }
 
-function workflowRunLinkEventPayload(entry: WorkflowRunLinkJournalEntry): Record<string, string> {
+function workflowRunLinkEventPayload(
+  entry: WorkflowRunLinkJournalEntry
+): Extract<AppendEventInput, { eventType: "workflow-link-recorded" }>["payload"] {
   return {
     workflow_link_id: entry.link_id,
     action: entry.action,
@@ -303,7 +310,7 @@ function workflowRunLinkEventPayload(entry: WorkflowRunLinkJournalEntry): Record
 
 function readWorkflowRunLinkJournal(layout: RunLayout): WorkflowRunLinkJournal {
   const journalPath = workflowRunLinkJournalPath(layout);
-  if (!fs.existsSync(journalPath)) {
+  if (!pathEntryExists(journalPath)) {
     return {
       schema_version: WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION,
       run_id: layout.runId,
@@ -364,7 +371,11 @@ function readWorkflowRunLinkJournal(layout: RunLayout): WorkflowRunLinkJournal {
     fs.closeSync(descriptor);
   }
   assertRegularFileInside(layout.root, journalPath, "workflow run link journal");
-  const parsed = JSON.parse(contents.toString("utf8")) as unknown;
+  const parsed = parseRuntimeDocumentBytes(
+    WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
+    contents,
+    "workflow run link journal"
+  );
   if (
     !isObjectRecord(parsed) ||
     parsed.schema_version !== WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION ||
@@ -412,10 +423,10 @@ function writeWorkflowRunLinkJournal(layout: RunLayout, journal: WorkflowRunLink
   ) {
     throw new Error("workflow run link journal directory is unsafe");
   }
-  if (fs.existsSync(journalPath)) {
+  if (pathEntryExists(journalPath)) {
     assertRegularFileInside(layout.root, journalPath, "workflow run link journal");
   }
-  writeJsonDurable(journalPath, journal);
+  writeRuntimeDocument(journalPath, WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID, journal, "workflow run link journal");
   assertRegularFileInside(layout.root, journalPath, "workflow run link journal");
 }
 
@@ -549,4 +560,14 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): b
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   return Object.keys(value).length === keys.length && hasOnlyKeys(value, keys);
+}
+
+function pathEntryExists(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }

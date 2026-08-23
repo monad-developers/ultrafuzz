@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { ARTIFACT_MANIFEST_FILE, isArtifactContractId, type ArtifactContractId } from "@ultrafuzz/artifacts";
+import {
+  ARTIFACT_MANIFEST_FILE,
+  MAX_RETRY_CHAIN_ATTEMPTS,
+  isArtifactContractId,
+  type ArtifactContractId
+} from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateArtifactHandoffs } from "./artifact-handoffs.js";
@@ -176,7 +181,7 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
   }
   assertOnlyKeys(
     input,
-    ["loops", "timeout_seconds", "max_attempts", "model_profiles"],
+    ["loops", "timeout_seconds", "max_attempts", "model_profiles", "failure_policy"],
     `topology group \`${groupId}\` defaults`
   );
   return {
@@ -187,8 +192,22 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
     ...(input.max_attempts === undefined
       ? {}
       : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", groupId) }),
-    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", groupId, false)
+    model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", groupId, false),
+    ...(input.failure_policy === undefined
+      ? {}
+      : { failure_policy: normalizeFailurePolicy(input.failure_policy, groupId) })
   };
+}
+
+function normalizeFailurePolicy(input: unknown, groupId: string): "halt" | "continue" {
+  if (input !== "halt" && input !== "continue") {
+    throw topologyError(
+      "INVALID_TOPOLOGY_SHAPE",
+      `Topology group \`${groupId}\` failure_policy must be halt or continue`,
+      { group: groupId }
+    );
+  }
+  return input;
 }
 
 function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
@@ -400,10 +419,12 @@ function validateNodeShape(
       nodeId: node.id
     });
   }
-  if (node.max_attempts !== undefined && node.max_attempts <= 0) {
-    throw topologyError("INVALID_TOPOLOGY_SHAPE", `Node \`${node.id}\` max_attempts must be greater than zero`, {
-      nodeId: node.id
-    });
+  if (node.max_attempts !== undefined && (node.max_attempts <= 0 || node.max_attempts > MAX_RETRY_CHAIN_ATTEMPTS)) {
+    throw topologyError(
+      "INVALID_TOPOLOGY_SHAPE",
+      `Node \`${node.id}\` max_attempts must be between 1 and ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+      { nodeId: node.id }
+    );
   }
   if (node.group !== undefined) {
     validateGroupId(node.group);
@@ -449,10 +470,15 @@ function validateGroups(
         group: groupId
       });
     }
-    if (group.defaults?.max_attempts !== undefined && group.defaults.max_attempts <= 0) {
-      throw topologyError("INVALID_TOPOLOGY_SHAPE", `Group \`${groupId}\` max_attempts must be greater than zero`, {
-        group: groupId
-      });
+    if (
+      group.defaults?.max_attempts !== undefined &&
+      (group.defaults.max_attempts <= 0 || group.defaults.max_attempts > MAX_RETRY_CHAIN_ATTEMPTS)
+    ) {
+      throw topologyError(
+        "INVALID_TOPOLOGY_SHAPE",
+        `Group \`${groupId}\` max_attempts must be between 1 and ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+        { group: groupId }
+      );
     }
     for (const modelProfile of group.defaults?.model_profiles ?? []) {
       if (!isSafeId(modelProfile)) {
@@ -638,6 +664,16 @@ function validateOutputs(node: NormalizedTopologyNode): void {
       });
     }
     seen.add(output.path);
+  }
+  if (
+    node.outputs.some((output) => output.contract === "ultrafuzz/implemented-properties@3") &&
+    node.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
+  ) {
+    throw topologyError(
+      "PROPERTY_ROLE_DECLARATION_CONFLICT",
+      `Node \`${node.id}\` must not declare both ultrafuzz/implemented-properties@3 and ultrafuzz/property-campaign@3; split implementation and campaign into dependency-ordered nodes`,
+      { nodeId: node.id }
+    );
   }
   const primaries = node.outputs.filter((output) => output.primary);
   if (primaries.length !== 1) {

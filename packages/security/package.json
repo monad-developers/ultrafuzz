@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/security",
   "version": "0.1.0",
   "private": true,
-  "description": "Security boundaries and redaction utilities for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": {
@@ -18,16 +18,7 @@
     "test": "rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
-    "directory": "packages/security"
-  },
-  "bugs": {
-    "url": "https://github.com/monad-developers/ultrafuzz/issues"
-  },
-  "engines": {
-    "node": ">=22.19.0"
+  "dependencies": {
+    "@scure/bip39": "2.3.0"
   }
 }

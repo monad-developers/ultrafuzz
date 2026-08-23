@@ -1,8 +1,8 @@
-import fs from "node:fs";
 import path from "node:path";
 
-import { RUN_STATE_STATUSES, type NodeState, type RunState } from "@ultrafuzz/artifacts";
+import { readRunState as readCanonicalRunState, type NodeState, type RunState } from "@ultrafuzz/artifacts";
 
+import { readStrictJsonDocument } from "./eval-durable.js";
 import { evalRunExpansion } from "./expansion.js";
 import type {
   EvalEfficiency,
@@ -10,22 +10,18 @@ import type {
   EvalEfficiencyReason,
   EvalRowLifecycle,
   EvalRunExpansion,
-  EvalRunRecord,
-  EvalWorkflowStatus
+  EvalRunRecord
 } from "./types.js";
+import { EvalError } from "./utils.js";
 
 export interface EvalTerminalSummary {
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
-  /**
-   * Re-derived from the run root rather than read off the record, so a row
-   * written before `expansion` existed is still observable.
-   */
+  /** Re-derived from the authoritative current run state and graph. */
   expansion: EvalRunExpansion;
 }
 
-const TERMINAL_WORKFLOW_STATUSES = new Set<EvalWorkflowStatus>(["succeeded", "failed", "timed-out", "canceled"]);
-const WORKFLOW_STATUSES = new Set<string>(RUN_STATE_STATUSES);
+const TERMINAL_WORKFLOW_STATUSES = new Set(["succeeded", "failed", "timed-out", "canceled"]);
 
 const NON_EXECUTING_NODE_STATUSES = new Set([
   "pending",
@@ -41,79 +37,83 @@ const NON_EXECUTING_NODE_STATUSES = new Set([
  * accounting snapshot. This is the only source used by JSON and Markdown eval
  * summaries, so launcher exit can never masquerade as workflow completion.
  */
-export function summarizeEvalTerminal(record: EvalRunRecord | undefined): EvalTerminalSummary {
-  const state = readRunState(record?.ultrafuzz_run_root);
+export function summarizeEvalTerminal(record: EvalRunRecord): EvalTerminalSummary {
+  if (
+    record.status !== "launched" ||
+    record.launcher.status !== "succeeded" ||
+    record.ultrafuzz_run_id === undefined ||
+    record.ultrafuzz_run_root === undefined
+  ) {
+    throw new EvalError("EVAL_TERMINAL_EVIDENCE_MISSING", `eval row ${record.row_id} has no launched run evidence`);
+  }
+  const state = readObservedRunState(record.ultrafuzz_run_root);
+  if (state.run_id !== record.ultrafuzz_run_id) {
+    throw new EvalError("EVAL_TERMINAL_EVIDENCE_LINEAGE_INVALID", `eval row ${record.row_id} state names another run`, {
+      expected_run_id: record.ultrafuzz_run_id,
+      observed_run_id: state.run_id
+    });
+  }
   const lifecycle: EvalRowLifecycle = {
-    launcher: launcherLifecycle(record),
+    launcher: record.launcher,
     workflow: evalWorkflowLifecycle(state)
   };
+  if (!lifecycle.workflow.terminal) {
+    throw new EvalError(
+      "EVAL_WORKFLOW_NOT_TERMINAL",
+      `eval row ${record.row_id} cannot be summarized before terminal state`
+    );
+  }
   return {
     lifecycle,
     efficiency: {
-      ...runtimeEfficiency(state, lifecycle.workflow.status),
-      ...accountingEfficiency(record?.ultrafuzz_run_root, lifecycle.workflow.status)
+      ...runtimeEfficiency(state),
+      ...accountingEfficiency(record.ultrafuzz_run_root)
     },
     expansion: evalRunExpansion({
-      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
+      runRoot: record.ultrafuzz_run_root,
       state
     })
   };
 }
 
 export function isTerminalWorkflowStatus(status: string): boolean {
-  return TERMINAL_WORKFLOW_STATUSES.has(status as EvalWorkflowStatus);
+  return TERMINAL_WORKFLOW_STATUSES.has(status);
 }
 
-function launcherLifecycle(record: EvalRunRecord | undefined): EvalRowLifecycle["launcher"] {
-  if (record?.launcher !== undefined) {
-    return record.launcher;
-  }
-  if (record === undefined) {
-    return { status: "unavailable", started_at: null, finished_at: null };
-  }
-  return {
-    status: record.status === "failed" ? "failed" : "succeeded",
-    started_at: record.started_at ?? null,
-    finished_at: record.finished_at ?? null
-  };
-}
-
-export function evalWorkflowLifecycle(state: RunState | undefined): EvalRowLifecycle["workflow"] {
-  const status = workflowStatus(state?.status);
+export function evalWorkflowLifecycle(state: RunState): EvalRowLifecycle["workflow"] {
+  const status = state.status;
   const terminal = isTerminalWorkflowStatus(status);
+  const startedAt = optionalTimestamp(state.started_at, "workflow started_at");
+  const finishedAt = optionalTimestamp(state.finished_at, "workflow finished_at");
+  if (terminal && (startedAt === null || finishedAt === null)) {
+    throw new EvalError(
+      "EVAL_WORKFLOW_TIMESTAMPS_MISSING",
+      "terminal workflow state requires started_at and finished_at"
+    );
+  }
+  if (!terminal && finishedAt !== null) {
+    throw new EvalError("EVAL_WORKFLOW_LIFECYCLE_INVALID", "nonterminal workflow state cannot carry finished_at");
+  }
+  if (startedAt !== null && finishedAt !== null && Date.parse(finishedAt) < Date.parse(startedAt)) {
+    throw new EvalError("EVAL_WORKFLOW_LIFECYCLE_INVALID", "workflow finished_at precedes started_at");
+  }
   return {
     status,
     terminal,
-    started_at: validTimestamp(state?.started_at),
-    finished_at: terminal ? validTimestamp(state?.finished_at) : null
+    started_at: startedAt,
+    finished_at: terminal ? finishedAt : null
   };
 }
 
 function runtimeEfficiency(
-  state: RunState | undefined,
-  status: EvalWorkflowStatus
+  state: RunState
 ): Pick<EvalEfficiency, "wall_time_seconds" | "active_time_seconds" | "wait_time_seconds" | "runtime"> {
-  if (state === undefined || status === "unavailable") {
-    return unavailableRuntime("workflow-state-unavailable");
-  }
-  if (!isTerminalWorkflowStatus(status)) {
-    return unavailableRuntime("workflow-not-terminal");
-  }
+  const started = requiredTimestamp(state.started_at, "workflow started_at");
+  const finished = requiredTimestamp(state.finished_at, "workflow finished_at");
+  if (finished < started) throw new EvalError("EVAL_EFFICIENCY_EVIDENCE_INVALID", "workflow timestamps are reversed");
 
-  const started = timestamp(state.started_at);
-  const finished = timestamp(state.finished_at);
-  if (started.kind === "missing" || finished.kind === "missing") {
-    return unavailableRuntime("workflow-timestamps-unavailable");
-  }
-  if (started.kind === "invalid" || finished.kind === "invalid" || finished.value < started.value) {
-    return unavailableRuntime("workflow-timestamps-invalid");
-  }
-
-  const active = activeMilliseconds(state.nodes, started.value, finished.value);
-  if (!active.ok) {
-    return unavailableRuntime(active.reason);
-  }
-  const wallMilliseconds = finished.value - started.value;
+  const active = activeMilliseconds(state.nodes, started, finished);
+  const wallMilliseconds = finished - started;
   return {
     wall_time_seconds: seconds(wallMilliseconds),
     active_time_seconds: seconds(active.value),
@@ -122,46 +122,37 @@ function runtimeEfficiency(
   };
 }
 
-function accountingEfficiency(
-  runRoot: string | undefined,
-  workflowStatus: EvalWorkflowStatus
-): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
-  if (workflowStatus === "unavailable") {
-    return unavailableAccounting("workflow-state-unavailable");
-  }
-  if (!isTerminalWorkflowStatus(workflowStatus)) {
-    return unavailableAccounting("workflow-not-terminal");
-  }
-
+function accountingEfficiency(runRoot: string): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
   const cumulative = readCumulativeAccounting(runRoot);
-  if (cumulative === undefined) {
-    return unavailableAccounting("accounting-unavailable");
+  const usageComplete = requiredBoolean(cumulative.usage_complete, "accounting.cumulative.usage_complete");
+  const pricingComplete = requiredBoolean(cumulative.pricing_complete, "accounting.cumulative.pricing_complete");
+  const partialPricing = requiredBoolean(cumulative.partial_pricing, "accounting.cumulative.partial_pricing");
+  if (partialPricing === pricingComplete) {
+    throw new EvalError(
+      "EVAL_ACCOUNTING_EVIDENCE_INVALID",
+      "accounting partial_pricing must be the inverse of pricing_complete"
+    );
   }
-
-  const totalTokens = nonNegativeNumber(cumulative.total_tokens ?? cumulative.totalTokens);
-  // The current durable accounting schema uses the presence of total_tokens as
-  // its completeness signal. The optional flag lets imported snapshots
-  // explicitly declare incomplete usage without making current snapshots fail.
-  const usageComplete = booleanValue(cumulative.usage_complete ?? cumulative.usageComplete) ?? true;
-  const usage: EvalEfficiencyCompleteness =
-    usageComplete && totalTokens !== undefined ? complete() : unavailable("usage-incomplete");
-
-  const partialPricing = booleanValue(cumulative.partial_pricing ?? cumulative.partialPricing) ?? false;
-  const pricingComplete = booleanValue(cumulative.pricing_complete ?? cumulative.pricingComplete) ?? !partialPricing;
-  const storedCost = nonNegativeNumber(cumulative.estimated_spend_usd ?? cumulative.estimatedSpendUsd);
-  const cost = storedCost ?? (pricingComplete && usage.status === "complete" && totalTokens === 0 ? 0 : undefined);
-  const costCompleteness: EvalEfficiencyCompleteness =
-    cost === undefined
-      ? unavailable(usage.status === "complete" ? "pricing-unavailable" : "usage-incomplete")
-      : pricingComplete
-        ? complete()
-        : partial("pricing-incomplete");
+  const observedTokens = optionalNonNegativeNumber(cumulative.total_tokens, "accounting.cumulative.total_tokens");
+  if (usageComplete && observedTokens === undefined) {
+    throw new EvalError(
+      "EVAL_ACCOUNTING_EVIDENCE_INVALID",
+      "complete accounting usage requires cumulative.total_tokens"
+    );
+  }
+  const storedCost = optionalNonNegativeNumber(
+    cumulative.estimated_spend_usd,
+    "accounting.cumulative.estimated_spend_usd"
+  );
+  if (pricingComplete && storedCost === undefined) {
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", "complete pricing requires cumulative.estimated_spend_usd");
+  }
 
   return {
-    total_tokens: usage.status === "complete" ? (totalTokens ?? null) : null,
-    cost_usd: cost ?? null,
-    usage,
-    cost: costCompleteness
+    total_tokens: usageComplete ? (observedTokens ?? null) : null,
+    cost_usd: storedCost ?? null,
+    usage: usageComplete ? complete() : partial("usage-incomplete"),
+    cost: pricingComplete ? complete() : partial("pricing-incomplete")
   };
 }
 
@@ -169,31 +160,22 @@ function activeMilliseconds(
   nodes: Record<string, NodeState>,
   runStartedAt: number,
   runFinishedAt: number
-): { ok: true; value: number; retriedNodeCount: number } | { ok: false; reason: EvalEfficiencyReason } {
+): { value: number; retriedNodeCount: number } {
   const intervals: Array<[number, number]> = [];
   let retriedNodeCount = 0;
-  for (const node of Object.values(nodes) as unknown[]) {
-    if (!isRecord(node) || typeof node.status !== "string") {
-      return { ok: false, reason: "node-timestamps-invalid" };
-    }
+  for (const node of Object.values(nodes)) {
     if (NON_EXECUTING_NODE_STATUSES.has(node.status) || isAggregateNode(node)) {
       continue;
     }
-    const retryCount = nonNegativeInteger(node.retry_count);
-    if (retryCount === undefined) {
-      return { ok: false, reason: "node-timestamps-invalid" };
-    }
+    const retryCount = node.retry_count;
     if (retryCount > 0) retriedNodeCount += 1;
-    const started = timestamp(node.started_at);
-    const finished = timestamp(node.finished_at);
-    if (started.kind === "missing" || finished.kind === "missing") {
-      return { ok: false, reason: "node-timestamps-unavailable" };
+    const started = requiredTimestamp(node.started_at, `node ${node.node_id} started_at`);
+    const finished = requiredTimestamp(node.finished_at, `node ${node.node_id} finished_at`);
+    if (finished < started) {
+      throw new EvalError("EVAL_EFFICIENCY_EVIDENCE_INVALID", `node ${node.node_id} finished_at precedes started_at`);
     }
-    if (started.kind === "invalid" || finished.kind === "invalid" || finished.value < started.value) {
-      return { ok: false, reason: "node-timestamps-invalid" };
-    }
-    const intervalStart = Math.max(runStartedAt, started.value);
-    const intervalFinish = Math.min(runFinishedAt, finished.value);
+    const intervalStart = Math.max(runStartedAt, started);
+    const intervalFinish = Math.min(runFinishedAt, finished);
     if (intervalFinish > intervalStart) {
       intervals.push([intervalStart, intervalFinish]);
     }
@@ -220,72 +202,33 @@ function activeMilliseconds(
   // Durable node timestamps describe the final attempt. For retried nodes the
   // union is therefore a lower-bound active-time attribution, while the
   // workflow start/finish interval remains an observed wall-clock value.
-  return { ok: true, value: total, retriedNodeCount };
+  return { value: total, retriedNodeCount };
 }
 
-function readRunState(runRoot: string | undefined): RunState | undefined {
-  const value = readJson(runRoot === undefined ? undefined : path.join(runRoot, "state.json"));
-  if (!isRecord(value) || !isRecord(value.nodes) || typeof value.status !== "string") {
-    return undefined;
-  }
-  return value as unknown as RunState;
+function readObservedRunState(runRoot: string): RunState {
+  return readCanonicalRunState(path.join(runRoot, "state.json"));
 }
 
-function readCumulativeAccounting(runRoot: string | undefined): Record<string, unknown> | undefined {
-  const metadata = readJson(runRoot === undefined ? undefined : path.join(runRoot, "run.json"));
+function readCumulativeAccounting(runRoot: string): Record<string, unknown> {
+  const metadata = readStrictJsonDocument(path.join(runRoot, "run.json"));
   if (!isRecord(metadata) || !isRecord(metadata.accounting) || !isRecord(metadata.accounting.cumulative)) {
-    return undefined;
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_MISSING", "current run metadata requires accounting.cumulative");
   }
   return metadata.accounting.cumulative;
 }
 
-function readJson(filePath: string | undefined): unknown {
-  if (filePath === undefined) {
-    return undefined;
+function requiredTimestamp(value: unknown, field: string): number {
+  const parsed = optionalTimestamp(value, field);
+  if (parsed === null) throw new EvalError("EVAL_TIMESTAMP_MISSING", `${field} is required`);
+  return Date.parse(parsed);
+}
+
+function optionalTimestamp(value: unknown, field: string): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length === 0 || !Number.isFinite(Date.parse(value))) {
+    throw new EvalError("EVAL_TIMESTAMP_INVALID", `${field} must be a valid timestamp`);
   }
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return undefined;
-  }
-}
-
-function workflowStatus(value: unknown): EvalWorkflowStatus {
-  return typeof value === "string" && WORKFLOW_STATUSES.has(value) ? (value as EvalWorkflowStatus) : "unavailable";
-}
-
-function timestamp(value: unknown): { kind: "missing" } | { kind: "invalid" } | { kind: "valid"; value: number } {
-  if (typeof value !== "string" || value.length === 0) {
-    return { kind: "missing" };
-  }
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? { kind: "valid", value: milliseconds } : { kind: "invalid" };
-}
-
-function validTimestamp(value: unknown): string | null {
-  return timestamp(value).kind === "valid" ? (value as string) : null;
-}
-
-function unavailableRuntime(
-  reason: EvalEfficiencyReason
-): Pick<EvalEfficiency, "wall_time_seconds" | "active_time_seconds" | "wait_time_seconds" | "runtime"> {
-  return {
-    wall_time_seconds: null,
-    active_time_seconds: null,
-    wait_time_seconds: null,
-    runtime: unavailable(reason)
-  };
-}
-
-function unavailableAccounting(
-  reason: EvalEfficiencyReason
-): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
-  return {
-    total_tokens: null,
-    cost_usd: null,
-    usage: unavailable(reason),
-    cost: unavailable(reason)
-  };
+  return value;
 }
 
 function complete(): EvalEfficiencyCompleteness {
@@ -296,31 +239,30 @@ function partial(reason: EvalEfficiencyReason): EvalEfficiencyCompleteness {
   return { status: "partial", reason };
 }
 
-function unavailable(reason: EvalEfficiencyReason): EvalEfficiencyCompleteness {
-  return { status: "unavailable", reason };
-}
-
 function seconds(milliseconds: number): number {
   return Number((milliseconds / 1000).toFixed(3));
 }
 
-function nonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+function optionalNonNegativeNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", `${field} must be a nonnegative number`);
+  }
+  return value;
 }
 
-function nonNegativeInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
-}
-
-function booleanValue(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
+function requiredBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", `${field} must be a Boolean`);
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isAggregateNode(node: Record<string, unknown>): boolean {
+function isAggregateNode(node: NodeState): boolean {
   const provenance = isRecord(node.provenance) ? node.provenance : undefined;
   const workflow = provenance !== undefined && isRecord(provenance.workflow) ? provenance.workflow : undefined;
   return workflow !== undefined && Array.isArray(workflow.aggregate_attempt_statuses);

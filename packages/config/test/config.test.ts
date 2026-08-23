@@ -7,6 +7,9 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRIAGE_PANEL_SIZE,
   DEFAULT_TRIAGE_QUORUM,
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
+  MODAL_SANDBOX_MAX_LIFETIME_SECONDS,
   REDACTION_PLACEHOLDER,
   assertNoRedactionPlaceholders,
   applyDefaultProfileOverrides,
@@ -19,6 +22,9 @@ import {
   resolveConfig,
   restoreRedactedConfig,
   serializeRedactedResolvedConfigToml,
+  type ConfigDiagnostic,
+  type ProjectConfigInput,
+  validateAgentConfigs,
   validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
@@ -57,6 +63,10 @@ describe("config loading and resolution", () => {
       auth: "api-key",
       apiKeyEnv: "DEEPSEEK_API_KEY"
     });
+    expect(resolved.value.agents.OpenRouterAgent).toEqual({
+      auth: "api-key",
+      apiKeyEnv: "OPENROUTER_API_KEY"
+    });
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
     expect(resolved.value.models.profiles.kimi).toEqual({
       id: "kimi",
@@ -70,23 +80,191 @@ describe("config loading and resolution", () => {
       model: "deepseek-v4-pro",
       reasoning: "max"
     });
+    expect(resolved.value.retry).toEqual({ sameAgentAttempts: 3, agents: [] });
+    expect(resolved.value.run.defaultTimeoutSeconds).toBe(3600);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(600);
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
     expect(resolved.value.run.forgeRayonThreads).toBe(1);
+    expect(resolved.value.permissions.productionSourceRoots).toEqual(["src", "contracts"]);
     expect(resolved.value.execution).toEqual({
       mode: "local",
       retentionDays: 30,
       resources: {
         cpu: 4,
         memoryMiB: 8192,
-        timeoutSeconds: 1800
+        timeoutSeconds: 3600
       },
       nodes: {},
       providers: {}
     });
+  });
+
+  it("resolves an error-agnostic retry policy through explicit model profile IDs", () => {
+    const parsed = parseProjectConfigToml(`
+[models.sol-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.6-sol"
+reasoning = "xhigh"
+
+[models.gpt55-xhigh]
+agent = "CodexAgent"
+model = "gpt-5.5"
+reasoning = "xhigh"
+
+[retry]
+same_agent_attempts = 3
+agents = ["sol-xhigh", "gpt55-xhigh"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolved.value.retry).toEqual({
+      sameAgentAttempts: 3,
+      agents: ["sol-xhigh", "gpt55-xhigh"]
+    });
+    expect(resolved.value.models.profiles["gpt55-xhigh"]).toMatchObject({
+      agent: "CodexAgent",
+      model: "gpt-5.5",
+      reasoning: "xhigh"
+    });
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain('agents = ["sol-xhigh", "gpt55-xhigh"]');
+  });
+
+  it("rejects unknown and duplicate retry profile IDs without parsing provider errors", () => {
+    const unknown = resolveConfig({
+      env: {},
+      projectConfig: { retry: { sameAgentAttempts: 2, agents: ["missing"] } }
+    });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_UNKNOWN");
+    for (const inherited of ["constructor", "toString"]) {
+      const result = resolveConfig({
+        env: {},
+        projectConfig: { models: { default: inherited }, retry: { agents: ["default", inherited] } }
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok)
+        expect(result.diagnostics.map(({ code }) => code)).toEqual(
+          expect.arrayContaining(["CONFIG_MODEL_DEFAULT_UNKNOWN", "CONFIG_RETRY_AGENT_UNKNOWN"])
+        );
+    }
+
+    const duplicate = resolveConfig({
+      env: {},
+      projectConfig: { retry: { agents: ["default", "default"] } }
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) {
+      expect(duplicate.diagnostics.map((entry) => entry.code)).toContain("CONFIG_RETRY_AGENT_DUPLICATE");
+    }
+  });
+
+  it("emits one exact retry-owned diagnostic for each invalid retry field", () => {
+    const cases: Array<{
+      retry: NonNullable<ProjectConfigInput["retry"]>;
+      expected: Pick<ConfigDiagnostic, "code" | "message" | "path">;
+    }> = [
+      {
+        retry: { sameAgentAttempts: 0 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_INVALID",
+          message: "retry.same_agent_attempts must be a positive safe integer",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { sameAgentAttempts: 101 },
+        expected: {
+          code: "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+          message: "retry.same_agent_attempts must not exceed 100",
+          path: ["retry", "same_agent_attempts"]
+        }
+      },
+      {
+        retry: { agents: ["../invalid"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_ID_INVALID",
+          message: "retry.agents entry 0 must be a valid model profile ID",
+          path: ["retry", "agents", "0"]
+        }
+      },
+      {
+        retry: { agents: ["default", "default"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_DUPLICATE",
+          message: "retry.agents repeats model profile `default`",
+          path: ["retry", "agents", "1"]
+        }
+      },
+      {
+        retry: { agents: ["missing"] },
+        expected: {
+          code: "CONFIG_RETRY_AGENT_UNKNOWN",
+          message: "retry.agents references unknown model profile `missing`",
+          path: ["retry", "agents", "0"]
+        }
+      }
+    ];
+
+    for (const { retry, expected } of cases) {
+      const result = resolveConfig({ env: {}, projectConfig: { retry } });
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([expected]);
+    }
+  });
+
+  it("accepts a 100-attempt retry chain and rejects an expanded chain of 101 exactly once", () => {
+    const profiles = {
+      primary: { agent: "CodexAgent", model: "gpt-5.5" },
+      fallback: { agent: "CodexAgent", model: "gpt-5.6-sol" }
+    };
+    const boundary = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 99, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(boundary.ok).toBe(true);
+
+    const exceeded = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: { profiles },
+        retry: { sameAgentAttempts: 100, agents: ["primary", "fallback"] }
+      }
+    });
+    expect(exceeded.ok).toBe(false);
+    if (exceeded.ok) return;
+    expect(exceeded.diagnostics.map(({ code, message, path }) => ({ code, message, path }))).toEqual([
+      {
+        code: "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+        message: "retry expands to 101 attempts; maximum is 100",
+        path: ["retry"]
+      }
+    ]);
+  });
+
+  it("loads and serializes declared production source roots", () => {
+    const parsed = parseProjectConfigToml(`
+[permissions]
+production_source_roots = ["protocol", "packages/core/src"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.permissions.productionSourceRoots).toEqual(["protocol", "packages/core/src"]);
+    expect(serializeRedactedResolvedConfigToml(resolved.value)).toContain(
+      'production_source_roots = ["protocol", "packages/core/src"]'
+    );
   });
 
   it("accepts a target-sized invariant Recon smoke timeout", () => {
@@ -158,15 +336,15 @@ memory_mib = 32768
 app = "node-runs"
 image = "runner:stable"
 region = "region-a"
-credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const resolved = resolveConfig({
       projectConfig: parsed.value,
       env: {
-        CLOUD_CREDENTIAL_ONE: "first-secret-value",
-        CLOUD_CREDENTIAL_TWO: "second-secret-value"
+        MODAL_TOKEN_ID: "first-secret-value",
+        MODAL_TOKEN_SECRET: "second-secret-value"
       }
     });
     expect(resolved.ok).toBe(true);
@@ -183,7 +361,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     });
     const serialized = serializeRedactedResolvedConfigToml(resolved.value);
     expect(serialized).toContain("[execution.nodes.project-discovery.resources]");
-    expect(serialized).toContain('credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]');
+    expect(serialized).toContain('credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]');
     expect(serialized).not.toContain("first-secret-value");
     expect(serialized).not.toContain("second-secret-value");
     expect(validateExecutionNodeOverrides(resolved.value, ["project-discovery"])).toEqual([]);
@@ -203,7 +381,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     }
 
     const missingCredential = resolveConfig({
-      env: { CLOUD_CREDENTIAL_ONE: "available" },
+      env: { MODAL_TOKEN_ID: "available" },
       projectConfig: {
         execution: {
           mode: "cloud",
@@ -212,7 +390,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
             modal: {
               app: "node-runs",
               image: "runner:stable",
-              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
             }
           }
         }
@@ -222,7 +400,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
     if (!missingCredential.ok) {
       expect(missingCredential.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_CREDENTIAL_MISSING");
       expect(missingCredential.diagnostics.map((entry) => entry.message).join("\n")).not.toContain(
-        "CLOUD_CREDENTIAL_TWO"
+        "MODAL_TOKEN_SECRET"
       );
     }
 
@@ -240,7 +418,7 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
             modal: {
               app: "node-runs",
               image: "runner:stable",
-              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
             }
           }
         }
@@ -251,12 +429,90 @@ credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
       expect(localProviderSettings.diagnostics.map((entry) => entry.code)).toContain(
         "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
       );
+      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).not.toContain(
+        "CONFIG_POSITIVE_INTEGER_INVALID"
+      );
+    }
+  });
+
+  it("reserves Modal lifecycle time without exceeding the provider's 24-hour sandbox limit", () => {
+    const credentials = {
+      MODAL_TOKEN_ID: "available",
+      MODAL_TOKEN_SECRET: "available"
+    };
+    const execution = {
+      mode: "cloud" as const,
+      provider: "modal" as const,
+      providers: {
+        modal: {
+          app: "node-runs",
+          image: "runner:stable",
+          credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+        }
+      }
+    };
+
+    expect(MODAL_SANDBOX_MAX_LIFETIME_SECONDS).toBe(86_400);
+    expect(MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(1_800);
+    expect(MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS).toBe(84_600);
+    expect(
+      resolveConfig({
+        env: credentials,
+        projectConfig: {
+          execution: {
+            ...execution,
+            resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS }
+          }
+        }
+      }).ok
+    ).toBe(true);
+
+    const oversizedBase = resolveConfig({
+      env: credentials,
+      projectConfig: {
+        execution: {
+          ...execution,
+          resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
+        }
+      }
+    });
+    expect(oversizedBase.ok).toBe(false);
+    if (!oversizedBase.ok) {
+      expect(oversizedBase.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          path: ["execution", "resources", "timeout_seconds"]
+        })
+      );
+    }
+
+    const oversized = resolveConfig({
+      env: credentials,
+      projectConfig: {
+        execution: {
+          ...execution,
+          nodes: {
+            discovery: {
+              resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
+            }
+          }
+        }
+      }
+    });
+    expect(oversized.ok).toBe(false);
+    if (!oversized.ok) {
+      expect(oversized.diagnostics).toContainEqual(
+        expect.objectContaining({
+          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          path: ["execution", "nodes", "discovery", "resources", "timeout_seconds"]
+        })
+      );
     }
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
     const project = parseProjectConfigToml(`
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 dynamic_strategies_enumerator = 5
 
 [run]
@@ -279,7 +535,7 @@ reasoning = "max"
 
 [agents.CodexAgent]
 auth = "subscription"
-config_dir = ".codex/team"
+config_dir = "teams/codex"
 `);
     expect(project.ok).toBe(true);
     if (!project.ok) return;
@@ -324,7 +580,7 @@ config_dir = ".codex/team"
     expect(resolved.value.agents.CodexAgent).toEqual({
       auth: "subscription",
       apiKeyEnv: "OPENAI_API_KEY",
-      configDir: ".codex/team"
+      configDir: "teams/codex"
     });
   });
 
@@ -352,7 +608,7 @@ api_key_env = "OPENAI_API_KEY"
 [agents.KimiAgent]
 auth = "api-key"
 api_key_env = "MOONSHOT_API_KEY"
-config_dir = ".kimi-code"
+config_dir = "kimi-code"
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -361,8 +617,40 @@ config_dir = ".kimi-code"
     expect(parsed.value.agents?.KimiAgent).toEqual({
       auth: "api-key",
       apiKeyEnv: "MOONSHOT_API_KEY",
-      configDir: ".kimi-code"
+      configDir: "kimi-code"
     });
+
+    for (const [agent, canonical] of Object.entries({
+      ClaudeAgent: "ANTHROPIC_API_KEY",
+      CodexAgent: "OPENAI_API_KEY",
+      DeepSeekAgent: "DEEPSEEK_API_KEY",
+      KimiAgent: "KIMI_API_KEY",
+      OpenRouterAgent: "OPENROUTER_API_KEY"
+    })) {
+      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code).toBe(
+        "CONFIG_AGENT_API_KEY_ENV_NONCANONICAL"
+      );
+      expect(validateAgentConfigs({ [agent]: { auth: "api-key", apiKeyEnv: canonical } })).toEqual([]);
+    }
+    expect(
+      validateAgentConfigs({ constructor: { auth: "api-key" as const, apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } })[0]?.code
+    ).toBe("CONFIG_AGENT_ID_INVALID");
+    {
+      const polluted = parseProjectConfigToml(
+        '[agents.__proto__]\nauth = "api-key"\napi_key_env = "AWS_SECRET_ACCESS_KEY"\n'
+      );
+      expect(polluted.ok).toBe(true);
+      if (polluted.ok) {
+        const result = resolveConfig({ env: {}, projectConfig: polluted.value });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.diagnostics.map(({ code }) => code)).toContain("CONFIG_AGENT_ID_INVALID");
+      }
+    }
+    for (const configDir of ["", "/tmp/provider", "../provider", ".codex", "team\\codex", "team/../codex"])
+      expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir } })[0]?.code).toBe(
+        "CONFIG_AGENT_CONFIG_DIR_UNSAFE"
+      );
+    expect(validateAgentConfigs({ CodexAgent: { auth: "subscription", configDir: "teams/codex" } })).toEqual([]);
 
     const invalid = resolveConfig({
       env: {},
@@ -390,6 +678,47 @@ config_dir = ".kimi-code"
     expect(serialized).toContain("forge_guard_enabled = true");
     expect(serialized).toContain("forge_vmem_limit_kb = 12582912");
     expect(serialized).toContain("forge_rayon_threads = 1");
+  });
+
+  it("preserves opaque OpenRouter catalogue IDs and rejects only unsafe boundaries", () => {
+    const model = "~vendor/model.latest:free+preview@2026";
+    const accepted = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            routed: { agent: "OpenRouterAgent", model, reasoning: "high" }
+          }
+        }
+      }
+    });
+    expect(accepted.ok).toBe(true);
+    if (!accepted.ok) return;
+    expect(accepted.value.models.profiles.routed?.model).toBe(model);
+    expect(serializeRedactedResolvedConfigToml(accepted.value)).toContain(`model = ${JSON.stringify(model)}`);
+
+    for (const invalidModel of [
+      "vendor/model with-space",
+      "vendor/model\nnext",
+      "vendor/model\u0080control",
+      `vendor/${"m".repeat(250)}`
+    ]) {
+      const invalid = resolveConfig({
+        env: {},
+        projectConfig: {
+          models: { profiles: { routed: { agent: "OpenRouterAgent", model: invalidModel } } }
+        }
+      });
+      expect(invalid.ok).toBe(false);
+      if (!invalid.ok) {
+        expect(invalid.diagnostics).toContainEqual(
+          expect.objectContaining({
+            code: "CONFIG_MODEL_OPENROUTER_ID_INVALID",
+            path: ["models", "routed", "model"]
+          })
+        );
+      }
+    }
   });
 
   it("loads ultrafuzz.toml from disk", async () => {
@@ -484,6 +813,163 @@ describe("redaction", () => {
   });
 });
 
+describe("resolved config named semantic diagnostics", () => {
+  const cases: Array<{
+    label: string;
+    projectConfig: ProjectConfigInput;
+    diagnostics: ConfigDiagnostic[];
+  }> = [
+    {
+      label: "unsupported Kimi reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-invalid": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+          "Kimi model profile `kimi-invalid` reasoning must be low, high, or max",
+          ["models", "kimi-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek reasoning",
+      projectConfig: {
+        models: {
+          profiles: {
+            "deepseek-invalid": {
+              agent: "DeepSeekAgent",
+              model: "deepseek-v4-pro",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+          "DeepSeek model profile `deepseek-invalid` reasoning must be low, high, or max",
+          ["models", "deepseek-invalid", "reasoning"]
+        )
+      ]
+    },
+    {
+      label: "unsupported DeepSeek subscription authentication",
+      projectConfig: {
+        agents: {
+          DeepSeekAgent: {
+            auth: "subscription"
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+          "DeepSeekAgent supports only api-key authentication",
+          ["agents", "DeepSeekAgent", "auth"]
+        )
+      ]
+    },
+    {
+      label: "unsupported OpenRouter subscription authentication",
+      projectConfig: {
+        agents: {
+          OpenRouterAgent: {
+            auth: "subscription"
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED",
+          "OpenRouterAgent supports only api-key authentication",
+          ["agents", "OpenRouterAgent", "auth"]
+        )
+      ]
+    },
+    {
+      label: "a cloud provider selected for local execution",
+      projectConfig: {
+        execution: {
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER",
+          "execution.provider is only valid when execution.mode is cloud",
+          ["execution", "provider"]
+        )
+      ]
+    },
+    {
+      label: "cloud provider settings configured for local execution",
+      projectConfig: {
+        execution: {
+          providers: {
+            modal: {
+              app: "node-runs",
+              image: "runner:stable",
+              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+            }
+          }
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
+          "cloud provider settings are only valid when execution.mode is cloud",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    },
+    {
+      label: "cloud execution without a provider",
+      projectConfig: {
+        execution: {
+          mode: "cloud"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic("CONFIG_EXECUTION_PROVIDER_REQUIRED", "cloud execution requires an execution provider", [
+          "execution",
+          "provider"
+        ])
+      ]
+    },
+    {
+      label: "cloud execution without selected-provider settings",
+      projectConfig: {
+        execution: {
+          mode: "cloud",
+          provider: "modal"
+        }
+      },
+      diagnostics: [
+        validationDiagnostic(
+          "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
+          "cloud execution requires settings for the selected provider",
+          ["execution", "providers", "modal"]
+        )
+      ]
+    }
+  ];
+
+  it.each(cases)("reports only the named semantic diagnostic for $label", ({ projectConfig, diagnostics }) => {
+    const resolved = resolveConfig({ env: {}, projectConfig });
+
+    expect(resolved).toEqual({ ok: false, diagnostics });
+  });
+});
+
 describe("model profile and triage validation", () => {
   it("clears default reasoning whenever an agent override switches agents", () => {
     const agentOnly = resolveConfig({ env: {} });
@@ -528,7 +1014,7 @@ describe("model profile and triage validation", () => {
         models: {
           profiles: {
             "../bad": {
-              agent: "../missing",
+              agent: "constructor",
               model: "",
               reasoning: "",
               timeoutSeconds: 0
@@ -540,16 +1026,14 @@ describe("model profile and triage validation", () => {
     });
 
     expect(resolved.ok).toBe(false);
-    expect(resolved.diagnostics.map((entry) => entry.code)).toEqual(
-      expect.arrayContaining([
-        "CONFIG_MODEL_PROFILE_ID_INVALID",
-        "CONFIG_MODEL_AGENT_INVALID",
-        "CONFIG_MODEL_DEFAULT_UNKNOWN",
-        "CONFIG_MODEL_NAME_EMPTY",
-        "CONFIG_MODEL_REASONING_EMPTY",
-        "CONFIG_MODEL_TIMEOUT_INVALID"
-      ])
-    );
+    expect(resolved.diagnostics.map(({ code, path }) => ({ code, path }))).toEqual([
+      { code: "CONFIG_MODEL_PROFILE_ID_INVALID", path: ["models", "../bad"] },
+      { code: "CONFIG_MODEL_DEFAULT_UNKNOWN", path: ["models", "default"] },
+      { code: "CONFIG_MODEL_AGENT_INVALID", path: ["models", "../bad", "agent"] },
+      { code: "CONFIG_MODEL_NAME_EMPTY", path: ["models", "../bad", "model"] },
+      { code: "CONFIG_MODEL_REASONING_EMPTY", path: ["models", "../bad", "reasoning"] },
+      { code: "CONFIG_MODEL_TIMEOUT_INVALID", path: ["models", "../bad", "timeout_seconds"] }
+    ]);
   });
 
   it("rejects Kimi reasoning values that Kimi Code cannot execute", () => {
@@ -575,6 +1059,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "kimi-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects whitespace-padded Kimi reasoning values instead of normalizing them away", () => {
@@ -625,6 +1110,7 @@ describe("model profile and triage validation", () => {
         path: ["models", "deepseek-invalid", "reasoning"]
       })
     );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
   });
 
   it("rejects unsupported DeepSeek subscription authentication during config validation", () => {
@@ -644,6 +1130,30 @@ describe("model profile and triage validation", () => {
       expect.objectContaining({
         code: "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
         path: ["agents", "DeepSeekAgent", "auth"]
+      })
+    );
+    expect(resolved.diagnostics.map((entry) => entry.code)).not.toContain("CONFIG_POSITIVE_INTEGER_INVALID");
+  });
+
+  it("rejects unknown agent and triage helper fields without stripping them", () => {
+    expect(
+      validateAgentConfigs({
+        CodexAgent: {
+          auth: "api-key",
+          apiKeyEnv: "OPENAI_API_KEY",
+          legacy: true
+        }
+      } as never)
+    ).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_AGENT_FIELD_UNKNOWN",
+        path: ["agents", "CodexAgent", "legacy"]
+      })
+    );
+    expect(validateTriageConfig({ quorum: 3, panelSize: 4, legacy: true } as never)).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_TRIAGE_FIELD_UNKNOWN",
+        path: ["triage", "legacy"]
       })
     );
   });
@@ -678,3 +1188,13 @@ describe("model profile and triage validation", () => {
     expect(resolved.diagnostics.map((entry) => entry.code)).toContain("CONFIG_TRIAGE_QUORUM_EXCEEDS_PANEL");
   });
 });
+
+function validationDiagnostic(code: string, message: string, path: string[]): ConfigDiagnostic {
+  return {
+    code,
+    severity: "error",
+    message,
+    path,
+    source: "validation"
+  };
+}

@@ -1,22 +1,40 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual, TextDecoder } from "node:util";
+
+import lockfile from "proper-lockfile";
 
 import {
   ARTIFACT_MANIFEST_FILE,
+  DEFAULT_STRICT_JSONL_MAX_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORDS,
+  assertEventRecord,
+  assertNoSymlinkComponents,
   assertRegularFileInside,
   getNodeArtifactDir,
   layoutForRunRoot,
   normalizeSafeRelativePath,
+  parseStrictJson,
   readArtifactManifest,
+  readRunState,
   safeResolveInside,
   sha256Bytes,
+  validateStrictJsonlHistory,
   validateSafeId,
   type ArtifactManifest,
   type ArtifactManifestEntry,
+  type ArtifactManifestOutputContract,
   type EventRecord,
   type RunState
 } from "@ultrafuzz/artifacts";
-import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  assertVerifiedFinalReportSnapshotRemainedCurrent,
+  loadVerifiedFinalReportSnapshot,
+  type RuntimeDiagnostic,
+  type VerifiedFinalReportSnapshot,
+  type VerifiedOutputArtifactSnapshot
+} from "@ultrafuzz/runtime";
 
 import {
   reporterForReliableDelivery,
@@ -26,12 +44,18 @@ import {
   type EvalReporter
 } from "./reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
-import { contentTypeForArtifact, isRecord, warningDiagnostic } from "./utils.js";
+import { readTelemetryCursor, writeTelemetryCursor } from "./eval-durable.js";
+import { contentTypeForArtifact, EvalError, isRecord, warningDiagnostic } from "./utils.js";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const TELEMETRY_CURSOR_LOCK_STALE_MS = 300_000;
+const TELEMETRY_CURSOR_LOCK_FS = Object.assign(Object.create(fs) as typeof fs, {
+  stat: fs.lstat.bind(fs),
+  utimes: fs.lutimes.bind(fs)
+});
 
 export interface TelemetryCursorState {
   schemaVersion: typeof TELEMETRY_CURSOR_SCHEMA_VERSION;
@@ -40,7 +64,7 @@ export interface TelemetryCursorState {
   uploadedArtifacts: Record<string, string>; // `${nodeId}/${relativePath}` -> sha256
   lastHeartbeatAt: Record<string, string>; // nodeId -> ISO, heartbeat rate limiting
   providerIds: Record<string, string>; // nodeId -> provider span/run id (rebuilt on resume)
-  /** findings-normalized counts folded into node-finished events. */
+  /** findings-validated counts folded into node-finished events. */
   findingsCountByNode: Record<string, number>;
 }
 
@@ -50,6 +74,11 @@ export interface TelemetryDrainResult {
   warnings: RuntimeDiagnostic[];
 }
 
+export interface TelemetryDrainOptions {
+  /** Start this drain from a durably reset cursor while holding the cursor lease. */
+  resetCursor?: boolean;
+}
+
 export interface NodeTelemetryPumpInput {
   /** Root of the underlying ultrafuzz run (contains events.jsonl, state.json, artifacts/). */
   runRoot: string;
@@ -57,9 +86,15 @@ export interface NodeTelemetryPumpInput {
   reporters: EvalReporter[];
   policy: EvalReportingPolicy;
   cursorPath: string;
+  /** Exact preflight authority required by post-hoc publication. Live telemetry may omit it. */
+  requiredFinalReportSnapshot?: VerifiedFinalReportSnapshot;
   now?: () => Date;
   maxDeliveryAttempts?: number;
   retryDelayMs?: number;
+}
+
+export function isRequiredFinalReportTelemetryError(error: unknown): error is EvalError {
+  return error instanceof EvalError && error.code.startsWith("EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_");
 }
 
 export function createTelemetryCursor(): TelemetryCursorState {
@@ -75,30 +110,29 @@ export function createTelemetryCursor(): TelemetryCursorState {
 }
 
 export function loadTelemetryCursor(cursorPath: string): TelemetryCursorState {
-  if (!fs.existsSync(cursorPath)) {
-    return createTelemetryCursor();
-  }
+  const absoluteCursorPath = path.resolve(cursorPath);
+  assertNoSymlinkComponents(path.parse(absoluteCursorPath).root, absoluteCursorPath, "telemetry cursor path");
+  let stat: fs.Stats;
   try {
-    const parsed = JSON.parse(fs.readFileSync(cursorPath, "utf8")) as Partial<TelemetryCursorState>;
-    if (parsed.schemaVersion !== TELEMETRY_CURSOR_SCHEMA_VERSION) {
+    stat = fs.lstatSync(cursorPath);
+  } catch (error) {
+    if (isErrnoException(error, "ENOENT")) {
       return createTelemetryCursor();
     }
-    return {
-      schemaVersion: TELEMETRY_CURSOR_SCHEMA_VERSION,
-      byteOffset: typeof parsed.byteOffset === "number" && parsed.byteOffset >= 0 ? parsed.byteOffset : 0,
-      deliveredEventIds: Array.isArray(parsed.deliveredEventIds)
-        ? parsed.deliveredEventIds.filter((entry): entry is string => typeof entry === "string")
-        : [],
-      uploadedArtifacts: isRecord(parsed.uploadedArtifacts) ? (parsed.uploadedArtifacts as Record<string, string>) : {},
-      lastHeartbeatAt: isRecord(parsed.lastHeartbeatAt) ? (parsed.lastHeartbeatAt as Record<string, string>) : {},
-      providerIds: isRecord(parsed.providerIds) ? (parsed.providerIds as Record<string, string>) : {},
-      findingsCountByNode: isRecord(parsed.findingsCountByNode)
-        ? (parsed.findingsCountByNode as Record<string, number>)
-        : {}
-    };
-  } catch {
-    return createTelemetryCursor();
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_READ_FAILED",
+      `failed to inspect telemetry cursor ${cursorPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: cursorPath }
+    );
   }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_UNSAFE",
+      `telemetry cursor must be a regular file and cannot be a symbolic link: ${cursorPath}`,
+      { path: cursorPath }
+    );
+  }
+  return readTelemetryCursor(cursorPath);
 }
 
 /**
@@ -106,10 +140,10 @@ export function loadTelemetryCursor(cursorPath: string): TelemetryCursorState {
  * sync tick, translates them into reporter envelopes, synthesizes heartbeats
  * from `state.json`, and streams allowlisted artifacts from node manifests.
  *
- * At-least-once with `event_id` dedup makes delivery effectively exactly-once;
- * the cursor is persisted durably only after a delivery pass, so killing and
- * resuming the driver never double-publishes. Reporter failures degrade to
- * warnings — a provider outage must not kill a multi-hour fuzzing run.
+ * Delivery is at-least-once. The cursor is persisted durably after callbacks,
+ * so a crash or cursor-write failure can replay a callback. Reporter-facing
+ * envelopes therefore carry stable idempotency keys. Delivery exhaustion
+ * degrades to warnings, while cursor lock/read/write failures are fatal.
  */
 export class NodeTelemetryPump {
   readonly cursor: TelemetryCursorState;
@@ -123,13 +157,33 @@ export class NodeTelemetryPump {
     this.now = input.now ?? (() => new Date());
     this.maxAttempts = Math.max(1, input.maxDeliveryAttempts ?? 3);
     this.retryDelayMs = input.retryDelayMs ?? 250;
-    this.cursor = loadTelemetryCursor(input.cursorPath);
+    this.cursor = createTelemetryCursor();
   }
 
-  async drain(): Promise<TelemetryDrainResult> {
+  async drain(options: TelemetryDrainOptions = {}): Promise<TelemetryDrainResult> {
+    const release = await acquireTelemetryCursorLock(this.input.cursorPath);
+    try {
+      if (options.resetCursor === true) {
+        persistTelemetryCursor(this.input.cursorPath, createTelemetryCursor());
+      }
+      const durableCursor = loadTelemetryCursor(this.input.cursorPath);
+      this.replaceCursor(durableCursor);
+      const rollbackCursor = cloneTelemetryCursor(durableCursor);
+      try {
+        return await this.drainLocked();
+      } catch (error) {
+        this.replaceCursor(rollbackCursor);
+        throw error;
+      }
+    } finally {
+      await release();
+    }
+  }
+
+  private async drainLocked(): Promise<TelemetryDrainResult> {
     const warnings: RuntimeDiagnostic[] = [];
     const state = this.readState();
-    const { records, nextOffset } = this.readNewJournalRecords(warnings);
+    const { records, nextOffset } = this.readNewJournalRecords();
     const replayOffset = this.cursor.byteOffset;
 
     const envelopes: EvalNodeEventEnvelope[] = [];
@@ -179,76 +233,174 @@ export class NodeTelemetryPump {
     // Re-read the journal after any failed callback. Successfully delivered
     // IDs/hashes remain in the cursor, so resume retries only missing work.
     this.cursor.byteOffset = deliveryFailed ? replayOffset : nextOffset;
-    this.persistCursor(warnings);
+    this.persistCursor();
     return { deliveredEvents, deliveredArtifacts, warnings };
   }
 
   private readState(): RunState | undefined {
     const statePath = path.join(this.input.runRoot, "state.json");
-    if (!fs.existsSync(statePath)) {
-      return undefined;
+    const expectedRunId = layoutForRunRoot(this.input.runRoot).runId;
+    try {
+      fs.lstatSync(statePath);
+    } catch (error) {
+      if (isErrnoException(error, "ENOENT")) return undefined;
+      throw new EvalError(
+        "EVAL_TELEMETRY_STATE_READ_FAILED",
+        `failed to inspect run state ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: statePath }
+      );
     }
     try {
-      return JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-    } catch {
-      return undefined;
+      assertRegularFileInside(this.input.runRoot, statePath, "telemetry run state");
+      const state = readRunState(statePath);
+      if (state.run_id !== expectedRunId) {
+        throw new Error(
+          `run state belongs to ${JSON.stringify(state.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+        );
+      }
+      return state;
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_STATE_READ_FAILED",
+        `failed to read run state ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: statePath }
+      );
     }
   }
 
-  private readNewJournalRecords(warnings: RuntimeDiagnostic[]): { records: EventRecord[]; nextOffset: number } {
+  private readNewJournalRecords(): { records: EventRecord[]; nextOffset: number } {
     const eventsPath = path.join(this.input.runRoot, "events.jsonl");
-    // The existsSync/statSync/openSync sequence is not atomic: the run dir can
-    // vanish between calls (CI cleanup, crash recovery). Treat any filesystem
-    // error as "no new records this tick" instead of aborting the whole suite.
-    let text: string;
+    const expectedRunId = layoutForRunRoot(this.input.runRoot).runId;
+    let buffer: Buffer;
     try {
-      if (!fs.existsSync(eventsPath)) {
-        return { records: [], nextOffset: this.cursor.byteOffset };
-      }
-      const size = fs.statSync(eventsPath).size;
-      if (size < this.cursor.byteOffset) {
-        // Journal shrank (rewritten run dir) — restart from zero rather than mis-read.
-        this.cursor.byteOffset = 0;
-      }
-      if (size === this.cursor.byteOffset) {
-        return { records: [], nextOffset: this.cursor.byteOffset };
-      }
-      const buffer = Buffer.alloc(size - this.cursor.byteOffset);
-      const fd = fs.openSync(eventsPath, "r");
       try {
-        fs.readSync(fd, buffer, 0, buffer.length, this.cursor.byteOffset);
+        fs.lstatSync(eventsPath);
+      } catch (error) {
+        if (isErrnoException(error, "ENOENT")) {
+          if (this.cursor.byteOffset !== 0) {
+            throw new Error("event journal disappeared after the cursor advanced", { cause: error });
+          }
+          return { records: [], nextOffset: this.cursor.byteOffset };
+        }
+        throw error;
+      }
+      assertRegularFileInside(this.input.runRoot, eventsPath, "telemetry event journal");
+      const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+      const fd = fs.openSync(eventsPath, flags);
+      let size: number;
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile()) throw new Error("event journal is not a regular file");
+        size = stat.size;
+        if (size < this.cursor.byteOffset) {
+          throw new Error("event journal is shorter than its durable cursor");
+        }
+        if (size > DEFAULT_STRICT_JSONL_MAX_BYTES) {
+          throw new Error(`event journal exceeds the ${DEFAULT_STRICT_JSONL_MAX_BYTES}-byte limit`);
+        }
+        buffer = Buffer.alloc(size);
+        let bytesRead = 0;
+        while (bytesRead < buffer.byteLength) {
+          const count = fs.readSync(fd, buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead);
+          if (count === 0) throw new Error("event journal changed while it was read");
+          bytesRead += count;
+        }
       } finally {
         fs.closeSync(fd);
       }
-      text = buffer.toString("utf8");
     } catch (error) {
-      warnings.push(
-        warningDiagnostic(
-          "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
-          `failed to read run journal ${eventsPath}: ${error instanceof Error ? error.message : String(error)}`
-        )
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `failed to read run journal ${eventsPath}: ${error instanceof Error ? error.message : String(error)}`,
+        { path: eventsPath }
       );
-      return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const lastNewline = text.lastIndexOf("\n");
+    if (buffer.byteLength === 0) return { records: [], nextOffset: 0 };
+    const lastNewline = buffer.lastIndexOf(0x0a);
     if (lastNewline === -1) {
       // Partial line only — wait for the writer to finish it.
       return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const complete = text.slice(0, lastNewline + 1);
-    const nextOffset = this.cursor.byteOffset + Buffer.byteLength(complete, "utf8");
+    const completeBytes = buffer.subarray(0, lastNewline + 1);
+    if (this.cursor.byteOffset > completeBytes.byteLength) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `run journal ${eventsPath} no longer has a complete record boundary at its durable cursor`,
+        { path: eventsPath }
+      );
+    }
+    if (this.cursor.byteOffset > 0 && buffer[this.cursor.byteOffset - 1] !== 0x0a) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+        `run journal ${eventsPath} durable cursor is not at a record boundary`,
+        { path: eventsPath }
+      );
+    }
+    let complete: string;
+    try {
+      complete = new TextDecoder("utf-8", { fatal: true }).decode(completeBytes);
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} contains invalid UTF-8; the cursor was not advanced`,
+        { path: eventsPath, reason: error instanceof Error ? error.message : String(error) }
+      );
+    }
+    const nextOffset = completeBytes.byteLength;
     const records: EventRecord[] = [];
-    for (const line of complete.split("\n")) {
-      if (line.trim().length === 0) {
-        continue;
-      }
+    const lines = complete.split("\n");
+    lines.pop();
+    if (lines.length > DEFAULT_STRICT_JSONL_MAX_RECORDS) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORDS}-record limit`,
+        { path: eventsPath }
+      );
+    }
+    for (const [index, line] of lines.entries()) {
       try {
-        records.push(JSON.parse(line) as EventRecord);
-      } catch {
-        warnings.push(warningDiagnostic("EVAL_TELEMETRY_JOURNAL_MALFORMED", "skipped malformed journal line"));
+        if (Buffer.byteLength(line, "utf8") > DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES) {
+          throw new Error(`record exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES}-byte limit`);
+        }
+        const record = assertEventRecord(parseStrictJson(line), `$[${index}]`);
+        if (record.run_id !== expectedRunId) {
+          throw new Error(
+            `record belongs to ${JSON.stringify(record.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+          );
+        }
+        records.push(record);
+      } catch (error) {
+        throw new EvalError(
+          "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+          `run journal ${eventsPath} has an invalid record at line ${index + 1}; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+          { path: eventsPath }
+        );
       }
     }
-    return { records, nextOffset };
+    try {
+      validateStrictJsonlHistory(records, {
+        label: "telemetry event journal",
+        parseRecord: (value, recordPath) => assertEventRecord(value, recordPath),
+        identity: (record) => record.event_id,
+        validateHistory: (history) => {
+          let priorTimestamp: string | undefined;
+          for (const [index, record] of history.entries()) {
+            if (priorTimestamp !== undefined && record.timestamp < priorTimestamp) {
+              throw new Error(`event journal timestamps are not ordered at record ${index + 1}`);
+            }
+            priorTimestamp = record.timestamp;
+          }
+        }
+      });
+    } catch (error) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_JOURNAL_MALFORMED",
+        `run journal ${eventsPath} has invalid history; the cursor was not advanced: ${error instanceof Error ? error.message : String(error)}`,
+        { path: eventsPath }
+      );
+    }
+    const priorRecordCount = countByte(buffer.subarray(0, this.cursor.byteOffset), 0x0a);
+    return { records: records.slice(priorRecordCount), nextOffset };
   }
 
   private translate(
@@ -258,15 +410,20 @@ export class NodeTelemetryPump {
     uploads: EvalArtifactUpload[],
     warnings: RuntimeDiagnostic[]
   ): void {
-    const nodeId = record.node_id;
-    if (nodeId === undefined) {
-      return;
-    }
-    const payload = isRecord(record.payload) ? record.payload : {};
     switch (record.event_type) {
       case "node-synced": {
+        const nodeId = record.node_id;
         const status = record.status;
-        const attempt = attemptFromPayload(payload, state, nodeId);
+        if (
+          status !== "running" &&
+          status !== "succeeded" &&
+          status !== "failed" &&
+          status !== "timed-out" &&
+          status !== "skipped"
+        ) {
+          return;
+        }
+        const attempt = requireTelemetryAttempt(record.payload.attempt, record.event_id);
         if (status === "running") {
           envelopes.push(
             this.envelope(record.event_id, nodeId, { type: "node-started", at: record.timestamp, attempt })
@@ -290,13 +447,14 @@ export class NodeTelemetryPump {
         }
         return;
       }
-      case "findings-normalized": {
-        if (typeof payload.count === "number") {
-          this.cursor.findingsCountByNode[nodeId] = payload.count;
+      case "findings-validated": {
+        if (record.payload.count !== undefined) {
+          this.cursor.findingsCountByNode[record.node_id] = record.payload.count;
         }
         return;
       }
       case "artifact-manifest-written": {
+        const nodeId = record.node_id;
         const manifest = this.readManifest(nodeId, warnings);
         if (manifest === undefined) {
           return;
@@ -328,7 +486,16 @@ export class NodeTelemetryPump {
       warnings.push(warningDiagnostic("EVAL_TELEMETRY_MANIFEST_UNSAFE", "skipped unsafe artifact manifest path"));
       return undefined;
     }
-    if (!fs.existsSync(manifestPath)) {
+    try {
+      fs.lstatSync(manifestPath);
+    } catch (error) {
+      if (isErrnoException(error, "ENOENT")) return undefined;
+      warnings.push(
+        warningDiagnostic(
+          "EVAL_TELEMETRY_MANIFEST_UNREADABLE",
+          `failed to inspect artifact manifest for ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
+        )
+      );
       return undefined;
     }
     try {
@@ -371,32 +538,122 @@ export class NodeTelemetryPump {
     const uploads: EvalArtifactUpload[] = [];
     const layout = layoutForRunRoot(this.input.runRoot);
     const nodeDir = getNodeArtifactDir(layout, nodeId);
+    const requiredSnapshot = this.input.requiredFinalReportSnapshot;
+    const manifestDeclaresFinalReport = manifest.output_contracts.some(
+      (output) => output.contract === "ultrafuzz/report@3"
+    );
+    const isRequiredFinalReportProducer = requiredSnapshot?.authority.attempt_id === nodeId;
+    const publishesFinalReport = manifestDeclaresFinalReport || isRequiredFinalReportProducer;
+    let verifiedFinalReport: Map<string, VerifiedFinalReportFile> | undefined;
+    if (publishesFinalReport) {
+      try {
+        const snapshot = requiredSnapshot ?? loadVerifiedFinalReportSnapshot(this.input.runRoot);
+        if (requiredSnapshot !== undefined) {
+          if (!isRequiredFinalReportProducer) {
+            throw new Error(
+              `manifest ${nodeId} declares a final report owned by ${requiredSnapshot.authority.attempt_id}`
+            );
+          }
+          assertVerifiedFinalReportSnapshotRemainedCurrent(snapshot);
+        }
+        if (snapshot.authority.attempt_id !== nodeId) {
+          throw new Error(`verified final-report authority belongs to ${snapshot.authority.attempt_id}`);
+        }
+        verifiedFinalReport = verifiedFinalReportFiles(snapshot);
+        if (requiredSnapshot !== undefined) {
+          assertRequiredFinalReportManifest(manifest, snapshot, verifiedFinalReport);
+        }
+      } catch (error) {
+        if (requiredSnapshot !== undefined) {
+          throw new EvalError(
+            "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_AUTHORITY_INVALID",
+            `required final-report publication ${nodeId} lost its preflight authority: ${error instanceof Error ? error.message : String(error)}`,
+            { node_id: nodeId, reason: error instanceof Error ? error.message : String(error) }
+          );
+        }
+        warnings.push(
+          warningDiagnostic(
+            "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
+            `skipped unverified final-report publication ${nodeId}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+        return uploads;
+      }
+    }
     for (const file of manifest.files) {
-      if (!includeSet.has(file.path)) {
+      const verified = verifiedFinalReport?.get(file.path);
+      if (!includeSet.has(file.path) && (verified === undefined || !includeSet.has(verified.policyPath))) {
         continue;
       }
       if (file.size_bytes > policy.max_file_bytes) {
         continue;
       }
-      try {
-        validateArtifact(nodeDir, file, policy.max_file_bytes);
-      } catch (error) {
-        warnings.push(
-          warningDiagnostic(
-            "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
-            `skipped unsafe artifact ${nodeId}/${file.path}: ${error instanceof Error ? error.message : String(error)}`
-          )
-        );
-        continue;
+      if (publishesFinalReport && verified === undefined) continue;
+      if (verified !== undefined) {
+        if (
+          verified.absolutePath !== safeResolveInside(nodeDir, file.path, "verified artifact upload path") ||
+          verified.bytes.length !== file.size_bytes ||
+          verified.sha256 !== file.sha256
+        ) {
+          if (requiredSnapshot !== undefined) {
+            throw new EvalError(
+              "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_MANIFEST_MISMATCH",
+              `required final-report manifest differs from preflight bytes ${nodeId}/${file.path}`,
+              { node_id: nodeId, artifact_path: file.path }
+            );
+          }
+          warnings.push(
+            warningDiagnostic(
+              "EVAL_TELEMETRY_ARTIFACT_UNVERIFIED",
+              `skipped final-report publication whose manifest differs from verified bytes ${nodeId}/${file.path}`
+            )
+          );
+          continue;
+        }
+      } else {
+        try {
+          validateArtifact(nodeDir, file, policy.max_file_bytes);
+        } catch (error) {
+          warnings.push(
+            warningDiagnostic(
+              "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
+              `skipped unsafe artifact ${nodeId}/${file.path}: ${error instanceof Error ? error.message : String(error)}`
+            )
+          );
+          continue;
+        }
       }
       uploads.push({
+        idempotencyKey: telemetryIdempotencyKey("artifact", [this.input.row.id, nodeId, file.path, file.sha256]),
         rowId: this.input.row.id,
         nodeId,
         relativePath: file.path,
         contentType: contentTypeForArtifact(file.path),
         sizeBytes: file.size_bytes,
         sha256: file.sha256,
-        ...(payloadAllowed ? { read: async () => readValidatedArtifact(nodeDir, file, policy.max_file_bytes) } : {})
+        ...(payloadAllowed
+          ? {
+              read: async () => {
+                if (verified === undefined) return readValidatedArtifact(nodeDir, file, policy.max_file_bytes);
+                if (requiredSnapshot !== undefined) {
+                  try {
+                    assertVerifiedFinalReportSnapshotRemainedCurrent(requiredSnapshot);
+                  } catch (error) {
+                    throw new EvalError(
+                      "EVAL_TELEMETRY_REQUIRED_FINAL_REPORT_AUTHORITY_CHANGED",
+                      `required final-report authority changed before delivering ${nodeId}/${file.path}`,
+                      {
+                        node_id: nodeId,
+                        artifact_path: file.path,
+                        reason: error instanceof Error ? error.message : String(error)
+                      }
+                    );
+                  }
+                }
+                return Buffer.from(verified.bytes);
+              }
+            }
+          : {})
       });
     }
     return uploads;
@@ -435,7 +692,13 @@ export class NodeTelemetryPump {
   }
 
   private envelope(eventId: string, nodeId: string, event: EvalNodeEvent): EvalNodeEventEnvelope {
-    return { eventId, rowId: this.input.row.id, nodeId, event };
+    return {
+      eventId,
+      idempotencyKey: telemetryIdempotencyKey("event", [this.input.row.id, eventId]),
+      rowId: this.input.row.id,
+      nodeId,
+      event
+    };
   }
 
   private async deliver(
@@ -453,6 +716,7 @@ export class NodeTelemetryPump {
           await action(reporter);
           delivered = true;
         } catch (error) {
+          if (isRequiredFinalReportTelemetryError(error)) throw error;
           lastError = error;
           if (attempt < this.maxAttempts && this.retryDelayMs > 0) {
             await sleep(this.retryDelayMs * attempt);
@@ -481,21 +745,204 @@ export class NodeTelemetryPump {
     }
   }
 
-  private persistCursor(warnings: RuntimeDiagnostic[]): void {
-    try {
-      fs.mkdirSync(path.dirname(this.input.cursorPath), { recursive: true });
-      const tempPath = `${this.input.cursorPath}.tmp`;
-      fs.writeFileSync(tempPath, `${JSON.stringify(this.cursor, null, 2)}\n`, "utf8");
-      fs.renameSync(tempPath, this.input.cursorPath);
-    } catch (error) {
-      warnings.push(
-        warningDiagnostic(
-          "EVAL_TELEMETRY_CURSOR_WRITE_FAILED",
-          `failed to persist telemetry cursor: ${error instanceof Error ? error.message : String(error)}`
-        )
-      );
+  private persistCursor(): void {
+    persistTelemetryCursor(this.input.cursorPath, this.cursor);
+  }
+
+  private replaceCursor(next: TelemetryCursorState): void {
+    const clone = cloneTelemetryCursor(next);
+    this.cursor.schemaVersion = clone.schemaVersion;
+    this.cursor.byteOffset = clone.byteOffset;
+    this.cursor.deliveredEventIds = clone.deliveredEventIds;
+    this.cursor.uploadedArtifacts = clone.uploadedArtifacts;
+    this.cursor.lastHeartbeatAt = clone.lastHeartbeatAt;
+    this.cursor.providerIds = clone.providerIds;
+    this.cursor.findingsCountByNode = clone.findingsCountByNode;
+  }
+}
+
+interface VerifiedFinalReportFile {
+  bytes: Buffer;
+  sha256: string;
+  absolutePath: string;
+  /** Stable reporting-policy role retained when the topology uses a custom path. */
+  policyPath: "report.json" | "report.md";
+}
+
+function verifiedFinalReportFiles(snapshot: VerifiedFinalReportSnapshot): Map<string, VerifiedFinalReportFile> {
+  const bindings = [
+    {
+      contract: "ultrafuzz/report@3",
+      policyPath: "report.json",
+      absolutePath: snapshot.artifacts.json_path,
+      bytes: snapshot.json_bytes
+    },
+    {
+      contract: "ultrafuzz/nonempty-markdown@1",
+      policyPath: "report.md",
+      absolutePath: snapshot.artifacts.markdown_path,
+      bytes: snapshot.markdown_bytes
+    }
+  ] as const;
+  const files = new Map<string, VerifiedFinalReportFile>();
+  for (const binding of bindings) {
+    const matches = snapshot.authority.outputs.filter(
+      (output) =>
+        output.contract === binding.contract &&
+        path.resolve(output.absolute_path) === path.resolve(binding.absolutePath)
+    );
+    if (matches.length !== 1) {
+      throw new Error(`verified final-report snapshot does not bind one exact ${binding.contract} declaration`);
+    }
+    const output = matches[0]!;
+    if (files.has(output.path)) {
+      throw new Error(`verified final-report snapshot repeats declared path ${output.path}`);
+    }
+    const bytes = Buffer.from(binding.bytes);
+    files.set(output.path, {
+      bytes,
+      sha256: sha256Bytes(bytes),
+      absolutePath: binding.absolutePath,
+      policyPath: binding.policyPath
+    });
+  }
+  return files;
+}
+
+function assertRequiredFinalReportManifest(
+  manifest: ArtifactManifest,
+  snapshot: VerifiedFinalReportSnapshot,
+  verifiedFiles: ReadonlyMap<string, VerifiedFinalReportFile>
+): void {
+  const attemptId = snapshot.authority.attempt_id;
+  const expectedRunId = layoutForRunRoot(snapshot.authority.run_root).runId;
+  if (manifest.run_id !== expectedRunId || manifest.node_id !== attemptId || manifest.producer_node_id !== attemptId) {
+    throw new Error(`live final-report manifest identity does not match required producer ${attemptId}`);
+  }
+
+  const expectedDeclarations = finalReportDeclarations(snapshot.authority.outputs);
+  const actualDeclarations = finalReportDeclarations(manifest.output_contracts);
+  if (expectedDeclarations.length !== 2 || !isDeepStrictEqual(actualDeclarations, expectedDeclarations)) {
+    throw new Error("live final-report manifest does not declare the exact required JSON/Markdown pair");
+  }
+
+  for (const [relativePath, verified] of verifiedFiles) {
+    const entries = manifest.files.filter((file) => file.path === relativePath);
+    if (entries.length !== 1) {
+      throw new Error(`live final-report manifest must contain exactly one file entry for ${relativePath}`);
+    }
+    const entry = entries[0]!;
+    if (entry.size_bytes !== verified.bytes.length || entry.sha256 !== verified.sha256) {
+      throw new Error(`live final-report manifest file binding changed for ${relativePath}`);
     }
   }
+}
+
+function finalReportDeclarations(
+  outputs: readonly (ArtifactManifestOutputContract | VerifiedOutputArtifactSnapshot)[]
+): ArtifactManifestOutputContract[] {
+  return outputs
+    .filter((output) => output.contract === "ultrafuzz/report@3" || output.contract === "ultrafuzz/nonempty-markdown@1")
+    .map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contract_digest,
+      ...(output.schema_file === undefined ? {} : { schema_file: output.schema_file }),
+      ...(output.schema_id === undefined ? {} : { schema_id: output.schema_id }),
+      ...(output.schema_sha256 === undefined ? {} : { schema_sha256: output.schema_sha256 }),
+      ...(output.schema_bundle_sha256 === undefined ? {} : { schema_bundle_sha256: output.schema_bundle_sha256 }),
+      ...(output.validator_build === undefined ? {} : { validator_build: output.validator_build }),
+      primary: output.primary
+    }))
+    .sort((left, right) => left.contract.localeCompare(right.contract) || left.path.localeCompare(right.path));
+}
+
+async function acquireTelemetryCursorLock(cursorPath: string): Promise<() => Promise<void>> {
+  const absoluteCursorPath = path.resolve(cursorPath);
+  const directory = path.dirname(absoluteCursorPath);
+  const filesystemRoot = path.parse(absoluteCursorPath).root;
+  assertNoSymlinkComponents(filesystemRoot, directory, "telemetry cursor directory");
+  fs.mkdirSync(directory, { recursive: true });
+  assertPhysicalTelemetryCursorDirectory(absoluteCursorPath);
+  const lockPath = `${absoluteCursorPath}.lock`;
+  try {
+    const lockStat = fs.lstatSync(lockPath);
+    if (lockStat.isSymbolicLink()) {
+      throw new EvalError(
+        "EVAL_TELEMETRY_CURSOR_UNSAFE",
+        `telemetry cursor lock cannot be a symbolic link: ${lockPath}`,
+        { path: lockPath }
+      );
+    }
+  } catch (error) {
+    if (!isErrnoException(error, "ENOENT")) {
+      throw error;
+    }
+  }
+  try {
+    return await lockfile.lock(absoluteCursorPath, {
+      lockfilePath: lockPath,
+      realpath: false,
+      fs: TELEMETRY_CURSOR_LOCK_FS,
+      stale: TELEMETRY_CURSOR_LOCK_STALE_MS,
+      update: 60_000,
+      retries: { retries: 120, factor: 1, minTimeout: 25, maxTimeout: 250 }
+    });
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_LOCK_FAILED",
+      `failed to acquire telemetry cursor lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: lockPath }
+    );
+  }
+}
+
+function cloneTelemetryCursor(cursor: TelemetryCursorState): TelemetryCursorState {
+  return {
+    schemaVersion: cursor.schemaVersion,
+    byteOffset: cursor.byteOffset,
+    deliveredEventIds: [...cursor.deliveredEventIds],
+    uploadedArtifacts: { ...cursor.uploadedArtifacts },
+    lastHeartbeatAt: { ...cursor.lastHeartbeatAt },
+    providerIds: { ...cursor.providerIds },
+    findingsCountByNode: { ...cursor.findingsCountByNode }
+  };
+}
+
+function persistTelemetryCursor(cursorPath: string, cursor: TelemetryCursorState): void {
+  try {
+    assertPhysicalTelemetryCursorDirectory(cursorPath);
+    writeTelemetryCursor(cursorPath, cursor);
+  } catch (error) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_WRITE_FAILED",
+      `failed to persist telemetry cursor ${cursorPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { path: cursorPath }
+    );
+  }
+}
+
+function assertPhysicalTelemetryCursorDirectory(cursorPath: string): void {
+  const absoluteCursorPath = path.resolve(cursorPath);
+  const directory = path.dirname(absoluteCursorPath);
+  assertNoSymlinkComponents(path.parse(absoluteCursorPath).root, directory, "telemetry cursor directory");
+  const directoryStat = fs.lstatSync(directory);
+  if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_CURSOR_UNSAFE",
+      `telemetry cursor directory must be a physical directory: ${directory}`,
+      { path: directory }
+    );
+  }
+}
+
+function telemetryIdempotencyKey(kind: "event" | "artifact", components: readonly string[]): string {
+  const digest = sha256Bytes(Buffer.from(JSON.stringify(components), "utf8"));
+  return `ultrafuzz-${kind}-${digest}`;
+}
+
+function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 function isSafeManifestEntry(value: unknown): value is ArtifactManifestEntry {
@@ -541,12 +988,22 @@ function readValidatedArtifact(nodeDir: string, file: ArtifactManifestEntry, max
   }
 }
 
-function attemptFromPayload(payload: Record<string, unknown>, state: RunState | undefined, nodeId: string): number {
-  if (typeof payload.attempt === "number" && payload.attempt > 0) {
-    return payload.attempt;
+function requireTelemetryAttempt(attempt: number | undefined, eventId: string): number {
+  if (attempt === undefined || attempt < 1) {
+    throw new EvalError(
+      "EVAL_TELEMETRY_EVENT_UNUSABLE",
+      `node transition ${eventId} must carry a positive canonical payload.attempt`
+    );
   }
-  const retryCount = state?.nodes[nodeId]?.retry_count;
-  return typeof retryCount === "number" ? retryCount + 1 : 1;
+  return attempt;
+}
+
+function countByte(bytes: Buffer, expected: number): number {
+  let count = 0;
+  for (const byte of bytes) {
+    if (byte === expected) count += 1;
+  }
+  return count;
 }
 
 function sleep(ms: number): Promise<void> {

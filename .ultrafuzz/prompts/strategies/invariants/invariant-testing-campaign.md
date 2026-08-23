@@ -5,6 +5,12 @@ display_name: Invariant testing campaign
 
 # Role
 
+Use the authoritative reachability tokens and report-bound note keys below for every finding; do not copy or rename them locally:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
 You are an Invariant Testing specialist running the final recon-fuzzer campaign
 over one implemented Chimera property suite.
 
@@ -26,7 +32,7 @@ Read the implementation summary:
 
 Read the prior Recon coverage campaign:
 
-{{artifact_path:stateful-invariant-coverage}}/coverage-report.md
+{{ancestor_artifact_path_authority:coverage-report.md}}
 
 Use this configured invariant testing fuzzer timeout:
 
@@ -58,6 +64,25 @@ Use this configured invariant testing fuzzer timeout:
      protocol action uses a typed direct call with checked return values and a
      documented precondition; repair the handler and rerun the smoke when the
      audit cannot explain its failure behavior.
+   - Enforce anti-vacuity before accepting a green or usable campaign. Confirm
+     that Recon discovers every implemented property entrypoint and that actual
+     campaign evidence includes at least one relevant handler reaching and
+     completing a meaningful state-changing protocol action. Deployment-only
+     execution, zero admitted properties, all handlers returning at guards,
+     empty target selections, harness-side preprocessing failures, or zero
+     completed protocol mutations make the campaign blocked or its results
+     unusable, never green. Do not add synthetic actions or weaken guards or
+     properties to manufacture activity.
+   - Recheck oracle independence before campaign execution. Expected values and
+     transitions must be derived from public specifications, source-declared
+     invariants, or independent accounting equations. Never call, copy,
+     translate, simplify, or re-derive the implementation under test as its own
+     oracle; block the affected property when no independent oracle is
+     available.
+   - Reject any inherited change that converts a source-backed safety assertion
+     into a `require`, handler guard, or other precondition that prevents Recon
+     from observing the violating post-state. Preconditions may admit valid
+     actions; they may not assume the property under test.
    - Record every reached protocol revert, panic, or out-of-gas failure as a
      raw backend failure with its entrypoint, sequence, precondition evidence,
      and exact property IDs when the failure exercises an implemented catalog
@@ -84,46 +109,56 @@ Use this configured invariant testing fuzzer timeout:
    - Establish a separate artifact-finalization reserve after the host shutdown
      grace to parse results, deduplicate failures, attempt reproducers, and
      finalize every required artifact. The shutdown grace and artifact reserve
-     are both additional to, not part of, the configured fuzzer timeout.
-     Copy the exact `Finalization reserve` value from the appended Topology
-     Runtime Context; do not choose or reduce this reserve yourself.
+     are both additional to, not part of, the configured fuzzer timeout. Copy
+     the exact `Finalization reserve` value from the appended Topology Runtime
+     Context; do not choose or reduce this reserve yourself.
    - The complete configured fuzzer timeout belongs to the one campaign; do not
      divide it into per-backend slices.
-   - Before launch, write a preliminary `campaign-plan.json` with
-     `schema_version` set to exactly
-     `ultrafuzz.invariant-campaign-plan.v2`,
+   - Before launch, write a preliminary `campaign-plan.json` using the exact
+     pinned `{{schema_path}}/invariant-campaign-plan-v2.schema.json`. The pinned
+     schema alone defines member names, types, and requiredness. Record the
+     plan's CPU, worker, budget, deadline, reserve, backend, command-plan, and
+     path evidence. Also record
      `configured_fuzzer_timeout_seconds`, `recon_internal_timeout_seconds`,
-     `recon_test_limit` (as a decimal string),
-     `host_soft_timeout_seconds`, `host_force_kill_grace_seconds`,
-     `artifact_finalization_reserve_seconds`, the exact command under
-     `backend.exact_shell_escaped_command`, and pending start-derived deadline
-     fields. Record the supervised launch timestamp immediately before starting
-     the process, then update the plan with `backend_started_at`,
+     `recon_test_limit` (as a decimal string), `host_soft_timeout_seconds`,
+     `host_force_kill_grace_seconds`,
+     `artifact_finalization_reserve_seconds`, and the exact campaign command in
+     both the campaign-phase command-plan row and
+     `backend.exact_shell_escaped_command`. Record the supervised launch
+     timestamp immediately before starting the process, then finalize the plan
+     with `backend_started_at`,
      `fuzzing_deadline_utc = backend_started_at + configured timeout`,
      `force_kill_deadline_utc = fuzzing deadline + host grace`, and
      `final_artifact_deadline_utc = force-kill deadline + artifact reserve`.
+     Set the plan's required join fields `configured_budget_seconds`, `deadline`,
+     and `finalization_reserve_seconds` to the post-smoke supervised budget
+     (fuzzer timeout plus shutdown grace plus artifact reserve), final artifact
+     deadline, and exact artifact reserve respectively. These runtime-value
+     relationships are contextual requirements beyond JSON Schema.
 
 3. Run the backend without path collisions.
    - Start the long campaign from this template, substituting the resolved
      worker count and the repository's own contract, config, and corpus
      conventions:
-     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout --preserve-status --signal=INT --kill-after=300s {{invariant_testing_fuzzer_timeout}}s recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --test-limit 18446744073709551615 --seq-len 100 --timeout {{invariant_testing_fuzzer_timeout}} --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
-     requires it. Put cache or other `env KEY=value` assignments before the
+     requires it. Put cache or other environment assignments before the
      `timeout` executable, leaving the four supervisor arguments immediately
      before `recon fuzz`. Always pass `--workers` with the count resolved in
-     step 2; do not reuse the bounded smoke's test limit of 1, `--seq-len`, or
-     single-worker flags for the long campaign. The explicit maximum
+     step 2; do not reuse the bounded smoke's test limit or sequence length of
+     1, or its single-worker flag, for the long campaign. The explicit
+     `--seq-len 100` prevents a generated `seqLen: 1` smoke configuration from
+     silently disabling multi-transaction state exploration. The explicit maximum
      `--test-limit` is nonbinding and prevents Recon's default 50,000-call cap
      from ending the campaign before the wall-clock deadline.
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer
      paths under `{{artifact_dir}}/backends/recon-fuzzer`. Never let concurrent
      processes write the same path.
    - Record the backend's locally available version and exact shell-escaped
-     command/config before launch. The host supervisor's `SIGINT` at the complete
-     configured timeout is the authoritative fuzzing cutoff; its forced-kill
-     grace is additional. Do not use `--foreground`, which would prevent the
-     supervisor from signalling the backend process group.
+     command/config before launch. The host supervisor's `SIGINT` at the
+     complete configured timeout is the authoritative fuzzing cutoff; its
+     forced-kill grace is additional. Do not use `--foreground`, which would
+     prevent the supervisor from signalling the backend process group.
    - Preserve raw backend output within normal artifact size and safety limits.
      Pass the exact configured timeout to Recon's `--timeout` for auditability
      and forward compatibility even when the locally installed Recon version
@@ -133,28 +168,72 @@ Use this configured invariant testing fuzzer timeout:
 
 4. Finalize the backend record.
    - Write the result record even when the backend is unavailable, fails to
-     start, crashes, or times out. The record must contain the backend name and
-     version; exact command/config; worker count; start/end timestamps and
-     terminal status; exit code or failure category; corpus, result, cache, and
-     log paths; every discovered property failure and raw reproducer reference;
-     and coverage metadata when the backend provides it. Also record the exact
+     start, crashes, or times out. Use the exact pinned
+     `{{schema_path}}/property-campaign.schema.json`; never emit or convert a
+     historical campaign document. Bind its artifact references, backend
+     identity, execution record, paths, coverage, implemented-property results,
+     and every observed failure to the authenticated plan and sibling
+     artifacts as described below.
+   - Choose the schema-defined execution variant that exactly matches whether
+     the backend started, how it terminated, and whether its results are
+     consumable. Record actual lifecycle timestamps, exit evidence, and failure
+     evidence; the finish time is the record finalization time even when the
+     backend never started.
+   - Copy every plan-owned backend identity, version, execution worker/deadline
+     setting, campaign command, and operational path exactly from
+     `campaign-plan.json`. Bind the executed campaign command to the plan's
+     campaign-phase command and record the actual configuration-path outcome
+     through the pinned result schema's applicable variant.
+   - Populate the result's required timeout-evidence fields:
      `configured_timeout_seconds`, `exact_command`, `start_timestamp`,
      `end_timestamp`, typed `termination_reason`, `campaign_outcome`, and
-     `usable_results` fields used by runtime timing validation.
+     `usable_results`. Copy `exact_command` from the plan and the nested
+     execution command, copy `start_timestamp` from `backend_started_at` and
+     `execution.started_at`, and bind `end_timestamp` to
+     `execution.finished_at`. These duplicate joins are intentional evidence
+     checks; their values must agree exactly.
+   - Populate the schema-defined coverage record only from observed metrics and
+     bind every metric to its exact evidence source. When coverage is not
+     available, select the schema's unavailable variant and record the actual
+     reason.
+   - Make `evidence_files` the exact file manifest for the campaign's durable
+     evidence. Include `paths.log` whenever `execution.started_at` is present;
+     include `paths.raw_results` whenever results are usable, coverage is
+     reported, or failures are present; and include every coverage
+     `source_ref`, property-result `evidence_refs` entry, failure
+     `raw_reproducer_ref`, and every present `deterministic_reproducer_ref`. List each
+     unique required path exactly once and no other path. Record each file's
+     exact immutable bytes, size, and digest as required by the pinned schema.
+     Operational corpus, cache, and reproducer directories are not implicitly
+     published; name every file that must survive through one of the typed
+     references above.
+   - Emit exactly one schema-defined property-result row for every implemented
+     record in `implemented-properties.json`, and no other property. Its status,
+     failure references, reason, coverage references, and evidence must reflect
+     this run exactly; every referenced failure and metric must resolve within
+     the sibling campaign record.
    - A later pass must never erase, downgrade, or overwrite an observed failure.
    - Finalize the backend record before deduplicating failures. Preserve the
      originating backend and raw record reference on every pre-deduplication
      failure and preserve all contributing backend provenance on the final
      deduplicated finding.
    - On every property-derived finding, put the exact failures it deduplicates
-     in a non-empty top-level `contributing_backend_failures` array. Across all
-     property-derived findings, these arrays must partition every
+     in the schema-defined `contributing_backend_failures` collection. Across
+     all property-derived findings, these collections must partition every
      property-derived failure from the sibling backend result records exactly
-     once: do not omit a failure or claim it in more than one finding. For the
-     shipped single-backend campaign, use each failure's exact `id` string. In
-     a project-owned multi-backend campaign, a plain ID is valid only when it is
-     unique across every sibling result record; otherwise use
-     `{"fuzzer_backend":"<backend>","failure_id":"<id>"}` to disambiguate it.
+     once: do not omit a failure or claim it in more than one finding. Every
+     entry binds the exact backend identity, failure ID, and campaign-result
+     artifact reference.
+     Copy `fuzzer_backend` and `failure_id` from the exact sibling campaign
+     result containing the failure. Set `raw_result_ref` to that authenticated
+     campaign result artifact (for this node, `recon-fuzzer-results.json`), not
+     to the backend-internal `paths.raw_results` evidence file. Plain failure ID
+     strings and omitted `raw_result_ref` values are invalid.
+   - Set each property-derived finding's `id` to the exact `failure_id` of one
+     entry in that finding's own `contributing_backend_failures`. When a finding
+     deduplicates several failures, pick one of them as the representative and
+     reuse its ID verbatim. A finding may not invent a new ID, reuse an ID from
+     another finding's partition, or use a descriptive slug.
    - Put `deduplication.pre_dedup_count` on every property-derived finding and
      set it to the number of entries in that finding's
      `contributing_backend_failures`. Every contributed failure's
@@ -163,21 +242,22 @@ Use this configured invariant testing fuzzer timeout:
      failures. Never borrow a property from a failure assigned to another
      finding.
    - Put backend provenance directly on every backend-derived object in
-     `findings.json`. Use the top-level string `fuzzer_backend` when exactly one
-     sibling result record contributed, or omit it and use a top-level unique,
-     lexicographically sorted `fuzzer_backends` array when several result
-     records contributed to the same deduplicated finding. Never emit both
-     fields. Copy each value exactly from the contributing result record's
-     `fuzzer_backend`; for this shipped single-backend campaign the value is
-     `"recon"`. Omit both fields when no backend contributed. Nested detail such
-     as `backend_provenance` may supplement these join fields but does not
-     replace them.
-   - When an implemented invariant property caused a failure, copy its exact
-     canonical ID from `implemented-properties.json` into a non-empty
-     `property_ids` array on that backend failure. Omit `property_ids` for
-     setup, harness, and other failures that did not originate from a catalog
-     property. Never invent or silently drop a property reference: a finding may
-     only name a property that some backend failure reported.
+     `findings.json`, using the schema-defined representation for the number of
+     contributing siblings. Copy every backend identity exactly from those
+     siblings, keep multiple identities unique and sorted, and claim no backend
+     when none contributed.
+   - Give every backend failure a unique identity and preserve its exact raw
+     reproducer, execution classification, entrypoint, sequence, precondition,
+     and deterministic-or-blocked evidence. When an implemented invariant
+     property caused a failure, copy its exact canonical ID from
+     `implemented-properties.json`. Associate no property IDs with setup,
+     harness, and other failures that did not originate from a catalog
+     property. Never
+     invent or silently drop a property reference: a finding may only name a
+     property that some backend failure reported.
+   - Bind deterministic reproducer evidence or the actual reproduction blocker
+     according to the pinned failure variant. A campaign whose results are not
+     usable cannot publish observed failures.
    - Give the finding that deduplicates a group of failures the ID of one of the
      failures in that group, so runtime validation can prove the joins. Findings
      are one per unique failure, never one per counterexample, so most backend
@@ -198,7 +278,8 @@ Use this configured invariant testing fuzzer timeout:
    - A unique failure is one distinct root cause, not one entry in the backend
      record: a fuzzer reports the same violation many times while shrinking. For
      each unique failure, write one finding object in `findings.json` and
-   include `stateful_failure_classification=<classification>` in `notes`,
+     include the typed stateful-failure classification entry from the
+     authoritative note-key list in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Keep harness defects, incomplete specifications, false positives, and
@@ -209,28 +290,30 @@ Use this configured invariant testing fuzzer timeout:
      the supervisor's expected `SIGINT` at that deadline counts as its expected
      terminal state.
    - `partial`: recon-fuzzer produced usable results but ended early, crashed,
-     or timed out before its expected terminal state.
+     reached a test limit, or was force-killed before its expected terminal
+     state.
    - `blocked`: recon-fuzzer produced no usable results.
-   - Use `termination_reason=configured-timeout` only after the full interval.
+   - Use `"termination_reason": "configured-timeout"` only after the full interval.
      Use exactly one of `test-limit`, `process-exit`, `launch-error`, or
      `host-force-kill` for other terminal conditions. An early run with usable
-     results is `partial`; a run without usable results is `blocked`. A partial
-     campaign must keep every usable finding and clearly report the early
-     termination. Record backend start/end timestamps so elapsed time is
-     computed from evidence rather than trusted from an authored duration.
-   - In the campaign summary, record the outcome, shared implemented
-     property-suite references, campaign-plan reference, the backend result
-     reference and status, final finding references, and reproducer or
-     reproduction-blocker references. Put the failure counts under exactly
-     `failure_counts.pre_deduplication` and
-     `failure_counts.post_deduplication`. `pre_deduplication` is the total
-     number of entries across every sibling backend record's `failures` array,
-     including failures without `property_ids`; `post_deduplication` is the
-     total number of objects in `findings.json`, including non-property
-     findings. These are artifact-population accounting counts. They make
-     omissions visible but do not prove that every finding is a distinct root
-     cause. The `contributing_backend_failures` arrays provide the separately
-     validated deduplication partition.
+     results is `partial`; a run without usable results is `blocked`.
+   - Choose the pinned summary schema's outcome variant that matches the
+     finalized backend execution and result usability. Preserve every usable
+     finding when execution ended early, crashed, or timed out, and clearly
+     report that termination. Record backend start/end timestamps so the
+     recorded budget can be checked against the campaign that actually ran.
+   - Whenever the chosen summary variant requires a termination or blocker
+     explanation, copy the actual reason from this run. Never synthesize a
+     generic fallback or infer a different reason from findings; downstream
+     reporting copies this authoritative reason exactly.
+   - Populate the schema-admitted summary references and backend status from
+     the exact sibling artifacts. Calculate the schema-defined pre-deduplication
+     count from every failure in every sibling backend result, including
+     failures without property IDs. Calculate the post-deduplication count from
+     every object in `findings.json`, including non-property findings. These
+     artifact-population counts make omissions visible but do not prove that
+     every finding is a distinct root cause; the contributed-backend-failure
+     records provide the separately validated deduplication partition.
 
 ## Required Outputs
 
@@ -238,25 +321,22 @@ Write the campaign plan to:
 
 {{artifact_dir}}/campaign-plan.json
 
+Its exact pinned schema is
+`{{schema_path}}/invariant-campaign-plan-v2.schema.json`.
+
 Write the backend-neutral structured summary to:
 
 {{artifact_dir}}/campaign-summary.json
 
-Include this exact failure-count object in the summary, using the populations
-defined above:
-
-```json
-{
-  "failure_counts": {
-    "pre_deduplication": 29,
-    "post_deduplication": 2
-  }
-}
-```
-
-The numbers above illustrate the shape only. Replace both with counts computed
-from this run's sibling backend records and `findings.json`; never copy the
-example values.
+Read the exact pinned schema at
+`{{schema_path}}/campaign-summary.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. Bind the
+summary outcome to the finalized backend state, preserve the authenticated
+implemented-property suite and campaign-plan references, and derive backend,
+finding, reproducer, and failure-count evidence from this run's sibling
+artifacts. The pre-deduplication count is the complete sibling backend failure
+population; the post-deduplication count is the complete findings population,
+as defined above.
 
 Write the backend-neutral campaign report to:
 
@@ -266,71 +346,58 @@ Write the recon-fuzzer result record to:
 
 {{artifact_dir}}/recon-fuzzer-results.json
 
-Use this exact top-level shape for the backend record:
+Read the exact pinned schema at
+`{{schema_path}}/property-campaign.schema.json`; it alone defines the JSON
+version, fields, types, enums, required members, and empty forms. Populate it
+only from this run's finalized Recon execution, plan, implementation handoff,
+findings, summary, and immutable evidence files.
 
-```json
-{
-  "schema_version": "ultrafuzz.property-campaign.v1",
-  "fuzzer_backend": "recon",
-  "configured_timeout_seconds": 3600,
-  "exact_command": "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --contract CryticTester --test-mode assertion --workers 32 --test-limit 18446744073709551615 --timeout 3600 --corpus-dir echidna --recon-corpus-dir recon-corpus",
-  "start_timestamp": "2026-01-01T00:00:00Z",
-  "end_timestamp": "2026-01-01T01:00:00Z",
-  "termination_reason": "configured-timeout",
-  "campaign_outcome": "complete",
-  "usable_results": true,
-  "failures": [
-    {
-      "id": "failure-1",
-      "status": "reproduced",
-      "property_ids": ["property-1"]
-    }
-  ]
-}
-```
-
-The timeout, worker count, command, timestamps, and outcome values above
-illustrate the required shape only. Replace them with exact evidence from this
-run; never copy the example values.
-
-Record the exact backend in `fuzzer_backend` when it ran, using the literal
-string `recon` so the final report join matches; omit that field when the
-backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
-empty `failures` array when none were observed. Each deduplicated finding must
-reuse the ID of one of the failures it covers, and must carry every property ID
-those failures reported and no others. Do not emit one finding per
-counterexample: a fuzzer reports the same violation many times, and the backend
-record already preserves every one of them. Property IDs are optional only for
-failures not caused by an implemented catalog property. References to an
-unknown or non-implemented canonical property fail artifact validation.
+The campaign-plan, implemented-properties, findings, and campaign-summary
+references must retain their exact declared artifact paths. The backend fields
+and record paths must match the authenticated plan;
+the implementation reference must name the authenticated ancestor handoff;
+and the findings and summary references must name the authenticated siblings.
+Bind the summary's backend evidence to the only configured backend, preserving
+the Recon identity, exact execution status, and authenticated result-artifact
+reference. Each deduplicated property finding must reuse the ID of one of the
+failures it covers and carry every property ID those failures reported and no
+others. Do not emit one finding per counterexample: a fuzzer reports the same
+violation many times, and the backend record already preserves every one of
+them. References to an unknown or non-implemented canonical property fail
+artifact validation. The exact durable-evidence reference set above is
+authoritative. The verifier captures each listed regular, non-hard-linked file
+once, checks its size and digest, and uses that same immutable byte snapshot for
+durable publication and marker digests.
 
 Write generated-test and reproducer records to:
 
 {{artifact_dir}}/generated-tests.json
 
+Read the exact pinned schema at `{{schema_path}}/generated-tests.schema.json`.
+Classify runnable reproducers separately from their non-runnable imported
+support, bind every entry to its exact mirrored companion, and use the
+schema-defined empty bundle only when no runnable reproducer was produced.
+
 Write structured findings to:
 
 {{output_findings_path}}
 
-The findings file must be a JSON array. Use an empty array only when the
-backend record is finalized and the campaign observed no fuzzer failures or
-deterministic reproducers.
+Read the exact pinned schema at `{{schema_path}}/findings.schema.json`. Use its
+schema-defined empty form only when the backend record is finalized and the
+campaign observed no fuzzer failures or deterministic reproducers.
 
-Every property-derived finding must include this accounting shape (the values
-below are illustrative):
+Finalize all interdependent JSON artifacts, then run every exact
+`ultrafuzz json validate` command displayed in the output contract. Correct an
+exit-1 artifact and rerun its command; after any later edit, rerun it again.
+Finish only after every displayed command exits 0. Do not repair, normalize,
+or convert an older campaign document to make validation pass.
 
-```json
-{
-  "id": "failure-1",
-  "property_ids": ["property-1"],
-  "contributing_backend_failures": ["failure-1", "failure-2"],
-  "deduplication": {
-    "pre_dedup_count": 2
-  }
-}
-```
-
-Compute the array and count from this run. Do not copy the example values.
+For every property-derived finding, compute the contributing backend-failure
+partition and pre-deduplication count from this run. Its finding ID must be the
+exact failure ID of one entry in its own partition. The property-ID union,
+backend identity, raw-result reference, and count must agree with those exact
+contributing failures. This cross-artifact accounting is contextual validation,
+not a second JSON shape definition.
 
 If you changed files in the isolated workspace, save a patch at:
 

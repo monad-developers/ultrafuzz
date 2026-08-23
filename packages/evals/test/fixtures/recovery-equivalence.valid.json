@@ -1,0 +1,18 @@
+{
+  "schema_version": "ultrafuzz.eval.recovery-equivalence.v1",
+  "policy": {
+    "max_repeated_model_executions": 0
+  },
+  "unique_model_backed_node_executions": 1,
+  "repeated_model_backed_node_executions": 0,
+  "recovery_reexecuted_model_backed_node_executions": 0,
+  "infrastructure_only_recovery_generations": 0,
+  "model_work_recovery_generations": 0,
+  "no_progress_recovery_generations": 0,
+  "recovery_generations": 0,
+  "observed_node_attempts": 1,
+  "observed_workflow_executions": 1,
+  "observed_controller_invocations": 1,
+  "classification": "clean",
+  "reason": null
+}

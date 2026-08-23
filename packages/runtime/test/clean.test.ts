@@ -129,3 +129,23 @@ test("cleanRun rejects missing confirmation, non-generated paths, state files, m
   assert.equal(symlink.ok, false);
   assert.ok(symlink.diagnostics.some((diagnostic) => diagnostic.code === "CLEAN_SELECTION_SYMLINK"));
 });
+
+test("cleanRun rejects malformed historical audit data before removing files", async () => {
+  const project = tempProject();
+  const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
+  const selectedArtifactDir = path.join(runRoot, "artifacts", nodeId);
+  const auditPath = path.join(project, ".ultrafuzz", "clean-audit.jsonl");
+  const malformedAudit = Buffer.from('{"schema_version":"1.0"}\n', "utf8");
+  fs.writeFileSync(auditPath, malformedAudit);
+
+  const result = await cleanRun({
+    projectRoot: project,
+    confirmed: true,
+    selections: [`runs/${runId}/artifacts/${nodeId}`]
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CLEAN_AUDIT_ROOT_UNSAFE"));
+  assert.equal(fs.existsSync(selectedArtifactDir), true);
+  assert.deepEqual(fs.readFileSync(auditPath), malformedAudit);
+});

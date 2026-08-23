@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:analysis-bundle-evaluation-metrics:1",
+  "title": "Ultrafuzz analysis bundle evaluation metrics",
+  "type": "object",
+  "required": ["schema_version", "row_count", "totals", "metrics"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+    "row_count": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "totals": {
+      "type": "object",
+      "required": [
+        "ground_truth_bug_count",
+        "finding_count",
+        "true_positives",
+        "false_positives",
+        "missed",
+        "human_review_queue_count",
+        "duplicate_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ground_truth_bug_count": { "$ref": "#/$defs/count" },
+        "finding_count": { "$ref": "#/$defs/count" },
+        "true_positives": { "$ref": "#/$defs/count" },
+        "false_positives": { "$ref": "#/$defs/count" },
+        "missed": { "$ref": "#/$defs/count" },
+        "human_review_queue_count": { "$ref": "#/$defs/count" },
+        "duplicate_count": { "$ref": "#/$defs/count" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "precision",
+        "recall",
+        "f1_score",
+        "full_match_rate",
+        "severity_accuracy",
+        "true_positive_accuracy",
+        "duplicate_rate",
+        "report_schema_valid_rate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "precision": { "$ref": "#/$defs/unit_metric" },
+        "recall": { "$ref": "#/$defs/unit_metric" },
+        "f1_score": { "$ref": "#/$defs/unit_metric" },
+        "full_match_rate": { "$ref": "#/$defs/unit_metric" },
+        "severity_accuracy": {
+          "anyOf": [{ "$ref": "#/$defs/unit_metric" }, { "type": "null" }]
+        },
+        "true_positive_accuracy": { "$ref": "#/$defs/unit_metric" },
+        "duplicate_rate": { "$ref": "#/$defs/unit_metric" },
+        "report_schema_valid_rate": { "$ref": "#/$defs/unit_metric" }
+      }
+    }
+  },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "unit_metric": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

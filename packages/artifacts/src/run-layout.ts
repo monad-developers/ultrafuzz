@@ -1,7 +1,19 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { createEventQueryFacadeInputs } from "./events.js";
+import { assertPlannedGraph, PLANNED_GRAPH_SCHEMA_VERSION, type PlannedGraphDocument } from "./planned-graph.js";
+import {
+  CONFIG_REDACTIONS_SCHEMA_VERSION,
+  RUN_METADATA_SCHEMA_VERSION,
+  SOURCE_RUN_SCHEMA_VERSION,
+  writeConfigRedactionsDocument,
+  writeRunMetadataDocument,
+  writeSourceRunDocument,
+  type ConfigRedactionsDocument,
+  type RunMetadataDocument
+} from "./run-documents.js";
 import { createInitialRunState, type NodeStateInput, type RunState, writeRunState } from "./state.js";
 import {
   assertNoSymlinkComponents,
@@ -13,7 +25,7 @@ import {
   writeJsonDurable
 } from "./safe-paths.js";
 
-export const RUN_LAYOUT_SCHEMA_VERSION = "1.0";
+export const RUN_LAYOUT_VERSION = "ultrafuzz.run-layout.v2" as const;
 
 export interface RunLayout {
   schemaVersion: string;
@@ -33,7 +45,6 @@ export interface RunLayout {
   usageLedgerPath: string;
   attemptLedgerPath: string;
   eventsIndexDir: string;
-  workspacesPath: string;
 }
 
 export interface CreateRunLayoutInput {
@@ -43,13 +54,13 @@ export interface CreateRunLayoutInput {
   sourceRunId?: string;
   createdAt?: string;
   resolvedConfigToml?: string;
-  configRedactions?: unknown;
-  graph?: unknown;
+  configRedactions?: ConfigRedactionsDocument;
+  graph?: PlannedGraphDocument;
   graphFingerprint?: string;
   configFingerprint?: string;
   state?: RunState;
   stateNodes?: NodeStateInput[];
-  runMetadata?: Record<string, unknown>;
+  runMetadata?: Omit<RunMetadataDocument, "schema_version" | "run_id" | "created_at" | "source_run_id">;
   overwrite?: boolean;
 }
 
@@ -91,41 +102,56 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
       createdAt,
       nodes: input.stateNodes
     });
+  const graph = assertPlannedGraph(
+    input.graph ?? {
+      schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+      graph_version: "4",
+      topology_version: 2,
+      groups: {},
+      nodes: []
+    }
+  );
 
-  writeJsonIfNeeded(
-    layout.runMetadataPath,
-    {
-      schema_version: RUN_LAYOUT_SCHEMA_VERSION,
+  if ((input.overwrite ?? false) || !fs.existsSync(layout.runMetadataPath)) {
+    writeRunMetadataDocument(layout.runMetadataPath, {
+      schema_version: RUN_METADATA_SCHEMA_VERSION,
       run_id: runId,
       created_at: createdAt,
       ...(sourceRunId === undefined ? {} : { source_run_id: sourceRunId }),
+      mode: "run",
+      workflow_ids: [],
+      redacted_config_fingerprint: sha256(input.resolvedConfigToml ?? ""),
+      forge_guard: {
+        enabled: false,
+        active: false,
+        virtual_memory_limit_kb: 1,
+        rayon_threads: 1
+      },
       ...(input.runMetadata ?? {})
-    },
-    input.overwrite ?? false
-  );
+    });
+  }
   if (sourceRunId !== undefined) {
-    writeJsonIfNeeded(
-      layout.sourceRunPath,
-      {
-        schema_version: RUN_LAYOUT_SCHEMA_VERSION,
+    if ((input.overwrite ?? false) || !fs.existsSync(layout.sourceRunPath)) {
+      writeSourceRunDocument(layout.sourceRunPath, {
+        schema_version: SOURCE_RUN_SCHEMA_VERSION,
         run_id: runId,
         source_run_id: sourceRunId,
         created_at: createdAt
-      },
-      input.overwrite ?? false
-    );
+      });
+    }
   }
   writeTextIfNeeded(layout.resolvedConfigPath, input.resolvedConfigToml ?? "", input.overwrite ?? false);
-  writeJsonIfNeeded(
-    layout.configRedactionsPath,
-    input.configRedactions ?? { schema_version: RUN_LAYOUT_SCHEMA_VERSION, redactions: [] },
-    input.overwrite ?? false
-  );
-  writeJsonIfNeeded(
-    layout.graphPath,
-    input.graph ?? { schema_version: RUN_LAYOUT_SCHEMA_VERSION, nodes: [] },
-    input.overwrite ?? false
-  );
+  if ((input.overwrite ?? false) || !fs.existsSync(layout.configRedactionsPath)) {
+    writeConfigRedactionsDocument(
+      layout.configRedactionsPath,
+      input.configRedactions ?? {
+        schemaVersion: CONFIG_REDACTIONS_SCHEMA_VERSION,
+        placeholder: "<redacted>",
+        entries: []
+      }
+    );
+  }
+  writeJsonIfNeeded(layout.graphPath, graph, input.overwrite ?? false);
   writeTextIfNeeded(layout.graphFingerprintPath, `${input.graphFingerprint ?? ""}\n`, input.overwrite ?? false);
   if ((input.overwrite ?? false) || !fs.existsSync(layout.statePath)) {
     writeRunState(layout, state);
@@ -140,11 +166,6 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
     writeFileDurable(layout.attemptLedgerPath, "");
   }
   writeJsonIfNeeded(
-    layout.workspacesPath,
-    { schema_version: RUN_LAYOUT_SCHEMA_VERSION, run_id: runId, workspaces: [] },
-    input.overwrite ?? false
-  );
-  writeJsonIfNeeded(
     path.join(layout.eventsIndexDir, "query-inputs.json"),
     createEventQueryFacadeInputs(layout),
     input.overwrite ?? false
@@ -157,7 +178,7 @@ export function layoutForRunRoot(root: string, runId = path.basename(root)): Run
   const safeRunId = validateSafeId(runId, "run ID");
   const absoluteRoot = path.resolve(root);
   return {
-    schemaVersion: RUN_LAYOUT_SCHEMA_VERSION,
+    schemaVersion: RUN_LAYOUT_VERSION,
     runId: safeRunId,
     root: absoluteRoot,
     artifactsDir: path.join(absoluteRoot, "artifacts"),
@@ -173,8 +194,7 @@ export function layoutForRunRoot(root: string, runId = path.basename(root)): Run
     eventsPath: path.join(absoluteRoot, "events.jsonl"),
     usageLedgerPath: path.join(absoluteRoot, "usage.jsonl"),
     attemptLedgerPath: path.join(absoluteRoot, "attempts.jsonl"),
-    eventsIndexDir: path.join(absoluteRoot, "events.index"),
-    workspacesPath: path.join(absoluteRoot, "workspaces.json")
+    eventsIndexDir: path.join(absoluteRoot, "events.index")
   };
 }
 
@@ -226,4 +246,8 @@ function nearestExistingAncestor(candidate: string): string {
     current = parent;
   }
   return current;
+}
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }

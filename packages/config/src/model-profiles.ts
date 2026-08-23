@@ -1,5 +1,6 @@
 import { z, type ZodIssue } from "zod/v4";
 import { DEFAULT_MODEL_PROFILE_ID, synthesizeDefaultModelProfile } from "./defaults.js";
+import { STOCK_AGENT_IDS } from "./agents.js";
 import { diagnostic, type ConfigDiagnostic, type ResolvedConfig } from "./types.js";
 
 export interface DefaultProfileOverrides {
@@ -11,20 +12,14 @@ export interface DefaultProfileOverrides {
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
-const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const SAFE_AGENT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
+const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 
-const profileIdSchema = z
-  .string()
-  .regex(PROFILE_ID_PATTERN)
-  .refine((value) => !value.split(/[\\/]/).some((segment) => segment === "..") && !value.includes(".."));
+const profileIdSchema = z.string().regex(PROFILE_ID_PATTERN);
 
-const safeAgentRefSchema = z
-  .string()
-  .regex(SAFE_AGENT_REF_PATTERN)
-  .refine((value) => !value.includes(".."));
+const safeAgentRefSchema = z.enum(STOCK_AGENT_IDS);
 
-const modelProfileSchema = z.object({
+const modelProfileSchema = z.strictObject({
   id: z.string(),
   agent: safeAgentRefSchema,
   model: z
@@ -38,44 +33,15 @@ const modelProfileSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(MODEL_TIMEOUT_SECONDS).optional()
 });
 
-const modelProfileIdsSchema = z.record(profileIdSchema, z.unknown());
-const modelProfileValuesSchema = z.record(z.string(), modelProfileSchema);
+const modelProfilesSchema = z.record(profileIdSchema, modelProfileSchema);
 
-const modelDefaultReferenceSchema = z
-  .object({
-    default: z.string(),
-    profiles: z.record(z.string(), z.unknown())
-  })
-  .superRefine((models, context) => {
-    if (models.profiles[models.default] === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["default"],
-        message: "CONFIG_MODEL_DEFAULT_UNKNOWN"
-      });
-    }
-  });
-
-const modelProfileIdMatchSchema = z
-  .record(z.string(), z.object({ id: z.string() }).passthrough())
-  .superRefine((profiles, context) => {
-    for (const [id, profile] of Object.entries(profiles).sort()) {
-      if (profile.id !== id) {
-        context.addIssue({
-          code: "custom",
-          path: [id, "id"],
-          message: "CONFIG_MODEL_PROFILE_ID_MISMATCH"
-        });
-      }
-    }
-  });
+type ModelProfileIssue = Pick<ZodIssue, "code" | "message" | "path">;
 
 export function validateModelProfiles(config: ResolvedConfig): ConfigDiagnostic[] {
   const issues = [
-    ...schemaIssues(modelDefaultReferenceSchema, config.models),
-    ...schemaIssues(modelProfileIdMatchSchema, config.models.profiles),
-    ...schemaIssues(modelProfileIdsSchema, config.models.profiles),
-    ...schemaIssues(modelProfileValuesSchema, config.models.profiles)
+    ...modelProfileSemanticIssues(config),
+    ...schemaIssues(modelProfilesSchema, config.models.profiles),
+    ...invalidKeyProfileValueIssues(config)
   ].sort(compareModelProfileIssues);
   return [...issues.map((issue) => modelProfileDiagnostic(issue, config)), ...validateProviderModelProfiles(config)];
 }
@@ -86,8 +52,10 @@ export function syncDefaultModelProfile(config: ResolvedConfig): void {
     return;
   }
 
-  const existingAgent = config.models.profiles[defaultId]?.agent;
-  if (!config.models.profiles[defaultId] || config.models.synthesizedDefault) {
+  const existingAgent = Object.hasOwn(config.models.profiles, defaultId)
+    ? config.models.profiles[defaultId]?.agent
+    : undefined;
+  if (!Object.hasOwn(config.models.profiles, defaultId) || config.models.synthesizedDefault) {
     config.models.profiles[defaultId] = synthesizeDefaultModelProfile(existingAgent);
     config.models.synthesizedDefault = true;
   }
@@ -98,10 +66,18 @@ export function validProfileId(id: string): boolean {
 }
 
 export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: DefaultProfileOverrides): void {
+  applyModelProfileOverrides(config, config.models.default, overrides);
+}
+
+export function applyModelProfileOverrides(
+  config: ResolvedConfig,
+  profileId: string,
+  overrides: DefaultProfileOverrides
+): void {
   if (overrides.agent === undefined && overrides.model === undefined && overrides.reasoning === undefined) {
     return;
   }
-  const profile = config.models.profiles[config.models.default];
+  const profile = Object.hasOwn(config.models.profiles, profileId) ? config.models.profiles[profileId] : undefined;
   if (profile === undefined) {
     return;
   }
@@ -125,12 +101,35 @@ export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: 
   }
 }
 
-function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
+function modelProfileSemanticIssues(config: ResolvedConfig): ModelProfileIssue[] {
+  const issues: ModelProfileIssue[] = [];
+  if (!Object.hasOwn(config.models.profiles, config.models.default)) {
+    issues.push({ code: "custom", path: ["default"], message: "CONFIG_MODEL_DEFAULT_UNKNOWN" });
+  }
+  for (const [id, profile] of Object.entries(config.models.profiles).sort()) {
+    if (profile.id !== id) {
+      issues.push({ code: "custom", path: [id, "id"], message: "CONFIG_MODEL_PROFILE_ID_MISMATCH" });
+    }
+  }
+  return issues;
+}
+
+function invalidKeyProfileValueIssues(config: ResolvedConfig): ModelProfileIssue[] {
+  return Object.entries(config.models.profiles).flatMap(([id, profile]) => {
+    if (profileIdSchema.safeParse(id).success) return [];
+    return schemaIssues(modelProfileSchema, profile).map((issue) => ({
+      ...issue,
+      path: [id, ...issue.path]
+    }));
+  });
+}
+
+function schemaIssues(schema: z.ZodType, value: unknown): ModelProfileIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;
 }
 
-function modelProfileDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {
+function modelProfileDiagnostic(issue: ModelProfileIssue, config: ResolvedConfig): ConfigDiagnostic {
   const code = modelProfileDiagnosticCode(issue);
   return diagnostic(
     code,
@@ -140,7 +139,7 @@ function modelProfileDiagnostic(issue: ZodIssue, config: ResolvedConfig): Config
   );
 }
 
-function modelProfileDiagnosticCode(issue: ZodIssue): string {
+function modelProfileDiagnosticCode(issue: ModelProfileIssue): string {
   if (issue.code === "custom" && issue.message.startsWith("CONFIG_")) {
     return issue.message;
   }
@@ -161,16 +160,17 @@ function modelProfileDiagnosticCode(issue: ZodIssue): string {
   }
 }
 
-function modelProfileDiagnosticMessage(code: string, issue: ZodIssue, config: ResolvedConfig): string {
+function modelProfileDiagnosticMessage(code: string, issue: ModelProfileIssue, config: ResolvedConfig): string {
   const id = modelProfileId(issue);
-  const profile = id === undefined ? undefined : config.models.profiles[id];
+  const profile =
+    id !== undefined && Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
   switch (code) {
     case "CONFIG_MODEL_DEFAULT_UNKNOWN":
       return `models.default references unknown model profile \`${config.models.default}\``;
     case "CONFIG_MODEL_PROFILE_ID_MISMATCH":
       return `model profile key \`${id ?? ""}\` must match profile id \`${profile?.id ?? ""}\``;
     case "CONFIG_MODEL_AGENT_INVALID":
-      return `model profile \`${id ?? ""}\` references invalid agent \`${String(profile?.agent)}\``;
+      return `model profile \`${id ?? ""}\` must reference a packaged stock agent, not \`${String(profile?.agent)}\``;
     case "CONFIG_MODEL_NAME_EMPTY":
       return `model profile \`${id ?? ""}\` model cannot be empty`;
     case "CONFIG_MODEL_REASONING_EMPTY":
@@ -182,7 +182,7 @@ function modelProfileDiagnosticMessage(code: string, issue: ZodIssue, config: Re
   }
 }
 
-function modelProfileDiagnosticPath(issue: ZodIssue): string[] {
+function modelProfileDiagnosticPath(issue: ModelProfileIssue): string[] {
   if (issue.path[0] === "default") {
     return ["models", "default"];
   }
@@ -194,7 +194,7 @@ function modelProfilePathSegment(segment: string): string {
   return segment === "timeoutSeconds" ? "timeout_seconds" : segment;
 }
 
-function modelProfileId(issue: ZodIssue): string | undefined {
+function modelProfileId(issue: ModelProfileIssue): string | undefined {
   if (issue.path[0] === "default") {
     return undefined;
   }
@@ -235,11 +235,24 @@ function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic
         )
       );
     }
+    if (
+      profile.agent === "OpenRouterAgent" &&
+      (profile.model === undefined || profile.model.length > 256 || !OPENROUTER_MODEL_ID_PATTERN.test(profile.model))
+    ) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_OPENROUTER_ID_INVALID",
+          `OpenRouter model profile \`${id}\` model must be a non-empty catalogue ID without whitespace or control characters and at most 256 characters`,
+          ["models", id, "model"],
+          "validation"
+        )
+      );
+    }
   }
   return diagnostics;
 }
 
-function compareModelProfileIssues(left: ZodIssue, right: ZodIssue): number {
+function compareModelProfileIssues(left: ModelProfileIssue, right: ModelProfileIssue): number {
   const leftRank = modelProfileIssueRank(left);
   const rightRank = modelProfileIssueRank(right);
   return (
@@ -247,7 +260,7 @@ function compareModelProfileIssues(left: ZodIssue, right: ZodIssue): number {
   );
 }
 
-function modelProfileIssueRank(issue: ZodIssue): { section: number; id: string; field: number } {
+function modelProfileIssueRank(issue: ModelProfileIssue): { section: number; id: string; field: number } {
   if (issue.path[0] === "default") {
     return { section: 0, id: "", field: 0 };
   }
@@ -258,7 +271,7 @@ function modelProfileIssueRank(issue: ZodIssue): { section: number; id: string; 
   };
 }
 
-function modelProfileFieldRank(issue: ZodIssue): number {
+function modelProfileFieldRank(issue: ModelProfileIssue): number {
   const code = modelProfileDiagnosticCode(issue);
   switch (code) {
     case "CONFIG_MODEL_PROFILE_ID_MISMATCH":

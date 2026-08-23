@@ -1,4 +1,4 @@
-import fs from "node:fs";
+import { PROJECT_CONFIG_SCHEMA_VERSION } from "@ultrafuzz/config";
 
 import {
   DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
@@ -15,7 +15,8 @@ export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: numbe
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
   const deepseek = agentToml(model, "DeepSeekAgent", "deepseek");
   const kimi = agentToml(model, "KimiAgent", "kimi");
-  return `schema_version = "1.0"
+  const openrouter = agentToml(model, "OpenRouterAgent", "openrouter");
+  return `schema_version = "${PROJECT_CONFIG_SCHEMA_VERSION}"
 audit_profile = ${tomlString(auditProfile)}
 ${dynamicStrategiesEnumerator}
 [project]
@@ -46,6 +47,8 @@ ${deepseek}
 
 ${kimi}
 
+${openrouter}
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true
@@ -65,18 +68,6 @@ provider = "none"
 `;
 }
 
-export function capModalTargetTopologyTimeouts(topologyPath: string, maximumSeconds: number): void {
-  if (!Number.isInteger(maximumSeconds) || maximumSeconds <= 0) {
-    throw new Error("Modal target topology timeout must be a positive integer");
-  }
-  const topology = fs.readFileSync(topologyPath, "utf8");
-  const capped = topology.replace(
-    /^([\t ]*timeout_seconds:[\t ]*)(\d+)[\t ]*$/gmu,
-    (_line, prefix: string, raw: string) => `${prefix}${Math.min(Number(raw), maximumSeconds)}`
-  );
-  fs.writeFileSync(topologyPath, capped, "utf8");
-}
-
 function modelProfileToml(model: ModalModelSpec): string {
   return `agent = ${tomlString(model.agent)}
 model = ${tomlString(model.model)}
@@ -85,17 +76,22 @@ reasoning = ${tomlString(model.reasoning)}`;
 
 function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"], provider: ModelProvider): string {
   const selected = selectedModel.agent === agent;
-  const auth = selected ? selectedModel.auth_mode : provider === "deepseek" ? "api-key" : "subscription";
+  const auth = selected
+    ? selectedModel.auth_mode
+    : provider === "deepseek" || provider === "openrouter"
+      ? "api-key"
+      : "subscription";
   if (auth === "api-key") {
     return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
-  return `[agents.${agent}]\nauth = "subscription"\nconfig_dir = ${tomlString(remoteAuthDir(provider))}`;
+  return `[agents.${agent}]\nauth = "subscription"`;
 }
 
 function apiKeyEnv(provider: ModelProvider): string {
   if (provider === "openai") return "OPENAI_API_KEY";
   if (provider === "anthropic") return "ANTHROPIC_API_KEY";
   if (provider === "deepseek") return "DEEPSEEK_API_KEY";
+  if (provider === "openrouter") return "OPENROUTER_API_KEY";
   return "KIMI_API_KEY";
 }
 

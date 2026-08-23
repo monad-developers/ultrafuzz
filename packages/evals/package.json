@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/evals",
   "version": "0.1.0",
   "private": true,
-  "description": "Evaluation suites, scoring, and benchmark reporting for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,7 +17,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompts.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompts.mjs && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
+    "schema:check": "pnpm build",
     "test": "pnpm --filter @ultrafuzz/evals^... build && vitest run",
     "typecheck": "pnpm --filter @ultrafuzz/evals^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
@@ -25,19 +26,11 @@
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
+    "proper-lockfile": "4.1.2",
     "yaml": "^2.8.0",
     "zod": "^4.4.3"
   },
-  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
-    "directory": "packages/evals"
-  },
-  "bugs": {
-    "url": "https://github.com/monad-developers/ultrafuzz/issues"
-  },
-  "engines": {
-    "node": ">=22.19.0"
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
   }
 }

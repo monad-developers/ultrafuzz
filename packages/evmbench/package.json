@@ -2,7 +2,7 @@
   "name": "@ultrafuzz/evmbench",
   "version": "0.1.0",
   "private": true,
-  "description": "Pinned EVM benchmark manifests and tooling for Ultrafuzz",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,12 +17,13 @@
   ],
   "scripts": {
     "benchmark": "pnpm run build && node dist/cli.js",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && rm -rf dist/schema && cp -R src/schema dist/schema",
     "lock": "pnpm run build && node dist/update-lock.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
     "yaml": "^2.8.0",
     "zod": "^4.4.3"
   },

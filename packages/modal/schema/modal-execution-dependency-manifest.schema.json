@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:execution-dependency-manifest:1",
+  "title": "Ultrafuzz workflow execution dependency manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.workflow-execution-dependencies.v1" },
+    "modules": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/executionDependencyTarget" }
+    },
+    "packages": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/executionDependencyPackage" }
+    },
+    "issuers": {
+      "type": "array",
+      "maxItems": 200000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/executionDependencyIssuer" }
+    },
+    "executable_paths": {
+      "type": "array",
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/snapshotRelativePath" }
+    },
+    "smithers_bin": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/snapshotRelativePath" }
+  }
+}

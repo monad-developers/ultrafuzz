@@ -11,6 +11,7 @@ import {
   projectRoot,
   type CommandResult
 } from "../command-shared.js";
+import { toCliWorkflowNodeData } from "../cli-contracts.js";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 5;
 
@@ -46,7 +47,12 @@ export default class Node extends Command {
     };
     if (flags.watch !== true) {
       const result = await getWorkflowNode(query);
-      emitCommandResult(this, "node", commandFromRuntime("node", result, renderNode), flags.json === true);
+      emitCommandResult(
+        this,
+        "node",
+        commandFromRuntime("node", result, renderNode, toCliWorkflowNodeData),
+        flags.json === true
+      );
       return;
     }
     const json = flags.json === true;
@@ -58,7 +64,7 @@ export default class Node extends Command {
       }
     });
     if (!result.ok) {
-      emitWatchFailure("node", commandFromRuntime("node", result, renderNode), json);
+      emitWatchFailure("node", commandFromRuntime("node", result, renderNode, toCliWorkflowNodeData), json);
     }
   }
 }
@@ -69,7 +75,7 @@ function emitWatchSnapshot(value: WorkflowNodeValue, json: boolean): void {
     io.stdout.write(renderNode(value));
     return;
   }
-  const result: CommandResult = { ok: true, command: "node", data: value, diagnostics: [] };
+  const result: CommandResult = { ok: true, command: "node", data: toCliWorkflowNodeData(value), diagnostics: [] };
   io.stdout.write(`${JSON.stringify(envelope("node", result))}\n`);
 }
 

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:artifacts:trusted-cli:1",
+  "title": "Ultrafuzz trusted CLI identity",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "cli_entrypoint",
+    "cli_sha256",
+    "launcher_sha256",
+    "validator_build",
+    "schema_bundle_sha256"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.trusted-cli.v1" },
+    "cli_entrypoint": { "type": "string", "minLength": 1 },
+    "cli_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "launcher_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "validator_build": { "type": "string", "minLength": 1 },
+    "schema_bundle_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

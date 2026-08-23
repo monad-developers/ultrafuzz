@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import ts from "typescript";
+
+import { assertRegularFileInside, parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 
 /**
  * Replaying a dependency chain into a RESUMED task worktree (issue #312).
@@ -135,8 +138,11 @@ test("#312 an unrecognised worktree tree replays everything and lets the patch c
 });
 
 /**
- * Lift `materializeWorkspacePatchDependencies` itself out of the template and run it against stubbed
- * collaborators, so the WIRING is pinned and not just the rule.
+ * Lift `materializeWorkspacePatchDependencies` itself out of the template, together with its real
+ * path-existence, regular-file, immutable-snapshot, UTF-8, and strict-JSON helpers. The fixture uses
+ * real files and the same imported artifact primitives as the generated workflow; only replay effects
+ * such as tree capture and patch application are controlled collaborators. This pins the WIRING and
+ * its trust boundary, not just the replay rule.
  *
  * Without this, deleting the `firstDependencyRequiringReplay` call and replaying from zero leaves every
  * test above green — the exact shape of gap that survived mutation testing on the previous change here.
@@ -152,74 +158,252 @@ function loadMaterializer(
     assert.ok(end > start, `unterminated helper ${name}`);
     return source.slice(start, end + 3);
   };
+  const sliceConstant = (name: string): string => {
+    const start = source.indexOf(`\nconst ${name} = `);
+    assert.ok(start >= 0, `the template does not declare a top-level ${name}`);
+    const end = source.indexOf(";\n", start);
+    assert.ok(end > start, `unterminated constant ${name}`);
+    return source.slice(start + 1, end + 1);
+  };
   const declaration = [
+    sliceConstant("MAX_VERIFIED_ARTIFACT_BYTES"),
+    slice("isStrictlyInsideDirectory"),
+    slice("isMissingPathError"),
+    slice("pathEntryExists"),
+    slice("resolveRegularArtifactFile"),
+    slice("readBoundedRegularArtifactSnapshot"),
+    slice("decodeStrictUtf8Snapshot"),
+    slice("parseStrictJsonSnapshot"),
     slice("firstDependencyRequiringReplay"),
+    // The production helper receives this projection from the sealed dependency
+    // admission established during input verification. Rebuild the same minimal
+    // projection from the real fixture files so these replay tests keep exercising
+    // their regular-file, immutable-snapshot, UTF-8, and strict-JSON boundaries.
+    `function assertDependencyArtifactAdmissionCurrent(task) {
+      const directories = [...task.dependencyArtifactDirs];
+      const snapshotsByProducerAttempt = new Map(
+        directories.map((dependency) => {
+          const patchCandidate = path.join(dependency, "workspace.patch");
+          const manifestCandidate = path.join(dependency, "workspace-patch.json");
+          const patchPresent = pathEntryExists(patchCandidate);
+          const manifestPresent = pathEntryExists(manifestCandidate);
+          if (patchPresent !== manifestPresent) {
+            throw new Error(\`artifact-contract failure: workspace patch handoff is incomplete \${dependency}\`);
+          }
+          const artifacts = new Map();
+          if (patchPresent && manifestPresent) {
+            const patchPath = resolveRegularArtifactFile(
+              dependency,
+              patchCandidate,
+              "artifact-contract failure: workspace patch is not a regular file"
+            );
+            const manifestPath = resolveRegularArtifactFile(
+              dependency,
+              manifestCandidate,
+              "artifact-contract failure: workspace patch manifest is not a regular file"
+            );
+            const manifestSnapshot = readBoundedRegularArtifactSnapshot(
+              dependency,
+              manifestPath,
+              "artifact-contract failure: workspace patch manifest is not a regular file",
+              MAX_VERIFIED_ARTIFACT_BYTES,
+              true
+            );
+            let manifest;
+            try {
+              manifest = parseStrictJsonSnapshot(
+                manifestSnapshot,
+                \`artifact-contract failure: workspace patch manifest is malformed \${manifestPath}\`
+              );
+            } catch (error) {
+              throw new Error(
+                \`artifact-contract failure: workspace patch manifest is malformed \${manifestPath}\`,
+                { cause: error }
+              );
+            }
+            artifacts.set("workspace.patch", {
+              contract: "ultrafuzz/text@1",
+              value: decodeStrictUtf8Snapshot(
+                readBoundedRegularArtifactSnapshot(
+                  dependency,
+                  patchPath,
+                  "artifact-contract failure: workspace patch is not a regular file",
+                  MAX_VERIFIED_ARTIFACT_BYTES
+                ),
+                \`artifact-contract failure: workspace patch is malformed \${patchPath}\`
+              )
+            });
+            artifacts.set("workspace-patch.json", {
+              contract: "ultrafuzz/workspace-patch@1",
+              value: manifest
+            });
+          }
+          return [path.basename(dependency), { artifacts }];
+        })
+      );
+      return { directories, snapshotsByProducerAttempt };
+    }`,
     slice("materializeWorkspacePatchDependencies"),
     "\nreturn materializeWorkspacePatchDependencies;"
   ].join("\n");
   const emitted = ts.transpileModule(declaration, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
   }).outputText;
-  const names = Object.keys(collaborators);
-  return new Function(...names, emitted)(...names.map((name) => collaborators[name])) as (
+  const injected = {
+    path,
+    lstatSync: fs.lstatSync,
+    statSync: fs.statSync,
+    realpathSync: fs.realpathSync,
+    assertRegularFileInside,
+    readRegularFileSnapshot,
+    parseStrictJsonBytes,
+    ...collaborators
+  };
+  const names = Object.keys(injected);
+  return new Function(...names, emitted)(...Object.values(injected)) as (
     task: unknown,
     workspaceRoot: string,
     replay: boolean
   ) => void;
 }
 
-function replayScenario(worktreeTree: string, replay = true): string[] {
-  const applied: string[] = [];
-  const chain = [
-    { dir: "/dep/setup-foundry", base: PRISTINE, result: SETUP_FOUNDRY },
-    { dir: "/dep/base-test-setup", base: SETUP_FOUNDRY, result: SETUP_FOUNDRY },
-    { dir: "/dep/stateful-invariant-setup", base: SETUP_FOUNDRY, result: INVARIANT_SETUP },
-    { dir: "/dep/stateful-invariant-handlers", base: INVARIANT_SETUP, result: COVERAGE },
-    { dir: "/dep/stateful-invariant-coverage", base: COVERAGE, result: COVERAGE }
-  ];
-  const byPath = new Map(chain.map((entry) => [entry.dir, entry]));
-  const task = {
-    attemptId: "stateful-invariant-implement-properties",
-    dependencyArtifactDirs: chain.map((entry) => entry.dir),
-    outputs: [],
-    metadata: { artifacts: { dir: "/artifacts/implement-properties" } }
+type DependencyFixtureEntry = Manifest & {
+  attemptId: string;
+  patch?: string | Buffer;
+  manifest?: string | Buffer;
+  patchPresent?: boolean;
+  manifestPresent?: boolean;
+};
+
+type DependencyFixture = {
+  root: string;
+  workspaceRoot: string;
+  artifactRoot: string;
+  dependencyArtifactDirs: string[];
+  task: {
+    attemptId: string;
+    dependencyArtifactDirs: string[];
+    outputs: never[];
+    metadata: { artifacts: { dir: string } };
   };
-  // The worktree tree ADVANCES as patches land, exactly as it does on a real run. A stub that returns a
-  // constant hides a real defect: the post-agent branch re-reads the tree every iteration precisely
-  // because each applied patch changes it, and with a frozen stub, hoisting that read out of the loop is
-  // indistinguishable from leaving it in.
-  let currentTree = worktreeTree;
-  const materialize = loadMaterializer({
-    path,
-    taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
-    readFileSync: (target: string) => {
-      const entry = byPath.get(path.dirname(target));
-      assert.ok(entry !== undefined, target);
-      if (target.endsWith("workspace-patch.json")) {
-        return JSON.stringify({ base_tree: entry.base, result_tree: entry.result });
+};
+
+function patchText(attemptId: string): string {
+  return `patch for /dep/${attemptId}`;
+}
+
+function withDependencyFixture<T>(
+  entries: readonly DependencyFixtureEntry[],
+  body: (fixture: DependencyFixture) => T
+): T {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf312-")));
+  try {
+    const workspaceRoot = path.join(root, "workspace");
+    const artifactRoot = path.join(root, "artifacts", "implement-properties");
+    const dependenciesRoot = path.join(root, "dependencies");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    fs.mkdirSync(dependenciesRoot, { recursive: true });
+    const dependencyArtifactDirs = entries.map((entry) => {
+      const dependency = path.join(dependenciesRoot, entry.attemptId);
+      fs.mkdirSync(dependency);
+      if (entry.patchPresent !== false) {
+        fs.writeFileSync(path.join(dependency, "workspace.patch"), entry.patch ?? patchText(entry.attemptId));
       }
-      return `patch for ${entry.dir}`;
-    },
-    resolveRegularArtifactFile: (_dir: string, candidate: string) => candidate,
-    captureWorkspaceTree: () => currentTree,
-    applyWorkspacePatch: (_root: string, capture: { patch: string; manifest: { result_tree: string } }) => {
-      applied.push(capture.patch);
-      currentTree = capture.manifest.result_tree;
-    },
+      if (entry.manifestPresent !== false) {
+        fs.writeFileSync(
+          path.join(dependency, "workspace-patch.json"),
+          entry.manifest ?? JSON.stringify({ base_tree: entry.base_tree, result_tree: entry.result_tree })
+        );
+      }
+      return dependency;
+    });
+    return body({
+      root,
+      workspaceRoot,
+      artifactRoot,
+      dependencyArtifactDirs,
+      task: {
+        attemptId: "stateful-invariant-implement-properties",
+        dependencyArtifactDirs,
+        outputs: [],
+        metadata: { artifacts: { dir: artifactRoot } }
+      }
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function materializerCollaborators(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    taskSpecs: [],
+    captureWorkspaceTree: () => PRISTINE,
+    applyWorkspacePatch: () => undefined,
     workspacePatchPreparationTrees: new Map<string, string>(),
     workspacePatchBaselineTrees: new Map<string, string>(),
-    // Post-agent preparation fails closed without a durable preparation record (#219), so the stub must
-    // supply one. It plays no part in the replay decision under test.
     readWorkspacePatchPreparation: () => "preparation-tree",
     writeWorkspacePatchPreparation: () => undefined,
     readWorkspacePatchBaseline: () => undefined,
     writeWorkspacePatchBaseline: () => undefined,
     validateWorkspacePatchCapture: () => undefined,
-    taskPublishesWorkspacePatch: () => false
+    taskPublishesWorkspacePatch: () => false,
+    ...overrides
+  };
+}
+
+function loadFixtureMaterializer(
+  entries: readonly DependencyFixtureEntry[],
+  overrides: Record<string, unknown> = {}
+): (task: unknown, workspaceRoot: string, replay: boolean) => void {
+  return loadMaterializer(
+    materializerCollaborators({
+      taskSpecs: entries.map((entry) => ({ attemptId: entry.attemptId })),
+      ...overrides
+    })
+  );
+}
+
+function causalErrorText(error: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    messages.push(current.message);
+    current = current.cause;
+  }
+  return messages.join("\n");
+}
+
+function replayScenario(worktreeTree: string, replay = true): string[] {
+  const chain = [
+    { attemptId: "setup-foundry", base_tree: PRISTINE, result_tree: SETUP_FOUNDRY },
+    { attemptId: "base-test-setup", base_tree: SETUP_FOUNDRY, result_tree: SETUP_FOUNDRY },
+    { attemptId: "stateful-invariant-setup", base_tree: SETUP_FOUNDRY, result_tree: INVARIANT_SETUP },
+    { attemptId: "stateful-invariant-handlers", base_tree: INVARIANT_SETUP, result_tree: COVERAGE },
+    { attemptId: "stateful-invariant-coverage", base_tree: COVERAGE, result_tree: COVERAGE }
+  ];
+  return withDependencyFixture(chain, (fixture) => {
+    const applied: string[] = [];
+    // The worktree tree ADVANCES as patches land, exactly as it does on a real run. A stub that returns a
+    // constant hides a real defect: the post-agent branch re-reads the tree every iteration precisely
+    // because each applied patch changes it, and with a frozen stub, hoisting that read out of the loop is
+    // indistinguishable from leaving it in.
+    let currentTree = worktreeTree;
+    const materialize = loadMaterializer(
+      materializerCollaborators({
+        taskSpecs: chain.map((entry) => ({ attemptId: entry.attemptId })),
+        captureWorkspaceTree: () => currentTree,
+        applyWorkspacePatch: (_root: string, capture: { patch: string; manifest: { result_tree: string } }) => {
+          applied.push(capture.patch);
+          currentTree = capture.manifest.result_tree;
+        }
+      })
+    );
+    materialize(fixture.task, fixture.workspaceRoot, replay);
+    return applied;
   });
-  materialize(task, "/workspace", replay);
-  return applied;
 }
 
 test("#312 replay applies every dependency when the worktree is at the pinned baseline", () => {
@@ -244,6 +428,161 @@ test("#312 replay resumes mid-chain from the first dependency the worktree does 
     "patch for /dep/stateful-invariant-handlers",
     "patch for /dep/stateful-invariant-coverage"
   ]);
+});
+
+test("#312 dependency replay rejects duplicate manifest keys through the generated strict JSON reader", () => {
+  const entry: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY,
+    manifest: `{"base_tree":"${PRISTINE}","base_tree":"${SETUP_FOUNDRY}","result_tree":"${SETUP_FOUNDRY}"}`
+  };
+  withDependencyFixture([entry], (fixture) => {
+    const applied: string[] = [];
+    const materialize = loadFixtureMaterializer([entry], {
+      applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch)
+    });
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true),
+      (error) => {
+        assert.match(causalErrorText(error), /duplicate property name/u);
+        return true;
+      }
+    );
+    assert.deepEqual(applied, []);
+  });
+});
+
+test("#312 dependency replay rejects invalid UTF-8 before applying a patch", () => {
+  const entry: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY,
+    patch: Buffer.from([0xc3, 0x28])
+  };
+  withDependencyFixture([entry], (fixture) => {
+    const applied: string[] = [];
+    const materialize = loadFixtureMaterializer([entry], {
+      applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch)
+    });
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true),
+      /workspace patch is malformed .*file is not valid UTF-8/u
+    );
+    assert.deepEqual(applied, []);
+  });
+});
+
+test("#312 dependency replay rejects symlinked and non-regular handoff files", () => {
+  const entry: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY
+  };
+  for (const unsafe of ["symlink", "directory"] as const) {
+    withDependencyFixture([entry], (fixture) => {
+      const dependency = fixture.dependencyArtifactDirs[0]!;
+      if (unsafe === "symlink") {
+        const patchPath = path.join(dependency, "workspace.patch");
+        const outside = path.join(fixture.root, "outside.patch");
+        fs.writeFileSync(outside, "outside patch\n");
+        fs.unlinkSync(patchPath);
+        fs.symlinkSync(outside, patchPath);
+      } else {
+        const manifestPath = path.join(dependency, "workspace-patch.json");
+        fs.unlinkSync(manifestPath);
+        fs.mkdirSync(manifestPath);
+      }
+      const applied: string[] = [];
+      const materialize = loadFixtureMaterializer([entry], {
+        applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch)
+      });
+      assert.throws(
+        () => materialize(fixture.task, fixture.workspaceRoot, true),
+        /workspace patch(?: manifest)? is not a regular file/u,
+        unsafe
+      );
+      assert.deepEqual(applied, [], unsafe);
+    });
+  }
+});
+
+test("#312 dependency replay rejects a file that changes during its immutable-byte capture", () => {
+  const entry: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY
+  };
+  withDependencyFixture([entry], (fixture) => {
+    let mutated = false;
+    const materialize = loadFixtureMaterializer([entry], {
+      readRegularFileSnapshot: (target: string, maxBytes: number) => {
+        const bytes = readRegularFileSnapshot(target, maxBytes);
+        if (!mutated && path.basename(target) === "workspace-patch.json") {
+          fs.appendFileSync(target, " ");
+          mutated = true;
+        }
+        return bytes;
+      }
+    });
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true),
+      /workspace patch manifest is not a regular file: file changed while it was captured/u
+    );
+    assert.equal(mutated, true);
+  });
+});
+
+test("#312 only causal ENOENT makes a dependency patch handoff absent", () => {
+  const absent: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY,
+    patchPresent: false,
+    manifestPresent: false
+  };
+  withDependencyFixture([absent], (fixture) => {
+    const applied: string[] = [];
+    const materialize = loadFixtureMaterializer([absent], {
+      applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch)
+    });
+    materialize(fixture.task, fixture.workspaceRoot, true);
+    assert.deepEqual(applied, []);
+  });
+
+  const incomplete: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY,
+    manifestPresent: false
+  };
+  withDependencyFixture([incomplete], (fixture) => {
+    const materialize = loadFixtureMaterializer([incomplete]);
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true),
+      /workspace patch handoff is incomplete/u
+    );
+  });
+
+  const inaccessible: DependencyFixtureEntry = {
+    attemptId: "setup-foundry",
+    base_tree: PRISTINE,
+    result_tree: SETUP_FOUNDRY
+  };
+  withDependencyFixture([inaccessible], (fixture) => {
+    const deniedPath = path.join(fixture.dependencyArtifactDirs[0]!, "workspace.patch");
+    const denied = Object.assign(new Error("permission denied by fixture"), { code: "EACCES" });
+    const materialize = loadFixtureMaterializer([inaccessible], {
+      lstatSync: (target: fs.PathLike) => {
+        if (String(target) === deniedPath) throw denied;
+        return fs.lstatSync(target);
+      }
+    });
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true),
+      (error) => error === denied
+    );
+  });
 });
 
 test("#312 post-agent preparation keeps its own rule and is not second-guessed by the chain skip", () => {
@@ -287,52 +626,29 @@ test("#312 every dependency capture is validated even when replay skips it", () 
   // All of the capture checks -- manifest schema, object ids, digest, symlink/submodule, sensitive paths
   // -- used to live inside `applyWorkspacePatch`, so a skipped patch was never validated at all, and the
   // skip decision itself reads `result_tree` from a manifest nothing had checked was well formed.
-  const validated: string[] = [];
-  const applied: string[] = [];
   const chain = [
-    { dir: "/dep/setup-foundry", base: PRISTINE, result: SETUP_FOUNDRY },
-    { dir: "/dep/stateful-invariant-handlers", base: SETUP_FOUNDRY, result: COVERAGE }
+    { attemptId: "setup-foundry", base_tree: PRISTINE, result_tree: SETUP_FOUNDRY },
+    { attemptId: "stateful-invariant-handlers", base_tree: SETUP_FOUNDRY, result_tree: COVERAGE }
   ];
-  const byPath = new Map(chain.map((entry) => [entry.dir, entry]));
-  const materialize = loadMaterializer({
-    path,
-    taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
-    readFileSync: (target: string) => {
-      const entry = byPath.get(path.dirname(target));
-      assert.ok(entry !== undefined, target);
-      return target.endsWith("workspace-patch.json")
-        ? JSON.stringify({ base_tree: entry.base, result_tree: entry.result })
-        : `patch for ${entry.dir}`;
-    },
-    resolveRegularArtifactFile: (_dir: string, candidate: string) => candidate,
-    captureWorkspaceTree: () => COVERAGE,
-    applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch),
-    validateWorkspacePatchCapture: (_root: string, capture: { patch: string }) => void validated.push(capture.patch),
-    workspacePatchPreparationTrees: new Map<string, string>(),
-    workspacePatchBaselineTrees: new Map<string, string>(),
-    readWorkspacePatchPreparation: () => "preparation-tree",
-    writeWorkspacePatchPreparation: () => undefined,
-    readWorkspacePatchBaseline: () => undefined,
-    writeWorkspacePatchBaseline: () => undefined,
-    taskPublishesWorkspacePatch: () => false
+  withDependencyFixture(chain, (fixture) => {
+    const validated: string[] = [];
+    const applied: string[] = [];
+    const materialize = loadMaterializer(
+      materializerCollaborators({
+        taskSpecs: chain.map((entry) => ({ attemptId: entry.attemptId })),
+        captureWorkspaceTree: () => COVERAGE,
+        applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch),
+        validateWorkspacePatchCapture: (_root: string, capture: { patch: string }) => void validated.push(capture.patch)
+      })
+    );
+    materialize(fixture.task, fixture.workspaceRoot, true);
+    assert.deepEqual(applied, [], "the whole chain is already present, so nothing should be applied");
+    assert.deepEqual(
+      validated,
+      ["patch for /dep/setup-foundry", "patch for /dep/stateful-invariant-handlers"],
+      "every capture must be validated even though replay skipped both"
+    );
   });
-  materialize(
-    {
-      attemptId: "stateful-invariant-implement-properties",
-      dependencyArtifactDirs: chain.map((entry) => entry.dir),
-      outputs: [],
-      metadata: { artifacts: { dir: "/artifacts/implement-properties" } }
-    },
-    "/workspace",
-    true
-  );
-  assert.deepEqual(applied, [], "the whole chain is already present, so nothing should be applied");
-  assert.deepEqual(
-    validated,
-    ["patch for /dep/setup-foundry", "patch for /dep/stateful-invariant-handlers"],
-    "every capture must be validated even though replay skipped both"
-  );
 });
 
 test("#312 a no-op sibling sorting LAST does not wipe out an earlier sibling's work", () => {
@@ -360,56 +676,40 @@ test("#312 dependencies are replayed in task order regardless of the order they 
   // The sort IS the replay order, and the skip rule's correctness depends entirely on it, yet nothing
   // pinned it: replacing the comparator with `() => 0` passed the whole suite. The fixture hands the
   // dependency directories over shuffled, so a comparator that does not order by task index is caught.
-  const applied: string[] = [];
   const chain = [
-    { dir: "/dep/setup-foundry", base: PRISTINE, result: SETUP_FOUNDRY },
-    { dir: "/dep/stateful-invariant-setup", base: SETUP_FOUNDRY, result: INVARIANT_SETUP },
-    { dir: "/dep/stateful-invariant-handlers", base: INVARIANT_SETUP, result: COVERAGE }
+    { attemptId: "setup-foundry", base_tree: PRISTINE, result_tree: SETUP_FOUNDRY },
+    { attemptId: "stateful-invariant-setup", base_tree: SETUP_FOUNDRY, result_tree: INVARIANT_SETUP },
+    { attemptId: "stateful-invariant-handlers", base_tree: INVARIANT_SETUP, result_tree: COVERAGE }
   ];
-  const byPath = new Map(chain.map((entry) => [entry.dir, entry]));
-  const materialize = loadMaterializer({
-    path,
-    taskSpecs: chain.map((entry) => ({ attemptId: entry.dir.split("/").pop() })),
-    existsSync: () => true,
-    readFileSync: (target: string) => {
-      const entry = byPath.get(path.dirname(target));
-      assert.ok(entry !== undefined, target);
-      return target.endsWith("workspace-patch.json")
-        ? JSON.stringify({ base_tree: entry.base, result_tree: entry.result })
-        : `patch for ${entry.dir}`;
-    },
-    resolveRegularArtifactFile: (_dir: string, candidate: string) => candidate,
-    captureWorkspaceTree: () => PRISTINE,
-    applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch),
-    validateWorkspacePatchCapture: () => undefined,
-    workspacePatchPreparationTrees: new Map<string, string>(),
-    workspacePatchBaselineTrees: new Map<string, string>(),
-    readWorkspacePatchPreparation: () => "preparation-tree",
-    writeWorkspacePatchPreparation: () => undefined,
-    readWorkspacePatchBaseline: () => undefined,
-    writeWorkspacePatchBaseline: () => undefined,
-    taskPublishesWorkspacePatch: () => false
+  withDependencyFixture(chain, (fixture) => {
+    const applied: string[] = [];
+    const byAttemptId = new Map(chain.map((entry, index) => [entry.attemptId, fixture.dependencyArtifactDirs[index]!]));
+    const materialize = loadMaterializer(
+      materializerCollaborators({
+        taskSpecs: chain.map((entry) => ({ attemptId: entry.attemptId })),
+        captureWorkspaceTree: () => PRISTINE,
+        applyWorkspacePatch: (_root: string, capture: { patch: string }) => void applied.push(capture.patch)
+      })
+    );
+    materialize(
+      {
+        ...fixture.task,
+        // Deliberately shuffled relative to task order.
+        dependencyArtifactDirs: [
+          byAttemptId.get("stateful-invariant-handlers")!,
+          byAttemptId.get("setup-foundry")!,
+          byAttemptId.get("stateful-invariant-setup")!
+        ]
+      },
+      fixture.workspaceRoot,
+      true
+    );
+    assert.deepEqual(applied, [
+      "patch for /dep/setup-foundry",
+      "patch for /dep/stateful-invariant-setup",
+      "patch for /dep/stateful-invariant-handlers"
+    ]);
   });
-  materialize(
-    {
-      attemptId: "stateful-invariant-implement-properties",
-      // Deliberately shuffled relative to task order.
-      dependencyArtifactDirs: [
-        "/dep/stateful-invariant-handlers",
-        "/dep/setup-foundry",
-        "/dep/stateful-invariant-setup"
-      ],
-      outputs: [],
-      metadata: { artifacts: { dir: "/artifacts/implement-properties" } }
-    },
-    "/workspace",
-    true
-  );
-  assert.deepEqual(applied, [
-    "patch for /dep/setup-foundry",
-    "patch for /dep/stateful-invariant-setup",
-    "patch for /dep/stateful-invariant-handlers"
-  ]);
 });
 
 test("#328 a contract failure names the field paths and collapses repeated messages", () => {

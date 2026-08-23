@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger",
+  "$id": "urn:ultrafuzz:schema:artifacts:node-attempt-ledger:1",
   "title": "Ultrafuzz node attempt ledger entry",
   "type": "object",
   "required": [
     "schema_version",
-    "attempt_id",
     "run_id",
+    "workflow_run_id",
+    "control_generation",
     "node_id",
     "strategy_attempt_id",
-    "executor_retry_id",
-    "checkpoint_generation_id",
-    "workflow_execution_id",
-    "controller_invocation_id",
+    "iteration",
+    "attempt",
+    "started_event_sequence",
+    "source_event_sequence",
     "lifecycle",
     "outcome",
     "reuse",
@@ -20,32 +21,44 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "1.0" },
-    "attempt_id": { "type": "string", "minLength": 1 },
-    "run_id": { "type": "string", "minLength": 1 },
-    "node_id": {
+    "schema_version": { "const": "ultrafuzz.node-attempt-ledger.v1" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "workflow_run_id": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
     },
-    "strategy_attempt_id": { "type": "string", "minLength": 1 },
-    "executor_retry_id": { "type": "string", "minLength": 1 },
-    "checkpoint_generation_id": { "type": "string", "minLength": 1 },
-    "workflow_execution_id": { "type": "string", "minLength": 1 },
-    "controller_invocation_id": { "type": "string", "minLength": 1 },
-    "parent_attempt_id": { "type": "string", "minLength": 1 },
+    "control_generation": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "node_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "strategy_attempt_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "iteration": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "attempt": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "started_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "source_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "lifecycle": {
       "type": "object",
       "required": ["started_at", "finished_at"],
       "additionalProperties": false,
       "properties": {
-        "started_at": { "type": "string", "format": "date-time" },
-        "finished_at": { "type": "string", "format": "date-time" }
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
       }
     },
-    "outcome": {
-      "enum": ["succeeded", "failed", "timed-out", "canceled", "skipped", "reused"]
-    },
+    "outcome": { "enum": ["succeeded", "failed", "timed-out", "canceled", "reused"] },
     "reuse": {
       "oneOf": [
         {
@@ -56,11 +69,24 @@
         },
         {
           "type": "object",
-          "required": ["status", "source_attempt_id"],
+          "required": ["status", "source"],
           "additionalProperties": false,
           "properties": {
             "status": { "const": "reused" },
-            "source_attempt_id": { "type": "string", "minLength": 1 }
+            "source": {
+              "type": "object",
+              "required": ["workflow_run_id", "source_event_sequence"],
+              "additionalProperties": false,
+              "properties": {
+                "workflow_run_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+                },
+                "source_event_sequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+              }
+            }
           }
         }
       ]
@@ -71,9 +97,41 @@
       "additionalProperties": false,
       "properties": {
         "input_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "output_sha256": {
-          "anyOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }]
-        }
+        "output_sha256": { "anyOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }] }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["chain_index", "profile_id", "agent_ref", "role", "selection"],
+      "additionalProperties": false,
+      "properties": {
+        "chain_index": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "agent_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "role": { "enum": ["primary", "fallback"] },
+        "selection": { "enum": ["observed", "projected"] }
       }
     },
     "failure_category": {
@@ -87,10 +145,109 @@
         "unknown"
       ]
     },
-    "failure_message": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 1000
+    "failure_message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "failure_message_redaction_span_code_points": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+    },
+    "failure_message_truncated": { "const": true }
+  },
+  "dependentRequired": {
+    "failure_message_redaction_span_code_points": ["failure_message"],
+    "failure_message_truncated": ["failure_message"]
+  },
+  "dependentSchemas": {
+    "failure_message_redaction_span_code_points": {
+      "properties": { "failure_message": { "type": "string", "pattern": "<redacted>" } }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "outcome": { "const": "reused" } }, "required": ["outcome"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "reuse": {
+            "type": "object",
+            "properties": { "status": { "const": "reused" } },
+            "required": ["status"]
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "reuse": {
+            "type": "object",
+            "properties": { "status": { "const": "executed" } },
+            "required": ["status"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": { "outcome": { "enum": ["succeeded", "reused"] } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "manifests": {
+            "type": "object",
+            "properties": {
+              "output_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            },
+            "required": ["output_sha256"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": { "outcome": { "enum": ["failed", "timed-out", "canceled"] } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "failure_category": {
+            "enum": [
+              "executor-error",
+              "timeout",
+              "canceled",
+              "dependency",
+              "invalid-output",
+              "artifact-validation",
+              "unknown"
+            ]
+          }
+        },
+        "required": ["failure_category"]
+      },
+      "else": {
+        "type": "object",
+        "not": {
+          "anyOf": [
+            { "type": "object", "properties": { "failure_category": {} }, "required": ["failure_category"] },
+            { "type": "object", "properties": { "failure_message": {} }, "required": ["failure_message"] },
+            {
+              "type": "object",
+              "properties": { "failure_message_redaction_span_code_points": {} },
+              "required": ["failure_message_redaction_span_code_points"]
+            },
+            {
+              "type": "object",
+              "properties": { "failure_message_truncated": {} },
+              "required": ["failure_message_truncated"]
+            }
+          ]
+        }
+      }
+    }
+  ]
 }

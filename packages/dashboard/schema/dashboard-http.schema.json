@@ -1,0 +1,1218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:dashboard:http:1",
+  "title": "Ultrafuzz dashboard HTTP JSON document",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionResponse" },
+    { "$ref": "#/$defs/runOverviewResponse" },
+    { "$ref": "#/$defs/flowResponse" },
+    { "$ref": "#/$defs/graphResponse" },
+    { "$ref": "#/$defs/nodesResponse" },
+    { "$ref": "#/$defs/nodeDetailResponse" },
+    { "$ref": "#/$defs/findingsResponse" },
+    { "$ref": "#/$defs/reportResponse" },
+    { "$ref": "#/$defs/eventsResponse" },
+    { "$ref": "#/$defs/configDetailResponse" },
+    { "$ref": "#/$defs/configSaveResponse" },
+    { "$ref": "#/$defs/topologyDetailResponse" },
+    { "$ref": "#/$defs/topologySaveResponse" },
+    { "$ref": "#/$defs/promptListResponse" },
+    { "$ref": "#/$defs/promptDetailResponse" },
+    { "$ref": "#/$defs/promptSaveResponse" },
+    { "$ref": "#/$defs/commandJobResponse" },
+    { "$ref": "#/$defs/errorResponse" },
+    { "$ref": "#/$defs/configSaveRequest" },
+    { "$ref": "#/$defs/topologySaveRequest" },
+    { "$ref": "#/$defs/promptSaveRequest" },
+    { "$ref": "#/$defs/promptCreateRequest" },
+    { "$ref": "#/$defs/commandRequest" }
+  ],
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "nonNegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "operatorWorkflowInput": {
+      "$comment": "Intentionally application-defined operator data. The dashboard preserves this RFC 8259 JSON value exactly and does not infer, repair, normalize, or reinterpret its contents. The HTTP reader enforces a 1 MiB request limit, depth 128, 100000 items, and 100000 properties before schema validation.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/operatorWorkflowInput" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/operatorWorkflowInput" }
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "ready",
+        "runnable",
+        "running",
+        "queued",
+        "succeeded",
+        "failed",
+        "skipped",
+        "timed-out",
+        "reused-from-prior-run",
+        "invalidated",
+        "paused",
+        "canceled",
+        "preview",
+        "unknown"
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "message"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "message": { "type": "string" }
+      }
+    },
+    "topologyGroupDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loops": { "$ref": "#/$defs/positiveSafeInteger" },
+        "timeout_seconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "max_attempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "model_profiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "topologyGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "color": { "$ref": "#/$defs/nonEmptyString" },
+        "defaults": { "$ref": "#/$defs/topologyGroupDefaults" }
+      }
+    },
+    "topologyOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "contract"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "contract": {
+          "type": "string",
+          "pattern": "^ultrafuzz/[a-z0-9-]+@[1-9][0-9]*$"
+        },
+        "primary": { "type": "boolean" }
+      }
+    },
+    "topologyNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "kind": { "enum": ["agentic", "meta", "reference"] },
+        "role": { "enum": ["start", "finish"] },
+        "prompt": { "$ref": "#/$defs/nonEmptyString" },
+        "reference": { "$ref": "#/$defs/nonEmptyString" },
+        "group": { "$ref": "#/$defs/nodeId" },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nodeId" }
+        },
+        "loops": { "$ref": "#/$defs/positiveSafeInteger" },
+        "loop_mode": { "enum": ["parallel", "series"] },
+        "timeout_seconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "max_attempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "outputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/topologyOutput" }
+        },
+        "model_profiles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "required_commands": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "projectTopology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "defaults", "nodes"],
+      "properties": {
+        "version": { "const": 2 },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["strategy_loops"],
+          "properties": {
+            "strategy_loops": { "$ref": "#/$defs/positiveSafeInteger" }
+          }
+        },
+        "groups": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nodeId" },
+          "additionalProperties": { "$ref": "#/$defs/topologyGroup" }
+        },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/topologyNode" }
+        }
+      }
+    },
+    "strategySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "category", "source", "models", "loops", "attempts"],
+      "properties": {
+        "id": { "$ref": "#/$defs/safeId" },
+        "display_name": { "$ref": "#/$defs/nonEmptyString" },
+        "category": { "$ref": "#/$defs/nonEmptyString" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "models": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "loops": { "$ref": "#/$defs/positiveSafeInteger" },
+        "attempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "timeout_seconds": { "$ref": "#/$defs/positiveSafeInteger" }
+      }
+    },
+    "modelSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "backend"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "backend": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "artifactAvailability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logs", "renderedPrompt", "findings", "patch", "report", "metadata"],
+      "properties": {
+        "logs": { "type": "boolean" },
+        "renderedPrompt": { "type": "boolean" },
+        "findings": { "type": "boolean" },
+        "patch": { "type": "boolean" },
+        "report": { "type": "boolean" },
+        "metadata": { "type": "boolean" }
+      }
+    },
+    "expandedAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "logicalId", "dependsOn", "artifactDir", "loop", "modelFanout"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "logicalId": { "$ref": "#/$defs/nodeId" },
+        "dependsOn": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nodeId" }
+        },
+        "artifactDir": { "$ref": "#/$defs/nonEmptyString" },
+        "loop": {
+          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4#/properties/nodes/items/properties/loop"
+        },
+        "modelFanout": {
+          "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4#/properties/nodes/items/properties/modelFanout"
+        }
+      }
+    },
+    "flowNodeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "kind",
+        "status",
+        "dependencies",
+        "artifactDir",
+        "artifactDirs",
+        "artifacts",
+        "promptAvailable",
+        "promptEditable",
+        "topologyConnectable",
+        "findingCount",
+        "propertySummary",
+        "logicalNodeId",
+        "attemptIndex",
+        "loopCount",
+        "loopBadgeCount",
+        "loopMode",
+        "promptPath",
+        "requiredArtifacts",
+        "topologyEditable",
+        "expandedAttempts"
+      ],
+      "properties": {
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "$ref": "#/$defs/status" },
+        "strategy": { "$ref": "#/$defs/strategySummary" },
+        "model": { "$ref": "#/$defs/modelSummary" },
+        "modelIndex": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "loopIndex": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nodeId" }
+        },
+        "artifactDir": { "$ref": "#/$defs/nonEmptyString" },
+        "artifactDirs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "artifacts": { "$ref": "#/$defs/artifactAvailability" },
+        "promptAvailable": { "type": "boolean" },
+        "promptEditable": { "type": "boolean" },
+        "topologyConnectable": { "type": "boolean" },
+        "findingCount": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "propertySummary": { "type": "null" },
+        "latestError": { "$ref": "#/$defs/nonEmptyString" },
+        "logicalNodeId": { "$ref": "#/$defs/nodeId" },
+        "attemptIndex": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "loopCount": { "$ref": "#/$defs/positiveSafeInteger" },
+        "loopBadgeCount": { "$ref": "#/$defs/positiveSafeInteger" },
+        "loopMode": { "enum": ["parallel", "series"] },
+        "promptPath": { "$ref": "#/$defs/nonEmptyString" },
+        "group": { "$ref": "#/$defs/nodeId" },
+        "groupLabel": { "$ref": "#/$defs/nonEmptyString" },
+        "groupColor": { "$ref": "#/$defs/nonEmptyString" },
+        "requiredArtifacts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "timeoutSeconds": { "$ref": "#/$defs/positiveSafeInteger" },
+        "topologyEditable": { "type": "boolean" },
+        "expandedAttempts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/expandedAttempt" }
+        }
+      }
+    },
+    "flowNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "position", "data"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "type": {
+          "enum": [
+            "metaStart",
+            "metaFinish",
+            "reference",
+            "report",
+            "triage",
+            "dedupe",
+            "projectDiscovery",
+            "propertySpecification",
+            "agentAttempt"
+          ]
+        },
+        "position": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["x", "y"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" }
+          }
+        },
+        "data": { "$ref": "#/$defs/flowNodeData" }
+      }
+    },
+    "flowEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target", "animated", "data", "style", "zIndex"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "source": { "$ref": "#/$defs/nodeId" },
+        "target": { "$ref": "#/$defs/nodeId" },
+        "animated": { "type": "boolean" },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": { "$ref": "#/$defs/status" }
+          }
+        },
+        "style": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stroke", "strokeWidth"],
+          "properties": {
+            "stroke": { "$ref": "#/$defs/nonEmptyString" },
+            "strokeWidth": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "zIndex": { "type": "integer" }
+      }
+    },
+    "commandCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validate",
+        "runNewCampaign",
+        "listRuns",
+        "ps",
+        "inspect",
+        "resume",
+        "replay",
+        "fork",
+        "report",
+        "referencesStatus",
+        "referencesSync",
+        "referencesUpdate",
+        "materialize",
+        "clean",
+        "config",
+        "restartWholeRun",
+        "status",
+        "doctor",
+        "triage",
+        "merge",
+        "restartFromNode",
+        "rerunSelectedNode",
+        "arbitraryShell"
+      ],
+      "properties": {
+        "validate": { "type": "boolean" },
+        "runNewCampaign": { "type": "boolean" },
+        "listRuns": { "type": "boolean" },
+        "ps": { "type": "boolean" },
+        "inspect": { "type": "boolean" },
+        "resume": { "type": "boolean" },
+        "replay": { "type": "boolean" },
+        "fork": { "type": "boolean" },
+        "report": { "type": "boolean" },
+        "referencesStatus": { "type": "boolean" },
+        "referencesSync": { "type": "boolean" },
+        "referencesUpdate": { "type": "boolean" },
+        "materialize": { "type": "boolean" },
+        "clean": { "type": "boolean" },
+        "config": { "type": "boolean" },
+        "restartWholeRun": { "type": "boolean" },
+        "status": { "type": "boolean" },
+        "doctor": { "type": "boolean" },
+        "triage": { "type": "boolean" },
+        "merge": { "type": "boolean" },
+        "restartFromNode": { "type": "boolean" },
+        "rerunSelectedNode": { "type": "boolean" },
+        "arbitraryShell": { "type": "boolean" }
+      }
+    },
+    "findingItem": {
+      "anyOf": [
+        { "$ref": "urn:ultrafuzz:schema:artifacts:finding:2" },
+        { "$ref": "urn:ultrafuzz:schema:artifacts:triaged-findings:1#/items" },
+        { "$ref": "urn:ultrafuzz:schema:artifacts:severity-classified-findings:1#/items" },
+        { "$ref": "urn:ultrafuzz:schema:artifacts:report:3#/properties/issues/items" }
+      ]
+    },
+    "artifactEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "size_bytes", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "$ref": "#/$defs/nonEmptyString" },
+        "size_bytes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "artifactPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logicalNodeId", "concreteNodeId", "path", "state"],
+      "properties": {
+        "logicalNodeId": { "$ref": "#/$defs/nodeId" },
+        "concreteNodeId": { "$ref": "#/$defs/nodeId" },
+        "relativePath": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "state": { "enum": ["available", "missing", "directory", "unsupported"] },
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "enum": ["markdown", "text"] },
+            "text": { "type": "string" }
+          }
+        }
+      }
+    },
+    "promptSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["promptId", "displayName", "source", "path", "editable", "contentHash"],
+      "properties": {
+        "strategyId": { "$ref": "#/$defs/safeId" },
+        "nodeId": { "$ref": "#/$defs/nodeId" },
+        "promptId": { "$ref": "#/$defs/safeId" },
+        "displayName": { "$ref": "#/$defs/nonEmptyString" },
+        "category": { "$ref": "#/$defs/nonEmptyString" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "editable": { "type": "boolean" },
+        "contentHash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "sessionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "runId", "liveUpdates", "sessionToken", "templateVariables"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "session" },
+        "runId": { "$ref": "#/$defs/safeId" },
+        "liveUpdates": { "type": "boolean" },
+        "sessionToken": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "templateVariables": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "runOverviewResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document_type",
+        "run_id",
+        "run_root",
+        "runs_dir",
+        "status",
+        "graph_nodes",
+        "expanded_nodes",
+        "node_counts",
+        "active_nodes",
+        "findings_count",
+        "event_count",
+        "live_updates",
+        "mode",
+        "restart_eligible"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "run-overview" },
+        "run_id": { "$ref": "#/$defs/safeId" },
+        "run_root": { "$ref": "#/$defs/nonEmptyString" },
+        "runs_dir": { "$ref": "#/$defs/nonEmptyString" },
+        "status": { "$ref": "#/$defs/status" },
+        "source_run_id": { "$ref": "#/$defs/safeId" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "elapsed_seconds": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "graph_nodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "expanded_nodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "node_counts": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/status" },
+          "additionalProperties": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+        },
+        "active_nodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nodeId" }
+        },
+        "findings_count": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "event_count": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "live_updates": { "type": "boolean" },
+        "mode": { "enum": ["persisted", "preview"] },
+        "restart_eligible": { "type": "boolean" },
+        "report_path": { "$ref": "#/$defs/nonEmptyString" },
+        "run_metadata": { "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2" }
+      }
+    },
+    "flowResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "run", "nodes", "edges", "strategies", "capabilities"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "flow" },
+        "run": { "$ref": "#/$defs/runOverviewResponse" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flowNode" }
+        },
+        "edges": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flowEdge" }
+        },
+        "strategies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/strategySummary" }
+        },
+        "capabilities": { "$ref": "#/$defs/commandCapabilities" }
+      }
+    },
+    "graphResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "topology", "expandedGraph", "logicalNodes", "expandedNodes"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "graph" },
+        "topology": { "$ref": "#/$defs/projectTopology" },
+        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4" },
+        "logicalNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "expandedNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+      }
+    },
+    "nodesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "nodes"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "nodes" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/flowNode" }
+        }
+      }
+    },
+    "nodeDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document_type",
+        "run_id",
+        "node",
+        "artifacts",
+        "artifactReferences",
+        "findings",
+        "metadata"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "node-detail" },
+        "run_id": { "$ref": "#/$defs/safeId" },
+        "node": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "label",
+            "kind",
+            "kind_detail",
+            "status",
+            "depends_on",
+            "artifact_dir",
+            "attempt_index",
+            "loop_index"
+          ],
+          "properties": {
+            "id": { "$ref": "#/$defs/nodeId" },
+            "label": { "$ref": "#/$defs/nonEmptyString" },
+            "kind": { "$ref": "#/$defs/nonEmptyString" },
+            "kind_detail": { "enum": ["agentic", "meta", "reference"] },
+            "status": { "$ref": "#/$defs/status" },
+            "depends_on": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/nodeId" }
+            },
+            "artifact_dir": { "$ref": "#/$defs/nonEmptyString" },
+            "attempt_index": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+            "loop_index": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+            "timeout_seconds": { "$ref": "#/$defs/positiveSafeInteger" }
+          }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalNodeId", "attempts"],
+          "properties": {
+            "logicalNodeId": { "$ref": "#/$defs/nodeId" },
+            "attempts": {
+              "type": "array",
+              "items": {
+                "$ref": "urn:ultrafuzz:schema:artifacts:run-state:5#/properties/nodes/additionalProperties"
+              }
+            }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifactEntry" }
+        },
+        "artifactReferences": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outputs", "referencedPrevious"],
+          "properties": {
+            "outputs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/artifactPreview" }
+            },
+            "referencedPrevious": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/artifactPreview" }
+            }
+          }
+        },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" },
+        "rendered_prompt": { "type": "string" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/findingItem" }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["expandedAttempts"],
+          "properties": {
+            "expandedAttempts": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/expandedAttempt" }
+            }
+          }
+        }
+      }
+    },
+    "findingsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "source", "findings"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "findings" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/findingItem" }
+        }
+      }
+    },
+    "reportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type"],
+      "dependentRequired": {
+        "markdown_path": ["markdown", "json_path", "json"],
+        "markdown": ["markdown_path", "json_path", "json"],
+        "json_path": ["markdown_path", "markdown", "json"],
+        "json": ["markdown_path", "markdown", "json_path"]
+      },
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "report" },
+        "markdown_path": { "$ref": "#/$defs/nonEmptyString" },
+        "markdown": { "$ref": "#/$defs/nonEmptyString" },
+        "json_path": { "$ref": "#/$defs/nonEmptyString" },
+        "json": { "$ref": "urn:ultrafuzz:schema:artifacts:report:3" }
+      }
+    },
+    "eventsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "source", "events", "malformed_records", "truncated_records"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "events" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "urn:ultrafuzz:schema:artifacts:event-record:2" }
+        },
+        "malformed_records": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "truncated_records": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+      }
+    },
+    "configDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document_type",
+        "source",
+        "path",
+        "editable",
+        "contentHash",
+        "content",
+        "validation"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "config-detail" },
+        "source": { "enum": ["project", "missing"] },
+        "path": { "const": "ultrafuzz.toml" },
+        "editable": { "const": true },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "content": { "type": "string" },
+        "validation": { "$ref": "#/$defs/validation" }
+      }
+    },
+    "configSaveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "path", "contentHash", "validation"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "config-save" },
+        "path": { "const": "ultrafuzz.toml" },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "validation": { "$ref": "#/$defs/validation" }
+      }
+    },
+    "topologyDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "path", "editable", "contentHash", "content", "validation"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "topology-detail" },
+        "path": { "const": ".ultrafuzz/topology.yml" },
+        "editable": { "const": true },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "content": { "type": "string" },
+        "topology": { "$ref": "#/$defs/projectTopology" },
+        "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4" },
+        "validation": { "$ref": "#/$defs/validation" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "validation": {
+                "type": "object",
+                "properties": { "valid": { "const": true } },
+                "required": ["valid"]
+              }
+            },
+            "required": ["validation"]
+          },
+          "then": {
+            "type": "object",
+            "properties": { "topology": true, "expandedGraph": true },
+            "required": ["topology", "expandedGraph"]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "type": "object", "properties": { "topology": true }, "required": ["topology"] },
+                { "type": "object", "properties": { "expandedGraph": true }, "required": ["expandedGraph"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "topologySaveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "path", "contentHash", "validation"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "topology-save" },
+        "path": { "const": ".ultrafuzz/topology.yml" },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "validation": { "$ref": "#/$defs/validation" }
+      }
+    },
+    "promptListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "prompts"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "prompt-list" },
+        "prompts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/promptSummary" }
+        }
+      }
+    },
+    "promptDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "summary", "content"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "prompt-detail" },
+        "summary": { "$ref": "#/$defs/promptSummary" },
+        "content": { "type": "string" }
+      }
+    },
+    "promptSaveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "strategyId", "nodeId", "path", "contentHash", "validation"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "prompt-save" },
+        "strategyId": { "$ref": "#/$defs/safeId" },
+        "nodeId": { "$ref": "#/$defs/nodeId" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "contentHash": { "$ref": "#/$defs/sha256" },
+        "validation": { "$ref": "#/$defs/validation" }
+      }
+    },
+    "commandJobResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "document_type",
+        "jobId",
+        "command",
+        "status",
+        "startedAtUnixSeconds",
+        "argv",
+        "output"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "command-job" },
+        "jobId": { "type": "string", "pattern": "^job-[a-z0-9]+-[a-f0-9]{8}$" },
+        "command": {
+          "enum": [
+            "validate",
+            "run",
+            "ps",
+            "inspect",
+            "resume",
+            "replay",
+            "fork",
+            "report",
+            "references-status",
+            "references-sync",
+            "references-update",
+            "materialize",
+            "clean"
+          ]
+        },
+        "status": { "enum": ["running", "succeeded", "failed"] },
+        "startedAtUnixSeconds": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "finishedAtUnixSeconds": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "output": { "type": "string" },
+        "error": { "$ref": "#/$defs/nonEmptyString" },
+        "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 }
+      },
+      "allOf": [
+        {
+          "if": { "type": "object", "properties": { "status": { "const": "running" } }, "required": ["status"] },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": { "finishedAtUnixSeconds": true },
+                  "required": ["finishedAtUnixSeconds"]
+                },
+                { "type": "object", "properties": { "exitCode": true }, "required": ["exitCode"] },
+                { "type": "object", "properties": { "error": true }, "required": ["error"] }
+              ]
+            }
+          },
+          "else": {
+            "type": "object",
+            "properties": { "finishedAtUnixSeconds": true, "exitCode": true },
+            "required": ["finishedAtUnixSeconds", "exitCode"]
+          }
+        },
+        {
+          "if": { "type": "object", "properties": { "status": { "const": "succeeded" } }, "required": ["status"] },
+          "then": { "type": "object", "properties": { "exitCode": { "const": 0 } } },
+          "else": {
+            "if": { "type": "object", "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+            "then": { "type": "object", "properties": { "exitCode": { "type": "integer", "minimum": 1 } } }
+          }
+        }
+      ]
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "document_type", "error"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "document_type": { "const": "error" },
+        "error": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "configSaveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_type", "content"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "config-save" },
+        "content": { "type": "string" }
+      }
+    },
+    "topologySaveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_type", "topology"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "topology-save" },
+        "topology": { "$ref": "#/$defs/projectTopology" }
+      }
+    },
+    "promptSaveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_type", "content"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "prompt-save" },
+        "content": { "type": "string" }
+      }
+    },
+    "promptCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_type", "content", "dependsOn"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "prompt-create" },
+        "content": { "type": "string" },
+        "group": { "$ref": "#/$defs/nodeId" },
+        "dependsOn": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nodeId" }
+        }
+      }
+    },
+    "emptyCommandArguments": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "runCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" },
+        "prompt": { "$ref": "#/$defs/nonEmptyString" },
+        "agent": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" },
+        "workflowInput": { "$ref": "#/$defs/operatorWorkflowInput" }
+      }
+    },
+    "runIdCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" }
+      }
+    },
+    "resumeCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" },
+        "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" }
+      }
+    },
+    "forkCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" },
+        "forkFrame": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "resetNode": { "$ref": "#/$defs/nodeId" },
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "maxConcurrency": { "$ref": "#/$defs/positiveSafeInteger" }
+      }
+    },
+    "referencesUpdateCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latest": { "type": "boolean" }
+      }
+    },
+    "materializeCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" },
+        "confirmed": { "const": true },
+        "dryRun": { "type": "boolean" },
+        "force": { "type": "boolean" },
+        "copies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "destination"],
+            "properties": {
+              "source": { "$ref": "#/$defs/nonEmptyString" },
+              "destination": { "$ref": "#/$defs/nonEmptyString" }
+            }
+          }
+        }
+      }
+    },
+    "cleanCommandArguments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/safeId" },
+        "confirmed": { "const": true },
+        "dryRun": { "type": "boolean" },
+        "select": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "commandRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_type", "command", "arguments"],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
+        "request_type": { "const": "command" },
+        "command": {
+          "enum": [
+            "validate",
+            "run",
+            "ps",
+            "inspect",
+            "resume",
+            "replay",
+            "fork",
+            "report",
+            "references-status",
+            "references-sync",
+            "references-update",
+            "materialize",
+            "clean"
+          ]
+        },
+        "arguments": {
+          "anyOf": [
+            { "$ref": "#/$defs/emptyCommandArguments" },
+            { "$ref": "#/$defs/runCommandArguments" },
+            { "$ref": "#/$defs/runIdCommandArguments" },
+            { "$ref": "#/$defs/resumeCommandArguments" },
+            { "$ref": "#/$defs/forkCommandArguments" },
+            { "$ref": "#/$defs/referencesUpdateCommandArguments" },
+            { "$ref": "#/$defs/materializeCommandArguments" },
+            { "$ref": "#/$defs/cleanCommandArguments" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "enum": ["validate", "ps", "references-status", "references-sync"]
+              }
+            },
+            "required": ["command"]
+          },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/emptyCommandArguments" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "command": { "const": "run" } }, "required": ["command"] },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/runCommandArguments" } } }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "command": { "enum": ["inspect", "replay", "report"] }
+            },
+            "required": ["command"]
+          },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/runIdCommandArguments" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "command": { "const": "resume" } }, "required": ["command"] },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/resumeCommandArguments" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "command": { "const": "fork" } }, "required": ["command"] },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/forkCommandArguments" } } }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": { "command": { "const": "references-update" } },
+            "required": ["command"]
+          },
+          "then": {
+            "type": "object",
+            "properties": { "arguments": { "$ref": "#/$defs/referencesUpdateCommandArguments" } }
+          }
+        },
+        {
+          "if": { "type": "object", "properties": { "command": { "const": "materialize" } }, "required": ["command"] },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/materializeCommandArguments" } } }
+        },
+        {
+          "if": { "type": "object", "properties": { "command": { "const": "clean" } }, "required": ["command"] },
+          "then": { "type": "object", "properties": { "arguments": { "$ref": "#/$defs/cleanCommandArguments" } } }
+        }
+      ]
+    }
+  }
+}

@@ -25,6 +25,7 @@ describe("audit profile catalog", () => {
     expect(smoke.topologyPath).toBe("topologies/smoke.yml");
     expect(smoke.settings.strategy_loops).toBe(1);
     expect(smoke.settings.dynamic_strategies_enumerator).toBe(0);
+    expect(smoke.settings.same_agent_attempts).toBe(1);
     const smokePath = packagedTopologyPath(smoke, catalog);
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
@@ -173,6 +174,9 @@ strategy_loops = 2
 
 [run]
 max_parallel_agents = 6
+
+[retry]
+same_agent_attempts = 2
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -189,10 +193,12 @@ max_parallel_agents = 6
     expect(resolved.value.dynamicStrategiesEnumerator).toBe(1);
     expect(resolved.value.run.maxParallelAgents).toBe(6);
     expect(resolved.value.run.maxParallelNodes).toBe(7);
+    expect(resolved.value.retry.sameAgentAttempts).toBe(2);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 3 });
     expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([
       "max_parallel_agents",
       "max_parallel_nodes",
+      "same_agent_attempts",
       "strategy_loops"
     ]);
     expect(resolved.value.auditProfileResolution.effectiveSettings).toMatchObject({
@@ -200,6 +206,7 @@ max_parallel_agents = 6
       dynamic_strategies_enumerator: 1,
       max_parallel_agents: 6,
       max_parallel_nodes: 7,
+      same_agent_attempts: 2,
       triage_quorum: 2,
       triage_panel_size: 3
     });
@@ -208,6 +215,7 @@ max_parallel_agents = 6
       dynamic_strategies_enumerator: "audit-profile",
       max_parallel_agents: "project-config",
       max_parallel_nodes: "runtime-override",
+      same_agent_attempts: "project-config",
       triage_quorum: "audit-profile",
       triage_panel_size: "audit-profile"
     });

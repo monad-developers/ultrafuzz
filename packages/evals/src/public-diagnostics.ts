@@ -1,12 +1,13 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { z } from "zod/v4";
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
-import { BENCHMARK_LANE_NAMES } from "./benchmark-manifest.js";
+import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import { boundedEvalId } from "./utils.js";
 
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
 export const PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v2" as const;
-const PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v1" as const;
 export const MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES = 1024 * 1024;
 export const MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW = 32;
 export const PUBLIC_EVAL_FAILED_NODE_STATUSES = ["failed", "timed-out"] as const;
@@ -17,8 +18,11 @@ export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
   "provider-interruption"
 ] as const;
 export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure"] as const;
+export const PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE =
+  "^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" as const;
 
 const MAX_ROWS = 2_048;
+const canonicalTimestamp = z.string().regex(new RegExp(PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE, "u"));
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 // Runtime workflow IDs prefix an otherwise-safe 128-character run ID with
 // `ultrafuzz-` (and may add lifecycle suffixes). They are opaque identifiers,
@@ -57,6 +61,17 @@ const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
 const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
 const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
 
+function boundedCodePointString(maximum: number): z.ZodType<string> {
+  return z
+    .string()
+    .min(1)
+    .refine((value) => [...value].length <= maximum, `must contain at most ${maximum} Unicode code points`);
+}
+
+function hasUniqueJsonItems(values: readonly unknown[]): boolean {
+  return values.every((value, index) => values.findIndex((candidate) => isDeepStrictEqual(candidate, value)) === index);
+}
+
 const failedNodeSchema = z
   .strictObject({
     node_id: safeId,
@@ -64,12 +79,7 @@ const failedNodeSchema = z
     timed_out: z.boolean(),
     failure_category: failureCategory.optional(),
     failure_code: failureCode.optional(),
-    failure_message: z
-      .string()
-      .min(1)
-      .max(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
-      .refine((value) => Buffer.byteLength(value, "utf8") <= MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES)
-      .optional()
+    failure_message: boundedCodePointString(MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES).optional()
   })
   .refine((node) => node.timed_out === (node.status === "timed-out"), {
     message: "failed node timeout flag does not match its status"
@@ -97,11 +107,17 @@ const rowSchema = z.strictObject({
   workflow_terminal: z.boolean(),
   terminal_disposition: terminalDisposition,
   terminal_report_present: z.boolean(),
-  workflow_ids: z.array(workflowId).max(32),
-  diagnostic_codes: z.array(safeId).max(64),
-  failed_nodes: z.array(failedNodeSchema).max(MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW).default([]),
+  workflow_ids: z.array(workflowId).max(32).refine(hasUniqueJsonItems, "workflow IDs must be unique"),
+  diagnostic_codes: z.array(safeId).max(64).refine(hasUniqueJsonItems, "diagnostic codes must be unique"),
+  failed_nodes: z
+    .array(failedNodeSchema)
+    .max(MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW)
+    .refine(hasUniqueJsonItems, "failed node entries must be unique"),
   scoring_ready: z.boolean(),
-  reason_codes: z.array(reasonCode).max(reasonCode.options.length)
+  reason_codes: z
+    .array(reasonCode)
+    .max(reasonCode.options.length)
+    .refine(hasUniqueJsonItems, "reason codes must be unique")
 });
 
 const summarySchema = z.strictObject({
@@ -126,28 +142,22 @@ const diagnosticsShape = {
   // checkpoint with the model spend already gone (#183).
   lane: z.enum(BENCHMARK_LANE_NAMES),
   model_slug: safeId,
-  model: z.string().min(1).max(256),
-  reasoning: z.string().min(1).max(64),
+  model: boundedCodePointString(256),
+  reasoning: boundedCodePointString(64),
   candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
   eval_run_id: safeId,
-  created_at: z.string().datetime({ offset: true }),
+  created_at: canonicalTimestamp,
   lineage: lineageSchema,
   summary: summarySchema,
-  rows: z.array(rowSchema).min(1).max(MAX_ROWS)
+  rows: z.array(rowSchema).min(1).max(MAX_ROWS).refine(hasUniqueJsonItems, "diagnostic rows must be unique")
 } as const;
 
-const diagnosticsSchema = z.union([
-  z.strictObject({
-    schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION),
-    ...diagnosticsShape
-  }),
-  z.strictObject({
-    schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION),
-    ...diagnosticsShape
-  })
-]);
+export const publicEvalDiagnosticsZodSchema = z.strictObject({
+  schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION),
+  ...diagnosticsShape
+});
 
-export type PublicEvalDiagnostics = z.infer<typeof diagnosticsSchema>;
+export type PublicEvalDiagnostics = z.infer<typeof publicEvalDiagnosticsZodSchema>;
 export type PublicEvalDiagnosticsRow = z.infer<typeof rowSchema>;
 export type PublicEvalDiagnosticsReasonCode = z.infer<typeof reasonCode>;
 export type PublicEvalFailedNode = z.infer<typeof failedNodeSchema>;
@@ -156,48 +166,91 @@ export function comparePublicEvalDiagnosticIds(left: string, right: string): num
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+export interface PublicEvalDiagnosticsSemanticIssue {
+  path: string;
+  message: string;
+}
+
 export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostics {
-  const parsed = diagnosticsSchema.parse(value);
-  const legacy = parsed.schema_version === PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION;
+  const canonical = validateEvalJsonSchema(EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, value);
+  if (!canonical.ok) {
+    const summary = canonical.issues
+      .slice(0, 8)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`public eval diagnostics failed canonical schema validation: ${summary}`);
+  }
+  const retained = publicEvalDiagnosticsZodSchema.safeParse(value);
+  if (!retained.success) {
+    throw new Error("canonical public eval diagnostics schema and retained Zod parser disagree");
+  }
+  const parsed = retained.data;
+  const semanticIssues = publicEvalDiagnosticsSemanticIssues(parsed);
+  if (semanticIssues.length > 0) {
+    const first = semanticIssues[0]!;
+    throw new Error(`public eval diagnostics failed ${first.path}: ${first.message}`);
+  }
+  return parsed;
+}
+
+export function publicEvalDiagnosticsSemanticIssues(
+  parsed: PublicEvalDiagnostics
+): PublicEvalDiagnosticsSemanticIssue[] {
+  const issues: PublicEvalDiagnosticsSemanticIssue[] = [];
+  if (!isCanonicalCalendarTimestamp(parsed.created_at)) {
+    issues.push({ path: "$.created_at", message: "must identify an actual canonical UTC calendar instant" });
+  }
   if (parsed.eval_run_id !== boundedEvalId([parsed.lineage.logical_run_id, parsed.model_slug], 128)) {
-    throw new Error("public eval diagnostics eval run does not match its lineage");
+    issues.push({ path: "$.eval_run_id", message: "must match the bounded lineage and model slug" });
   }
   const rowIds = new Set(parsed.rows.map((row) => row.row_id));
-  if (rowIds.size !== parsed.rows.length) throw new Error("public eval diagnostics contains duplicate rows");
-  for (const row of parsed.rows) {
-    if (
-      new Set(row.workflow_ids).size !== row.workflow_ids.length ||
-      new Set(row.diagnostic_codes).size !== row.diagnostic_codes.length ||
-      new Set(row.failed_nodes.map((node) => node.node_id)).size !== row.failed_nodes.length ||
-      new Set(row.reason_codes).size !== row.reason_codes.length
-    ) {
-      throw new Error(`public eval diagnostics row contains duplicate values: ${row.row_id}`);
+  if (rowIds.size !== parsed.rows.length) {
+    issues.push({ path: "$.rows", message: "row IDs must be unique" });
+  }
+  for (const [rowIndex, row] of parsed.rows.entries()) {
+    if (new Set(row.failed_nodes.map((node) => node.node_id)).size !== row.failed_nodes.length) {
+      issues.push({ path: `$.rows[${rowIndex}].failed_nodes`, message: "failed node IDs must be unique" });
     }
     const sortedFailedNodeIds = row.failed_nodes.map((node) => node.node_id).sort(comparePublicEvalDiagnosticIds);
     if (JSON.stringify(row.failed_nodes.map((node) => node.node_id)) !== JSON.stringify(sortedFailedNodeIds)) {
-      throw new Error(`public eval diagnostics row failed nodes are not deterministic: ${row.row_id}`);
+      issues.push({ path: `$.rows[${rowIndex}].failed_nodes`, message: "failed nodes must be sorted by node ID" });
     }
-    const expectedReasons = legacy
-      ? legacyPublicEvalDiagnosticsReadinessReasonCodes(row)
-      : publicEvalDiagnosticsReadinessReasonCodes(row);
+    for (const [nodeIndex, node] of row.failed_nodes.entries()) {
+      if (
+        node.failure_message !== undefined &&
+        Buffer.byteLength(node.failure_message, "utf8") > MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
+      ) {
+        issues.push({
+          path: `$.rows[${rowIndex}].failed_nodes[${nodeIndex}].failure_message`,
+          message: `must not exceed ${MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES} UTF-8 bytes`
+        });
+      }
+    }
+    const expectedReasons = publicEvalDiagnosticsReadinessReasonCodes(row);
     if (
       JSON.stringify(row.reason_codes) !== JSON.stringify(expectedReasons) ||
       row.scoring_ready !== (expectedReasons.length === 0)
     ) {
-      throw new Error(`public eval diagnostics row readiness is inconsistent: ${row.row_id}`);
+      issues.push({
+        path: `$.rows[${rowIndex}].reason_codes`,
+        message: "row readiness is inconsistent with reason codes or row evidence"
+      });
     }
   }
-  const expected = legacy
-    ? summarizeLegacyPublicEvalDiagnosticsRows(parsed.rows)
-    : summarizePublicEvalDiagnosticsRows(parsed.rows);
+  const expected = summarizePublicEvalDiagnosticsRows(parsed.rows);
   if (JSON.stringify(parsed.summary) !== JSON.stringify(expected)) {
-    throw new Error("public eval diagnostics summary is inconsistent");
+    issues.push({ path: "$.summary", message: "is inconsistent with the summary projected from rows" });
   }
   const serialized = JSON.stringify(parsed);
   if (Buffer.byteLength(serialized, "utf8") > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
-    throw new Error("public eval diagnostics exceeds the size limit");
+    issues.push({ path: "$", message: `must not exceed ${MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES} UTF-8 bytes` });
   }
-  return parsed;
+  return issues;
+}
+
+function isCanonicalCalendarTimestamp(value: string): boolean {
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
 }
 
 // A zero-row set is never scoreable: an eval that planned nothing has nothing to
@@ -216,21 +269,6 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
     scoring_ready:
       rows.length > 0 && rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
-  };
-}
-
-function summarizeLegacyPublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow[]): PublicEvalDiagnostics["summary"] {
-  return {
-    planned: rows.length,
-    launched: rows.filter((row) => row.run_status === "launched").length,
-    launch_failed: rows.filter((row) => row.run_status === "failed").length,
-    run_records_missing: rows.filter((row) => row.run_status === "missing").length,
-    workflow_succeeded: rows.filter((row) => row.workflow_status === "succeeded" && row.workflow_terminal).length,
-    workflow_failed: rows.filter((row) => row.workflow_terminal && row.workflow_status !== "succeeded").length,
-    workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
-    genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
-    terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.length > 0 && rows.every((row) => row.scoring_ready)
   };
 }
 
@@ -276,28 +314,6 @@ export function publicEvalDiagnosticsReadinessReasonCodes(
     row.terminal_disposition !== "genuine-task-failures" &&
     row.terminal_disposition !== "operational-failure"
   ) {
-    reasons.push("terminal-disposition-not-scoreable");
-  }
-  if (row.workflow_ids.length === 0) reasons.push("workflow-id-missing");
-  if (!row.terminal_report_present) reasons.push("terminal-report-missing");
-  return reasons;
-}
-
-function legacyPublicEvalDiagnosticsReadinessReasonCodes(
-  row: Parameters<typeof publicEvalDiagnosticsReadinessReasonCodes>[0]
-): PublicEvalDiagnosticsReasonCode[] {
-  const genuineTaskFailure =
-    row.final_status === "failed" &&
-    row.workflow_status === "failed" &&
-    row.workflow_terminal &&
-    row.terminal_disposition === "genuine-task-failures";
-  const reasons: PublicEvalDiagnosticsReasonCode[] = [];
-  if (row.run_status === "missing") reasons.push("run-record-missing");
-  if (row.run_status === "failed") reasons.push("launch-failed");
-  if (!row.workflow_terminal) reasons.push("workflow-nonterminal");
-  if (row.workflow_status !== "succeeded" && !genuineTaskFailure) reasons.push("workflow-not-scoreable");
-  if (row.final_status !== "succeeded" && !genuineTaskFailure) reasons.push("final-status-not-scoreable");
-  if (row.final_status === "failed" && row.terminal_disposition !== "genuine-task-failures") {
     reasons.push("terminal-disposition-not-scoreable");
   }
   if (row.workflow_ids.length === 0) reasons.push("workflow-id-missing");

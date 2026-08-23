@@ -1,4 +1,5 @@
-import { z, type ZodIssue } from "zod/v4";
+import type { ZodIssue, ZodType } from "zod/v4";
+import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import {
   DEFAULT_AGENT,
   DEFAULT_MODEL_PROFILE_ID,
@@ -13,13 +14,20 @@ import {
   type AuditProfileSettings
 } from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
+import {
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
+  MODAL_SANDBOX_MAX_LIFETIME_SECONDS
+} from "./execution.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
+import { resolvedConfigZodSchema } from "./resolved-config-schema.js";
 import {
   diagnostic,
   fail,
   hasErrors,
   ok,
+  PROJECT_CONFIG_SCHEMA_VERSION,
   type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
@@ -30,119 +38,6 @@ import {
   type ResolvedConfig,
   type RuntimeConfigOverrides
 } from "./types.js";
-
-const positiveIntegerSchema = z.number().int().positive();
-const dynamicStrategiesEnumeratorSchema = z.union([z.number().int().nonnegative(), z.literal("unlimited")]);
-const positiveNumberSchema = z.number().positive().finite();
-const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
-const nonEmptyStringSchema = z.string().refine((value) => value.trim().length > 0);
-const environmentVariableNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
-const projectLocalPathSchema = z.string().superRefine((value, context) => {
-  if (value.length === 0) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_EMPTY" });
-    return;
-  }
-  if (value === ".") {
-    return;
-  }
-  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_ABSOLUTE" });
-    return;
-  }
-  if (value.split(/[\\/]/).some((part) => part.length === 0 || part === "." || part === "..")) {
-    context.addIssue({ code: "custom", message: "CONFIG_PATH_TRAVERSAL" });
-  }
-});
-
-const resolvedConfigValidationSchema = z
-  .object({
-    schemaVersion: nonEmptyStringSchema,
-    auditProfile: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u),
-    topologyPath: projectLocalPathSchema.optional(),
-    strategyLoops: positiveIntegerSchema.optional(),
-    auditProfileResolution: z.object({
-      catalogSchemaVersion: positiveIntegerSchema,
-      catalogDigest: z.string().regex(/^[0-9a-f]{64}$/u),
-      declaredTopologyPath: nonEmptyStringSchema.optional(),
-      settings: z.record(z.string(), z.unknown()),
-      effectiveSettings: z.record(z.string(), z.unknown()),
-      settingOrigins: z.record(
-        z.string(),
-        z.enum(["default", "audit-profile", "project-config", "environment", "runtime-override"])
-      ),
-      overriddenSettings: z.array(z.string())
-    }),
-    dynamicStrategiesEnumerator: dynamicStrategiesEnumeratorSchema,
-    project: z
-      .object({
-        repo: projectLocalPathSchema
-      })
-      .passthrough(),
-    run: z
-      .object({
-        outputDir: projectLocalPathSchema,
-        maxParallelAgents: positiveIntegerSchema,
-        maxParallelNodes: positiveIntegerSchema,
-        maxDynamicNodes: positiveIntegerSchema,
-        forgeGuardEnabled: z.boolean(),
-        forgeVmemLimitKb: positiveIntegerSchema,
-        forgeRayonThreads: positiveIntegerSchema,
-        defaultTimeoutSeconds: timeoutSecondsSchema,
-        workflowDeadlineSeconds: timeoutSecondsSchema,
-        controllerLeaseSeconds: timeoutSecondsSchema,
-        workspaceMode: z.literal("git-worktree")
-      })
-      .passthrough(),
-    execution: z
-      .object({
-        mode: z.enum(["local", "cloud"]),
-        provider: z.literal("modal").optional(),
-        retentionDays: z.number().int().min(1).max(3650),
-        resources: z.object({
-          cpu: positiveNumberSchema.max(256),
-          memoryMiB: z.number().int().min(128).max(4_194_304),
-          timeoutSeconds: timeoutSecondsSchema
-        }),
-        nodes: z.record(
-          z.string(),
-          z.object({
-            resources: z.object({
-              cpu: positiveNumberSchema.max(256).optional(),
-              memoryMiB: z.number().int().min(128).max(4_194_304).optional(),
-              timeoutSeconds: timeoutSecondsSchema.optional()
-            })
-          })
-        ),
-        providers: z.object({
-          modal: z
-            .object({
-              app: nonEmptyStringSchema,
-              image: nonEmptyStringSchema,
-              region: nonEmptyStringSchema.optional(),
-              credentialEnv: z
-                .array(environmentVariableNameSchema)
-                .length(2)
-                .refine((names) => new Set(names).size === names.length)
-            })
-            .optional()
-        })
-      })
-      .passthrough(),
-    invariants: z
-      .object({
-        propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
-        invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
-        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema,
-        referenceExpectationEnforcement: z.enum(["warn", "fail"]).optional()
-      })
-      .passthrough(),
-    permissions: z
-      .object({
-        trustModel: z.literal("skip-permissions")
-      })
-      .passthrough()
-  })
-  .passthrough();
 
 export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<ResolvedConfig> {
   const diagnostics: ConfigDiagnostic[] = [];
@@ -191,7 +86,9 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   syncDefaultModelProfile(config);
   finalizeAuditProfileResolution(config, input, environment);
   sortConfig(config);
-  diagnostics.push(...validateResolvedConfig(config, environment));
+  for (const entry of validateResolvedConfig(config, environment)) {
+    if (!diagnostics.some((existing) => sameDiagnosticIdentity(existing, entry))) diagnostics.push(entry);
+  }
 
   if (hasErrors(diagnostics)) {
     return fail(diagnostics);
@@ -203,12 +100,15 @@ export function validateResolvedConfig(
   config: ResolvedConfig,
   env: Record<string, string | undefined> = process.env
 ): ConfigDiagnostic[] {
-  const diagnostics = schemaIssues(resolvedConfigValidationSchema, config).map((issue) =>
-    resolvedConfigDiagnostic(issue, config)
-  );
+  const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
+    .filter(
+      (issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue) && !isRetrySchemaIssue(issue)
+    )
+    .map((issue) => resolvedConfigDiagnostic(issue, config));
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
+  diagnostics.push(...validateRetryConfig(config));
   diagnostics.push(...validateExecutionConfig(config, env));
   return diagnostics;
 }
@@ -227,7 +127,7 @@ export function serializeResolvedConfigToml(
   const lines: string[] = [];
 
   pushAssignments(lines, {
-    schema_version: clone.schemaVersion,
+    schema_version: PROJECT_CONFIG_SCHEMA_VERSION,
     audit_profile: clone.auditProfile,
     topology_path: clone.topologyPath,
     strategy_loops: omitProfileSettings ? undefined : clone.strategyLoops,
@@ -288,6 +188,10 @@ export function serializeResolvedConfigToml(
       timeout_seconds: profile.timeoutSeconds
     });
   }
+  pushTable(lines, "retry", {
+    same_agent_attempts: omitProfileSettings ? undefined : clone.retry.sameAgentAttempts,
+    agents: clone.retry.agents.length === 0 ? undefined : clone.retry.agents
+  });
   for (const [id, agent] of Object.entries(clone.agents)) {
     pushTable(lines, tableName(["agents", id]), {
       auth: agent.auth,
@@ -298,7 +202,8 @@ export function serializeResolvedConfigToml(
   pushTable(lines, "permissions", {
     trust_model: clone.permissions.trustModel,
     prompt_review_required: clone.permissions.promptReviewRequired,
-    materialize_outputs_as_unstaged: clone.permissions.materializeOutputsAsUnstaged
+    materialize_outputs_as_unstaged: clone.permissions.materializeOutputsAsUnstaged,
+    production_source_roots: clone.permissions.productionSourceRoots
   });
   pushTable(lines, "invariants", {
     property_priority_threshold: clone.invariants.propertyPriorityThreshold,
@@ -334,6 +239,7 @@ function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfil
   if (settings.dynamic_strategies_enumerator !== undefined) {
     config.dynamicStrategiesEnumerator = settings.dynamic_strategies_enumerator;
   }
+  if (settings.same_agent_attempts !== undefined) config.retry.sameAgentAttempts = settings.same_agent_attempts;
   if (settings.max_parallel_agents !== undefined) config.run.maxParallelAgents = settings.max_parallel_agents;
   if (settings.max_parallel_nodes !== undefined) config.run.maxParallelNodes = settings.max_parallel_nodes;
   if (settings.default_timeout_seconds !== undefined) {
@@ -356,6 +262,7 @@ export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfi
   return {
     strategy_loops: config.strategyLoops ?? 1,
     dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
+    same_agent_attempts: config.retry.sameAgentAttempts,
     max_parallel_agents: config.run.maxParallelAgents,
     max_parallel_nodes: config.run.maxParallelNodes,
     default_timeout_seconds: config.run.defaultTimeoutSeconds,
@@ -405,6 +312,7 @@ function applyLayerSettingOrigins(
   const runtimeLayer = layer as RuntimeConfigOverrides;
   if (layer.strategyLoops !== undefined) origins.strategy_loops = origin;
   if (layer.dynamicStrategiesEnumerator !== undefined) origins.dynamic_strategies_enumerator = origin;
+  if (layer.retry?.sameAgentAttempts !== undefined) origins.same_agent_attempts = origin;
   if (layer.run?.maxParallelAgents !== undefined || runtimeLayer.maxParallelAgents !== undefined) {
     origins.max_parallel_agents = origin;
   }
@@ -445,14 +353,14 @@ function applyPromptMetadataLayer(
           )
         );
       }
-      const existing = config.models.profiles[id];
-      config.models.profiles[id] = {
+      const existing = Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
+      setOwn(config.models.profiles, id, {
         id,
         agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
         model: profile.model ?? existing?.model,
         reasoning: profile.reasoning ?? existing?.reasoning,
         timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
-      };
+      });
       if (id === DEFAULT_MODEL_PROFILE_ID) {
         config.models.synthesizedDefault = false;
       }
@@ -540,6 +448,35 @@ function validateExecutionConfig(config: ResolvedConfig, env: Record<string, str
     );
     return diagnostics;
   }
+  if (config.execution.provider === "modal") {
+    const timeoutEntries: Array<{ timeoutSeconds: number; path: string[] }> = [
+      {
+        timeoutSeconds: config.execution.resources.timeoutSeconds,
+        path: ["execution", "resources", "timeout_seconds"]
+      },
+      ...Object.entries(config.execution.nodes).flatMap(([nodeId, override]) =>
+        override.resources.timeoutSeconds === undefined
+          ? []
+          : [
+              {
+                timeoutSeconds: override.resources.timeoutSeconds,
+                path: ["execution", "nodes", nodeId, "resources", "timeout_seconds"]
+              }
+            ]
+      )
+    ];
+    for (const entry of timeoutEntries) {
+      if (entry.timeoutSeconds <= MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS) continue;
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
+          `Modal cloud timeout_seconds must be at most ${MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS} so the ${MODAL_NODE_LIFECYCLE_RESERVE_SECONDS}-second lifecycle reserve stays within Modal's ${MODAL_SANDBOX_MAX_LIFETIME_SECONDS}-second maximum sandbox lifetime`,
+          entry.path,
+          "validation"
+        )
+      );
+    }
+  }
   provider.credentialEnv.forEach((name, index) => {
     const value = env[name];
     if (value === undefined || value.trim() === "") {
@@ -562,9 +499,8 @@ function applyProjectConfigLayer(
   diagnostics: ConfigDiagnostic[],
   source: "project-toml" | "runtime"
 ): void {
-  if (layer.schemaVersion !== undefined) {
-    config.schemaVersion = layer.schemaVersion;
-  }
+  // `schema_version` describes the user-authored TOML contract. Resolved JSON has
+  // its own exact identity and is assigned when the default resolved config is built.
   if (layer.auditProfile !== undefined) {
     config.auditProfile = layer.auditProfile;
   }
@@ -607,20 +543,32 @@ function applyProjectConfigLayer(
             )
           );
         }
-        const existing = config.models.profiles[id];
-        config.models.profiles[id] = {
+        const existing = Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
+        setOwn(config.models.profiles, id, {
           id,
           agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
           model: profile.model ?? existing?.model,
           reasoning: profile.reasoning ?? existing?.reasoning,
           timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
-        };
+        });
       }
+    }
+  }
+  if (layer.retry) {
+    if (layer.retry.sameAgentAttempts !== undefined) {
+      config.retry.sameAgentAttempts = layer.retry.sameAgentAttempts;
+    }
+    if (layer.retry.agents !== undefined) {
+      config.retry.agents = [...layer.retry.agents];
     }
   }
   if (layer.agents) {
     for (const [id, agent] of Object.entries(layer.agents).sort()) {
-      config.agents[id] = normalizeAgentConfig(agent, config.agents[id]);
+      setOwn(
+        config.agents,
+        id,
+        normalizeAgentConfig(agent, Object.hasOwn(config.agents, id) ? config.agents[id] : undefined)
+      );
     }
   }
   if (layer.permissions) {
@@ -757,6 +705,9 @@ function applyRunConfig(target: ResolvedConfig["run"], source: Partial<ResolvedC
 
 function applyPermissionConfig(target: PermissionConfig, source: Partial<PermissionConfig>): void {
   Object.assign(target, definedOnly(source));
+  if (source.productionSourceRoots !== undefined) {
+    target.productionSourceRoots = [...source.productionSourceRoots];
+  }
 }
 
 function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig): AgentConfig {
@@ -765,6 +716,99 @@ function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig):
     apiKeyEnv: source.apiKeyEnv ?? base?.apiKeyEnv,
     configDir: source.configDir ?? base?.configDir
   };
+}
+
+function setOwn<T>(record: Record<string, T>, id: string, value: T): void {
+  Object.defineProperty(record, id, { configurable: true, enumerable: true, value, writable: true });
+}
+
+function validateRetryConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+  const diagnostics: ConfigDiagnostic[] = [];
+  const sameAgentAttempts = config.retry.sameAgentAttempts;
+  if (!Number.isSafeInteger(sameAgentAttempts) || sameAgentAttempts <= 0) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_INVALID",
+        "retry.same_agent_attempts must be a positive safe integer",
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  } else if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_ATTEMPTS_MAX_EXCEEDED",
+        `retry.same_agent_attempts must not exceed ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+        ["retry", "same_agent_attempts"],
+        "validation"
+      )
+    );
+  }
+  if (!Array.isArray(config.retry.agents)) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_RETRY_AGENTS_INVALID",
+        "retry.agents must be an array of model profile IDs",
+        ["retry", "agents"],
+        "validation"
+      )
+    );
+    return diagnostics;
+  }
+  const seen = new Set<string>();
+  for (const [index, profileId] of config.retry.agents.entries()) {
+    if (typeof profileId !== "string" || !validProfileId(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_ID_INVALID",
+          `retry.agents entry ${index} must be a valid model profile ID`,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
+    if (seen.has(profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_DUPLICATE",
+          `retry.agents repeats model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+      continue;
+    }
+    seen.add(profileId);
+    if (!Object.hasOwn(config.models.profiles, profileId)) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_AGENT_UNKNOWN",
+          `retry.agents references unknown model profile \`${profileId}\``,
+          ["retry", "agents", String(index)],
+          "validation"
+        )
+      );
+    }
+  }
+  if (
+    Number.isSafeInteger(sameAgentAttempts) &&
+    sameAgentAttempts > 0 &&
+    sameAgentAttempts <= MAX_RETRY_CHAIN_ATTEMPTS
+  ) {
+    const expandedAttempts = sameAgentAttempts + Math.max(0, config.retry.agents.length - 1);
+    if (expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_RETRY_CHAIN_MAX_EXCEEDED",
+          `retry expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`,
+          ["retry"],
+          "validation"
+        )
+      );
+    }
+  }
+  return diagnostics;
 }
 
 function applyIntegerEnv(
@@ -790,9 +834,40 @@ function applyIntegerEnv(
   void path;
 }
 
-function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
+function schemaIssues(schema: ZodType, value: unknown): ZodIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;
+}
+
+/**
+ * The canonical JSON Schema conditionals are mirrored as named Zod refinements
+ * for validator parity. The named validators in this module own their
+ * user-facing diagnostics; mapping the mirrored issue as a structural failure
+ * would report the same error twice with a generic structural message.
+ */
+function isNamedSemanticSchemaIssue(issue: ZodIssue): boolean {
+  return issue.code === "custom" && issue.message.startsWith("CONFIG_");
+}
+
+function isModelProfileSchemaIssue(issue: ZodIssue): boolean {
+  return issue.path[0] === "models" && issue.path[1] === "profiles";
+}
+
+function isRetrySchemaIssue(issue: ZodIssue): boolean {
+  return (
+    issue.path[0] === "retry" ||
+    (issue.path[0] === "auditProfileResolution" &&
+      (issue.path[1] === "settings" || issue.path[1] === "effectiveSettings") &&
+      issue.path[2] === "same_agent_attempts")
+  );
+}
+
+function sameDiagnosticIdentity(left: ConfigDiagnostic, right: ConfigDiagnostic): boolean {
+  return (
+    left.code === right.code &&
+    left.path.length === right.path.length &&
+    left.path.every((part, i) => part === right.path[i])
+  );
 }
 
 function resolvedConfigDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {
@@ -813,7 +888,7 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
   const key = path.join(".");
   switch (key) {
     case "schema_version":
-      return "CONFIG_SCHEMA_VERSION_EMPTY";
+      return "CONFIG_SCHEMA_VERSION_UNSUPPORTED";
     case "run.default_timeout_seconds":
     case "run.workflow_deadline_seconds":
     case "run.controller_lease_seconds":
@@ -836,8 +911,8 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
 function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: ResolvedConfig): string {
   const label = resolvedConfigDiagnosticPath(issue).join(".");
   switch (code) {
-    case "CONFIG_SCHEMA_VERSION_EMPTY":
-      return "schema_version cannot be empty";
+    case "CONFIG_SCHEMA_VERSION_UNSUPPORTED":
+      return "schema_version must be exactly ultrafuzz.config.v2";
     case "CONFIG_PATH_EMPTY":
       return `${label} cannot be empty`;
     case "CONFIG_PATH_ABSOLUTE":

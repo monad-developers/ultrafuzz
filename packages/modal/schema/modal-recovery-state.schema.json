@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:modal:recovery-state:1",
+  "title": "Ultrafuzz Modal recovery controller state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "logical_run_id", "launch_generation", "app", "rows"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.modal.recovery-state.v1" },
+    "logical_run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
+    "launch_generation": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/positiveInteger" },
+    "app": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "rows": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/recoveryRow" }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+schema_version: ultrafuzz.eval-ground-truth.v1
+source:
+  url: https://www.openzeppelin.com/news/very-liquid-vaults-audit
+  retrieved_sha256: a1084bacc2e8df2d0a2e920ca3f7d028ea5e32217e05bb8e130cd44f212d42d2
+  note: Public OpenZeppelin audit; only concrete Medium and Low findings are benchmark labels.
+bugs:
+  - id: M-01
+    severity: medium
+    title: Incorrect order of operations causes permanent reduction in protocol fees
+  - id: L-01
+    severity: low
+    title: Share transfers blocked during pause
+  - id: L-02
+    severity: low
+    title: Malicious or faulty strategies cannot be removed
+  - id: L-03
+    severity: low
+    title: Missing, incomplete, and misleading documentation
+  - id: L-04
+    severity: low
+    title: Incorrect return values for nested meta vaults sharing the same strategy
+  - id: L-05
+    severity: low
+    title: Incomplete reentrancy protection
+  - id: L-06
+    severity: low
+    title: Incorrect return value in maxRedeem and maxMint functions

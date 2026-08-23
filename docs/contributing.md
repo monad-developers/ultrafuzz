@@ -40,6 +40,13 @@ init` may scaffold topology and prompts, but validation, run, dashboard, and
 report paths should fail clearly when required product state is missing or
 invalid.
 
+JSON Schema is the canonical document-shape contract for JSON handoffs. Do not
+add version aliases, coercion, normalization, repair, or historical readers for
+agent-owned JSON. Once an agent returns, its declared artifact bytes must remain
+unchanged through host validation, synchronization, reporting, dashboards, and
+bundling. Put cross-file, filesystem, Git, or projected-key checks in named
+semantic/context gates instead of a competing shape parser.
+
 Keep generated artifacts out of git, including:
 
 ```text

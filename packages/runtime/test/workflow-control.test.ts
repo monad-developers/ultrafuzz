@@ -12,21 +12,17 @@ import {
 
 const BASE_MS = Date.parse("2026-01-01T00:00:00.000Z");
 
-test("synthetic scheduler fixtures persist distinct capacity, dependency, and backoff waits", () => {
-  const graph = syntheticGraph([node("active"), node("queued"), node("dependent", ["active"]), node("retrying")]);
+test("synthetic scheduler fixtures persist distinct capacity and dependency waits", () => {
+  const graph = syntheticGraph([node("active"), node("queued"), node("dependent", ["active"])]);
   const state = initialState(graph, 1);
   state.nodes.active!.status = "running";
-  state.nodes.retrying!.status = "running";
 
   const projection = projectWorkflowControlState({
     previousState: structuredClone(state),
     state,
     graph,
     tasks: tasksFor(graph),
-    workflowStates: new Map([
-      ["active", "in-progress"],
-      ["retrying", "retrying"]
-    ]),
+    workflowStates: new Map([["active", "in-progress"]]),
     workflowState: "running",
     nowMs: BASE_MS + 5_000
   });
@@ -34,10 +30,8 @@ test("synthetic scheduler fixtures persist distinct capacity, dependency, and ba
   assert.equal(projection.state.nodes.active?.wait_reason, "active");
   assert.equal(projection.state.nodes.queued?.wait_reason, "capacity");
   assert.equal(projection.state.nodes.dependent?.wait_reason, "dependency");
-  assert.equal(projection.state.nodes.retrying?.wait_reason, "backoff");
   assert.equal(projection.state.nodes.queued?.next_eligible_action, "capacity-available");
   assert.equal(projection.state.nodes.dependent?.next_eligible_action, "dependency-complete");
-  assert.equal(projection.state.nodes.retrying?.next_eligible_action, "retry");
 });
 
 test("external wait states persist typed gate reasons", () => {
@@ -53,9 +47,9 @@ test("external wait states persist typed gate reasons", () => {
     graph,
     tasks: tasksFor(graph),
     workflowStates: new Map([
-      ["approval", "NodeWaitingApproval"],
-      ["event", "NodeWaitingEvent"],
-      ["timer", "NodeWaitingTimer"]
+      ["approval", "waiting-approval"],
+      ["event", "waiting-event"],
+      ["timer", "waiting-timer"]
     ]),
     workflowState: "running",
     nowMs: BASE_MS + 5_000
@@ -78,7 +72,7 @@ test("queued workflow work persists a capacity wait before bounded stall recover
     state,
     graph,
     tasks: tasksFor(graph),
-    workflowStates: new Map([["queued", "queued"]]),
+    workflowStates: new Map([["queued", "waiting-quota"]]),
     workflowState: "running",
     nowMs: BASE_MS + 5_000
   });
@@ -93,7 +87,7 @@ test("queued workflow work persists a capacity wait before bounded stall recover
     state,
     graph,
     tasks: tasksFor(graph),
-    workflowStates: new Map([["queued", "queued"]]),
+    workflowStates: new Map([["queued", "waiting-quota"]]),
     workflowState: "running",
     nowMs: BASE_MS + 30_000
   });
@@ -103,7 +97,7 @@ test("queued workflow work persists a capacity wait before bounded stall recover
 });
 
 test("expired controller ownership requests one safe takeover without reopening completed work", () => {
-  for (const workflowState of ["orphaned", "stale"]) {
+  for (const workflowState of ["orphaned", "stale"] as const) {
     const graph = syntheticGraph([node("complete"), node("pending", ["complete"])]);
     const state = initialState(graph, 2);
     state.nodes.complete!.status = "succeeded";
@@ -233,25 +227,44 @@ test("workflow deadline decisions are deterministic at the fake-clock boundary",
   assert.equal(deadlineProjection.deadlineExceeded, true);
 });
 
-test("controller recovery keeps the configured lease duration when timestamps are malformed", () => {
+test("controller recovery rejects malformed present timestamps instead of substituting the clock", () => {
   const graph = syntheticGraph([node("pending")]);
   const state = initialState(graph, 1, 60, 45);
   state.controller_lease.renewed_at = "malformed";
   state.controller_lease.expires_at = "malformed";
 
-  const before = projectWorkflowControlState({
-    previousState: structuredClone(state),
-    state,
-    graph,
-    tasks: tasksFor(graph),
-    workflowStates: new Map(),
-    workflowState: "running",
-    nowMs: BASE_MS + 44_999
-  });
+  assert.throws(
+    () =>
+      projectWorkflowControlState({
+        previousState: structuredClone(state),
+        state,
+        graph,
+        tasks: tasksFor(graph),
+        workflowStates: new Map(),
+        workflowState: "running",
+        nowMs: BASE_MS + 44_999
+      }),
+    /controller lease renewed_at must be an exact parseable timestamp/u
+  );
+});
 
-  assert.equal(before.recoveryDue, false);
-  assert.equal(before.state.controller_lease.duration_ms, 45_000);
-  assert.equal(before.state.controller_lease.expires_at, new Date(BASE_MS + 89_999).toISOString());
+test("workflow control rejects historical state aliases instead of normalizing them", () => {
+  const graph = syntheticGraph([node("approval")]);
+  const state = initialState(graph, 1);
+
+  assert.throws(
+    () =>
+      projectWorkflowControlState({
+        previousState: structuredClone(state),
+        state,
+        graph,
+        tasks: tasksFor(graph),
+        workflowStates: new Map([["approval", "NodeWaitingApproval" as never]]),
+        workflowState: "RUNNING" as never,
+        nowMs: BASE_MS + 5_000
+      }),
+    /invalid current state/u
+  );
 });
 
 test("strict joins resolve a generated human ID through its safe storage state", () => {
@@ -398,7 +411,7 @@ function initialState(
   return createInitialRunState({
     runId: "synthetic-run",
     graphFingerprint: "synthetic-graph",
-    configFingerprint: "synthetic-config",
+    configFingerprint: "c".repeat(64),
     createdAt: new Date(BASE_MS).toISOString(),
     controllerLeaseSeconds,
     workflowDeadlineSeconds,
@@ -413,9 +426,9 @@ function tasksFor(graph: PlannedGraph): WorkflowControlTask[] {
 
 function syntheticGraph(nodes: PlannedGraphNode[]): PlannedGraph {
   return {
-    schema_version: "1.0",
-    graph_version: "synthetic",
-    topology_version: 1,
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
+    topology_version: 2,
     groups: {},
     nodes
   };
@@ -432,7 +445,7 @@ function node(id: string, dependsOn: string[] = []): PlannedGraphNode {
     outputs: [],
     prompt_id: id,
     prompt_path: `${id}.md`,
-    loop: { index: 0, count: 1, mode: "single", attempt_index: 0 },
+    loop: { index: 0, count: 1, mode: "series", attempt_index: 0 },
     model_fanout: []
   };
 }

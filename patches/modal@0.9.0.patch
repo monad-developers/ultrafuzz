@@ -1,0 +1,42 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index e1794ee4e42d61ebb0c35654318fe5c84a946b04..9e3a5cb2d694b123f0e0da2a6ee38a57a1201f0b 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -62811,12 +62811,14 @@ var SandboxFilesystem = class {
+           [SANDBOX_FS_TOOLS_PATH, makeReadFileCommand(remotePath)],
+           { mode: "binary" }
+         );
+-        const returnCode = await process2.wait();
++        const [returnCode] = await Promise.all([
++          process2.wait(),
++          process2.stdout.pipeTo(import_node_stream.Writable.toWeb((0, import_node_fs2.createWriteStream)(tmpPath)))
++        ]);
+         if (returnCode !== 0) {
+           const stderr = await process2.stderr.readBytes();
+           raiseReadFileError(returnCode, stderr, remotePath);
+         }
+-        await process2.stdout.pipeTo(import_node_stream.Writable.toWeb((0, import_node_fs2.createWriteStream)(tmpPath)));
+       });
+       await (0, import_promises2.rename)(tmpPath, localPath);
+     } catch (err) {
+diff --git a/dist/index.js b/dist/index.js
+index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..0559e09408b0993aa7d3a40fe5c37f1e0535e3df 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -62739,12 +62739,14 @@ var SandboxFilesystem = class {
+           [SANDBOX_FS_TOOLS_PATH, makeReadFileCommand(remotePath)],
+           { mode: "binary" }
+         );
+-        const returnCode = await process2.wait();
++        const [returnCode] = await Promise.all([
++          process2.wait(),
++          process2.stdout.pipeTo(Writable.toWeb(createWriteStream(tmpPath)))
++        ]);
+         if (returnCode !== 0) {
+           const stderr = await process2.stderr.readBytes();
+           raiseReadFileError(returnCode, stderr, remotePath);
+         }
+-        await process2.stdout.pipeTo(Writable.toWeb(createWriteStream(tmpPath)));
+       });
+       await rename(tmpPath, localPath);
+     } catch (err) {

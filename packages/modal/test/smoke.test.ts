@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "../src/defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "../src/layout.js";
+import { ModalDocumentValidationError } from "../src/modal-documents.js";
+import { parseModalSmokeCheckpointBytes, parseModalSmokeCompletionBytes } from "../src/smoke-evidence.js";
 import {
   MODAL_SMOKE_ENTRY_PATH,
   cloudFailureResult,
@@ -95,7 +97,8 @@ describe("provider-isolated smoke entrypoints", () => {
     ["openai", "anthropic"],
     ["anthropic", "openai"],
     ["deepseek", "openai"],
-    ["kimi", "openai"]
+    ["kimi", "openai"],
+    ["openrouter", "openai"]
   ] as const)("stages only %s subscription auth", (selected, unselected) => {
     const fresh = modalSmokeEntrypointCommand(selected, "fresh");
     const resume = modalSmokeEntrypointCommand(selected, "resume");
@@ -133,7 +136,82 @@ describe("dedicated cloud command", () => {
     expect(packageJson.scripts.test).not.toContain("smoke");
     expect(smokeSources.every((source) => !source.includes("process.env"))).toBe(true);
   });
+
+  it("uses registered strict documents for worker publication and immutable controller reads", () => {
+    const controllerSource = fs.readFileSync(new URL("../src/smoke-modal.ts", import.meta.url), "utf8");
+    const workerSource = fs.readFileSync(new URL("../src/smoke-worker.ts", import.meta.url), "utf8");
+
+    expect(controllerSource).toContain("sandbox.filesystem.readBytes(filePath)");
+    expect(controllerSource).toContain("parseModalSmokeCheckpointBytes");
+    expect(controllerSource).toContain("parseModalSmokeCompletionBytes");
+    expect(controllerSource).not.toContain("filesystem.readText");
+    expect(controllerSource).not.toContain("JSON.parse");
+    expect(workerSource).toMatch(/writeModalDocumentAtomic\(\s*checkpointPath,\s*MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,/u);
+    expect(workerSource).toMatch(/writeModalDocumentAtomic\(\s*resultPath,\s*MODAL_SMOKE_COMPLETION_SCHEMA_ID,/u);
+    expect(workerSource).toContain("readModalDocument(checkpointPath, MODAL_SMOKE_CHECKPOINT_SCHEMA_ID)");
+    expect(workerSource).not.toContain("JSON.stringify");
+  });
 });
+
+describe("strict smoke evidence", () => {
+  const checkpoint = {
+    schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
+    non_root: true,
+    durable_storage: true,
+    provider_auth: "deepseek",
+    completed_units: 1
+  } as const;
+  const completion = {
+    schema_version: "ultrafuzz.modal.smoke-completion.v1",
+    non_root: true,
+    durable_storage: true,
+    provider_auth: "kimi",
+    completed_units: 1,
+    repeated_units: 0
+  } as const;
+
+  it("projects valid registered snake-case documents into the orchestration shape", () => {
+    expect(parseModalSmokeCheckpointBytes(bytes(checkpoint))).toEqual({
+      nonRoot: true,
+      durableStorage: true,
+      providerAuth: "deepseek",
+      completedUnits: 1
+    });
+    expect(parseModalSmokeCompletionBytes(bytes(completion))).toEqual({
+      nonRoot: true,
+      durableStorage: true,
+      providerAuth: "kimi",
+      completedUnits: 1,
+      repeatedUnits: 0
+    });
+  });
+
+  it("rejects duplicate keys and unknown fields", () => {
+    expect(() =>
+      parseModalSmokeCheckpointBytes(
+        Buffer.from(
+          '{"schema_version":"ultrafuzz.modal.smoke-checkpoint.v1","non_root":true,"non_root":false,"durable_storage":true,"provider_auth":"openai","completed_units":1}'
+        )
+      )
+    ).toThrow(ModalDocumentValidationError);
+    expect(() => parseModalSmokeCompletionBytes(bytes({ ...completion, repaired: true }))).toThrow(
+      ModalDocumentValidationError
+    );
+  });
+
+  it("rejects historical, missing, or cross-document schema identities", () => {
+    expect(() =>
+      parseModalSmokeCheckpointBytes(bytes({ ...checkpoint, schema_version: "ultrafuzz.modal.smoke-checkpoint.v0" }))
+    ).toThrow(ModalDocumentValidationError);
+    const { schema_version: _schemaVersion, ...missingVersion } = completion;
+    expect(() => parseModalSmokeCompletionBytes(bytes(missingVersion))).toThrow(ModalDocumentValidationError);
+    expect(() => parseModalSmokeCheckpointBytes(bytes(completion))).toThrow(ModalDocumentValidationError);
+  });
+});
+
+function bytes(value: unknown): Buffer {
+  return Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+}
 
 class ContractDriver implements ModalSmokeDriver {
   readonly events: string[] = [];

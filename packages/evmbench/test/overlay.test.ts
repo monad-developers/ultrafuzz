@@ -40,7 +40,11 @@ describe("EVMBench overlay build context", () => {
     const repoRoot = findUltrafuzzRepoRoot();
     const dockerfile = fs.readFileSync(path.join(repoRoot, "benchmarks", "evmbench", "overlay.Dockerfile"), "utf8");
 
-    expect(dockerfile).toContain('RUN ["node", "-e"');
+    expect(dockerfile).toContain('RUN ["node", "--input-type=module", "-e"');
+    expect(dockerfile).toContain("parseEvmbenchProfileBytes");
+    expect(dockerfile).toContain("serializeEvmbenchProfile");
+    expect(dockerfile).toContain("writeFileDurable");
+    expect(dockerfile).not.toContain("JSON.parse");
     expect(dockerfile).not.toContain('"${MODEL}"');
     expect(dockerfile).not.toContain('"${REASONING}"');
   });

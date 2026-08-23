@@ -1,10 +1,22 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Flags, type Command } from "@oclif/core";
 import { loadProjectConfig, resolveConfig, type EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic, RuntimeResult } from "@ultrafuzz/runtime";
 
-export const CLI_SCHEMA_VERSION = "ultrafuzz.cli.result.v1" as const;
+import {
+  CLI_SCHEMA_VERSION,
+  publicDiagnostic,
+  type CliCommandData,
+  type CliCommandDataMap,
+  type CliDiagnostic,
+  type CliKnownCommand,
+  type CliResultEnvelope
+} from "./cli-contracts.js";
+import { validateCliResultEnvelope } from "./cli-schema-registry.js";
+
+export { CLI_SCHEMA_VERSION };
 
 export interface CliIo {
   cwd: string;
@@ -16,9 +28,9 @@ export interface CliIo {
 export interface CommandResult {
   ok: boolean;
   command: string;
-  data?: unknown;
+  data: CliCommandData | null;
   text?: string;
-  diagnostics: RuntimeDiagnostic[];
+  diagnostics: CliDiagnostic[];
 }
 
 declare global {
@@ -47,6 +59,10 @@ export function cliIo(): CliIo {
 
 export function projectRoot(flags: { project?: string }): string {
   return path.resolve(flags.project ?? cliIo().cwd);
+}
+
+export function cliEntrypoint(): string {
+  return fileURLToPath(new URL("./index.js", import.meta.url));
 }
 
 /**
@@ -79,16 +95,35 @@ export async function loadEvalConfig(
   return { evalConfig: resolved.value.eval, diagnostics };
 }
 
-export function commandFromRuntime<T>(
-  command: string,
-  result: RuntimeResult<T>,
-  text: (value: T) => string
+export function commandFromRuntime<CommandName extends CliKnownCommand, Source extends CliCommandDataMap[CommandName]>(
+  command: CommandName,
+  result: RuntimeResult<Source>,
+  text: (value: Source) => string
+): CommandResult;
+export function commandFromRuntime<CommandName extends CliKnownCommand, Source>(
+  command: CommandName,
+  result: RuntimeResult<Source>,
+  text: (value: Source) => string,
+  project: (value: Source) => CliCommandDataMap[CommandName]
+): CommandResult;
+export function commandFromRuntime<CommandName extends CliKnownCommand, Source>(
+  command: CommandName,
+  result: RuntimeResult<Source>,
+  text: (value: Source) => string,
+  project?: (value: Source) => CliCommandDataMap[CommandName]
 ): CommandResult {
   return {
     ok: result.ok,
     command,
-    data: result.value,
-    text: result.value ? text(result.value) : diagnosticsText(result.diagnostics),
+    data:
+      result.value === undefined
+        ? null
+        : project === undefined
+          ? (result.value as CliCommandDataMap[CommandName])
+          : project(result.value),
+    text: result.value
+      ? `${result.ok ? "" : diagnosticsText(result.diagnostics)}${text(result.value)}`
+      : diagnosticsText(result.diagnostics),
     diagnostics: result.diagnostics
   };
 }
@@ -102,6 +137,7 @@ export function commandFailure(
   return {
     ok: false,
     command,
+    data: null,
     text: `${message}\n`,
     diagnostics: [
       {
@@ -155,12 +191,24 @@ export function diagnosticsText(diagnostics: RuntimeDiagnostic[]): string {
   return `${diagnostics.map((diagnostic) => `${diagnostic.severity}: ${diagnostic.code}: ${diagnostic.message}`).join("\n")}\n`;
 }
 
-export function envelope(command: string, result: CommandResult): Record<string, unknown> {
-  return {
+export function envelope(command: string, result: CommandResult): CliResultEnvelope {
+  if (command !== result.command) {
+    throw new Error(`CLI result command mismatch: expected ${command}, received ${result.command}`);
+  }
+  const value = {
     schema_version: CLI_SCHEMA_VERSION,
     command,
     ok: result.ok,
-    diagnostics: result.diagnostics,
-    data: result.data ?? null
+    diagnostics: result.diagnostics.map(publicDiagnostic),
+    data: result.data
   };
+  const validation = validateCliResultEnvelope(value);
+  if (!validation.ok) {
+    const summary = validation.issues
+      .slice(0, 10)
+      .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`CLI producer result does not match ${CLI_SCHEMA_VERSION}: ${summary}`);
+  }
+  return value as CliResultEnvelope;
 }

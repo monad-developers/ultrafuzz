@@ -1,0 +1,754 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:config:resolved-config:3",
+  "title": "Ultrafuzz Resolved Configuration v3",
+  "description": "Closed camelCase runtime contract for the exact resolved Ultrafuzz configuration published to a workflow execution snapshot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "auditProfile",
+    "auditProfileResolution",
+    "dynamicStrategiesEnumerator",
+    "project",
+    "run",
+    "execution",
+    "models",
+    "retry",
+    "agents",
+    "permissions",
+    "invariants",
+    "triage",
+    "eval"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "ultrafuzz.resolved-config.v3"
+    },
+    "auditProfile": {
+      "$ref": "#/$defs/auditProfileId"
+    },
+    "topologyPath": {
+      "$ref": "#/$defs/projectLocalPath"
+    },
+    "strategyLoops": {
+      "$ref": "#/$defs/positiveInteger"
+    },
+    "auditProfileResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalogSchemaVersion",
+        "catalogDigest",
+        "settings",
+        "effectiveSettings",
+        "settingOrigins",
+        "overriddenSettings"
+      ],
+      "properties": {
+        "catalogSchemaVersion": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "catalogDigest": {
+          "$ref": "#/$defs/sha256Digest"
+        },
+        "declaredTopologyPath": {
+          "$ref": "#/$defs/packagedTopologyPath"
+        },
+        "settings": {
+          "$ref": "#/$defs/auditProfileSettings"
+        },
+        "effectiveSettings": {
+          "$ref": "#/$defs/auditProfileSettings"
+        },
+        "settingOrigins": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/auditProfileSettingName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/auditProfileSettingOrigin"
+          }
+        },
+        "overriddenSettings": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/auditProfileSettingName"
+          }
+        }
+      }
+    },
+    "dynamicStrategiesEnumerator": {
+      "$ref": "#/$defs/dynamicStrategiesEnumerator"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo"],
+      "properties": {
+        "repo": {
+          "$ref": "#/$defs/projectLocalPath"
+        },
+        "name": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outputDir",
+        "maxParallelAgents",
+        "maxParallelNodes",
+        "keepWorkspaces",
+        "forgeGuardEnabled",
+        "forgeVmemLimitKb",
+        "forgeRayonThreads",
+        "workspaceMode",
+        "defaultTimeoutSeconds",
+        "workflowDeadlineSeconds",
+        "controllerLeaseSeconds"
+      ],
+      "properties": {
+        "outputDir": {
+          "$ref": "#/$defs/projectLocalPath"
+        },
+        "maxParallelAgents": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "maxParallelNodes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "keepWorkspaces": {
+          "type": "boolean"
+        },
+        "forgeGuardEnabled": {
+          "type": "boolean"
+        },
+        "forgeVmemLimitKb": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "forgeRayonThreads": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "workspaceMode": {
+          "const": "git-worktree"
+        },
+        "defaultTimeoutSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "workflowDeadlineSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "controllerLeaseSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "retentionDays", "resources", "nodes", "providers"],
+      "properties": {
+        "mode": {
+          "enum": ["local", "cloud"]
+        },
+        "provider": {
+          "const": "modal"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "resources": {
+          "$ref": "#/$defs/executionResources"
+        },
+        "nodes": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/nodeId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/executionNodeOverride"
+          }
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "modal": {
+              "$ref": "#/$defs/modalExecutionProvider"
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "synthesizedDefault", "profiles"],
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/profileId"
+        },
+        "synthesizedDefault": {
+          "type": "boolean"
+        },
+        "profiles": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/profileId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/modelProfile"
+          }
+        }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sameAgentAttempts", "agents"],
+      "properties": {
+        "sameAgentAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "agents": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/profileId"
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/agentId"
+      },
+      "properties": {
+        "DeepSeekAgent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agentConfig"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "auth": {
+                  "const": "api-key"
+                }
+              }
+            }
+          ]
+        },
+        "OpenRouterAgent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agentConfig"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "auth": {
+                  "const": "api-key"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/agentConfig"
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trustModel", "promptReviewRequired", "materializeOutputsAsUnstaged", "productionSourceRoots"],
+      "properties": {
+        "trustModel": {
+          "const": "skip-permissions"
+        },
+        "promptReviewRequired": {
+          "type": "boolean"
+        },
+        "materializeOutputsAsUnstaged": {
+          "type": "boolean"
+        },
+        "productionSourceRoots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/projectLocalPath"
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "propertyPriorityThreshold",
+        "invariantTestingSmokeTimeoutSeconds",
+        "invariantTestingFuzzerTimeoutSeconds"
+      ],
+      "properties": {
+        "propertyPriorityThreshold": {
+          "enum": ["high", "medium", "low"]
+        },
+        "invariantTestingSmokeTimeoutSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "invariantTestingFuzzerTimeoutSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "referenceExpectationEnforcement": {
+          "enum": ["warn", "fail"]
+        }
+      }
+    },
+    "triage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quorum", "panelSize"],
+      "properties": {
+        "quorum": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "panelSize": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "eval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "providers"],
+      "properties": {
+        "evalConfig": {
+          "$ref": "#/$defs/projectLocalPath"
+        },
+        "groundTruthRoot": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "provider": {
+          "$ref": "#/$defs/evalProviderId"
+        },
+        "providers": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/evalProviderId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/evalProviderProfile"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "execution": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "const": "local"
+              }
+            },
+            "required": ["mode"]
+          }
+        },
+        "required": ["execution"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "execution": {
+            "type": "object",
+            "not": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "const": "modal"
+                    }
+                  },
+                  "required": ["provider"]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "providers": {
+                      "type": "object",
+                      "properties": {
+                        "modal": {
+                          "$ref": "#/$defs/modalExecutionProvider"
+                        }
+                      },
+                      "required": ["modal"]
+                    }
+                  },
+                  "required": ["providers"]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "type": "object",
+        "properties": {
+          "execution": {
+            "type": "object",
+            "required": ["provider"],
+            "properties": {
+              "provider": {
+                "const": "modal"
+              },
+              "providers": {
+                "type": "object",
+                "properties": {
+                  "modal": {
+                    "$ref": "#/$defs/modalExecutionProvider"
+                  }
+                },
+                "required": ["modal"]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "dynamicStrategiesEnumerator": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        {
+          "const": "unlimited"
+        }
+      ]
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "auditProfileId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "packagedTopologyPath": {
+      "type": "string",
+      "pattern": "^topologies/[a-z0-9][a-z0-9-]*\\.ya?ml$"
+    },
+    "auditProfileSettingName": {
+      "type": "string",
+      "enum": [
+        "strategy_loops",
+        "dynamic_strategies_enumerator",
+        "same_agent_attempts",
+        "max_parallel_agents",
+        "max_parallel_nodes",
+        "default_timeout_seconds",
+        "workflow_deadline_seconds",
+        "invariant_testing_smoke_timeout_seconds",
+        "invariant_testing_fuzzer_timeout_seconds",
+        "triage_quorum",
+        "triage_panel_size"
+      ]
+    },
+    "auditProfileSettingOrigin": {
+      "type": "string",
+      "enum": ["default", "audit-profile", "project-config", "environment", "runtime-override"]
+    },
+    "auditProfileSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy_loops": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "dynamic_strategies_enumerator": {
+          "$ref": "#/$defs/dynamicStrategiesEnumerator"
+        },
+        "same_agent_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_parallel_agents": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_parallel_nodes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "default_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "workflow_deadline_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "invariant_testing_smoke_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "invariant_testing_fuzzer_timeout_seconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        },
+        "triage_quorum": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "triage_panel_size": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "nonWhitespaceString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "environmentVariableName": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "agentId": {
+      "type": "string",
+      "enum": ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"]
+    },
+    "nodeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9_][a-z0-9_-]{0,127}$"
+    },
+    "evalProviderId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"
+    },
+    "projectLocalPath": {
+      "type": "string",
+      "pattern": "^(?:\\.|(?![A-Za-z]:[\\\\/])(?![\\\\/])(?!.*[\\\\/]$)(?!.*(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]{2})[^\\r\\n]+)$"
+    },
+    "executionResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memoryMiB", "timeoutSeconds"],
+      "properties": {
+        "cpu": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 256
+        },
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 128,
+          "maximum": 4194304
+        },
+        "timeoutSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        }
+      }
+    },
+    "executionNodeOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resources"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 256
+            },
+            "memoryMiB": {
+              "type": "integer",
+              "minimum": 128,
+              "maximum": 4194304
+            },
+            "timeoutSeconds": {
+              "$ref": "#/$defs/timeoutSeconds"
+            }
+          }
+        }
+      }
+    },
+    "modalExecutionProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "image", "credentialEnv"],
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "image": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "region": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "credentialEnv": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [{ "const": "MODAL_TOKEN_ID" }, { "const": "MODAL_TOKEN_SECRET" }],
+          "items": false
+        }
+      }
+    },
+    "modelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "agent"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/profileId"
+        },
+        "agent": {
+          "$ref": "#/$defs/agentId"
+        },
+        "model": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "reasoning": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "timeoutSeconds": {
+          "$ref": "#/$defs/timeoutSeconds"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "const": "OpenRouterAgent"
+              }
+            },
+            "required": ["agent"]
+          },
+          "then": {
+            "required": ["model"],
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[^\\s\\p{Cc}]+$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "enum": ["KimiAgent", "DeepSeekAgent"]
+              }
+            },
+            "required": ["agent"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reasoning": {
+                "enum": ["low", "high", "max"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "agentConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auth"],
+      "properties": {
+        "auth": {
+          "enum": ["api-key", "subscription"]
+        },
+        "apiKeyEnv": {
+          "$ref": "#/$defs/environmentVariableName"
+        },
+        "configDir": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "auth": {
+                "const": "api-key"
+              }
+            },
+            "required": ["auth"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "apiKeyEnv": {
+                "$ref": "#/$defs/environmentVariableName"
+              }
+            },
+            "required": ["apiKeyEnv"]
+          }
+        }
+      ]
+    },
+    "evalProviderProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiKeyEnv": {
+          "$ref": "#/$defs/environmentVariableName"
+        },
+        "project": {
+          "$ref": "#/$defs/nonWhitespaceString"
+        },
+        "endpoint": {
+          "type": "string",
+          "pattern": "^https://\\S+$"
+        }
+      }
+    }
+  }
+}

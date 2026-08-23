@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:workspace-patch-baseline:1",
+  "title": "Ultrafuzz workspace patch baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "attempt_id", "baseline_tree"],
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.workspace-patch-baseline.v1"
+    },
+    "attempt_id": {
+      "$ref": "#/$defs/identity"
+    },
+    "baseline_tree": {
+      "$ref": "#/$defs/gitObjectId"
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}(?:[a-f0-9]{24})?$"
+    }
+  }
+}

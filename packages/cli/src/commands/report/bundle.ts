@@ -4,17 +4,34 @@ import path from "node:path";
 
 import { Args, Command, Flags } from "@oclif/core";
 import {
+  DEFAULT_STRICT_JSONL_MAX_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+  DEFAULT_STRICT_JSONL_MAX_RECORDS,
+  assertEventRecord,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   layoutForRunRoot,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  validateStrictJsonlHistory,
+  type EventRecord,
+  type StrictJsonlCodec,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  assertVerifiedRunOutputAuthorityRemainedCurrent,
+  isVerifiedOutputAuthorityUnavailable,
+  loadVerifiedRunOutputAuthoritySnapshot,
+  runsRootForProject,
+  type RuntimeDiagnostic,
+  type VerifiedRunOutputAuthoritySnapshot
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
-import { reconcileReportArtifacts } from "../../report-artifacts.js";
+import { validateReportBundleManifest } from "../../cli-schema-registry.js";
+import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
   "attempts.jsonl",
@@ -26,8 +43,7 @@ const TOP_LEVEL_RUN_FILES = [
   "plan.json",
   "run.json",
   "state.json",
-  "usage.jsonl",
-  "workspaces.json"
+  "usage.jsonl"
 ] as const;
 
 const INCLUDED_DIRECTORIES = ["artifacts", "review", "events.index"] as const;
@@ -36,6 +52,8 @@ const INCLUDED_DIRECTORIES = ["artifacts", "review", "events.index"] as const;
 // why a node failed, which nothing else in the run root records. They ship under
 // a neutral archive prefix so the bundle does not name the orchestration engine.
 const RENAMED_DIRECTORIES = [{ source: "smithers/logs", archive: "engine-logs" }] as const;
+const MAX_BUNDLE_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_BYTES = 512 * 1024 * 1024;
 
 interface BundleData {
   zip_path: string;
@@ -49,6 +67,19 @@ interface BundleData {
 interface BundleFile {
   absolutePath: string;
   archivePath: string;
+  contents: Buffer;
+  sourceArchivePath?: string;
+}
+
+interface ReportBundleManifest {
+  schema_version: "ultrafuzz.report-bundle-manifest.v3";
+  run_id: string;
+  created_at: string;
+  included_roots: string[];
+  excluded_roots: ["workspaces"];
+  excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
+  path_mappings: Array<{ source_path: string; archive_path: string }>;
+  entry_count_without_manifest: number;
 }
 
 export default class ReportBundle extends Command {
@@ -95,20 +126,24 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
-      if (hasFinalReportJson(layout.root, layout.artifactsDir)) {
-        reconcileReportArtifacts(layout.root);
-      }
-      const files = collectBundleFiles(layout.root, diagnostics);
+      assertCurrentBundleAuthorityPresent(layout.root);
+      const verifiedRunAuthority = loadVerifiedRunOutputAuthoritySnapshot(layout.root);
+      const validatedReport = loadDeclaredValidatedReportSnapshot(layout.root);
+      const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
+      const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
+      assertVerifiedRunAuthorityBundleSnapshots(files, verifiedRunAuthority);
+      if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
+      assertVerifiedRunOutputAuthorityRemainedCurrent(verifiedRunAuthority);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
       }
 
       const zip = new AdmZip();
       for (const file of files) {
-        zip.addFile(file.archivePath, fs.readFileSync(file.absolutePath));
+        zip.addFile(file.archivePath, file.contents);
       }
-      const manifest = {
-        schema_version: "ultrafuzz.report_bundle.v1",
+      const manifest: ReportBundleManifest = {
+        schema_version: "ultrafuzz.report-bundle-manifest.v3",
         run_id: runId,
         created_at: new Date().toISOString(),
         included_roots: [
@@ -118,8 +153,21 @@ export default class ReportBundle extends Command {
         ],
         excluded_roots: ["workspaces"],
         excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
+        path_mappings: files.flatMap((file) =>
+          file.sourceArchivePath === undefined
+            ? []
+            : [{ source_path: file.sourceArchivePath, archive_path: file.archivePath }]
+        ),
         entry_count_without_manifest: files.length
       };
+      const manifestValidation = validateReportBundleManifest(manifest);
+      if (!manifestValidation.ok) {
+        const summary = manifestValidation.issues
+          .slice(0, 10)
+          .map((issue) => `${issue.instancePath || "/"} ${issue.keyword}: ${issue.message}`)
+          .join("; ");
+        throw new Error(`report bundle manifest is invalid: ${summary}`);
+      }
       zip.addFile("bundle-manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
       writeZipSafely(zip, outputPath);
 
@@ -159,6 +207,81 @@ export default class ReportBundle extends Command {
   }
 }
 
+function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], report: ValidatedReportSnapshot): void {
+  const expected = [
+    { path: report.artifacts.json_path, contents: report.json_bytes },
+    { path: report.artifacts.markdown_path, contents: report.markdown_bytes }
+  ];
+  for (const entry of expected) {
+    const captured = files.find((file) => file.absolutePath === entry.path);
+    if (captured === undefined || !captured.contents.equals(entry.contents)) {
+      throw new Error(`validated report changed before its immutable bundle snapshot was captured: ${entry.path}`);
+    }
+  }
+}
+
+function assertCurrentBundleAuthorityPresent(runRoot: string): void {
+  const smithersRoot = path.join(runRoot, "smithers");
+  const required = [path.join(smithersRoot, "tasks.json"), path.join(smithersRoot, "control-integrity.json")];
+  if (required.some((authorityPath) => lstatIfPresent(authorityPath) === undefined)) {
+    throw new Error(
+      "report bundling for historical or unsealed runs is unsupported; current sealed workflow authority is required"
+    );
+  }
+}
+
+function loadDeclaredValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot | undefined {
+  try {
+    return loadValidatedReportSnapshot(runRoot);
+  } catch (error) {
+    if (isVerifiedOutputAuthorityUnavailable(error)) return undefined;
+    throw error;
+  }
+}
+
+function assertVerifiedRunAuthorityBundleSnapshots(
+  files: readonly BundleFile[],
+  authority: VerifiedRunOutputAuthoritySnapshot
+): void {
+  const capturedByPath = new Map<string, BundleFile>();
+  const capturedArchivePaths = new Set<string>();
+  for (const file of files) {
+    const absolutePath = path.resolve(file.absolutePath);
+    if (capturedByPath.has(absolutePath)) {
+      throw new Error(`report bundle captured the same physical file more than once: ${absolutePath}`);
+    }
+    if (capturedArchivePaths.has(file.archivePath)) {
+      throw new Error(`report bundle captured the same archive path more than once: ${file.archivePath}`);
+    }
+    capturedByPath.set(absolutePath, file);
+    capturedArchivePaths.add(file.archivePath);
+  }
+  for (const snapshot of authority.outputs) {
+    for (const publication of snapshot.publications) {
+      const captured = capturedByPath.get(path.resolve(publication.absolute_path));
+      if (captured === undefined || !captured.contents.equals(publication.bytes)) {
+        throw new Error(
+          `verified publication changed before its immutable bundle snapshot was captured: ${publication.absolute_path}`
+        );
+      }
+    }
+  }
+  for (const document of [authority.state, authority.graph, authority.graph_fingerprint]) {
+    const captured = capturedByPath.get(path.resolve(document.path));
+    if (captured === undefined || !captured.contents.equals(document.bytes)) {
+      throw new Error(`run authority changed before its immutable bundle snapshot was captured: ${document.path}`);
+    }
+  }
+  for (const manifest of authority.artifact_manifests) {
+    const captured = capturedByPath.get(path.resolve(manifest.path));
+    if (captured === undefined || !captured.contents.equals(manifest.bytes)) {
+      throw new Error(
+        `artifact manifest authority changed before its immutable bundle snapshot was captured: ${manifest.path}`
+      );
+    }
+  }
+}
+
 function resolveOutputPath(project: string, runId: string, requested: string | undefined): string {
   if (requested !== undefined) {
     return path.resolve(path.isAbsolute(requested) ? requested : path.join(project, requested));
@@ -173,35 +296,112 @@ function assertOutputIsOutsideRun(runRoot: string, outputPath: string): void {
   }
 }
 
-function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolean {
-  if (!fs.existsSync(artifactsDirectory)) {
-    return false;
-  }
-  assertPathInside(runRoot, artifactsDirectory, "report artifacts directory");
-  assertNoSymlinkComponents(runRoot, artifactsDirectory, "report artifacts directory");
+function loadValidatedEventJournalSnapshot(
+  runRoot: string,
+  eventsPath: string,
+  expectedRunId: string
+): BundleFile | undefined {
+  const stat = lstatIfPresent(eventsPath);
+  if (stat === undefined) return undefined;
+  if (stat.isSymbolicLink()) throw new Error(`event journal cannot be a symlink: ${eventsPath}`);
+  if (!stat.isFile()) throw new Error(`event journal is not a regular file: ${eventsPath}`);
 
-  const entries = fs.readdirSync(artifactsDirectory, { withFileTypes: true });
-  const reportDirectories = [
-    ...entries.filter((entry) => entry.isDirectory() && entry.name === "final-report"),
-    ...entries.filter(
-      (entry) => entry.isDirectory() && entry.name !== "final-report" && entry.name.startsWith("final-report")
-    )
-  ];
-  for (const entry of reportDirectories) {
-    const reportJsonPath = path.join(artifactsDirectory, entry.name, "report.json");
-    if (lstatIfPresent(reportJsonPath) === undefined) {
-      continue;
-    }
-    assertRegularFileInside(runRoot, reportJsonPath, "report JSON path");
-    return true;
-  }
-  return false;
+  assertRegularFileInside(runRoot, eventsPath, "event journal");
+  const contents = readRegularFileSnapshot(eventsPath, DEFAULT_STRICT_JSONL_MAX_BYTES);
+  validateEventJournalSnapshot(contents, expectedRunId);
+  return {
+    absolutePath: eventsPath,
+    archivePath: "events.jsonl",
+    contents
+  };
 }
 
-function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): BundleFile[] {
-  const files: BundleFile[] = [];
+function validateEventJournalSnapshot(contents: Buffer, expectedRunId: string): void {
+  if (contents.byteLength === 0) return;
+  if (contents[contents.byteLength - 1] !== 0x0a) {
+    throw new Error("event journal has a torn or unterminated final record");
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch (error) {
+    throw new Error("event journal is not valid UTF-8", { cause: error });
+  }
+  const lines = text.split("\n");
+  lines.pop();
+  if (lines.length > DEFAULT_STRICT_JSONL_MAX_RECORDS) {
+    throw new Error(`event journal exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORDS}-record limit`);
+  }
+
+  const codec = eventJournalCodec(expectedRunId);
+  const records: EventRecord[] = [];
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    if (line.trim().length === 0) throw new Error(`event journal contains a blank record at line ${lineNumber}`);
+    const lineBytes = Buffer.from(line, "utf8");
+    if (lineBytes.byteLength > DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES) {
+      throw new Error(
+        `event journal record ${lineNumber} exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES}-byte limit`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = parseStrictJsonBytes(lineBytes, {
+        maxBytes: DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
+        maxDepth: 128,
+        maxItems: 100_000,
+        maxProperties: 100_000
+      });
+    } catch (error) {
+      throw new Error(
+        `event journal record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error }
+      );
+    }
+    records.push(codec.parseRecord(parsed, `$[${index}]`));
+  }
+  validateStrictJsonlHistory(records, codec);
+}
+
+function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord> {
+  return {
+    label: "event journal",
+    parseRecord: (value, recordPath) => {
+      const record = assertEventRecord(value, recordPath);
+      if (record.run_id !== expectedRunId) {
+        throw new Error(
+          `${recordPath}.run_id belongs to ${JSON.stringify(record.run_id)}, expected ${JSON.stringify(expectedRunId)}`
+        );
+      }
+      return record;
+    },
+    identity: (record) => record.event_id,
+    validateHistory: (records) => {
+      const firstRunId = records[0]?.run_id;
+      let priorTimestamp = records[0]?.timestamp;
+      for (const [index, record] of records.entries()) {
+        if (firstRunId !== undefined && record.run_id !== firstRunId) {
+          throw new Error(`event journal changes run_id at record ${index + 1}`);
+        }
+        if (priorTimestamp !== undefined && record.timestamp < priorTimestamp) {
+          throw new Error(`event journal timestamps are not ordered at record ${index + 1}`);
+        }
+        priorTimestamp = record.timestamp;
+      }
+    }
+  };
+}
+
+function collectBundleFiles(
+  runRoot: string,
+  diagnostics: RuntimeDiagnostic[],
+  eventJournal: BundleFile | undefined
+): BundleFile[] {
+  const files: BundleFile[] = eventJournal === undefined ? [] : [eventJournal];
 
   for (const relativePath of TOP_LEVEL_RUN_FILES) {
+    if (relativePath === "events.jsonl") continue;
     const absolutePath = path.join(runRoot, relativePath);
     if (fs.existsSync(absolutePath)) {
       addBundleFile(runRoot, absolutePath, relativePath, files, diagnostics);
@@ -225,6 +425,10 @@ function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): 
     }
   }
 
+  const totalBytes = files.reduce((total, file) => total + file.contents.byteLength, 0);
+  if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
+    throw new Error(`report bundle inputs exceed the ${MAX_BUNDLE_TOTAL_BYTES}-byte limit`);
+  }
   return files.sort((left, right) => left.archivePath.localeCompare(right.archivePath));
 }
 
@@ -256,11 +460,15 @@ function collectDirectory(
       const archivePath =
         rename === undefined
           ? displayRelativePath(runRoot, absolutePath)
-          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
+          : `${rename.archiveRoot}/${portableArchiveRelativePath(displayRelativePath(rename.sourceRoot, absolutePath))}`;
       if (shouldExcludeArchivePath(archivePath)) {
         continue;
       }
-      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics);
+      const sourceArchivePath =
+        rename === undefined
+          ? undefined
+          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
+      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, sourceArchivePath);
     }
   }
 }
@@ -270,11 +478,18 @@ function addBundleFile(
   absolutePath: string,
   archivePath: string,
   files: BundleFile[],
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  sourceArchivePath?: string
 ): void {
   try {
     assertRegularFileInside(runRoot, absolutePath, "bundle file");
-    files.push({ absolutePath, archivePath: normalizeArchivePath(archivePath) });
+    const normalizedArchivePath = normalizeArchivePath(archivePath);
+    files.push({
+      absolutePath,
+      archivePath: normalizedArchivePath,
+      contents: readRegularFileSnapshot(absolutePath, MAX_BUNDLE_FILE_BYTES),
+      ...(sourceArchivePath !== undefined && sourceArchivePath !== normalizedArchivePath ? { sourceArchivePath } : {})
+    });
   } catch (error) {
     diagnostics.push({
       code: "REPORT_BUNDLE_FILE_SKIPPED",
@@ -284,6 +499,17 @@ function addBundleFile(
       path: absolutePath
     });
   }
+}
+
+function portableArchiveRelativePath(relativePath: string): string {
+  return relativePath
+    .split("/")
+    .map((segment) => `entry-${crypto.createHash("sha256").update(segment, "utf8").digest("hex")}`)
+    .join("/");
+}
+
+function shouldExcludeArchivePath(archivePath: string): boolean {
+  return /^artifacts\/final-report\/report\.json\.pre-/u.test(archivePath);
 }
 
 function normalizeArchivePath(relativePath: string): string {
@@ -307,10 +533,6 @@ function normalizeArchivePath(relativePath: string): string {
     }
   }
   return archivePath;
-}
-
-function shouldExcludeArchivePath(archivePath: string): boolean {
-  return /^artifacts\/final-report\/report\.json\.pre-/u.test(archivePath);
 }
 
 function skippedSymlinkDiagnostic(runRoot: string, absolutePath: string): RuntimeDiagnostic {

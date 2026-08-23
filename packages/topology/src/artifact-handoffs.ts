@@ -1,4 +1,5 @@
-import { PromptError, extractPromptVariables } from "@ultrafuzz/prompts";
+import { findingReportSemanticAssignment } from "@ultrafuzz/artifacts";
+import { PromptError, extractPromptVariables, parsePromptFrontmatter } from "@ultrafuzz/prompts";
 import type { PromptVariableReference } from "@ultrafuzz/prompts";
 import { START_NODE_ID } from "./types.js";
 import type { NormalizedProjectTopology, NormalizedTopologyNode } from "./types.js";
@@ -11,6 +12,13 @@ export type { PromptVariableReference };
 export interface ArtifactHandoffValidationOptions {
   promptTexts?: Record<string, string>;
 }
+
+const REPORT_VOCABULARY_CONTRACTS = new Set([
+  "ultrafuzz/findings@2",
+  "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/severity-classified-findings@1",
+  "ultrafuzz/report@3"
+]);
 
 export function validateArtifactHandoffs(
   topology: NormalizedProjectTopology,
@@ -25,9 +33,47 @@ export function validateArtifactHandoffs(
     if (promptText === undefined) {
       continue;
     }
-    for (const variable of extractPromptVariablesForNode(node, promptText)) {
+    const promptBody = promptBodyForNode(node, promptText);
+    const variables = extractPromptVariablesForNode(node, promptBody);
+    validateReportVocabularyVariables(node, promptBody, variables);
+    for (const variable of variables) {
       validatePromptVariable(node, variable, nodeById);
     }
+  }
+}
+
+function validateReportVocabularyVariables(
+  node: NormalizedTopologyNode,
+  promptText: string,
+  variables: PromptVariableReference[]
+): void {
+  const publishesReportVocabulary = node.outputs.some((output) => REPORT_VOCABULARY_CONTRACTS.has(output.contract));
+  if (!publishesReportVocabulary) return;
+  for (const variable of ["finding_reachability_vocabulary", "finding_note_key_vocabulary"]) {
+    if (!variables.some((reference) => reference.name === variable)) {
+      throw topologyError(
+        "MISSING_REPORT_VOCABULARY_REFERENCE",
+        `Node \`${node.id}\` prompt must reference authoritative report vocabulary \`{{${variable}}}\``,
+        { nodeId: node.id, variable }
+      );
+    }
+  }
+  const duplicated = findingReportSemanticAssignment(promptText);
+  if (duplicated !== undefined) {
+    throw topologyError(
+      "DUPLICATED_REPORT_VOCABULARY",
+      `Node \`${node.id}\` prompt duplicates unsupported report-bound key \`${duplicated.key}\`; use the authoritative rendered variables`,
+      { nodeId: node.id, key: duplicated.key }
+    );
+  }
+}
+
+function promptBodyForNode(node: NormalizedTopologyNode, promptText: string): string {
+  try {
+    return parsePromptFrontmatter(promptText).body;
+  } catch (error) {
+    if (error instanceof PromptError) throw topologyErrorForPromptError(node, error);
+    throw error;
   }
 }
 
@@ -71,55 +117,6 @@ function validatePromptVariable(
       );
     }
     return;
-  }
-
-  if (variable.name === "ancestor_artifacts") {
-    const producers =
-      variable.argument === undefined || variable.argument.trim().length === 0
-        ? node.depends_on
-        : variable.argument
-            .split(",")
-            .map((part) => part.trim())
-            .filter(Boolean);
-    if (producers.length === 0) {
-      throw topologyError("INVALID_PROMPT_ARTIFACT_REFERENCE", "ancestor_artifacts found no producer nodes", {
-        nodeId: node.id,
-        variable: variable.raw
-      });
-    }
-    for (const producerId of producers) {
-      if (!isSafeId(producerId)) {
-        throw topologyError("INVALID_PROMPT_ARTIFACT_REFERENCE", `Invalid producer id \`${producerId}\``, {
-          nodeId: node.id,
-          referenced: producerId
-        });
-      }
-      const producer = validateAncestorReference(node, producerId, nodeById);
-      if (producer.outputs.length === 0) {
-        throw topologyError(
-          "INVALID_PROMPT_ARTIFACT_REFERENCE",
-          `ancestor_artifacts producer \`${producerId}\` has no outputs`,
-          { nodeId: node.id, referenced: producerId }
-        );
-      }
-    }
-    return;
-  }
-
-  if (variable.name === "ancestor_generated_test_manifests") {
-    const producers = [...nodeById.values()].filter(
-      (candidate) =>
-        candidate.id !== node.id &&
-        isAncestor(node, candidate.id, nodeById, new Set()) &&
-        candidate.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")
-    );
-    if (producers.length === 0) {
-      throw topologyError(
-        "INVALID_PROMPT_ARTIFACT_REFERENCE",
-        "ancestor_generated_test_manifests found no ancestor outputs with contract `ultrafuzz/generated-tests@1`",
-        { nodeId: node.id, variable: variable.raw }
-      );
-    }
   }
 }
 

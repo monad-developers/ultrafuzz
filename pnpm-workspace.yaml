@@ -18,22 +18,22 @@ packages:
 # whatever the open caret on @effect/platform-node-shared happens to resolve to.
 # A runtime test asserts the two lists stay identical.
 overrides:
-  effect: "4.0.0-beta.102"
-  "@effect/opentelemetry": "4.0.0-beta.102"
-  "@effect/platform-bun": "4.0.0-beta.102"
-  "@effect/platform-node-shared": "4.0.0-beta.102"
-  "@effect/sql-sqlite-bun": "4.0.0-beta.102"
+  effect: "4.0.0-beta.105"
+  "@effect/opentelemetry": "4.0.0-beta.105"
+  "@effect/platform-bun": "4.0.0-beta.105"
+  "@effect/platform-node-shared": "4.0.0-beta.105"
+  "@effect/sql-sqlite-bun": "4.0.0-beta.105"
 allowBuilds:
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false
-  "@smithers-orchestrator/jj-darwin-arm64": false
-  "@smithers-orchestrator/jj-darwin-x64": false
-  "@smithers-orchestrator/jj-linux-arm64": false
-  "@smithers-orchestrator/jj-linux-x64": false
-  "@smithers-orchestrator/jj-win32-x64": false
+  "@smthrs/jj-linux-arm64": false
+  "@smthrs/jj-linux-x64": false
   cbor-extract: true
   esbuild: true
   koffi: false
   msgpackr-extract: false
   node-pty: false
   protobufjs: true
+patchedDependencies:
+  modal@0.9.0: patches/modal@0.9.0.patch
+  npm@11.19.0: patches/npm@11.19.0.patch

@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, type Stats } from "node:fs";
-import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
-import { z } from "zod/v4";
+import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
 
 import {
   MODAL_LAUNCH_STATE_SCHEMA_VERSION,
@@ -12,38 +12,24 @@ import {
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_PRE_MODEL_RETRY_MAX_DELAY_MS,
   MODAL_WORKER_LINEAGE_SCHEMA_VERSION,
-  MODAL_WORKER_STATUS_SCHEMA_VERSION,
   type ModalLaunchMode,
   type ModalModelSpec
 } from "./defaults.js";
 import {
   finishModalRecoveryLifecycle,
-  modalRecoveryLifecycleRecordSchema,
-  parseModalRecoveryLifecycleRecord,
-  parseModalRecoveryLifecycleRecords,
   startModalRecoveryLifecycle,
   type FinishModalRecoveryLifecycleInput,
   type ModalRecoveryLifecycleRecord,
   type ModalRecoveryStartReason,
   type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
-import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
-import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
-
-const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const timestampSchema = z.string().min(1);
-const LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v1" as const;
-const PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v2" as const;
-const modelSchema = z
-  .object({
-    slug: z.string().min(1),
-    model: z.string().min(1),
-    provider: z.enum(["openai", "anthropic", "deepseek", "kimi"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"]),
-    reasoning: z.string().min(1),
-    auth_mode: z.enum(["api-key", "subscription"])
-  })
-  .strict();
+import {
+  MODAL_LAUNCH_STATE_SCHEMA_ID,
+  MODAL_WORKER_LINEAGE_SCHEMA_ID,
+  MODAL_WORKER_RESULT_SCHEMA_ID
+} from "./modal-contracts.js";
+import { parseModalDocumentValue, readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
+import { WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
 
 export interface ModalLineageFingerprints {
   config: string;
@@ -128,7 +114,7 @@ export type ModalWorkerStatusCategory =
   | "incompatible-checkpoint";
 
 export interface ModalWorkerStatus {
-  schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION | typeof WORKER_RESULT_SCHEMA_VERSION;
+  schema_version: typeof WORKER_RESULT_SCHEMA_VERSION;
   updated_at?: string;
   stage: string;
   terminal: boolean;
@@ -144,378 +130,18 @@ export interface ModalWorkerStatus {
   result_generation?: number;
 }
 
-const lineageFingerprintsSchema = z
-  .object({ config: fingerprintSchema, source: fingerprintSchema, image: fingerprintSchema })
-  .strict();
-
-const attemptProvenanceSchema = z
-  .object({
-    slug: z.string().min(1),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    model_fingerprint: fingerprintSchema,
-    fingerprints: lineageFingerprintsSchema,
-    workspace_mode: z.enum(["resume", "fresh"]),
-    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
-    reserved_at: timestampSchema,
-    sandbox_id: z.string().min(1).optional(),
-    launched_at: timestampSchema.optional(),
-    finished_at: timestampSchema.optional(),
-    phase: z.enum(["reserved", "sandbox-created", "launched", "failed"])
-  })
-  .strict();
-
-const launchRecordSchema = modelSchema
-  .extend({
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    model_fingerprint: fingerprintSchema,
-    volume_name: z.string().min(1),
-    remote_root: z.string().min(1),
-    workspace_mode: z.enum(["resume", "fresh"]),
-    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
-    phase: z.enum(["reserved", "sandbox-created", "launched", "failed"]),
-    reserved_at: timestampSchema,
-    sandbox_id: z.string().min(1).optional(),
-    launched_at: timestampSchema.optional(),
-    finished_at: timestampSchema.optional(),
-    failure_category: z.enum(["transient-operational-failure", "permanent-operational-failure"]).optional()
-  })
-  .strict()
-  .superRefine((record, context) => {
-    if ((record.phase === "sandbox-created" || record.phase === "launched") && record.sandbox_id === undefined) {
-      context.addIssue({ code: "custom", message: `${record.phase} launch is missing sandbox_id` });
-    }
-    if (record.phase === "launched" && record.launched_at === undefined) {
-      context.addIssue({ code: "custom", message: "launched record is missing launched_at" });
-    }
-    if (record.phase === "failed" && record.failure_category === undefined) {
-      context.addIssue({ code: "custom", message: "failed record is missing failure_category" });
-    }
-  });
-
-const previousLaunchStateSchema = z
-  .object({
-    schema_version: z.literal(PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    generation_mode: z.enum(["resume", "fresh"]),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    image_id: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    fingerprints: lineageFingerprintsSchema,
-    launches: z.array(launchRecordSchema),
-    attempt_history: z.array(attemptProvenanceSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (launch.generation !== state.generation) {
-        context.addIssue({ code: "custom", message: `launch ${launch.slug} has the wrong generation` });
-      }
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-    const attempts = new Set<string>();
-    for (const attempt of [...state.attempt_history, ...state.launches]) {
-      const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
-      if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
-      attempts.add(key);
-    }
-  });
-
-const launchStateSchema = z
-  .object({
-    schema_version: z.literal(MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    generation_mode: z.enum(["resume", "fresh"]),
-    generation_start_reason: z.enum([
-      "initial",
-      "pre-model-retry",
-      "post-model-resume",
-      "image-rollout",
-      "stale-probe-rotation",
-      "operator-restart",
-      "unknown"
-    ]),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    image_id: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    fingerprints: lineageFingerprintsSchema,
-    launches: z.array(launchRecordSchema),
-    attempt_history: z.array(attemptProvenanceSchema),
-    recovery_lifecycle: z.array(modalRecoveryLifecycleRecordSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (launch.generation !== state.generation) {
-        context.addIssue({ code: "custom", message: `launch ${launch.slug} has the wrong generation` });
-      }
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-    const attempts = new Set<string>();
-    const attemptIds = new Set<string>();
-    for (const attempt of [...state.attempt_history, ...state.launches]) {
-      const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
-      if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
-      attempts.add(key);
-      attemptIds.add(attempt.attempt_id);
-      const lifecycle = state.recovery_lifecycle.find((record) => record.attempt_id === attempt.attempt_id);
-      const expectedFingerprints = "fingerprints" in attempt ? attempt.fingerprints : state.fingerprints;
-      if (lifecycle === undefined) {
-        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} is missing lifecycle` });
-      } else if (
-        lifecycle.logical_run_id !== state.logical_run_id ||
-        lifecycle.model_slug !== attempt.slug ||
-        lifecycle.generation !== attempt.generation ||
-        lifecycle.attempt !== attempt.attempt ||
-        lifecycle.fingerprints.config !== expectedFingerprints.config ||
-        lifecycle.fingerprints.source !== expectedFingerprints.source ||
-        lifecycle.fingerprints.image !== expectedFingerprints.image ||
-        lifecycle.fingerprints.model !== attempt.model_fingerprint
-      ) {
-        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} has mismatched lifecycle` });
-      }
-    }
-    try {
-      const recoveryRecords = parseModalRecoveryLifecycleRecords(state.recovery_lifecycle);
-      const activeModels = new Set<string>();
-      for (const record of recoveryRecords) {
-        if (record.logical_run_id !== state.logical_run_id || !attemptIds.has(record.attempt_id)) {
-          context.addIssue({
-            code: "custom",
-            path: ["recovery_lifecycle"],
-            message: `orphaned recovery lifecycle ${record.attempt_id}`
-          });
-        }
-        if (record.terminal_reason !== "active") continue;
-        if (activeModels.has(record.model_slug)) {
-          context.addIssue({
-            code: "custom",
-            path: ["recovery_lifecycle"],
-            message: `multiple active recovery generations for ${record.model_slug}`
-          });
-        }
-        activeModels.add(record.model_slug);
-      }
-    } catch (error) {
-      context.addIssue({
-        code: "custom",
-        path: ["recovery_lifecycle"],
-        message: error instanceof Error ? error.message : "invalid recovery lifecycle"
-      });
-    }
-  });
-
-const legacyLaunchRecordSchema = modelSchema
-  .extend({
-    sandbox_id: z.string().min(1),
-    volume_name: z.string().min(1),
-    remote_root: z.string().min(1),
-    launched_at: timestampSchema
-  })
-  .strict();
-
-const legacyLaunchStateSchema = z
-  .object({
-    schema_version: z.literal(LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
-    run_id: z.string().min(1),
-    app: z.string().min(1),
-    image: z.string().min(1),
-    timeout_ms: z.number().int().positive(),
-    source_revision: z.string().min(1),
-    launches: z.array(legacyLaunchRecordSchema)
-  })
-  .strict()
-  .superRefine((state, context) => {
-    const slugs = new Set<string>();
-    for (const launch of state.launches) {
-      if (slugs.has(launch.slug)) {
-        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
-      }
-      slugs.add(launch.slug);
-    }
-  });
-
-type LegacyModalLaunchState = z.infer<typeof legacyLaunchStateSchema>;
-type PreviousModalLaunchState = z.infer<typeof previousLaunchStateSchema>;
-
-export interface ModalLaunchStateCompatibilityContext {
-  imageId: string;
-  fingerprints: ModalLineageFingerprints;
-}
-
-const workerLineageSchema = z
-  .object({
-    schema_version: z.literal(MODAL_WORKER_LINEAGE_SCHEMA_VERSION),
-    logical_run_id: z.string().min(1),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    attempt_id: z.string().min(1),
-    workspace_mode: z.enum(["resume", "fresh"]),
-    fingerprints: lineageFingerprintsSchema,
-    model_fingerprint: fingerprintSchema
-  })
-  .strict();
-
-const workerStatusSchema = z
-  .object({
-    schema_version: z.literal(MODAL_WORKER_STATUS_SCHEMA_VERSION),
-    updated_at: timestampSchema,
-    stage: z.string().min(1),
-    category: z.enum([
-      "preparing",
-      "model-work",
-      "post-processing",
-      "succeeded",
-      "genuine-task-outcome",
-      "resume-required",
-      "transient-operational-failure",
-      "permanent-operational-failure",
-      "incompatible-checkpoint"
-    ]),
-    model_work_started: z.boolean(),
-    retryable: z.boolean(),
-    generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    eval_run_id: z.string().min(1).optional(),
-    run_status: z.string().min(1).optional(),
-    node_counts: z.record(z.string(), z.number().int().nonnegative()).optional(),
-    error_code: z.enum(WORKER_DIAGNOSTIC_CODES).optional()
-  })
-  .strict();
-
-const workerResultStatusSchema = z
-  .object({
-    schema_version: z.literal(WORKER_RESULT_SCHEMA_VERSION),
-    result_type: z.enum(["partial", "terminal"]),
-    generation: z.number().int().positive(),
-    launch_generation: z.number().int().positive(),
-    attempt: z.number().int().positive(),
-    model_work_started: z.boolean(),
-    counts: z
-      .object({
-        succeeded: z.number().int().nonnegative(),
-        failed: z.number().int().nonnegative(),
-        remaining: z.number().int().nonnegative()
-      })
-      .strict(),
-    checkpoint: z
-      .object({
-        age_ms: z.number().int().nonnegative().nullable(),
-        digest: z
-          .string()
-          .regex(/^sha256:[a-f0-9]{64}$/u)
-          .nullable()
-      })
-      .strict(),
-    exit_category: z.enum(OPERATIONAL_DISPOSITION_CATEGORIES),
-    runtime_ms: z.number().int().nonnegative(),
-    usage: z
-      .object({
-        input_tokens: z.number().int().nonnegative(),
-        output_tokens: z.number().int().nonnegative(),
-        cache_read_tokens: z.number().int().nonnegative(),
-        cache_write_tokens: z.number().int().nonnegative(),
-        reasoning_tokens: z.number().int().nonnegative(),
-        total_tokens: z.number().int().nonnegative(),
-        estimated_cost_usd: z.number().nonnegative().nullable(),
-        partial_pricing: z.boolean(),
-        event_count: z.number().int().nonnegative(),
-        priced_event_count: z.number().int().nonnegative(),
-        unpriced_event_count: z.number().int().nonnegative()
-      })
-      .strict()
-      .nullable(),
-    pricing: z
-      .object({
-        source: z.enum(["models.dev", "configured-catalog", "disabled"]),
-        status: z.enum(["available", "disabled", "unavailable"]),
-        fetched_at: timestampSchema.optional(),
-        resolved_model_count: z.number().int().nonnegative(),
-        unresolved_model_count: z.number().int().nonnegative()
-      })
-      .strict()
-      .optional(),
-    diagnostic_code: z.enum(WORKER_DIAGNOSTIC_CODES)
-  })
-  .strict()
-  .superRefine((status, context) => {
-    if (status.result_type === "partial" && status.exit_category !== "live") {
-      context.addIssue({ code: "custom", message: "partial worker result must be live" });
-    }
-    if (status.result_type === "terminal" && status.exit_category === "live") {
-      context.addIssue({ code: "custom", message: "terminal worker result cannot be live" });
-    }
-  });
-
 export function parseModalLaunchState(value: unknown): ModalLaunchState {
-  return launchStateSchema.parse(value) as ModalLaunchState;
-}
-
-export function isLegacyModalLaunchStateWithoutImageId(value: unknown): boolean {
-  return legacyLaunchStateSchema.safeParse(value).success;
-}
-
-export function parseCompatibleModalLaunchState(
-  value: unknown,
-  compatibility?: ModalLaunchStateCompatibilityContext
-): ModalLaunchState {
-  const current = launchStateSchema.safeParse(value);
-  if (current.success) return current.data as ModalLaunchState;
-  const previous = previousLaunchStateSchema.safeParse(value);
-  if (previous.success) return migratePreviousLaunchState(previous.data);
-  const legacy = legacyLaunchStateSchema.safeParse(value);
-  if (!legacy.success) return launchStateSchema.parse(value) as ModalLaunchState;
-  if (compatibility === undefined) {
-    throw new Error("legacy Modal launch state requires compatibility context");
-  }
-  return migrateLegacyLaunchState(legacy.data, compatibility);
+  return parseModalDocumentValue(MODAL_LAUNCH_STATE_SCHEMA_ID, value) as ModalLaunchState;
 }
 
 export function parseModalWorkerLineage(value: unknown): ModalWorkerLineage {
-  return workerLineageSchema.parse(value) as ModalWorkerLineage;
+  return parseModalDocumentValue(MODAL_WORKER_LINEAGE_SCHEMA_ID, value) as ModalWorkerLineage;
 }
 
 export function parseModalWorkerStatus(
   value: unknown,
   expected?: { generation: number; attempt: number }
 ): ModalWorkerStatus | undefined {
-  const parsed = workerStatusSchema.safeParse(value);
-  if (parsed.success) {
-    const candidate = parsed.data;
-    const status: ModalWorkerStatus = {
-      schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
-      updated_at: candidate.updated_at,
-      stage: candidate.category,
-      terminal: candidate.stage === "terminal",
-      category: candidate.category,
-      model_work_started: candidate.model_work_started,
-      retryable: candidate.retryable,
-      generation: candidate.generation,
-      attempt: candidate.attempt,
-      ...(candidate.eval_run_id === undefined ? {} : { eval_run_id: candidate.eval_run_id }),
-      ...(candidate.run_status === undefined ? {} : { run_status: candidate.run_status }),
-      ...(candidate.node_counts === undefined ? {} : { node_counts: candidate.node_counts }),
-      ...(candidate.error_code === undefined ? {} : { error_code: candidate.error_code })
-    };
-    return matchesWorkerAttempt(status, expected) ? status : undefined;
-  }
   const contract = parseModalWorkerResult(value, expected);
   if (contract === undefined) return undefined;
   const status: ModalWorkerStatus = {
@@ -538,9 +164,7 @@ export function parseModalWorkerResult(
   value: unknown,
   expected?: { generation: number; attempt: number }
 ): WorkerResultContract | undefined {
-  const parsed = workerResultStatusSchema.safeParse(value);
-  if (!parsed.success) return undefined;
-  const contract = parsed.data as WorkerResultContract;
+  const contract = parseModalDocumentValue(MODAL_WORKER_RESULT_SCHEMA_ID, value) as WorkerResultContract;
   return matchesWorkerAttempt({ generation: contract.launch_generation, attempt: contract.attempt }, expected)
     ? contract
     : undefined;
@@ -657,53 +281,6 @@ export function createModalLaunchState(input: {
     launches: [],
     attempt_history: input.attemptHistory ?? [],
     recovery_lifecycle: input.recoveryLifecycle ?? []
-  });
-}
-
-function migratePreviousLaunchState(state: PreviousModalLaunchState): ModalLaunchState {
-  return parseModalLaunchState({
-    ...state,
-    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
-    generation_start_reason: "unknown",
-    recovery_lifecycle: historicalRecoveryLifecycle(
-      state.logical_run_id,
-      [...state.attempt_history, ...state.launches],
-      state.fingerprints
-    )
-  });
-}
-
-function migrateLegacyLaunchState(
-  state: LegacyModalLaunchState,
-  compatibility: ModalLaunchStateCompatibilityContext
-): ModalLaunchState {
-  const launches: ModalLaunchRecord[] = state.launches.map((launch, index) => ({
-    ...launch,
-    generation: 1,
-    attempt: 1,
-    attempt_id: legacyAttemptId(launch, index),
-    model_fingerprint: fingerprintLegacyModel(launch),
-    workspace_mode: "resume",
-    phase: "launched",
-    reserved_at: launch.launched_at,
-    sandbox_id: launch.sandbox_id,
-    launched_at: launch.launched_at
-  }));
-  return parseModalLaunchState({
-    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
-    logical_run_id: state.run_id,
-    generation: 1,
-    generation_mode: "resume",
-    generation_start_reason: "unknown",
-    app: state.app,
-    image: state.image,
-    image_id: compatibility.imageId,
-    timeout_ms: state.timeout_ms,
-    source_revision: state.source_revision,
-    fingerprints: compatibility.fingerprints,
-    launches,
-    attempt_history: [],
-    recovery_lifecycle: historicalRecoveryLifecycle(state.run_id, launches, compatibility.fingerprints)
   });
 }
 
@@ -1106,15 +683,10 @@ export function isTransientModalError(error: unknown): boolean {
   return false;
 }
 
-export async function readModalLaunchState(
-  statePath: string,
-  compatibility?: ModalLaunchStateCompatibilityContext
-): Promise<ModalLaunchState | undefined> {
+export async function readModalLaunchState(statePath: string): Promise<ModalLaunchState | undefined> {
   try {
-    return parseCompatibleModalLaunchState(
-      JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown,
-      compatibility
-    );
+    const snapshot = readModalDocument(path.resolve(statePath), MODAL_LAUNCH_STATE_SCHEMA_ID);
+    return structuredClone(snapshot.value) as ModalLaunchState;
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -1124,26 +696,11 @@ export async function readModalLaunchState(
 export async function writeModalLaunchState(statePath: string, state: ModalLaunchState): Promise<void> {
   const target = path.resolve(statePath);
   const checked = parseModalLaunchState(state);
-  await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  let handle;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(checked, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, target);
-    const directory = await open(path.dirname(target), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
+  const trustedRoot = path.dirname(target);
+  await mkdir(trustedRoot, { recursive: true, mode: 0o700 });
+  await writeModalDocumentAtomic(target, MODAL_LAUNCH_STATE_SCHEMA_ID, checked, {
+    trustedRoot
+  });
 }
 
 export interface ModalLaunchLockOptions {
@@ -1153,6 +710,15 @@ export interface ModalLaunchLockOptions {
   delay?: (ms: number) => Promise<void>;
   token?: string;
 }
+
+interface ModalLaunchLockOwner {
+  token: string;
+  pid: number;
+  pid_start_ticks?: string;
+  created_at: string;
+}
+
+const MAX_MODAL_LAUNCH_LOCK_BYTES = 4 * 1024;
 
 export async function withModalLaunchStateLock<T>(
   statePath: string,
@@ -1166,6 +732,9 @@ export async function withModalLaunchStateLock<T>(
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 25;
   const token = options.token ?? randomUUID();
+  if (!isModalLaunchLockToken(token)) {
+    throw new Error("Modal launch state lock token must be a non-empty bounded opaque string");
+  }
   const pidStartTicks = readProcessStartTicksSync(process.pid);
   const deadline = now() + timeoutMs;
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -1210,7 +779,7 @@ export async function withModalLaunchStateLock<T>(
   await handle.close().catch(() => undefined);
   let releaseError: unknown;
   try {
-    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { token?: unknown };
+    const owner = parseModalLaunchLockOwner(readRegularFileSnapshot(lockPath, MAX_MODAL_LAUNCH_LOCK_BYTES), lockPath);
     if (owner.token === token) await unlink(lockPath);
   } catch (error) {
     if (!isNodeError(error, "ENOENT")) releaseError = error;
@@ -1240,54 +809,6 @@ export function modalAttemptProvenance(
     ...(record.finished_at === undefined ? {} : { finished_at: record.finished_at }),
     phase: record.phase
   };
-}
-
-function historicalRecoveryLifecycle(
-  logicalRunId: string,
-  attempts: ReadonlyArray<ModalAttemptProvenance | ModalLaunchRecord>,
-  fallbackFingerprints: ModalLineageFingerprints
-): ModalRecoveryLifecycleRecord[] {
-  const records: ModalRecoveryLifecycleRecord[] = [];
-  const latestBySlug = new Map<string, ModalRecoveryLifecycleRecord>();
-  for (const attempt of attempts) {
-    const parent = latestBySlug.get(attempt.slug);
-    const record = parseModalRecoveryLifecycleRecord({
-      schema_version: "ultrafuzz.modal.recovery-lifecycle.v1",
-      logical_run_id: logicalRunId,
-      model_slug: attempt.slug,
-      generation: attempt.generation,
-      attempt: attempt.attempt,
-      attempt_id: attempt.attempt_id,
-      ...(parent === undefined
-        ? {}
-        : {
-            parent_generation: parent.generation,
-            parent_attempt_id: parent.attempt_id
-          }),
-      trigger_action: "unknown",
-      start_reason: "unknown",
-      terminal_reason: "unknown",
-      terminal_class: "unknown",
-      launched_at: attempt.launched_at ?? attempt.reserved_at,
-      ...(attempt.finished_at === undefined ? {} : { finished_at: attempt.finished_at }),
-      worker_exit_code: "unknown",
-      fingerprints: {
-        ...("fingerprints" in attempt ? attempt.fingerprints : fallbackFingerprints),
-        model: attempt.model_fingerprint
-      },
-      model_work_started: "unknown",
-      last_durable_transition_at: "unknown",
-      node_counts_before: "unknown",
-      node_counts_after: "unknown",
-      progress_made: "unknown",
-      controller_requested: "unknown",
-      node_attempt_ledger_digest: "unknown",
-      evaluation_lineage_digest: "unknown"
-    });
-    records.push(record);
-    latestBySlug.set(attempt.slug, record);
-  }
-  return records;
 }
 
 function latestModalRecoveryLifecycle(
@@ -1331,63 +852,90 @@ function updateFramed(hash: ReturnType<typeof createHash>, value: string | Buffe
   hash.update("\0");
 }
 
-function legacyAttemptId(launch: Pick<ModalLaunchRecord, "slug" | "sandbox_id">, index: number): string {
-  return `legacy-${sha256(`${launch.slug}\0${launch.sandbox_id}\0${index}`).slice(0, 32)}`;
-}
-
-function fingerprintLegacyModel(model: ModalModelSpec): string {
-  return sha256(
-    JSON.stringify({
-      slug: model.slug,
-      model: model.model,
-      provider: model.provider,
-      agent: model.agent,
-      reasoning: model.reasoning,
-      auth_mode: model.auth_mode
-    })
-  );
-}
-
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
 interface ObservedLaunchLock {
   identity: string;
-  owner: { token?: unknown; pid?: unknown; pid_start_ticks?: unknown } | undefined;
+  owner: ModalLaunchLockOwner;
   dead: boolean;
 }
 
 async function observeLaunchLock(lockPath: string): Promise<ObservedLaunchLock | undefined> {
   try {
-    const contents = await readFile(lockPath, "utf8");
+    const contents = readRegularFileSnapshot(lockPath, MAX_MODAL_LAUNCH_LOCK_BYTES);
     const metadata = await stat(lockPath);
-    let owner: ObservedLaunchLock["owner"];
-    try {
-      owner = JSON.parse(contents) as { token?: unknown; pid?: unknown; pid_start_ticks?: unknown };
-    } catch {
-      owner = undefined;
-    }
+    const owner = parseModalLaunchLockOwner(contents, lockPath);
     let dead = Date.now() - metadata.mtimeMs > 5_000;
-    if (typeof owner?.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
-      try {
-        process.kill(owner.pid, 0);
-        const expectedStartTicks = owner.pid_start_ticks;
-        const actualStartTicks =
-          typeof expectedStartTicks === "string" ? await readProcessStartTicks(owner.pid) : undefined;
-        dead =
-          typeof expectedStartTicks === "string" && actualStartTicks !== undefined
-            ? actualStartTicks !== expectedStartTicks
-            : false;
-      } catch (error) {
-        dead = isNodeError(error, "ESRCH");
-      }
+    try {
+      process.kill(owner.pid, 0);
+      const expectedStartTicks = owner.pid_start_ticks;
+      const actualStartTicks = expectedStartTicks === undefined ? undefined : await readProcessStartTicks(owner.pid);
+      dead =
+        expectedStartTicks !== undefined && actualStartTicks !== undefined
+          ? actualStartTicks !== expectedStartTicks
+          : false;
+    } catch (error) {
+      dead = isNodeError(error, "ESRCH");
     }
     return { identity: sha256(contents), owner, dead };
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
   }
+}
+
+function parseModalLaunchLockOwner(contents: Uint8Array, lockPath: string): ModalLaunchLockOwner {
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(contents, {
+      maxBytes: MAX_MODAL_LAUNCH_LOCK_BYTES,
+      maxDepth: 2,
+      maxItems: 0,
+      maxProperties: 4
+    });
+  } catch (error) {
+    throw new Error(`Modal launch state lock metadata is not strict bounded JSON: ${lockPath}`, { cause: error });
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Modal launch state lock metadata must be an object: ${lockPath}`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const allowedKeys = new Set(["token", "pid", "pid_start_ticks", "created_at"]);
+  const exactKeyCount = Object.hasOwn(record, "pid_start_ticks") ? 4 : 3;
+  if (
+    keys.length !== exactKeyCount ||
+    keys.some((key) => !allowedKeys.has(key)) ||
+    !isModalLaunchLockToken(record.token) ||
+    typeof record.pid !== "number" ||
+    !Number.isSafeInteger(record.pid) ||
+    record.pid <= 0 ||
+    (record.pid_start_ticks !== undefined &&
+      (typeof record.pid_start_ticks !== "string" || !/^[0-9]+$/u.test(record.pid_start_ticks))) ||
+    typeof record.created_at !== "string" ||
+    !isCanonicalTimestamp(record.created_at)
+  ) {
+    throw new Error(`Modal launch state lock metadata has an unsupported shape: ${lockPath}`);
+  }
+  return {
+    token: record.token,
+    pid: record.pid,
+    ...(record.pid_start_ticks === undefined ? {} : { pid_start_ticks: record.pid_start_ticks }),
+    created_at: record.created_at
+  };
+}
+
+function isCanonicalTimestamp(value: string): boolean {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function isModalLaunchLockToken(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value === value.trim() && Buffer.byteLength(value, "utf8") <= 256
+  );
 }
 
 async function reclaimDeadLaunchLock(lockPath: string): Promise<boolean> {
@@ -1444,7 +992,9 @@ function parseProcessStartTicks(contents: string): string | undefined {
 }
 
 function isNodeError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  if (!(error instanceof Error)) return false;
+  if ("code" in error && error.code === code) return true;
+  return "cause" in error && isNodeError(error.cause, code);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -1,14 +1,13 @@
-export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v1" as const;
+export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v2" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v3" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-state.v1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
-export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status.v2" as const;
 export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const MODAL_PUBLIC_SANDBOX_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-// A full public EVMBench pair may legitimately spend roughly 14.5 hours in
-// preparation, eight eval/score waves, cleanup, and report generation. Keep
-// that lane bounded below the historical 24-hour default without expiring a
-// worker inside its own accepted command envelope.
+// A full public EVMBench pair's derived control envelope is roughly 10.5 hours:
+// two bounded eval waves plus preparation, scoring, cleanup, reporting, and
+// polling grace. Keep that lane below the historical 24-hour default without
+// expiring a worker inside its own accepted command envelope.
 export const MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS = 16 * 60 * 60 * 1000;
 export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
@@ -40,7 +39,7 @@ export const MODAL_BENCHMARK_SANDBOX_RESOURCES = {
 export const DEFAULT_MODAL_MAX_PARALLEL_AGENTS = 16;
 export const DEFAULT_MODAL_MAX_PARALLEL_NODES = 32;
 
-export type ModelProvider = "openai" | "anthropic" | "deepseek" | "kimi";
+export type ModelProvider = "openai" | "anthropic" | "deepseek" | "kimi" | "openrouter";
 export type ModelAuthMode = "api-key" | "subscription";
 export type ModalLaunchMode = "resume" | "fresh";
 
@@ -48,7 +47,7 @@ export interface ModalModelSpec {
   slug: string;
   model: string;
   provider: ModelProvider;
-  agent: "CodexAgent" | "ClaudeAgent" | "DeepSeekAgent" | "KimiAgent";
+  agent: "CodexAgent" | "ClaudeAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
   reasoning: string;
   auth_mode: ModelAuthMode;
 }

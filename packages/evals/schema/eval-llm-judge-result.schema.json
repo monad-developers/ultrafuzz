@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:evals:llm-judge-result:1",
+  "title": "Ultrafuzz eval LLM judge result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.eval.llm-judge-result.v1" },
+    "matched_ground_truth_bug_id": {
+      "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }]
+    },
+    "score": { "$ref": "#/$defs/unitMetric" },
+    "signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root_cause", "affected_area", "impact", "evidence"],
+      "properties": {
+        "root_cause": { "$ref": "#/$defs/unitMetric" },
+        "affected_area": { "$ref": "#/$defs/unitMetric" },
+        "impact": { "$ref": "#/$defs/unitMetric" },
+        "evidence": { "$ref": "#/$defs/unitMetric" }
+      }
+    },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 16384 },
+    "confidence": { "$ref": "#/$defs/unitMetric" }
+  },
+  "$defs": {
+    "unitMetric": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

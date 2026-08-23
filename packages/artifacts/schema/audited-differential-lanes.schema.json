@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.audited-differential-lanes.v1"
+    },
+    "auditor_attempt_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "source_plan_artifacts": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "source_harness_artifacts": {
+      "minItems": 0,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "surface_audits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": ["conformant", "reference_gap", "ambiguous_spec", "out_of_scope", "ready"]
+          },
+          "public_evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "audit_notes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required_narrowing": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": ["surface_id", "status", "public_evidence_paths", "audit_notes", "required_narrowing"],
+        "additionalProperties": false
+      }
+    },
+    "ready_lanes": {
+      "maxItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "auditor_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "planner_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "harness_author_attempt_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "source_plan_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_harness_artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "intended_t_sol_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "focused_command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_evidence_paths": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "exact_observable_equality_assertions": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "oracle_type": {
+            "type": "string",
+            "enum": ["independent_reference", "metamorphic", "self_consistency", "sanity_probe"]
+          },
+          "calibration_bucket": {
+            "type": "string",
+            "enum": ["red_seeking_adversarial", "green_safe_sanity"]
+          },
+          "red_seeking_priority": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        },
+        "required": [
+          "lane_id",
+          "attempt_index",
+          "auditor_attempt_index",
+          "planner_attempt_index",
+          "harness_author_attempt_index",
+          "source_plan_artifact",
+          "source_harness_artifact",
+          "surface_id",
+          "intended_t_sol_path",
+          "focused_command",
+          "public_evidence_paths",
+          "exact_observable_equality_assertions",
+          "oracle_type",
+          "calibration_bucket",
+          "red_seeking_priority"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "rejected_or_narrowed_lanes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": ["rejected", "narrowed"]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["lane_id", "disposition", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "reference_gap_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["surface_id", "summary", "evidence_paths"],
+        "additionalProperties": false
+      }
+    },
+    "ambiguous_spec_work_orders": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "surface_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_paths": {
+            "minItems": 0,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": ["surface_id", "summary", "evidence_paths"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "auditor_attempt_index",
+    "source_plan_artifacts",
+    "source_harness_artifacts",
+    "surface_audits",
+    "ready_lanes",
+    "rejected_or_narrowed_lanes",
+    "reference_gap_work_orders",
+    "ambiguous_spec_work_orders"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:audited-differential-lanes:1",
+  "title": "Ultrafuzz audited differential lanes"
+}

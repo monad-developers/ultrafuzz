@@ -47,6 +47,10 @@ function data(capture: Capture): Record<string, unknown> {
 test("profile list and detail expose the catalog and effective project policy", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  assert.deepEqual(
+    fs.readFileSync(path.join(project, ".ultrafuzz", "topology.yml")),
+    fs.readFileSync(packagedTopology("default").path)
+  );
 
   const listed = await cli(project, ["config", "audit-profiles", "--json"]);
   assert.equal(listed.code, 0, listed.stderr);

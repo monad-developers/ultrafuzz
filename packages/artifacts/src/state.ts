@@ -1,11 +1,17 @@
 import fs from "node:fs";
 
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 
-import type { ArtifactContractId } from "./artifact-contracts.js";
-import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import type { ArtifactContractId } from "./artifact-contract-ids.js";
+import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
+import { validateSafeId, writeJsonDurable } from "./safe-paths.js";
+import { readRegularFileSnapshot } from "./schema-registry.js";
+import { executeSemanticGate } from "./semantic-gates.js";
+import { parseStrictJsonBytes } from "./strict-json.js";
 
-export const STATE_SCHEMA_VERSION = "1.1";
+export const STATE_SCHEMA_VERSION = "ultrafuzz.run-state.v5" as const;
+export const RUN_STATE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-state:5" as const;
+export const TERMINAL_DISPOSITION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:terminal-disposition:1" as const;
 
 export const RUN_STATE_STATUSES = [
   "pending",
@@ -82,6 +88,173 @@ export const CONTROLLER_LEASE_STATUSES = ["active", "expired", "recovering"] as 
 
 export type ControllerLeaseStatus = (typeof CONTROLLER_LEASE_STATUSES)[number];
 
+export const SMITHERS_RUN_STATUSES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "finished",
+  "continued",
+  "failed",
+  "cancelled"
+] as const;
+
+export const SMITHERS_RUN_STATES = [
+  "running",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "paused",
+  "recovering",
+  "stale",
+  "orphaned",
+  "failed",
+  "cancel-pending",
+  "cancelled",
+  "succeeded",
+  "unknown"
+] as const;
+
+export const SMITHERS_NODE_STATES = [
+  "pending",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer",
+  "waiting-quota",
+  "waiting-bound",
+  "bound-stale",
+  "in-progress",
+  "finished",
+  "failed",
+  "cancelled",
+  "skipped"
+] as const;
+
+export const NODE_PROVENANCE_FAILURE_CATEGORIES = [
+  "dependency-cascade",
+  "artifact-contract",
+  "provider-interruption",
+  "agent-failure"
+] as const;
+
+export const NODE_PROVENANCE_REASON_CODES = ["CAUSAL_MANIFEST_MISMATCH", "DEPENDENCY_NOT_SATISFIED"] as const;
+
+export type NodeProvenanceReasonCode = (typeof NODE_PROVENANCE_REASON_CODES)[number];
+
+export const TERMINAL_DISPOSITION_SCHEMA_VERSION = "ultrafuzz.terminal-disposition.v1" as const;
+
+export interface TerminalDispositionDocument {
+  schema_version: typeof TERMINAL_DISPOSITION_SCHEMA_VERSION;
+  kind: "task-output-validation-failure";
+}
+
+export interface RunWorkflowProvenance {
+  inspection: { runId: string };
+  runId: string;
+  compiledRunId: string;
+  name: string;
+  controlGeneration: string;
+  controllerGeneration?: string;
+  controllerGenerationJournal?: string;
+  linkId: string;
+  executionSnapshot: string;
+  controllerExecutionSnapshot?: string;
+}
+
+export interface RunProvenance {
+  workflow: RunWorkflowProvenance;
+  recovery?: RunRecoveryProvenance;
+  recovery_history?: RunRecoveryProvenance[];
+}
+
+export interface RunRecoveryProvenance {
+  recovery_id: string;
+  submission_status: "prepared" | "submitted";
+  recovered: boolean;
+  recovered_at?: string;
+  prior_status: "failed";
+  failed_nodes: Array<{
+    node_id: string;
+    workflow_task_id: string;
+    failed_attempt: number;
+    failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  }>;
+  source_workflow_run_id: string;
+  source_workflow_link_id: string;
+  workflow_run_id?: string;
+  workflow_link_id?: string;
+  control_generation: string;
+  controller_invocation_id: string;
+  controller_invoked_at: string;
+  lifecycle_result_event_id?: string;
+  lifecycle_result_at?: string;
+  lifecycle_submission_event_id?: string;
+  lifecycle_submitted_at?: string;
+}
+
+export interface TaskNodeWorkflowProvenance {
+  run_id: string;
+  task_id: string;
+  agent_task_id: string;
+  verifier_task_id: string;
+  state?: (typeof SMITHERS_NODE_STATES)[number];
+  attempt?: number;
+}
+
+export interface AggregateNodeWorkflowProvenance {
+  run_id: string;
+  aggregate_attempt_statuses: NodeStatus[];
+}
+
+export type NodeWorkflowProvenance = TaskNodeWorkflowProvenance | AggregateNodeWorkflowProvenance;
+
+export interface NodeOutputContractProvenance {
+  ok: boolean;
+  missing: string[];
+  /** Controller-authenticated digest of the finalized artifact manifest. */
+  artifact_manifest_sha256?: string;
+}
+
+export interface NodeFailureProvenance {
+  category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  causal_task_id: string;
+  causal_failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
+  dependent_task_ids: string[];
+}
+
+export interface NodeReferenceExpectationProvenance {
+  source: "operator-supplied";
+  path: string;
+  sha256: string;
+}
+
+export interface ExecutionNodeProvenance {
+  source_node_id?: string;
+  workflow?: NodeWorkflowProvenance;
+  output_contracts?: NodeOutputContractProvenance;
+  findings_count?: number;
+  failure?: NodeFailureProvenance;
+  terminal_disposition?: TerminalDispositionDocument;
+}
+
+export interface ReferenceNodeProvenance {
+  origin: "pinned-reference";
+  reference: string;
+  repo?: string;
+  commit?: string;
+  reference_expectations?: NodeReferenceExpectationProvenance;
+}
+
+export interface BlockedNodeProvenance {
+  reason_code: NodeProvenanceReasonCode;
+  blocked_by: string[];
+}
+
+export type NodeProvenance = ExecutionNodeProvenance | ReferenceNodeProvenance | BlockedNodeProvenance;
+
 export interface NodeStateInput {
   id: string;
   logicalNodeId?: string;
@@ -96,13 +269,18 @@ export interface NodeStateInput {
   waitReason?: NodeWaitReason;
   nextEligibleAction?: NodeNextEligibleAction;
   waitSince?: string;
-  provenance?: Record<string, unknown>;
+  provenance?: NodeProvenance;
 }
 
 export interface NodeOutputContract {
   path: string;
   contract: ArtifactContractId;
   contract_digest: string;
+  schema_file?: string;
+  schema_id?: string;
+  schema_sha256?: string;
+  schema_bundle_sha256?: string;
+  validator_build?: string;
   primary: boolean;
 }
 
@@ -125,7 +303,7 @@ export interface NodeState {
   wait_since?: string;
   wait_reason?: NodeWaitReason;
   next_eligible_action?: NodeNextEligibleAction;
-  provenance?: Record<string, unknown>;
+  provenance?: NodeProvenance;
 }
 
 export interface ControllerLeaseState {
@@ -148,7 +326,7 @@ export interface RunConcurrencyState {
 }
 
 export interface RunState {
-  schema_version: string;
+  schema_version: typeof STATE_SCHEMA_VERSION;
   run_id: string;
   status: RunStatus;
   graph_fingerprint: string;
@@ -162,7 +340,7 @@ export interface RunState {
   last_transition_at: string;
   controller_lease: ControllerLeaseState;
   concurrency: RunConcurrencyState;
-  provenance?: Record<string, unknown>;
+  provenance?: RunProvenance;
 }
 
 export interface CreateInitialRunStateInput {
@@ -175,7 +353,7 @@ export interface CreateInitialRunStateInput {
   controllerLeaseSeconds?: number;
   requestedConcurrency?: number;
   nodes?: NodeStateInput[];
-  provenance?: Record<string, unknown>;
+  provenance?: RunProvenance;
 }
 
 export interface RunLayoutStateLike {
@@ -281,33 +459,102 @@ export function createNodeState(input: NodeStateInput): NodeState {
   return state;
 }
 
-export function writeRunState(target: RunLayoutStateLike | string, state: RunState): void {
+export interface RunStateWriteOptions {
+  /** Exact in-memory secrets to redact from agent-controlled state diagnostics. */
+  forbiddenSecretValues?: readonly string[];
+}
+
+export function writeRunState(
+  target: RunLayoutStateLike | string,
+  state: RunState,
+  options: RunStateWriteOptions = {}
+): void {
   const nodes = Object.fromEntries(
     Object.entries(state.nodes).map(([nodeId, node]) => [
       nodeId,
-      node.last_error === undefined ? node : { ...node, last_error: redactSecretsInText(node.last_error) }
+      node.last_error === undefined
+        ? node
+        : {
+            ...node,
+            last_error: redactSecretsInText(
+              node.last_error,
+              SENSITIVE_REDACTION_PLACEHOLDER,
+              options.forbiddenSecretValues
+            )
+          }
     ])
   );
-  writeJsonDurable(resolveStatePath(target), { ...state, nodes });
+  const next = { ...state, nodes };
+  assertCurrentRunState(next);
+  writeJsonDurable(resolveStatePath(target), next);
 }
 
 export function readRunState(target: RunLayoutStateLike | string): RunState {
-  return readJsonFile<RunState>(resolveStatePath(target));
+  const statePath = resolveStatePath(target);
+  const value = parseStrictJsonBytes(readRegularFileSnapshot(statePath, 64 * 1024 * 1024));
+  return assertRunStateDocument(value);
 }
 
-export function loadOrCreateRunState(target: RunLayoutStateLike | string, state: RunState): RunState {
+export function assertRunStateDocument(value: unknown, expectedRunId?: string): RunState {
+  assertCurrentRunState(value);
+  if (expectedRunId !== undefined && value.run_id !== expectedRunId) {
+    throw new Error(`run state identity does not match run ${JSON.stringify(expectedRunId)}`);
+  }
+  return value;
+}
+
+export function assertTerminalDispositionDocument(value: unknown): TerminalDispositionDocument {
+  const validation = validateRegisteredJsonSchema(TERMINAL_DISPOSITION_JSON_SCHEMA_ID, value, { maxErrors: 20 });
+  if (!validation.ok) {
+    const details = validation.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
+    throw new Error(`terminal disposition is schema-invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  return value as TerminalDispositionDocument;
+}
+
+function assertCurrentRunState(value: unknown): asserts value is RunState {
+  const version =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>).schema_version
+      : undefined;
+  if (version !== STATE_SCHEMA_VERSION) {
+    throw new Error(
+      `unsupported run state schema_version ${JSON.stringify(version)}; expected ${JSON.stringify(STATE_SCHEMA_VERSION)}`
+    );
+  }
+  const validation = validateRegisteredJsonSchema(RUN_STATE_JSON_SCHEMA_ID, value, { maxErrors: 50 });
+  if (!validation.ok) {
+    const details = validation.issues.map((issue) => `${issue.instancePath || "/"} ${issue.message}`).join("; ");
+    throw new Error(`run state is schema-invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  const nodeKeys = executeSemanticGate("run-state-node-key-equality", { document: value });
+  if (nodeKeys.status === "failed") {
+    const details = nodeKeys.issues.map((issue) => `${issue.path} ${issue.message}`).join("; ");
+    throw new Error(`run state is semantically invalid${details.length === 0 ? "" : `: ${details}`}`);
+  }
+  if (nodeKeys.status !== "passed") {
+    throw new Error("run-state node-key validation unexpectedly requires context");
+  }
+}
+
+export function loadOrCreateRunState(
+  target: RunLayoutStateLike | string,
+  state: RunState,
+  options: RunStateWriteOptions = {}
+): RunState {
   const statePath = resolveStatePath(target);
   if (fs.existsSync(statePath)) {
     return readRunState(statePath);
   }
-  writeRunState(statePath, state);
+  writeRunState(statePath, state, options);
   return state;
 }
 
 export function updateRunStatus(
   target: RunLayoutStateLike | string,
   status: RunStatus,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  options: RunStateWriteOptions = {}
 ): RunState {
   const state = readRunState(target);
   if (state.status !== status) {
@@ -322,7 +569,7 @@ export function updateRunStatus(
   } else {
     delete state.finished_at;
   }
-  writeRunState(target, state);
+  writeRunState(target, state, options);
   return state;
 }
 
@@ -330,16 +577,25 @@ export function updateNodeState(
   target: RunLayoutStateLike | string,
   nodeId: string,
   patch: Partial<Omit<NodeState, "node_id">>,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  options: RunStateWriteOptions = {}
 ): RunState {
   const safeNodeId = validateSafeId(nodeId, "node ID");
   const state = readRunState(target);
   const previous = state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId });
+  const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<
+    Omit<NodeState, "node_id">
+  >;
   const next: NodeState = {
     ...previous,
-    ...patch,
+    ...definedPatch,
     node_id: safeNodeId
   };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete (next as unknown as Record<string, unknown>)[key];
+    }
+  }
   if (isTerminalNodeStatus(next.status)) {
     delete next.wait_since;
     delete next.wait_reason;
@@ -355,9 +611,12 @@ export function updateNodeState(
     previous.next_eligible_action !== next.next_eligible_action
   ) {
     state.last_transition_at = timestamp;
+    if (!isTerminalNodeStatus(next.status)) {
+      next.wait_since = timestamp;
+    }
   }
   state.nodes[safeNodeId] = next;
-  writeRunState(target, state);
+  writeRunState(target, state, options);
   return state;
 }
 

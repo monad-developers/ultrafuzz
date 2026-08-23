@@ -6,13 +6,21 @@ import path from "node:path";
 import {
   ANALYSIS_BUNDLE_MANIFEST_FILE,
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
-  createInitialRunState,
   validateAnalysisBundle,
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { describe, expect, it } from "vitest";
 
 import { collectEvalAnalysisBundle } from "../src/analysis-bundle.js";
+import type { EvalMatrixRow, EvalRowScore } from "../src/types.js";
+import {
+  currentEvalRunRecord,
+  currentRowScore,
+  currentRunState,
+  currentScoreSummary,
+  testRow,
+  testSuite
+} from "./helpers.js";
 
 function writeJson(filePath: string, value: unknown): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -20,20 +28,20 @@ function writeJson(filePath: string, value: unknown): void {
 }
 
 function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", tokens: number, cost: number): void {
-  const state = createInitialRunState({
-    runId: path.basename(root),
-    graphFingerprint: "graph-fixture",
-    configFingerprint: "config-fixture",
-    createdAt: "2026-01-01T00:00:00.000Z"
+  const runId = path.basename(root);
+  const state = currentRunState({
+    runId,
+    status,
+    nodes: { "final-report": {} },
+    overrides: {
+      created_at: "2026-01-01T00:00:00.000Z",
+      started_at: "2026-01-01T00:00:00.000Z",
+      finished_at: "2026-01-01T00:01:00.000Z",
+      last_transition_at: "2026-01-01T00:01:00.000Z"
+    }
   });
-  state.status = status;
-  state.started_at = "2026-01-01T00:00:00.000Z";
-  state.finished_at = "2026-01-01T00:01:00.000Z";
-  state.provenance = { execution_root: root };
   writeJson(path.join(root, "state.json"), state);
   writeJson(path.join(root, "run.json"), {
-    schema_version: "1.0",
-    run_id: path.basename(root),
     accounting: {
       cumulative: {
         input_tokens: tokens,
@@ -43,6 +51,8 @@ function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", toke
         reasoning_tokens: 3,
         total_tokens: tokens + 6,
         estimated_spend_usd: cost,
+        usage_complete: true,
+        pricing_complete: true,
         partial_pricing: false,
         event_count: 1,
         priced_event_count: 1,
@@ -53,8 +63,10 @@ function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", toke
   });
 }
 
-function scoreRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function scoreRow(row: EvalMatrixRow, overrides: Partial<EvalRowScore> = {}): EvalRowScore {
+  const base = currentRowScore(row);
   return {
+    ...base,
     report_schema_valid: true,
     ground_truth_bug_count: 2,
     finding_count: 2,
@@ -70,10 +82,38 @@ function scoreRow(overrides: Record<string, unknown> = {}): Record<string, unkno
     severity_accuracy: 1,
     true_positive_accuracy: 0.5,
     duplicate_rate: 0,
-    runtime_seconds: 60,
-    cost_estimate: null,
+    efficiency: {
+      ...base.efficiency,
+      wall_time_seconds: 60,
+      active_time_seconds: 60,
+      wait_time_seconds: 0,
+      total_tokens: 106,
+      cost_usd: 0.01
+    },
     ...overrides
   };
+}
+
+function writeSingleEvalSources(
+  projectRoot: string,
+  evalRunId: string
+): { evalRoot: string; runRoot: string; summaryPath: string } {
+  const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
+  const runRoot = path.join(projectRoot, "synthetic-runs", "run-one");
+  syntheticWorkflowRun(runRoot, "succeeded", 100, 0.01);
+  const row = testRow(testSuite(path.join(projectRoot, "ground-truth")), {
+    id: "synthetic-row-one",
+    run_id: "synthetic-run-one"
+  });
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify(currentEvalRunRecord({ row, runRoot, runId: path.basename(runRoot), evalRunId }))}\n`,
+    "utf8"
+  );
+  const summaryPath = path.join(evalRoot, "summary.json");
+  writeJson(summaryPath, currentScoreSummary({ row, evalRunRoot: evalRoot, evalRunId }));
+  return { evalRoot, runRoot, summaryPath };
 }
 
 describe("privacy-safe eval analysis bundles", () => {
@@ -86,35 +126,104 @@ describe("privacy-safe eval analysis bundles", () => {
     syntheticWorkflowRun(firstRun, "succeeded", 100, 0.01);
     syntheticWorkflowRun(secondRun, "failed", 200, 0.02);
     fs.mkdirSync(evalRoot, { recursive: true });
+    const suite = testSuite(path.join(projectRoot, "ground-truth"));
+    const firstRow = testRow(suite, { id: "synthetic-row-one", run_id: "synthetic-run-one" });
+    const secondRow = testRow(suite, {
+      id: "synthetic-row-two",
+      run_id: "synthetic-run-two",
+      trial_id: "trial-2"
+    });
     fs.writeFileSync(
       path.join(evalRoot, "runs.jsonl"),
       [
-        {
-          row_id: "synthetic-row-one",
-          status: "launched",
-          ultrafuzz_run_root: firstRun,
-          started_at: "2026-01-01T00:00:00.000Z",
-          finished_at: "2026-01-01T00:01:00.000Z",
-          diagnostics: []
-        },
-        {
-          row_id: "synthetic-row-two",
-          status: "launched",
-          ultrafuzz_run_root: secondRun,
-          started_at: "2026-01-01T00:02:00.000Z",
-          finished_at: "2026-01-01T00:03:00.000Z",
-          diagnostics: []
-        }
+        currentEvalRunRecord({
+          row: firstRow,
+          runRoot: firstRun,
+          runId: path.basename(firstRun),
+          evalRunId,
+          overrides: {
+            launcher: {
+              status: "succeeded",
+              started_at: "2026-01-01T00:00:00.000Z",
+              finished_at: "2026-01-01T00:01:00.000Z"
+            }
+          }
+        }),
+        currentEvalRunRecord({
+          row: secondRow,
+          runRoot: secondRun,
+          runId: path.basename(secondRun),
+          evalRunId,
+          overrides: {
+            final_status: "failed",
+            launcher: {
+              status: "succeeded",
+              started_at: "2026-01-01T00:02:00.000Z",
+              finished_at: "2026-01-01T00:03:00.000Z"
+            },
+            workflow: {
+              status: "failed",
+              terminal: true,
+              started_at: "2026-01-01T00:00:00.000Z",
+              finished_at: "2026-01-01T00:01:00.000Z"
+            }
+          }
+        })
       ]
         .map((record) => JSON.stringify(record))
         .join("\n") + "\n",
       "utf8"
     );
-    writeJson(path.join(evalRoot, "summary.json"), {
-      eval_run_root: evalRoot,
-      rows: [scoreRow(), scoreRow({ precision: 1, recall: 1, f1_score: 1, runtime_seconds: 90 })],
-      unapproved_detail: "generated-private-marker"
+    const firstScore = scoreRow(firstRow);
+    const secondScore = scoreRow(secondRow, {
+      precision: 1,
+      recall: 1,
+      f1_score: 1,
+      efficiency: {
+        ...currentRowScore(secondRow).efficiency,
+        wall_time_seconds: 90,
+        active_time_seconds: 90,
+        wait_time_seconds: 0,
+        total_tokens: 206,
+        cost_usd: 0.02
+      }
     });
+    writeJson(
+      path.join(evalRoot, "summary.json"),
+      currentScoreSummary({
+        row: firstRow,
+        evalRunRoot: evalRoot,
+        evalRunId,
+        overrides: {
+          rows: [firstScore, secondScore],
+          variants: [
+            {
+              variant_id: firstRow.variant_id,
+              row_count: 2,
+              precision: 0.75,
+              recall: 0.75,
+              f1_score: 0.75,
+              full_match_rate: 0.5,
+              human_review_queue_count: 0,
+              duplicate_rate: 0,
+              report_schema_valid_rate: 1
+            }
+          ],
+          recovery_equivalence: {
+            aggregate_non_comparable: "include",
+            included_row_count: 2,
+            excluded_row_count: 0,
+            classification_counts: {
+              clean: 2,
+              "infrastructure-recovered": 0,
+              "model-reexecuted-within-policy": 0,
+              "non-comparable": 0
+            },
+            non_comparable_variants: []
+          }
+        }
+      })
+    );
 
     const firstOutput = path.join(projectRoot, "bundle-one");
     const secondOutput = path.join(projectRoot, "bundle-two");
@@ -179,81 +288,96 @@ describe("privacy-safe eval analysis bundles", () => {
     expect(fs.existsSync(path.join(firstOutput, ANALYSIS_BUNDLE_MANIFEST_FILE))).toBe(true);
   });
 
-  it("records typed omissions when optional analysis evidence is unavailable", () => {
+  it("rejects missing required current analysis sources", () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-omissions-"));
     const evalRunId = "eval-synthetic-omissions";
     const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
     fs.mkdirSync(evalRoot, { recursive: true });
-    fs.writeFileSync(
-      path.join(evalRoot, "runs.jsonl"),
-      `${JSON.stringify({
-        row_id: "synthetic-row",
-        status: "launched",
-        started_at: "2026-01-01T00:00:00.000Z",
-        finished_at: "2026-01-01T00:00:01.000Z"
-      })}\n`,
-      "utf8"
-    );
     const output = path.join(projectRoot, "bundle");
-    const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
-
-    expect(result.omissions.omissions).toEqual([
-      { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "not-terminal" },
-      { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "not-terminal" },
-      { kind: "recovery-summary", path: "data/recovery-summary.json", reason: "source-missing" }
-    ]);
-    const terminal = JSON.parse(fs.readFileSync(path.join(output, "data", "terminal-status.json"), "utf8"));
-    expect(terminal).toMatchObject({ terminal: false, status: "unknown", status_counts: { unknown: 1 } });
-    expect(() => validateAnalysisBundle(output)).not.toThrow();
+    expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
+      expect.objectContaining({ code: "EVAL_DURABLE_READ_FAILED" })
+    );
   });
 
-  it("omits zero-row metrics instead of reporting synthetic zero scores", () => {
+  it("rejects score summaries that do not exactly join current run records", () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-empty-score-"));
     const evalRunId = "eval-synthetic-empty-score";
-    const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
-    fs.mkdirSync(evalRoot, { recursive: true });
-    writeJson(path.join(evalRoot, "summary.json"), { rows: [] });
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const summary = JSON.parse(fs.readFileSync(fixture.summaryPath, "utf8")) as Record<string, unknown> & {
+      recovery_equivalence: Record<string, unknown>;
+    };
+    summary.rows = [];
+    summary.variants = [];
+    summary.recovery_equivalence = {
+      aggregate_non_comparable: "include",
+      included_row_count: 0,
+      excluded_row_count: 0,
+      classification_counts: {
+        clean: 0,
+        "infrastructure-recovered": 0,
+        "model-reexecuted-within-policy": 0,
+        "non-comparable": 0
+      },
+      non_comparable_variants: []
+    };
+    writeJson(fixture.summaryPath, summary);
 
     const output = path.join(projectRoot, "bundle");
-    const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
-
-    expect(result.omissions.omissions).toContainEqual({
-      kind: "evaluation-metrics",
-      path: "data/evaluation-metrics.json",
-      reason: "data-unavailable"
-    });
-    expect(fs.existsSync(path.join(output, "data", "evaluation-metrics.json"))).toBe(false);
-    expect(() => validateAnalysisBundle(output)).not.toThrow();
+    expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
+      expect.objectContaining({ code: "EVAL_ANALYSIS_LINEAGE_INVALID" })
+    );
   });
 
-  it("retains accounting aggregates when run records are unavailable", () => {
+  it("rejects incomplete accounting instead of defaulting missing fields", () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-score-accounting-"));
     const evalRunId = "eval-synthetic-score-accounting";
-    const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
-    fs.mkdirSync(evalRoot, { recursive: true });
-    writeJson(path.join(evalRoot, "summary.json"), {
-      rows: [scoreRow({ runtime_seconds: 12, cost_estimate: 0.5 })]
-    });
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const runPath = path.join(fixture.runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+      accounting: { cumulative: Record<string, unknown> };
+    };
+    delete metadata.accounting.cumulative.input_tokens;
+    writeJson(runPath, metadata);
 
     const output = path.join(projectRoot, "bundle");
-    const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
-    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8"));
+    expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
+      expect.objectContaining({ code: "EVAL_ANALYSIS_ACCOUNTING_INVALID" })
+    );
+  });
 
-    expect(result.omissions.omissions).toEqual([
-      { kind: "attempt-history", path: "data/attempt-history.json", reason: "source-missing" },
-      { kind: "recovery-summary", path: "data/recovery-summary.json", reason: "source-missing" },
-      { kind: "terminal-status", path: "data/terminal-status.json", reason: "source-missing" }
-    ]);
-    expect(accounting).toMatchObject({
-      run_count: 1,
-      accounted_run_count: 1,
-      runtime_observed_run_count: 1,
-      runtime_seconds: 12,
-      total_tokens: 0,
-      estimated_spend_usd: 0.5,
-      partial_pricing: false
+  it("preserves valid source timestamps and rejects reversed launcher evidence without repair", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-timestamps-"));
+    const evalRunId = "eval-synthetic-timestamps";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const statePath = path.join(fixture.runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    state.started_at = "2026-01-01T01:00:00.000+01:00";
+    state.finished_at = "2026-01-01T01:01:00.000+01:00";
+    writeJson(statePath, state);
+
+    const recordsPath = path.join(fixture.evalRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(recordsPath, "utf8")) as {
+      launcher: { started_at: string; finished_at: string };
+    };
+    record.launcher.started_at = "2026-01-01T01:00:00.000+01:00";
+    record.launcher.finished_at = "2026-01-01T01:01:00.000+01:00";
+    fs.writeFileSync(recordsPath, `${JSON.stringify(record)}\n`, "utf8");
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    expect(JSON.parse(fs.readFileSync(path.join(output, "data", "terminal-status.json"), "utf8"))).toMatchObject({
+      started_at: state.started_at,
+      finished_at: state.finished_at
     });
-    expect(() => validateAnalysisBundle(output)).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(path.join(output, "data", "attempt-history.json"), "utf8"))).toMatchObject({
+      attempts: [{ started_at: record.launcher.started_at, finished_at: record.launcher.finished_at }]
+    });
+
+    record.launcher.started_at = "2026-01-01T01:02:00.000+01:00";
+    fs.writeFileSync(recordsPath, `${JSON.stringify(record)}\n`, "utf8");
+    expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
+      expect.objectContaining({ code: "EVAL_ANALYSIS_TIMESTAMP_INVALID" })
+    );
   });
 });
 

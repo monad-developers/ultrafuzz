@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
+import { CodexAgent as SmithersCodexAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import { resolveProviderHome } from "./provider-home";
 import { readRootStringTable, readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -29,7 +30,17 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
 
   override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
     const command = await super.buildCommand(params);
-    const sanitizedCommand = { ...command, env: workflowControlChildEnvironment(command.env) };
+    let env: Record<string, string>;
+    try {
+      env = workflowControlChildEnvironment(command.env, process.env, {
+        agent: this.workflowDataGovernanceAgent(),
+        configDir: this.opts.configDir
+      });
+    } catch (error) {
+      await command.cleanup?.();
+      throw error;
+    }
+    const sanitizedCommand = { ...command, env };
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
       return sanitizedCommand;
@@ -47,6 +58,10 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
         ...command.args.slice(addDirIndex + 1 + directories.length)
       ]
     };
+  }
+
+  protected workflowDataGovernanceAgent(): "CodexAgent" | "OpenRouterAgent" {
+    return "CodexAgent";
   }
 }
 
@@ -206,11 +221,4 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.CodexAgent auth is api-key, but ${name} is not set`);
   }
   return workflowControlCredentialValue(value, name);
-}
-
-function resolveConfigDir(value: string): string {
-  if (value.trim() === "") {
-    throw new Error("agents.CodexAgent.config_dir cannot be empty");
-  }
-  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }

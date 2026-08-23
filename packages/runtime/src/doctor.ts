@@ -4,11 +4,7 @@ import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
 import { inspectSmithersInstallation, type SmithersInstallationPosture } from "./smithers.js";
-import {
-  SMITHERS_ORCHESTRATOR_PACKAGE_NAME,
-  SMITHERS_ORCHESTRATOR_VERSION,
-  SMITHERS_SUCCESSOR_PACKAGE_NAME
-} from "./smithers-package.js";
+import { SMITHERS_PACKAGE_NAME, SMITHERS_VERSION } from "./smithers-package.js";
 import type {
   DoctorCheck,
   DoctorCheckStatus,
@@ -18,7 +14,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { runtimeResult } from "./utils.js";
-import { loadResolvedProject, validateProject } from "./validate.js";
+import { activeTopologyAgentRefs, loadResolvedProject, validateProject } from "./validate.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 
 const execFileAsync = promisify(execFile);
@@ -34,7 +30,6 @@ const AGENT_EXECUTABLES: Record<string, string> = {
   CodexAgent: "codex",
   DeepSeekAgent: "claude",
   KimiAgent: "kimi",
-  OpenCodeAgent: "opencode",
   PiAgent: "pi"
 };
 
@@ -48,7 +43,7 @@ const AGENT_EXECUTABLES: Record<string, string> = {
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const env = input.env ?? process.env;
-  const validation = await validateProject({ projectRoot, env });
+  const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
   const resolved = await loadResolvedProject({ projectRoot, env });
   const references = referencesStatus({ projectRoot });
   const installation = inspectSmithersInstallation(projectRoot);
@@ -66,6 +61,29 @@ export async function diagnoseProject(input: DoctorInput) {
       : "configuration validation reported errors; run ultrafuzz validate for detail"
   });
   diagnostics.push(...validation.diagnostics);
+
+  const openRouterSelected =
+    resolved.config !== undefined &&
+    activeTopologyAgentRefs(projectRoot, resolved.config, input.topologyPath).includes("OpenRouterAgent");
+  const openRouterCredential = openRouterSelected ? resolved.config?.agents.OpenRouterAgent?.apiKeyEnv : undefined;
+  const openRouterCredentialReady =
+    !openRouterSelected || (openRouterCredential !== undefined && (env[openRouterCredential] ?? "").trim() !== "");
+  checks.push({
+    name: "agent-credentials",
+    status: openRouterCredentialReady ? "ok" : "error",
+    summary: openRouterCredentialReady
+      ? "selected agent credential posture passes"
+      : "the selected OpenRouter agent API-key environment variable is not set"
+  });
+  if (!openRouterCredentialReady) {
+    diagnostics.push({
+      code: "DOCTOR_AGENT_CREDENTIAL_MISSING",
+      message: `OpenRouterAgent requires ${openRouterCredential} to be set`,
+      severity: "error",
+      source: "doctor",
+      path: "agents.OpenRouterAgent.api_key_env"
+    });
+  }
 
   checks.push({
     name: "references",
@@ -138,12 +156,21 @@ export async function diagnoseProject(input: DoctorInput) {
   }
 
   const engineCheck = workflowEngineCheck(installation);
-  checks.push(engineCheck.check);
-  diagnostics.push(...engineCheck.diagnostics);
+  const observedEngineStatus = engineCheck.check.status;
+  checks.push({
+    ...engineCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
+  });
 
   const patchCheck = compatibilityPatchCheck(installation);
-  checks.push(patchCheck.check);
-  diagnostics.push(...patchCheck.diagnostics);
+  checks.push({
+    ...patchCheck.check,
+    status: "unknown" as const,
+    summary:
+      "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
+  });
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);
@@ -165,11 +192,7 @@ export async function diagnoseProject(input: DoctorInput) {
       installed_bin_target: installation.installed_bin_target,
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
-      // The newest release can come from a renamed upstream package, so the version
-      // above is not necessarily comparable with the pinned one. Flag that rather
-      // than naming the package, which would leak engine branding.
-      latest_published_is_renamed_package: latest !== undefined && "version" in latest && latest.renamed,
-      layout_status: engineCheck.check.status,
+      layout_status: observedEngineStatus,
       layout_detail: installation.layout_error,
       compatibility_patches: installation.compatibility_patches
     }
@@ -341,56 +364,26 @@ function registryCheck(latest: LatestPublishedEngine | { error: string } | undef
       ]
     };
   }
-  // The successor lookup failing while the legacy one succeeds must not read as
-  // "you are current": the legacy name is frozen at the pinned version forever, so
-  // that combination is exactly the false positive this check exists to remove.
-  if (latest.successorUnavailable) {
-    return {
-      check: {
-        name: "workflow-engine-registry",
-        status: "warning",
-        summary: "registry lookup was only partly available; a newer workflow engine cannot be ruled out"
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_REGISTRY_UNAVAILABLE",
-          message:
-            "the pinned workflow engine name is frozen upstream, and the renamed successor package could not be " +
-            `read, so ${SMITHERS_ORCHESTRATOR_VERSION} cannot be confirmed as current: ${latest.successorUnavailable}`,
-          severity: "warning",
-          source: "doctor"
-        }
-      ]
-    };
-  }
-  if (latest.version === SMITHERS_ORCHESTRATOR_VERSION && !latest.renamed) {
+  if (latest.version === SMITHERS_VERSION) {
     return {
       check: {
         name: "workflow-engine-registry",
         status: "ok",
-        summary: `pinned workflow engine ${SMITHERS_ORCHESTRATOR_VERSION} is the latest published stable release`
+        summary: `pinned workflow engine ${SMITHERS_VERSION} is the latest published stable release`
       },
       diagnostics: []
     };
   }
-  // Deliberately never names the upstream package: operator-facing text keeps the
-  // engine de-branded, and the successor name would slip past the `smithers` scrub
-  // by spelling alone. "renamed upstream package" carries the actionable signal.
-  const newest = `${latest.version}${latest.renamed ? " under a renamed upstream package" : ""}`;
   return {
     check: {
       name: "workflow-engine-registry",
       status: "warning",
-      summary: `a newer stable workflow engine is published: ${newest} (Ultrafuzz pins ${SMITHERS_ORCHESTRATOR_VERSION})`
+      summary: `a newer stable workflow engine is published: ${latest.version} (Ultrafuzz pins ${SMITHERS_VERSION})`
     },
     diagnostics: [
       {
         code: "DOCTOR_WORKFLOW_ENGINE_OUTDATED",
-        message:
-          `Ultrafuzz pins workflow engine ${SMITHERS_ORCHESTRATOR_VERSION}; ${newest} is the latest published stable release` +
-          (latest.renamed
-            ? `; upgrading past ${SMITHERS_ORCHESTRATOR_VERSION} requires migrating to the renamed upstream package`
-            : ""),
+        message: `Ultrafuzz pins workflow engine ${SMITHERS_VERSION}; ${latest.version} is the latest published stable release`,
         severity: "warning",
         source: "doctor"
       }
@@ -400,39 +393,13 @@ function registryCheck(latest: LatestPublishedEngine | { error: string } | undef
 
 interface LatestPublishedEngine {
   version: string;
-  /** True when the newest release comes from the renamed successor package. */
-  renamed: boolean;
-  /** Set when the successor lookup failed, so "current" cannot be concluded. */
-  successorUnavailable?: string;
 }
 
-// Upstream renamed the package after the version Ultrafuzz pins, so the old name
-// is frozen forever and asking only about it would silently report "you are on the
-// latest release" for every future release. Consult both names and report the
-// newer. The package names stay inside this module: operator-facing text keeps the
-// engine de-branded.
 async function latestPublishedSmithersVersion(
   projectRoot: string,
   env: Record<string, string | undefined>
 ): Promise<LatestPublishedEngine | { error: string }> {
-  const [legacy, successor] = await Promise.all([
-    latestPublishedVersionOf(SMITHERS_ORCHESTRATOR_PACKAGE_NAME, projectRoot, env),
-    latestPublishedVersionOf(SMITHERS_SUCCESSOR_PACKAGE_NAME, projectRoot, env)
-  ]);
-  if ("error" in legacy && "error" in successor) {
-    return { error: legacy.error };
-  }
-  if ("error" in successor) {
-    // `legacy` resolved. Its name can never advance past the pinned version, so an
-    // unreadable successor leaves the question genuinely open rather than answered.
-    return { version: (legacy as { version: string }).version, renamed: false, successorUnavailable: successor.error };
-  }
-  if ("error" in legacy) {
-    return { version: successor.version, renamed: true };
-  }
-  return compareSemanticVersions(successor.version, legacy.version) > 0
-    ? { version: successor.version, renamed: true }
-    : { version: legacy.version, renamed: false };
+  return latestPublishedVersionOf(SMITHERS_PACKAGE_NAME, projectRoot, env);
 }
 
 async function latestPublishedVersionOf(
@@ -451,22 +418,6 @@ async function latestPublishedVersionOf(
   } catch (error) {
     return { error: error instanceof Error ? error.message.split("\n")[0]! : String(error) };
   }
-}
-
-// Callers only ever pass versions `latestPublishedVersionOf` has already matched
-// against `^\d+\.\d+\.\d+$`. That invariant lives in another function, so treat a
-// non-numeric segment as 0 rather than returning NaN, which would silently compare
-// as "not newer" and reinstate the dead upgrade signal.
-function compareSemanticVersions(left: string, right: string): number {
-  const segment = (value: string, index: number): number => {
-    const parsed = Number(value.split(".")[index]);
-    return Number.isFinite(parsed) ? parsed : 0;
-  };
-  for (let index = 0; index < 3; index += 1) {
-    const difference = segment(left, index) - segment(right, index);
-    if (difference !== 0) return difference;
-  }
-  return 0;
 }
 
 function configuredAgentRefs(profiles: Record<string, { agent: string }> | undefined): string[] {

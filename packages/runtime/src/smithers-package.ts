@@ -1,26 +1,21 @@
-export const SMITHERS_ORCHESTRATOR_VERSION = "0.32.0";
-export const SMITHERS_ORCHESTRATOR_PACKAGE_NAME = "smithers-orchestrator";
-// Upstream renamed the npm package after 0.32.0, the newest release published
-// under the name Ultrafuzz pins. Nothing further will ever ship as
-// `smithers-orchestrator`, so any future upgrade means moving to this name.
-export const SMITHERS_SUCCESSOR_PACKAGE_NAME = "smthrs";
-export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
-// Smithers 0.32.0 migrated its runtime from Effect 3 to Effect 4 and pins
-// exactly this version across its own packages. Track what Smithers declares:
-// left unpinned, npm installs two Effect copies side by side and the engine
-// loses the single Effect module identity its services are keyed on.
-export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.102";
+export const SMITHERS_VERSION = "0.34.0";
+export const SMITHERS_PACKAGE_NAME = "smthrs";
+export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
+// Smithers 0.34.0 pins this Effect build across its own packages. Track what
+// Smithers declares: left unpinned, npm installs two Effect copies side by side
+// and the engine loses the single Effect module identity its services are keyed on.
+export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.105";
 export const KIMI_CODE_VERSION = "0.29.1";
 
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for
-// `@effect/platform-node-shared: ^4.0.0-beta.102`, an open caret over
-// prereleases, and the generated workspace is installed with
+// `@effect/platform-node-shared: ^4.0.0-beta.105`, an open caret over
+// prereleases, and each ephemeral generated workspace is installed with
 // `--package-lock=false`. Unpinned, two cloud containers resuming the same run
 // at different times install different `@effect/*` builds, and a newer beta that
 // needs Effect APIs absent from the pinned core breaks every run including
 // in-flight resumes. Every entry below publishes at SMITHERS_EFFECT_VERSION and
-// peers `^4.0.0-beta.102`, so the pinned set is internally consistent.
+// peers `^4.0.0-beta.105`, so the pinned set is internally consistent.
 const SMITHERS_EFFECT_PACKAGE_NAMES = [
   "@effect/opentelemetry",
   "@effect/platform-bun",
@@ -36,7 +31,7 @@ export const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
 const REQUIRED_SMITHERS_DEPENDENCIES = {
   dependencies: {
     "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
-    "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+    smthrs: SMITHERS_VERSION,
     zod: "4.4.3"
   },
   devDependencies: {
@@ -45,9 +40,19 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
   overrides: REQUIRED_SMITHERS_OVERRIDES
 } as const;
 
-const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
-  dependencies: REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
-  devDependencies: REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
+const STOCK_SMITHERS_032_DEPENDENCIES = {
+  dependencies: {
+    "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
+    "smithers-orchestrator": "0.32.0",
+    zod: "4.4.3"
+  },
+  devDependencies: {
+    typescript: "6.0.3"
+  },
+  overrides: {
+    effect: "4.0.0-beta.102",
+    ...Object.fromEntries(SMITHERS_EFFECT_PACKAGE_NAMES.map((name) => [name, "4.0.0-beta.102"]))
+  }
 } as const;
 
 // When each pinned version above reached npm. This is the input to the
@@ -56,20 +61,20 @@ const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
 // an entry for every `name@version` the manifest pins, so raising a pin without
 // recording its publish instant fails the build rather than a launch.
 const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
-  "@effect/opentelemetry@4.0.0-beta.102": "2026-07-26T22:24:29.050Z",
-  "@effect/platform-bun@4.0.0-beta.102": "2026-07-26T22:24:35.293Z",
-  "@effect/platform-node-shared@4.0.0-beta.102": "2026-07-26T22:24:39.301Z",
-  "@effect/sql-sqlite-bun@4.0.0-beta.102": "2026-07-26T22:24:42.599Z",
+  "@effect/opentelemetry@4.0.0-beta.105": "2026-08-07T01:12:53.761Z",
+  "@effect/platform-bun@4.0.0-beta.105": "2026-08-07T01:13:10.227Z",
+  "@effect/platform-node-shared@4.0.0-beta.105": "2026-08-07T01:16:00.798Z",
+  "@effect/sql-sqlite-bun@4.0.0-beta.105": "2026-08-07T01:13:00.629Z",
   "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
-  "effect@4.0.0-beta.102": "2026-07-26T22:24:42.705Z",
-  "smithers-orchestrator@0.32.0": "2026-08-01T05:00:25.735Z",
+  "effect@4.0.0-beta.105": "2026-08-07T01:37:58.225Z",
+  "smthrs@0.34.0": "2026-08-13T03:21:30.904Z",
   "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
   "zod@4.4.3": "2026-05-04T07:06:40.819Z"
 };
 
 // The pin list above closes the hazard one package at a time, and only for
 // packages that have already broken a run. What it cannot cover is the rest of
-// the transitive closure: the generated workspace installs with
+// the transitive closure: an ephemeral generated workspace installs with
 // `--package-lock=false`, so every open range below the pins re-resolves against
 // whatever npm holds at that instant. Two costs follow. A version published
 // minutes ago can be selected before its tarball has propagated to the CDN edge
@@ -84,13 +89,13 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // version published after it, so resolution depends on the manifest and this
 // constant, not on the wall clock -- which is exactly what an in-flight resume
 // needs, and it needs no lockfile in the run workspace, so `--package-lock=false`
-// and the migration path in `migrateLegacySmithersPackageManifest` are untouched.
+// and the generated manifest is current-only.
 //
-// The rule for moving it: the next UTC midnight after the newest pin above. It
-// must never precede a pinned version's own publish instant -- npm would fail to
-// find the pin at all -- and dating it a day back keeps every selectable tarball
-// well past propagation.
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-02T00:00:00Z";
+// The rule for moving it: choose a fixed instant after every new pin has
+// published and propagated, but already in the past when release validation
+// runs -- npm does not freeze a future `--before` view. This instant is more
+// than eight hours after the newest pin (`smthrs@0.34.0`, at 03:21:30Z).
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-13T12:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
@@ -132,65 +137,31 @@ export interface SmithersInstallCommandOptions {
   readonly prefix: string;
   /** Registry to install from; omitted, npm uses the ambient configuration. */
   readonly registry?: string;
+  /** Record registry integrity hashes for an operator-owned controller install. */
+  readonly packageLock?: boolean;
 }
 
 /**
- * The argv both installers of the generated workspace run. Shared so the
- * resolution cutoff cannot be present on one path and missing on the other.
+ * Shared argv for operator and ephemeral dependency installs, keeping the
+ * resolution cutoff present on both paths.
  */
-export function smithersDependencyInstallArgs({ prefix, registry }: SmithersInstallCommandOptions): string[] {
+export function smithersDependencyInstallArgs({
+  prefix,
+  registry,
+  packageLock
+}: SmithersInstallCommandOptions): string[] {
   return [
     "install",
     "--prefix",
     prefix,
     "--ignore-scripts",
-    "--package-lock=false",
+    `--package-lock=${packageLock === true ? "true" : "false"}`,
     `--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`,
     ...(registry === undefined ? [] : [`--registry=${registry}`]),
     "--no-audit",
     "--no-fund",
     "--loglevel=error"
   ];
-}
-
-/** Manifest sections keyed by name, so one comparison covers deps and overrides. */
-type SmithersManifestSections = Readonly<Record<string, Readonly<Record<string, string>>>>;
-
-interface SmithersDependencyShape extends SmithersManifestSections {
-  readonly dependencies: Readonly<Record<string, string>>;
-  readonly devDependencies: Readonly<Record<string, string>>;
-}
-
-// Every pinned shape Ultrafuzz has shipped, newest first. A generated manifest
-// left behind by an older Ultrafuzz must migrate forward instead of failing the
-// launch, because in-flight cloud runs resume against their existing project
-// root. Add the outgoing pin here whenever the runner version changes.
-const SUPERSEDED_SMITHERS_DEPENDENCIES: readonly SmithersDependencyShape[] = [
-  {
-    dependencies: { "smithers-orchestrator": "0.31.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.29.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.28.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "0.27.0", zod: "4.4.3" },
-    devDependencies: { typescript: "6.0.3" }
-  },
-  {
-    dependencies: { "smithers-orchestrator": "^0.27.0", zod: "^4.4.3" },
-    devDependencies: { typescript: "^6.0.3" }
-  }
-];
-
-export interface SmithersPackageMigration {
-  manifest: unknown;
-  migrated: boolean;
 }
 
 export function renderSmithersPackageJson(): string {
@@ -206,13 +177,65 @@ export function renderSmithersPackageJson(): string {
   )}\n`;
 }
 
+/**
+ * Authenticates and rewrites the generated 0.32 manifest once. Extra packages
+ * in the three dependency extension maps are preserved; executable fields and
+ * manifests with modified generated pins are never migrated automatically.
+ */
+export function migrateStockSmithers032PackageManifest(value: unknown): string | undefined {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||
+    value.name !== "ultrafuzz-smithers" ||
+    value.private !== true ||
+    value.type !== "module"
+  ) {
+    return undefined;
+  }
+  const migratedSections: Record<string, Record<string, string>> = {};
+  for (const [section, expected] of Object.entries(STOCK_SMITHERS_032_DEPENDENCIES)) {
+    const actual = value[section];
+    if (!isRecord(actual) || !hasDependencyEntries(actual)) return undefined;
+    for (const [name, version] of Object.entries(expected)) {
+      if (actual[name] !== version) return undefined;
+    }
+    migratedSections[section] = { ...(actual as Record<string, string>) };
+  }
+  const dependencies = migratedSections.dependencies!;
+  if (Object.hasOwn(dependencies, SMITHERS_PACKAGE_NAME) && dependencies[SMITHERS_PACKAGE_NAME] !== SMITHERS_VERSION) {
+    return undefined;
+  }
+  delete dependencies["smithers-orchestrator"];
+  dependencies[SMITHERS_PACKAGE_NAME] = SMITHERS_VERSION;
+  const overrides = migratedSections.overrides!;
+  for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) overrides[name] = version;
+  return `${JSON.stringify(
+    {
+      name: value.name,
+      private: value.private,
+      type: value.type,
+      dependencies,
+      devDependencies: migratedSections.devDependencies,
+      overrides
+    },
+    null,
+    2
+  )}\n`;
+}
+
 export function assertSmithersPackageManifest(value: unknown): void {
-  if (!isRecord(value)) {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||
+    value.name !== "ultrafuzz-smithers" ||
+    value.private !== true ||
+    value.type !== "module"
+  ) {
     throw modifiedManifestError();
   }
   for (const [section, expected] of Object.entries(REQUIRED_SMITHERS_DEPENDENCIES)) {
     const actual = value[section];
-    if (!isRecord(actual)) {
+    if (!isRecord(actual) || !hasDependencyEntries(actual)) {
       throw modifiedManifestError();
     }
     for (const [name, version] of Object.entries(expected)) {
@@ -223,61 +246,6 @@ export function assertSmithersPackageManifest(value: unknown): void {
   }
 }
 
-export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPackageMigration {
-  // A manifest already carrying the current runner but an incomplete override
-  // block still has to migrate: that is how a project root written before an
-  // override was added, or before one was retargeted, picks the new pin up.
-  const staleRequiredOverrides =
-    isRecord(value) &&
-    hasRequiredVersions(value, UNOVERRIDDEN_SMITHERS_DEPENDENCIES) &&
-    !hasRequiredVersions(value, { overrides: REQUIRED_SMITHERS_OVERRIDES });
-  if (
-    !isRecord(value) ||
-    value.name !== "ultrafuzz-smithers" ||
-    value.private !== true ||
-    value.type !== "module" ||
-    (!SUPERSEDED_SMITHERS_DEPENDENCIES.some((dependencies) => hasRequiredVersions(value, dependencies)) &&
-      !staleRequiredOverrides)
-  ) {
-    return { manifest: value, migrated: false };
-  }
-  const dependencies = value.dependencies as Record<string, unknown>;
-  const devDependencies = value.devDependencies as Record<string, unknown>;
-  return {
-    manifest: {
-      ...value,
-      dependencies: {
-        ...dependencies,
-        ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies
-      },
-      devDependencies: {
-        ...devDependencies,
-        ...REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
-      },
-      overrides: {
-        ...(isRecord(value.overrides) ? value.overrides : {}),
-        ...REQUIRED_SMITHERS_DEPENDENCIES.overrides
-      }
-    },
-    migrated: true
-  };
-}
-
-function hasRequiredVersions(value: Record<string, unknown>, required: SmithersManifestSections): boolean {
-  for (const [section, expected] of Object.entries(required)) {
-    const actual = value[section];
-    if (!isRecord(actual)) {
-      return false;
-    }
-    for (const [name, version] of Object.entries(expected)) {
-      if (actual[name] !== version) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 function modifiedManifestError(): Error {
   return new Error(
     "generated workflow dependency manifest must retain Ultrafuzz's exact runner versions; recreate it before launch"
@@ -286,4 +254,21 @@ function modifiedManifestError(): Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const canonical = [...expected].sort();
+  return actual.length === canonical.length && actual.every((key, index) => key === canonical[index]);
+}
+
+function hasDependencyEntries(value: Record<string, unknown>): boolean {
+  return Object.entries(value).every(
+    ([name, version]) =>
+      name.length > 0 &&
+      name.trim() === name &&
+      typeof version === "string" &&
+      version.length > 0 &&
+      version.trim() === version
+  );
 }
