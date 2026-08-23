@@ -79,6 +79,7 @@ import {
 } from "./workflow-integrity.js";
 import {
   commitControllerGeneration,
+  commitPublishedPreparedControllerGeneration,
   effectiveControllerGeneration,
   prepareControllerGeneration
 } from "./workflow-controller-generation.js";
@@ -548,15 +549,25 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     ]);
   }
 
-  let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-    allowPendingControllerRefresh: input.refreshController === true
-  });
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
-  }
   let releaseLifecycleLock: (() => Promise<void>) | undefined;
   try {
-    releaseLifecycleLock = await acquireWorkflowLifecycleLock(evidence.layout);
+    // A refresh may need to remove an authenticated prepared-generation temporary publication
+    // while loading evidence. Resolve and lock the run before that first read so a concurrent
+    // publisher can never have its live temporary tree classified as stale.
+    if (input.refreshController === true) {
+      const resolvedProjectRoot = path.resolve(input.projectRoot);
+      const runsRoot = await runsRootForProject(resolvedProjectRoot);
+      const safeRunId = validateSafeId(input.runId, "run ID");
+      const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
+      assertPathInside(runsRoot, layout.root, "run root");
+      if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+      releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
+    }
+    let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
+      allowPendingControllerRefresh: input.refreshController === true
+    });
+    if (!evidence.ok) return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
+    releaseLifecycleLock ??= await acquireWorkflowLifecycleLock(evidence.layout);
     const lockedEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
       allowPendingControllerRefresh: input.refreshController === true
     });
@@ -595,23 +606,34 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ) {
           throw new Error("workflow link changed before controller refresh");
         }
-        const refreshed = refreshedSmithersControllerSnapshot({
-          projectRoot: path.resolve(input.projectRoot),
-          layout: evidence.layout,
-          original,
-          config: sealedConfig
-        });
-        const prepared = prepareControllerGeneration(evidence.layout, original, refreshed, {
-          workflowRunId: activeLink.workflow_run_id,
-          workflowLinkId: activeLink.link_id
-        });
+        const publishedPrepared = commitPublishedPreparedControllerGeneration(evidence.layout, original);
+        const prepared =
+          publishedPrepared === undefined
+            ? prepareControllerGeneration(
+                evidence.layout,
+                original,
+                refreshedSmithersControllerSnapshot({
+                  projectRoot: path.resolve(input.projectRoot),
+                  layout: evidence.layout,
+                  original,
+                  config: sealedConfig
+                }),
+                {
+                  workflowRunId: activeLink.workflow_run_id,
+                  workflowLinkId: activeLink.link_id
+                }
+              )
+            : undefined;
+        const selectedSnapshot = publishedPrepared?.snapshot ?? prepared!.snapshot;
+        const authorizedGenerations = publishedPrepared?.authorizedGenerations ?? prepared!.authorizedGenerations;
         const published = materializeWorkflowExecutionSnapshot({
           projectRoot: path.resolve(input.projectRoot),
           layout: evidence.layout,
-          snapshot: prepared.snapshot,
-          authorizedGenerations: prepared.authorizedGenerations
+          snapshot: selectedSnapshot,
+          authorizedGenerations
         });
-        const committed = commitControllerGeneration(evidence.layout, original, prepared.controllerGeneration);
+        const committed =
+          publishedPrepared ?? commitControllerGeneration(evidence.layout, original, prepared!.controllerGeneration);
         evidence = {
           ...evidence,
           workflowPath: published.workflowPath,

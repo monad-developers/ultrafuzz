@@ -671,6 +671,21 @@ function reconcileStaleSnapshotPublications(directory: OpenedSnapshotDirectory, 
   }
 }
 
+/**
+ * Reconcile only the temporary publication belonging to an already authenticated generation.
+ * Controller-refresh recovery calls this before the normal snapshot-root equality check so an
+ * abrupt exit immediately before the atomic rename remains recoverable without admitting any
+ * unrelated root entry.
+ */
+export function reconcileStaleWorkflowExecutionSnapshotPublications(layout: RunLayout, generation: string): void {
+  const snapshots = openWorkflowExecutionSnapshotsDirectory(layout);
+  try {
+    reconcileStaleSnapshotPublications(snapshots, generation);
+  } finally {
+    if (snapshots.descriptor !== undefined) fs.closeSync(snapshots.descriptor);
+  }
+}
+
 function assertSnapshotPublicationBoundary(boundary: SnapshotPublicationBoundary, label: string): void {
   assertOpenedSnapshotDirectoryCurrent(boundary.snapshots, "workflow execution snapshots");
   assertExactDirectoryIdentity(boundary.lexicalRoot, boundary.device, boundary.inode, label);
