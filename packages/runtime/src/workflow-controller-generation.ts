@@ -22,7 +22,10 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import type { RefreshedSmithersControllerSnapshot } from "./smithers.js";
-import type { VerifiedWorkflowControlSnapshot } from "./workflow-integrity.js";
+import {
+  reconcileStaleWorkflowExecutionSnapshotPublications,
+  type VerifiedWorkflowControlSnapshot
+} from "./workflow-integrity.js";
 import { verifyWorkflowRunLinkHistory } from "./workflow-run-link.js";
 
 const JOURNAL_VERSION = "ultrafuzz.workflow-controller-generation-journal.v1";
@@ -213,6 +216,44 @@ export function commitControllerGeneration(
   };
 }
 
+/**
+ * Finish the exact prepared transition when its immutable tree already crossed the publication
+ * boundary. This must run before rebuilding a refresh: controller source may legitimately advance
+ * after the crash, but it cannot redefine the identity of an existing prepared transaction.
+ */
+export function commitPublishedPreparedControllerGeneration(
+  layout: RunLayout,
+  original: VerifiedWorkflowControlSnapshot
+): EffectiveControllerGeneration | undefined {
+  assertOriginalGeneration(layout, original);
+  const journal = readJournal(layout, original.generation);
+  verifyControllerGenerationJournalEvents(layout, journal);
+  const pending = journal.entries.find((entry) => entry.phase === "prepared");
+  if (pending === undefined) return undefined;
+  if (publishedPreparedSnapshotRoot(layout, pending) === undefined) return undefined;
+  return commitControllerGeneration(layout, original, pending.controller_generation);
+}
+
+function publishedPreparedSnapshotRoot(layout: RunLayout, pending: ControllerGenerationEntry): string | undefined {
+  const snapshotRoot = safeResolveInside(
+    layout.root,
+    path.join("smithers", "execution-snapshots", pending.controller_generation),
+    "prepared controller generation snapshot"
+  );
+  let snapshotStat: fs.Stats;
+  try {
+    snapshotStat = fs.lstatSync(snapshotRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (snapshotStat.isSymbolicLink() || !snapshotStat.isDirectory()) {
+    throw new Error("prepared controller generation snapshot is not a physical directory");
+  }
+  assertNoSymlinkComponents(layout.root, snapshotRoot, "prepared controller generation snapshot");
+  return snapshotRoot;
+}
+
 /** Select only the committed journal head; a half-transition fails closed. */
 export function effectiveControllerGeneration(
   layout: RunLayout,
@@ -224,13 +265,25 @@ export function effectiveControllerGeneration(
   if (journal.entries.some((entry) => entry.phase === "prepared") && options.allowPending !== true) {
     throw new Error("controller generation requires reconciliation with resume --refresh-controller");
   }
+  const readableGenerations = authorizedGenerations(journal, original.generation);
+  if (options.allowPending === true) {
+    for (const entry of journal.entries) {
+      if (entry.phase === "prepared") {
+        reconcileStaleWorkflowExecutionSnapshotPublications(layout, entry.controller_generation);
+        if (publishedPreparedSnapshotRoot(layout, entry) !== undefined) {
+          readableGenerations.push(entry.controller_generation);
+        }
+      }
+    }
+    readableGenerations.sort(compareStrings);
+  }
   const head = committedHead(journal);
   if (head === undefined) {
     assertNoControllerGenerationProjection(layout);
     return {
       snapshot: original,
       controllerGeneration: original.generation,
-      authorizedGenerations: [original.generation]
+      authorizedGenerations: readableGenerations
     };
   }
   const manifest = readManifest(layout, head);
@@ -239,7 +292,7 @@ export function effectiveControllerGeneration(
   return {
     snapshot: snapshotFromManifest(layout, original, manifest),
     controllerGeneration: head.controller_generation,
-    authorizedGenerations: authorizedGenerations(journal, original.generation)
+    authorizedGenerations: readableGenerations
   };
 }
 
