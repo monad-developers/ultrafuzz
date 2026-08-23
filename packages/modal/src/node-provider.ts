@@ -41,6 +41,9 @@ const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
 const COMMAND_PROBE_TIMEOUT_MS = 60_000;
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION = "ultrafuzz.modal.invariant-source-proof-publication.v1";
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX = ".invariant.publication.json";
+const MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES = 16 * 1024;
 
 const MODAL_COMMAND_PROBE_SOURCE = String.raw`
 const fs = require("node:fs");
@@ -1097,6 +1100,15 @@ interface ModalNodeResult {
   durable_checkpoint_index: string;
 }
 
+interface InvariantSourceProofPublication {
+  schema_version: typeof INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION;
+  attempt_id: string;
+  execution_generation: string;
+  storage_lineage: string;
+  logical_dispatch_fingerprint: string;
+  source_proof_sha256: string;
+}
+
 async function waitForModalNodeResult(
   sandbox: Sandbox,
   request: NodeSandboxProviderRequest,
@@ -1274,7 +1286,8 @@ async function publishModalNodeResult(
       assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination, markerRefreshed);
     }
     const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
-    const sourceProofs: Array<{ source: string; destination: string }> = [];
+    const sourceProofs: Array<{ source: string; destination: string; replacementAllowed: boolean }> = [];
+    let invariantProofPublication: { source: string; destination: string; replacementAllowed: boolean } | undefined;
     for (const suffix of [".json", ".invariant.json"] as const) {
       const sourceProof = path.join(extracted, "source-proofs", `${input.attempt_id}${suffix}`);
       if (!fs.existsSync(sourceProof)) continue;
@@ -1282,8 +1295,28 @@ async function publishModalNodeResult(
       if (path.dirname(destination) !== proofRoot) {
         throw new Error("cloud node result source proof path is unsafe");
       }
-      assertPublishedFileReplacementAllowed(sourceProof, destination);
-      sourceProofs.push({ source: sourceProof, destination });
+      let replacementAllowed = false;
+      if (suffix === ".invariant.json") {
+        const publication = prepareInvariantSourceProofPublication(
+          temporaryRoot,
+          sourceProof,
+          destination,
+          proofRoot,
+          input,
+          result
+        );
+        replacementAllowed = publication.proofReplacementAllowed;
+        invariantProofPublication = publication.provenance;
+      }
+      assertPublishedFileReplacementAllowed(sourceProof, destination, replacementAllowed);
+      sourceProofs.push({ source: sourceProof, destination, replacementAllowed });
+    }
+    if (invariantProofPublication !== undefined) {
+      assertPublishedFileReplacementAllowed(
+        invariantProofPublication.source,
+        invariantProofPublication.destination,
+        invariantProofPublication.replacementAllowed
+      );
     }
     const artifacts = path.join(extracted, "artifacts");
     assertPublishedDirectoryReplacementAllowed(artifacts, artifactDir);
@@ -1293,8 +1326,15 @@ async function publishModalNodeResult(
       replacePublishedDirectory(workspace, workspaceDir);
     }
     replacePublishedDirectory(artifacts, artifactDir);
-    for (const { source, destination } of sourceProofs) {
-      replacePublishedFile(source, destination);
+    for (const { source, destination, replacementAllowed } of sourceProofs) {
+      replacePublishedFile(source, destination, replacementAllowed);
+    }
+    if (invariantProofPublication !== undefined) {
+      replacePublishedFile(
+        invariantProofPublication.source,
+        invariantProofPublication.destination,
+        invariantProofPublication.replacementAllowed
+      );
     }
     if (verificationDestination !== undefined) {
       replacePublishedFile(verificationMarker, verificationDestination, markerRefreshed);
@@ -2281,6 +2321,137 @@ function assertSafeTree(root: string): void {
   }
 }
 
+/**
+ * Decides whether the invariant proof advances a prior published generation or republishes the
+ * current one. The receipt is controller-owned because the proof schema intentionally describes
+ * source provenance rather than Modal storage lineage.
+ *
+ * The proof is installed before its receipt. If the process stops between those renames, a retry
+ * recognizes that the destination already has the incoming digest and completes the receipt update.
+ * A legacy destination without a receipt is backfilled only when its bytes are already identical;
+ * an ambiguous conflict fails closed. Once a receipt is present, conflicting bytes for that exact
+ * generation remain immutable.
+ */
+function prepareInvariantSourceProofPublication(
+  temporaryRoot: string,
+  source: string,
+  destination: string,
+  proofRoot: string,
+  input: ModalNodeSandboxInput,
+  result: ModalNodeResult
+): {
+  proofReplacementAllowed: boolean;
+  provenance: { source: string; destination: string; replacementAllowed: boolean };
+} {
+  // Validate both proof endpoints before reading either one for the publication decision.
+  assertPublishedFileReplacementAllowed(source, destination, true);
+  const sourceDigest = crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex");
+  const provenance: InvariantSourceProofPublication = {
+    schema_version: INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION,
+    attempt_id: input.attempt_id,
+    execution_generation: input.execution_generation,
+    storage_lineage: result.storage_lineage,
+    logical_dispatch_fingerprint: result.logical_dispatch_fingerprint,
+    source_proof_sha256: sourceDigest
+  };
+  const provenanceSource = path.join(temporaryRoot, "invariant-source-proof-publication.json");
+  fs.writeFileSync(provenanceSource, `${JSON.stringify(provenance, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  const provenanceDestination = path.join(proofRoot, `${input.attempt_id}${INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX}`);
+  if (path.dirname(provenanceDestination) !== proofRoot) {
+    throw new Error("cloud node invariant source proof publication path is unsafe");
+  }
+  assertPublishedFileReplacementAllowed(provenanceSource, provenanceDestination, true);
+
+  const destinationExists = fs.existsSync(destination);
+  const provenanceExists = fs.existsSync(provenanceDestination);
+  if (!destinationExists) {
+    if (provenanceExists) {
+      throw new Error("cloud node invariant source proof publication provenance is invalid");
+    }
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  const destinationDigest = crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex");
+  if (!provenanceExists) {
+    // A receipt-less destination predates this publication contract, so its generation is
+    // unknowable. Only identical bytes may be adopted and backfilled; every conflict fails closed.
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  const published = readInvariantSourceProofPublication(provenanceDestination, input);
+  if (published.execution_generation === input.execution_generation) {
+    if (
+      published.logical_dispatch_fingerprint !== result.logical_dispatch_fingerprint ||
+      published.source_proof_sha256 !== destinationDigest
+    ) {
+      throw new Error("cloud node invariant source proof publication provenance is invalid");
+    }
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  if (input.execution_generation === "base") {
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+  if (published.source_proof_sha256 !== destinationDigest && destinationDigest !== sourceDigest) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  return {
+    proofReplacementAllowed: destinationDigest !== sourceDigest,
+    provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: true }
+  };
+}
+
+function readInvariantSourceProofPublication(
+  publicationPath: string,
+  input: ModalNodeSandboxInput
+): InvariantSourceProofPublication {
+  const stat = fs.lstatSync(publicationPath);
+  if (stat.size > MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(publicationPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid", { cause: error });
+  }
+  const expectedKeys = [
+    "attempt_id",
+    "execution_generation",
+    "logical_dispatch_fingerprint",
+    "schema_version",
+    "source_proof_sha256",
+    "storage_lineage"
+  ];
+  if (
+    !isRecord(parsed) ||
+    JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(expectedKeys) ||
+    parsed.schema_version !== INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION ||
+    parsed.attempt_id !== input.attempt_id ||
+    !isCloudExecutionGeneration(parsed.execution_generation) ||
+    parsed.storage_lineage !== `${input.run_id}/${input.attempt_id}/${parsed.execution_generation}` ||
+    typeof parsed.logical_dispatch_fingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(parsed.logical_dispatch_fingerprint) ||
+    typeof parsed.source_proof_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(parsed.source_proof_sha256)
+  ) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  return parsed as unknown as InvariantSourceProofPublication;
+}
+
 function replacePublishedDirectory(source: string, destination: string): void {
   assertPublishedDirectoryReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -2317,12 +2488,12 @@ function assertPublishedDirectoryReplacementAllowed(source: string, destination:
   }
 }
 
-function replacePublishedFile(source: string, destination: string, refreshedMarker = false): void {
-  assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
+function replacePublishedFile(source: string, destination: string, replacementAllowed = false): void {
+  assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   if (fs.existsSync(destination)) {
-    assertPublishedFileReplacementAllowed(source, destination, refreshedMarker);
-    if (!refreshedMarker) return;
+    assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
+    if (!replacementAllowed) return;
   }
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   fs.copyFileSync(source, pending);
@@ -2333,7 +2504,7 @@ function replacePublishedFile(source: string, destination: string, refreshedMark
   }
 }
 
-function assertPublishedFileReplacementAllowed(source: string, destination: string, refreshedMarker = false): void {
+function assertPublishedFileReplacementAllowed(source: string, destination: string, replacementAllowed = false): void {
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud node result source file is unsafe");
@@ -2345,7 +2516,7 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
   ) {
     throw new Error("cloud node result destination file is unsafe");
   }
-  if (destinationStat !== undefined && !refreshedMarker) {
+  if (destinationStat !== undefined && !replacementAllowed) {
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
