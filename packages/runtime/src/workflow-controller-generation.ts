@@ -22,7 +22,10 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import type { RefreshedSmithersControllerSnapshot } from "./smithers.js";
-import type { VerifiedWorkflowControlSnapshot } from "./workflow-integrity.js";
+import {
+  reconcileStaleWorkflowExecutionSnapshotPublications,
+  type VerifiedWorkflowControlSnapshot
+} from "./workflow-integrity.js";
 import { verifyWorkflowRunLinkHistory } from "./workflow-run-link.js";
 
 const JOURNAL_VERSION = "ultrafuzz.workflow-controller-generation-journal.v1";
@@ -265,8 +268,11 @@ export function effectiveControllerGeneration(
   const readableGenerations = authorizedGenerations(journal, original.generation);
   if (options.allowPending === true) {
     for (const entry of journal.entries) {
-      if (entry.phase === "prepared" && publishedPreparedSnapshotRoot(layout, entry) !== undefined) {
-        readableGenerations.push(entry.controller_generation);
+      if (entry.phase === "prepared") {
+        reconcileStaleWorkflowExecutionSnapshotPublications(layout, entry.controller_generation);
+        if (publishedPreparedSnapshotRoot(layout, entry) !== undefined) {
+          readableGenerations.push(entry.controller_generation);
+        }
       }
     }
     readableGenerations.sort(compareStrings);
