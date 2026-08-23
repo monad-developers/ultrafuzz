@@ -17126,9 +17126,13 @@ test(
     const temporaryRoot = path.join(snapshotsRoot, temporaryName);
     fs.renameSync(published.root, temporaryRoot);
 
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+    const [recovered, concurrent] = await Promise.all([
+      resumeRun({ projectRoot: project, runId, refreshController: true, env }),
+      resumeRun({ projectRoot: project, runId, refreshController: true, env })
+    ]);
 
     assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(concurrent.ok, true, JSON.stringify(concurrent.diagnostics));
     assert.equal(fs.existsSync(temporaryRoot), false);
     assert.equal(fs.existsSync(published.root), true);
   }

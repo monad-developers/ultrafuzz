@@ -549,15 +549,25 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     ]);
   }
 
-  let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-    allowPendingControllerRefresh: input.refreshController === true
-  });
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
-  }
   let releaseLifecycleLock: (() => Promise<void>) | undefined;
   try {
-    releaseLifecycleLock = await acquireWorkflowLifecycleLock(evidence.layout);
+    // A refresh may need to remove an authenticated prepared-generation temporary publication
+    // while loading evidence. Resolve and lock the run before that first read so a concurrent
+    // publisher can never have its live temporary tree classified as stale.
+    if (input.refreshController === true) {
+      const resolvedProjectRoot = path.resolve(input.projectRoot);
+      const runsRoot = await runsRootForProject(resolvedProjectRoot);
+      const safeRunId = validateSafeId(input.runId, "run ID");
+      const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
+      assertPathInside(runsRoot, layout.root, "run root");
+      if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+      releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
+    }
+    let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
+      allowPendingControllerRefresh: input.refreshController === true
+    });
+    if (!evidence.ok) return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
+    releaseLifecycleLock ??= await acquireWorkflowLifecycleLock(evidence.layout);
     const lockedEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
       allowPendingControllerRefresh: input.refreshController === true
     });
