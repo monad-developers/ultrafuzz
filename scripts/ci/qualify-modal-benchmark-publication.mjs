@@ -9,7 +9,10 @@ const MAX_GITHUB_EVENT_BYTES = 4 * 1024 * 1024;
 const MAX_GITHUB_API_ENVELOPE_BYTES = 16 * 1024 * 1024;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
-const SUPPORTED_BENCHMARK_MODES = ["smoke", "full"];
+// Longitudinal publication is artifact-derived and deliberately allowlisted.
+// The production-topology threat-model release gate is not a comparable history row.
+const KNOWN_BENCHMARK_MODES = ["smoke", "full", "threat-model"];
+const PUBLISHABLE_BENCHMARK_MODES = new Set(["smoke", "full"]);
 const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "modal-benchmark-control", "public-benchmark-results"];
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifactsValue, repository) {

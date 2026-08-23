@@ -1,20 +1,11 @@
 import { execFileSync } from "node:child_process";
-import crypto, { type Hash } from "node:crypto";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
-import {
-  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
-  isCloudExecutionGeneration,
-  isInsideCloudHandoffRoot,
-  isSafeCloudHandoffPath,
-  materializePromptSchemas,
-  parseCloudSelectedTask,
-  type CloudSelectedTask
-} from "@ultrafuzz/artifacts";
 import {
   ModalClient,
   SandboxFilesystemNotFoundError,
@@ -26,18 +17,22 @@ import {
 } from "modal";
 import {
   ARTIFACT_MANIFEST_FILE,
+  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
   INVARIANT_PINNED_SOURCE_BRANCH,
   INVARIANT_PINNED_SOURCE_REF,
   layoutForRunRoot,
   assertArtifactVerificationMarkerSemantics,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
+  isCloudExecutionGeneration,
   materializePromptSchemas,
+  parseCloudSelectedTask,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   referenceArtifactManifestAuthorityForArtifactDir,
   publishFileDurableExclusive,
+  writeFileDurable,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
   type ArtifactManifest,
@@ -76,6 +71,9 @@ import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION = "ultrafuzz.modal.invariant-source-proof-publication.v1";
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX = ".invariant.publication.json";
+const MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES = 16 * 1024;
 const REMOTE_PROJECT_ARCHIVE = "/tmp/ultrafuzz-node-project.tgz";
 const REMOTE_REQUEST = "/tmp/ultrafuzz-node-request.json";
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
@@ -90,9 +88,6 @@ const SAFE_ATTEMPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SNAPSHOT_GENERATION_PATTERN = /^[0-9a-f]{64}$/u;
 const REQUIRED_COMMAND_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u;
 const COMMAND_PROBE_TIMEOUT_MS = 60_000;
-const INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION = "ultrafuzz.modal.invariant-source-proof-publication.v1";
-const INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX = ".invariant.publication.json";
-const MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES = 16 * 1024;
 
 /**
  * Bounded allowance for controller handoff construction, Modal admission and
@@ -314,6 +309,7 @@ async function runModalNodeSandbox(
   request: NodeSandboxProviderRequest
 ): Promise<NodeSandboxProviderResult> {
   const input = parseModalNodeSandboxInput(request.input);
+  assertSelectedTaskSourceProjectRoot(input, request.rootDir);
   const lifecycleTimeoutSeconds = modalNodeLifecycleTimeoutSeconds(input.resources.timeout_seconds);
   const lifecycleTimeoutMs = lifecycleTimeoutSeconds * 1000;
   const executionDeadline = Date.now() + lifecycleTimeoutMs;
@@ -322,7 +318,7 @@ async function runModalNodeSandbox(
   const tokenId = requiredCredential(env, tokenIdName);
   const tokenSecret = requiredCredential(env, tokenSecretName);
   const archive = await createModalNodeHandoffArchive(request.rootDir, input);
-  const workerInput = modalNodeWorkerInput(input, archive.sha256);
+  const workerInput = modalNodeWorkerInput(input, archive.sha256, archive.sha256);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
@@ -339,7 +335,7 @@ async function runModalNodeSandbox(
       request.runId,
       request.sandboxId,
       input.execution_generation,
-      modalNodeDispatchFingerprint(input)
+      modalNodeDispatchFingerprint(workerInput)
     );
     const volume = await getOrCreateModalV2Volume(client, modalNodeVolumeName(request.runId), {
       createIfMissing: true
@@ -493,10 +489,12 @@ export function parseModalNodeWorkerInput(value: unknown): ModalNodeWorkerInput 
 
 export function modalNodeWorkerInput(
   input: ModalNodeSandboxInput,
-  projectArchiveSha256?: string
+  projectArchiveSha256?: string,
+  projectContentSha256?: string
 ): ModalNodeWorkerInput {
   return parseModalNodeWorkerInput({
     ...input,
+    ...(projectContentSha256 === undefined ? {} : { project_content_sha256: projectContentSha256 }),
     ...(projectArchiveSha256 === undefined ? {} : { project_archive_sha256: projectArchiveSha256 })
   });
 }
@@ -579,10 +577,16 @@ export function modalNodeContinuationIdentity(
       dependency_artifact_dirs: input.dependency_artifact_dirs.map((value) =>
         normalizedContinuationPath(root, value, "dependency artifact directory")
       ),
+      reference_artifact_dirs: (input.reference_artifact_dirs ?? []).map((value) =>
+        normalizedContinuationPath(root, value, "reference artifact directory")
+      ),
+      vulnerability_database: input.vulnerability_database ?? null,
       optional_dependency_artifact_dirs: (input.optional_dependency_artifact_dirs ?? []).map((value) =>
         normalizedContinuationPath(root, value, "optional dependency artifact directory")
       ),
       dependency_verification_authorities: input.dependency_verification_authorities,
+      project_content_sha256: input.project_content_sha256 ?? null,
+      selected_task: continuationSelectedTask(input),
       resources: input.resources,
       agent_credential_env: input.agent_credential_env,
       operator_prompt: input.operator_prompt ?? null,
@@ -614,6 +618,24 @@ export function modalNodeContinuationIdentity(
       !optionalDependencies.has(value)
     );
   }
+  for (const [index, value] of (input.reference_artifact_dirs ?? []).entries()) {
+    fingerprintContinuationTree(
+      nonController,
+      `reference:${index}`,
+      checkedPath(root, value, "reference artifact directory"),
+      fingerprintContext,
+      true
+    );
+  }
+  if (input.vulnerability_database !== undefined) {
+    fingerprintContinuationTree(
+      nonController,
+      "vulnerability-database",
+      checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog"),
+      fingerprintContext,
+      true
+    );
+  }
   for (const [index, authority] of input.dependency_verification_authorities.entries()) {
     fingerprintContinuationTree(
       nonController,
@@ -634,10 +656,31 @@ export function modalNodeContinuationIdentity(
   };
 }
 
+function continuationSelectedTask(input: ModalNodeWorkerInput): NonNullable<ModalNodeWorkerInput["selected_task"]> {
+  const selected = input.selected_task!;
+  const snapshotPrefix = `${input.execution_snapshot_root}/`;
+  return {
+    ...selected,
+    workflowPath: ".ultrafuzz/controller/workflow.tsx",
+    promptPath: selected.promptPath.startsWith(snapshotPrefix)
+      ? ".ultrafuzz/controller/prompt.md"
+      : selected.promptPath,
+    execution: { ...selected.execution, generation: "<logical>" }
+  };
+}
+
 function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   try {
     assertModalDocumentValue(MODAL_NODE_INPUT_SCHEMA_ID, value as StrictModalNodeInputDocument);
     const input = value as StrictModalNodeInputDocument;
+    if (input.selected_task === undefined) throw new Error("selected task handoff is required");
+    const selected = parseCloudSelectedTask(input.selected_task, {
+      taskId: input.task_id,
+      attemptId: input.attempt_id,
+      executionGeneration: input.execution_generation,
+      ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION
+    });
+    assertSelectedTaskAgreesWithDispatch(selected, input);
     const dependencyArtifactDirs = new Set(input.dependency_artifact_dirs);
     if ((input.optional_dependency_artifact_dirs ?? []).some((directory) => !dependencyArtifactDirs.has(directory))) {
       throw new Error("optional dependency artifact directories must be an exact subset of dependencies");
@@ -655,43 +698,6 @@ function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   return value as StrictModalNodeInputDocument;
 }
 
-/**
- * Binds the handoff to the dispatch it travels with.
- *
- * The archive is built from the top-level dispatch fields while the worker executes from the handoff,
- * so any disagreement would mean the worker runs an attempt whose inputs were never archived.
- */
-function assertSelectedTaskAgreesWithDispatch(selected: CloudSelectedTask, input: ModalNodeSandboxInput): void {
-  const agreements: Array<[string, unknown, unknown]> = [
-    ["runRoot", selected.runRoot, input.run_root],
-    ["workflowPath", selected.workflowPath, input.workflow_path],
-    ["artifactDir", selected.artifactDir, input.artifact_dir],
-    ["workspacePath", selected.workspacePath, input.workspace_dir],
-    ["promptPath", selected.promptPath, input.prompt_path],
-    ["metadata.run.ultrafuzzRunId", selected.metadata.run.ultrafuzzRunId, input.run_id],
-    [
-      "dependencyArtifactDirs",
-      JSON.stringify([...selected.dependencyArtifactDirs].sort()),
-      JSON.stringify([...input.dependency_artifact_dirs].sort())
-    ],
-    [
-      "referenceArtifactDirs",
-      JSON.stringify([...selected.referenceArtifactDirs].sort()),
-      JSON.stringify([...(input.reference_artifact_dirs ?? [])].sort())
-    ],
-    [
-      "vulnerabilityDatabase",
-      JSON.stringify(selected.vulnerabilityDatabase ?? null),
-      JSON.stringify(input.vulnerability_database ?? null)
-    ]
-  ];
-  for (const [label, left, right] of agreements) {
-    if (left !== right) {
-      throw new Error(`cloud node selected task handoff ${label} disagrees with the dispatched cloud node input`);
-    }
-  }
-}
-
 export function modalNodeTags(
   runId: string,
   sandboxId: string,
@@ -702,67 +708,85 @@ export function modalNodeTags(
     purpose: "ultrafuzz-node",
     run: boundedIdentity(runId),
     attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`),
-    // Reattachment is a lookup by tag, so the logical dispatch is part of the lookup key: a live
-    // sandbox launched for a different logical attempt under the same identity is not found at all,
-    // rather than found and then adopted.
     ...(logicalDispatchFingerprint === undefined ? {} : { dispatch: logicalDispatchFingerprint.slice(0, 32) })
   };
 }
 
-/**
- * The canonical logical identity of one cloud dispatch, independent of the generation it runs under.
- *
- * A generation reset deliberately re-dispatches the same logical attempt into a new sandbox, volume
- * attempt root, and storage lineage, so the generation itself cannot be part of this identity.
- * Everything else -- the archived locations, the validated handoff DTO, the pinned planner catalog,
- * the resources, and the credential surface -- is provenance for whatever a durable workspace
- * publishes. Reducing it to one fingerprint gives every durable record, published result, and live
- * reattachment a single value to agree on instead of each boundary re-deriving its own field subset.
- *
- * The byte-level tar digest is deliberately excluded: container metadata can differ while the
- * semantic staged inputs remain identical. `project_content_sha256` binds those staged inputs here,
- * while `project_archive_sha256` independently protects the exact transport bytes.
- */
-export function modalNodeDispatchFingerprint(input: ModalNodeSandboxInput): string {
-  const logical = {
-    schema_version: input.schema_version,
-    run_id: input.run_id,
-    task_id: input.task_id,
-    attempt_id: input.attempt_id,
-    execution_snapshot_root: input.execution_snapshot_root,
-    workflow_path: input.workflow_path,
-    prompt_path: input.prompt_path,
-    run_root: input.run_root,
-    artifact_dir: input.artifact_dir,
-    workspace_dir: input.workspace_dir,
-    dependency_artifact_dirs: input.dependency_artifact_dirs,
-    reference_artifact_dirs: input.reference_artifact_dirs ?? [],
-    vulnerability_database: input.vulnerability_database ?? null,
-    project_content_sha256: input.project_content_sha256 ?? null,
-    // The dispatched generation is the one value a reset is allowed to change, so it is normalized
-    // out of the handoff too; every other handoff field stays part of the logical identity.
-    selected_task: {
-      ...input.selected_task,
-      execution: { ...input.selected_task.execution, generation: "<logical>" }
-    },
-    resources: input.resources,
-    agent_credential_env: input.agent_credential_env,
-    operator_prompt: input.operator_prompt ?? null
-  };
-  return crypto.createHash("sha256").update(canonicalDispatchJson(logical)).digest("hex");
+function assertSelectedTaskAgreesWithDispatch(
+  selected: NonNullable<StrictModalNodeInputDocument["selected_task"]>,
+  input: StrictModalNodeInputDocument
+): void {
+  const agreements: Array<[string, unknown, unknown]> = [
+    ["runRoot", selected.runRoot, input.run_root],
+    ["workflowPath", selected.workflowPath, input.workflow_path],
+    ["artifactDir", selected.artifactDir, input.artifact_dir],
+    ["workspacePath", selected.workspacePath, input.workspace_dir],
+    ["promptPath", selected.promptPath, input.prompt_path],
+    ["metadata.run.ultrafuzzRunId", selected.metadata.run.ultrafuzzRunId, input.run_id],
+    ["dependencyArtifactDirs", selected.dependencyArtifactDirs, input.dependency_artifact_dirs],
+    ["referenceArtifactDirs", selected.referenceArtifactDirs, input.reference_artifact_dirs ?? []],
+    ["vulnerabilityDatabase", selected.vulnerabilityDatabase ?? null, input.vulnerability_database ?? null]
+  ];
+  for (const [label, left, right] of agreements) {
+    if (!isDeepStrictEqual(left, right)) {
+      throw new Error(`cloud node selected task handoff ${label} disagrees with the dispatched input`);
+    }
+  }
 }
 
-/** Key-ordered JSON, so an equal logical dispatch always hashes to the same fingerprint. */
+export function modalNodeDispatchFingerprint(inputValue: ModalNodeSandboxInput): string {
+  const input = parseModalNodeInput(inputValue);
+  const selectedTask = input.selected_task!;
+  return crypto
+    .createHash("sha256")
+    .update(
+      canonicalDispatchJson({
+        schema_version: input.schema_version,
+        run_id: input.run_id,
+        task_id: input.task_id,
+        attempt_id: input.attempt_id,
+        source_revision: input.source_revision ?? null,
+        source_ref: input.source_ref ?? null,
+        workflow_path: input.workflow_path,
+        prompt_path: input.prompt_path ?? null,
+        run_root: input.run_root,
+        artifact_dir: input.artifact_dir,
+        workspace_dir: input.workspace_dir,
+        dependency_artifact_dirs: input.dependency_artifact_dirs,
+        reference_artifact_dirs: input.reference_artifact_dirs ?? [],
+        vulnerability_database: input.vulnerability_database ?? null,
+        optional_dependency_artifact_dirs: input.optional_dependency_artifact_dirs ?? [],
+        dependency_verification_authorities: input.dependency_verification_authorities,
+        project_content_sha256: input.project_content_sha256 ?? null,
+        selected_task: {
+          ...selectedTask,
+          execution: { ...selectedTask.execution, generation: "<logical>" }
+        },
+        resources: input.resources,
+        agent_credential_env: input.agent_credential_env,
+        operator_prompt: input.operator_prompt ?? null
+      })
+    )
+    .digest("hex");
+}
+
 function canonicalDispatchJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalDispatchJson(entry)).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map(canonicalDispatchJson).join(",")}]`;
   if (isRecord(value)) {
-    const members = Object.keys(value)
+    return `{${Object.keys(value)
       .sort()
       .filter((key) => value[key] !== undefined)
-      .map((key) => `${JSON.stringify(key)}:${canonicalDispatchJson(value[key])}`);
-    return `{${members.join(",")}}`;
+      .map((key) => `${JSON.stringify(key)}:${canonicalDispatchJson(value[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value ?? null);
+}
+
+function assertSelectedTaskSourceProjectRoot(input: ModalNodeSandboxInput, projectRoot: string): void {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  if (input.selected_task?.sourceProjectRoot !== root) {
+    throw new Error("selected task source project root does not match the archived project root");
+  }
 }
 
 export function modalNodeVolumeName(runId: string): string {
@@ -777,6 +801,7 @@ export async function createModalNodeHandoffArchive(
   projectRoot: string,
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
+  input = parseModalNodeSandboxInput(input);
   assertRecordedSourceInput(input);
   const root = fs.realpathSync(path.resolve(projectRoot));
   const gitExecutable = trustedGitExecutable(root);
@@ -789,11 +814,6 @@ export async function createModalNodeHandoffArchive(
   const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
     checkedPath(root, value, "dependency artifact directory", !optionalDependencyArtifactDirValues.has(value))
   );
-  const optionalDependencyArtifactDirs = new Set(
-    (input.optional_dependency_artifact_dirs ?? []).map((value) =>
-      checkedPath(root, value, "optional dependency artifact directory", false)
-    )
-  );
   const referenceArtifactDirs = (input.reference_artifact_dirs ?? []).map((value) =>
     checkedPath(root, value, "reference artifact directory")
   );
@@ -801,6 +821,11 @@ export async function createModalNodeHandoffArchive(
     input.vulnerability_database === undefined
       ? undefined
       : checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog");
+  const optionalDependencyArtifactDirs = new Set(
+    (input.optional_dependency_artifact_dirs ?? []).map((value) =>
+      checkedPath(root, value, "optional dependency artifact directory", false)
+    )
+  );
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
   const workspaceDir = checkedPath(root, input.workspace_dir, "workspace directory", false);
   assertExecutionSnapshotRoot(runRoot, executionSnapshotRoot);
@@ -811,14 +836,16 @@ export async function createModalNodeHandoffArchive(
     "cloud workflow path"
   );
   const governedSource = readGovernedSourceIdentity(root, runRoot, executionSnapshotRoot, workflowPath, gitExecutable);
-  if (promptPath !== undefined) assertChildPath(executionSnapshotRoot, promptPath, "rendered prompt path");
+  if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
+  }
+  for (const optionalDependencyArtifactDir of optionalDependencyArtifactDirs) {
+    assertChildPath(runRoot, optionalDependencyArtifactDir, "optional dependency artifact directory");
   }
   for (const referenceArtifactDir of referenceArtifactDirs) {
     assertChildPath(runRoot, referenceArtifactDir, "reference artifact directory");
   }
-  assertDependencyReferenceOverlapsAreExact(dependencyArtifactDirs, referenceArtifactDirs);
   if (vulnerabilityDatabaseCatalog !== undefined) {
     assertChildPath(runRoot, vulnerabilityDatabaseCatalog, "vulnerability database catalog");
     const actual = crypto.createHash("sha256").update(fs.readFileSync(vulnerabilityDatabaseCatalog)).digest("hex");
@@ -826,17 +853,21 @@ export async function createModalNodeHandoffArchive(
       throw new Error("vulnerability database catalog does not match its declared cloud-input digest");
     }
   }
-  const taskAuthority = readSealedModalTaskAuthority(
-    input,
-    runRoot,
-    executionSnapshotRoot,
-    workflowPath,
-    promptPath,
-    artifactDir,
-    workspaceDir,
-    dependencyArtifactDirs,
-    optionalDependencyArtifactDirs
-  );
+  const runtimeSelectedAuthority = selectedTaskRequiresRuntimeAuthority(input, executionSnapshotRoot);
+  const taskAuthority = runtimeSelectedAuthority
+    ? undefined
+    : readSealedModalTaskAuthority(
+        input,
+        runRoot,
+        executionSnapshotRoot,
+        workflowPath,
+        promptPath,
+        artifactDir,
+        workspaceDir,
+        dependencyArtifactDirs,
+        referenceArtifactDirs,
+        optionalDependencyArtifactDirs
+      );
   assertChildPath(runRoot, artifactDir, "artifact directory");
   assertChildPath(runRoot, workspaceDir, "workspace directory");
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
@@ -845,33 +876,30 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    const baseArchive = path.join(temporaryRoot, "base.tar");
-    execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], { cwd: root });
-    await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
-    fs.rmSync(baseArchive, { force: true });
-    assertSafeTree(staging);
-    const objectFormat = execFileSync("git", ["rev-parse", "--show-object-format"], {
-      cwd: root,
-      encoding: "utf8"
-    }).trim();
-    const gitTemplate = path.join(temporaryRoot, "git-template");
-    const gitEnvironment = deterministicCloudGitEnvironment();
-    fs.mkdirSync(gitTemplate, { mode: 0o700 });
-    execFileSync(
-      "git",
-      ["init", "--quiet", "--initial-branch=main", `--object-format=${objectFormat}`, `--template=${gitTemplate}`],
-      { cwd: staging, env: gitEnvironment }
-    );
-    // Reconstruct the committed tree rather than the original repository's history. Fixed commit
-    // metadata makes that parentless baseline a function of the immutable tree alone, so separately
-    // built handoffs can safely exchange workspace patches while a changed tree still changes HEAD.
-    execFileSync("git", ["add", "--all", "--force", "--", "."], { cwd: staging, env: gitEnvironment });
-    execFileSync("git", ["commit", "--quiet", "--no-gpg-sign", "-m", "immutable cloud input"], {
-      cwd: staging,
-      env: gitEnvironment
-    });
-    for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG"]) {
-      fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
+    if (input.source_revision !== undefined && input.source_ref !== undefined) {
+      if (input.source_revision !== governedSource.commit) {
+        throw new Error("recorded cloud source revision does not match the governed source commit");
+      }
+      if (
+        input.source_ref === INVARIANT_PINNED_SOURCE_REF &&
+        pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)
+      ) {
+        createPinnedGitBaseline(root, staging, temporaryRoot, gitExecutable, governedSource);
+      } else {
+        createRecordedGitBaseline(root, staging, temporaryRoot, gitExecutable, input.source_revision, input.source_ref);
+      }
+    } else if (pinnedSourceHasGitlinks(root, gitExecutable, governedSource.commit)) {
+      createPinnedGitBaseline(root, staging, temporaryRoot, gitExecutable, governedSource);
+    } else {
+      const baseArchive = path.join(temporaryRoot, "base.tar");
+      execFileSync(gitExecutable, ["archive", "--format=tar", "--output", baseArchive, governedSource.commit], {
+        cwd: root,
+        env: deterministicGitEnvironment(gitExecutable)
+      });
+      await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
+      fs.rmSync(baseArchive, { force: true });
+      assertSafeTree(staging);
+      createDeterministicGitBaseline(staging, temporaryRoot, gitExecutable);
     }
     assertSafeTree(staging);
 
@@ -889,48 +917,36 @@ export async function createModalNodeHandoffArchive(
       workflowPath
     );
     copyWorkflowControlSealChecked(root, runRoot, executionSnapshotRoot, staging);
-    if (path.relative(executionSnapshotRoot, promptPath).startsWith(`..${path.sep}`)) {
-      copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
-    }
-    for (const dependencyArtifactDir of dependencyArtifactDirs) {
-      copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)), {
-        excludedRootFileNames: CLOUD_DEPENDENCY_PRESENTATION_FILES
-      });
-    }
-    // Reference trees and the run-root planner catalog are explicit cloud inputs: the threat-model
-    // and goal-plan postprocessors verify both against the pinned database, and neither is an
-    // agentic dependency artifact directory.
-    const materializedDependencyArtifactDirs = new Set(dependencyArtifactDirs);
-    for (const referenceArtifactDir of referenceArtifactDirs) {
-      // One canonical tree may have both semantic roles. Its bytes are staged once, while the
-      // dispatch DTO and both fingerprints retain the dependency and reference declarations.
-      if (materializedDependencyArtifactDirs.has(referenceArtifactDir)) continue;
-      copyTreeChecked(referenceArtifactDir, path.join(staging, path.relative(root, referenceArtifactDir)));
-    }
-    if (vulnerabilityDatabaseCatalog !== undefined) {
-      copyFileChecked(
-        root,
-        vulnerabilityDatabaseCatalog,
-        path.join(staging, path.relative(root, vulnerabilityDatabaseCatalog))
-      );
-    }
-    copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
+    const dependencyCapture =
+      taskAuthority === undefined
+        ? stageRuntimeSelectedInputs({
+            input,
+            projectRoot: root,
+            runRoot,
+            staging,
+            promptPath,
+            executionSnapshotRoot,
+            dependencyArtifactDirs,
+            referenceArtifactDirs,
+            vulnerabilityDatabaseCatalog,
+            optionalDependencyArtifactDirs
+          })
+        : stageAuthenticatedDependencies({
+            projectRoot: root,
+            runRoot,
+            staging,
+            dependencyArtifactDirs,
+            optionalDependencyArtifactDirs,
+            taskAuthority
+          });
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
-    for (const relative of CLOUD_HANDOFF_EXPLICIT_FILES) {
-      const source = path.join(root, relative);
-      if (fs.existsSync(source)) {
-        copyFileChecked(root, source, path.join(staging, relative));
-      }
-    }
     assertSafeTree(staging);
     assertDependencyCaptureCurrent(dependencyCapture);
     await writeDeterministicTarGzip(staging, archive);
     fs.chmodSync(archive, 0o600);
-    input.project_content_sha256 = contentSha256;
     return {
       path: archive,
       sha256: sha256File(archive),
-      contentSha256,
       cleanup: () => removeHandoffTemporaryRoot(temporaryRoot)
     };
   } catch (error) {
@@ -939,61 +955,24 @@ export async function createModalNodeHandoffArchive(
   }
 }
 
-function assertDependencyReferenceOverlapsAreExact(
-  dependencyArtifactDirs: readonly string[],
-  referenceArtifactDirs: readonly string[]
-): void {
-  for (const dependencyArtifactDir of dependencyArtifactDirs) {
-    for (const referenceArtifactDir of referenceArtifactDirs) {
-      if (dependencyArtifactDir === referenceArtifactDir) continue;
-      if (
-        dependencyArtifactDir.startsWith(`${referenceArtifactDir}${path.sep}`) ||
-        referenceArtifactDir.startsWith(`${dependencyArtifactDir}${path.sep}`)
-      ) {
-        throw new Error("cloud handoff dependency and reference artifact trees overlap without being identical");
-      }
-    }
+function assertRecordedSourceInput(input: ModalNodeSandboxInput): void {
+  if ((input.source_revision === undefined) !== (input.source_ref === undefined)) {
+    throw new Error("cloud source revision and ref must be supplied together");
+  }
+  if (input.source_revision === undefined || input.source_ref === undefined) return;
+  if (!/^[0-9a-f]{40}$/u.test(input.source_revision)) throw new Error("cloud source revision is invalid");
+  if (
+    !/^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u.test(
+      input.source_ref
+    )
+  ) {
+    throw new Error("cloud source ref is invalid");
+  }
+  const expectedRunRef = `refs/ultrafuzz/runs/${input.run_id}/source`;
+  if (input.source_ref !== INVARIANT_PINNED_SOURCE_REF && input.source_ref !== expectedRunRef) {
+    throw new Error("cloud source ref does not belong to the requested run");
   }
 }
-
-function deterministicCloudGitEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (!name.startsWith("GIT_") && value !== undefined) environment[name] = value;
-  }
-  return {
-    ...environment,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "maintenance.auto",
-    GIT_CONFIG_VALUE_0: "false",
-    GIT_CONFIG_KEY_1: "gc.auto",
-    GIT_CONFIG_VALUE_1: "0",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_AUTHOR_NAME: "Ultrafuzz Cloud",
-    GIT_AUTHOR_EMAIL: "cloud@invalid",
-    GIT_AUTHOR_DATE: "2000-01-01T00:00:00+0000",
-    GIT_COMMITTER_NAME: "Ultrafuzz Cloud",
-    GIT_COMMITTER_EMAIL: "cloud@invalid",
-    GIT_COMMITTER_DATE: "2000-01-01T00:00:00+0000",
-    GIT_INDEX_VERSION: "2",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_TERMINAL_PROMPT: "0",
-    LANG: "C",
-    LC_ALL: "C",
-    TZ: "UTC"
-  };
-}
-
-const CLOUD_HANDOFF_EXPLICIT_FILES = [
-  // Prompt-referenced canonical artifact contracts. `git archive HEAD` only carries them when
-  // the project committed `.ultrafuzz/schema`, so copy them explicitly like the agent registry.
-  ".ultrafuzz/schema/threat-model.schema.json",
-  ".ultrafuzz/schema/goal-plan.schema.json",
-  ".smithers/package.json"
-] as const;
-const CLOUD_DEPENDENCY_PRESENTATION_FILES: ReadonlySet<string> = new Set(["prompt.rendered.md"]);
 
 function readGovernedSourceIdentity(
   projectRoot: string,
@@ -1089,43 +1068,38 @@ function createPinnedGitBaseline(
     throw new Error("pinned cloud source ref does not identify HEAD");
   }
 
-  const overlays: Array<{ label: string; relative: string; kind: "file" | "tree" | "dependency-tree" }> = [
-    { label: "workflow", relative: input.workflow_path, kind: "file" as const },
-    { label: "prompt", relative: input.prompt_path, kind: "file" as const },
-    ...input.dependency_artifact_dirs.map((relative) => ({
-      label: "dependency",
-      relative,
-      kind: "dependency-tree" as const
-    })),
-    ...(input.reference_artifact_dirs ?? []).map((relative) => ({
-      label: "reference",
-      relative,
-      kind: "tree" as const
-    })),
-    ...(input.vulnerability_database === undefined
-      ? []
-      : [
-          { label: "vulnerability-database", relative: input.vulnerability_database.catalogPath, kind: "file" as const }
-        ]),
-    ...CLOUD_HANDOFF_EXPLICIT_FILES.filter((relative) => fs.existsSync(path.join(root, relative))).map((relative) => ({
-      label: "explicit",
-      relative,
-      kind: "file" as const
-    }))
-  ].sort((left, right) => `${left.label}:${left.relative}`.localeCompare(`${right.label}:${right.relative}`));
+  const template = path.join(scratchRoot, "git-template");
+  fs.mkdirSync(template, { mode: 0o700 });
+  execFileSync(
+    gitExecutable,
+    [
+      "clone",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--single-branch",
+      "--depth",
+      "1",
+      "--branch",
+      INVARIANT_PINNED_SOURCE_BRANCH,
+      `--template=${template}`,
+      pathToFileURL(sourceRoot).href,
+      projectRoot
+    ],
+    { env: environment, stdio: "ignore" }
+  );
 
-  for (const overlay of overlays) {
-    const source = checkedPath(root, overlay.relative, `${overlay.label} content`);
-    updateContentFingerprint(hash, `overlay:${overlay.label}`, Buffer.from(overlay.relative));
-    if (overlay.kind === "file") hashContentFile(hash, root, source, overlay.relative);
-    else {
-      hashContentTree(
-        hash,
-        root,
-        source,
-        overlay.relative,
-        overlay.kind === "dependency-tree" ? { excludedRootFileNames: CLOUD_DEPENDENCY_PRESENTATION_FILES } : undefined
-      );
+  const clonedCommit = execFileSync(gitExecutable, ["rev-parse", "HEAD"], {
+    cwd: projectRoot,
+    env: environment,
+    encoding: "utf8"
+  }).trim();
+  if (clonedCommit !== pinnedCommit) throw new Error("pinned cloud source clone changed commit identity");
+
+  const gitRoot = path.join(projectRoot, ".git");
+  for (const entry of fs.readdirSync(gitRoot)) {
+    if (!["HEAD", "config", "index", "objects", "refs", "shallow"].includes(entry)) {
+      fs.rmSync(path.join(gitRoot, entry), { recursive: true, force: true });
     }
   }
   fs.rmSync(path.join(gitRoot, "objects", "info"), { recursive: true, force: true });
@@ -1446,72 +1420,7 @@ function stableContinuationFileIdentity(
     }
     return { sha256: firstDigest, size: before.size, mode: before.mode & 0o111n };
   } finally {
-    // The bundle is intentionally read-only; restore directory write access so it can be removed.
-    if (fs.existsSync(schemas) && !fs.lstatSync(schemas).isSymbolicLink()) fs.chmodSync(schemas, 0o700);
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
-}
-
-function hashContentTree(
-  hash: Hash,
-  root: string,
-  directory: string,
-  relative: string,
-  options: { excludedRootFileNames?: ReadonlySet<string> } = {}
-): void {
-  const stat = fs.lstatSync(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory) {
-    throw new Error("cloud handoff content tree is unsafe");
-  }
-  // copyTreeChecked deliberately normalizes directories to private permissions. Directory modes are
-  // therefore transport metadata, unlike file executable bits, and cannot be part of a source-to-
-  // staging semantic comparison.
-  updateContentFingerprint(hash, "directory", Buffer.from(relative));
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    const child = path.join(directory, entry.name);
-    const childRelative = path.posix.join(relative.split(path.sep).join("/"), entry.name);
-    if (options.excludedRootFileNames?.has(entry.name) === true) {
-      const childStat = fs.lstatSync(child);
-      if (!entry.isFile() || entry.isSymbolicLink() || childStat.nlink !== 1) {
-        throw new Error("cloud handoff dependency presentation file is unsafe");
-      }
-      continue;
-    }
-    if (entry.isDirectory() && !entry.isSymbolicLink()) hashContentTree(hash, root, child, childRelative);
-    else if (entry.isFile() && !entry.isSymbolicLink()) hashContentFile(hash, root, child, childRelative);
-    else throw new Error("cloud handoff content tree excludes links and special files");
-  }
-}
-
-function hashContentFile(hash: Hash, root: string, file: string, relative: string): void {
-  const stat = fs.lstatSync(file);
-  const real = fs.realpathSync(file);
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    (real !== root && !real.startsWith(`${root}${path.sep}`))
-  ) {
-    throw new Error("cloud handoff content file is unsafe");
-  }
-  // Safe extraction normalizes regular files to 0600/0700. The executable distinction survives and
-  // can affect runtime behavior; all other permission bits are transport metadata.
-  updateContentFingerprint(hash, "file", Buffer.from(`${relative}\0${stat.mode & 0o111 ? "executable" : "regular"}`));
-  updateContentFingerprint(hash, "bytes", fs.readFileSync(real));
-}
-
-function updateContentFingerprint(hash: Hash, label: string, value: Buffer): void {
-  hash
-    .update(`${Buffer.byteLength(label)}:`)
-    .update(label)
-    .update(`${value.length}:`)
-    .update(value);
-}
-
-function assertSelectedTaskSourceProjectRoot(input: ModalNodeSandboxInput, projectRoot: string): void {
-  const root = fs.realpathSync(path.resolve(projectRoot));
-  if (input.selected_task.sourceProjectRoot !== root) {
-    throw new Error("selected task source project root does not match the archived project root");
+    fs.closeSync(descriptor);
   }
 }
 
@@ -1594,9 +1503,6 @@ async function readModalNodeResult(
   if (
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
-    // A recovered or resumed sandbox may already hold a published result. Accepting it means adopting
-    // its artifacts as this dispatch's outputs, so the logical dispatch behind it must be this one.
-    parsed.logical_dispatch_fingerprint === modalNodeDispatchFingerprint(input) &&
     isDurableCheckpointPath(parsed.durable_checkpoint, attemptRoot) &&
     parsed.durable_checkpoint_index === path.posix.join(attemptRoot, "checkpoints", "index.json")
   ) {
@@ -1656,6 +1562,7 @@ async function validateDurableCheckpoint(
       artifactArchive: path.posix.join(attemptRoot, "artifacts.tgz"),
       checkpointIndex: path.posix.join(attemptRoot, "checkpoints", "index.json"),
       storageLineage: lineage,
+      logicalDispatchFingerprint: modalNodeDispatchFingerprint(input),
       workspacePath,
       runRoot: input.run_root,
       executionSnapshotRoot: input.execution_snapshot_root,
@@ -1707,7 +1614,8 @@ async function publishModalNodeResult(
     if (path.dirname(verificationDestination) !== verificationRoot) {
       throw new Error("cloud node result verification marker path is unsafe");
     }
-    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination);
+    const markerRefreshed = isRefreshedVerificationMarker(verificationMarker, verificationDestination, artifactDir);
+    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination, markerRefreshed);
     const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
     const sourceProofs: Array<{ source: string; destination: string; replacementAllowed: boolean }> = [];
     let invariantProofPublication: { source: string; destination: string; replacementAllowed: boolean } | undefined;
@@ -1750,19 +1658,17 @@ async function publishModalNodeResult(
     }
     replacePublishedDirectory(artifacts, artifactDir);
     for (const { source, destination, replacementAllowed } of sourceProofs) {
-      replacePublishedFile(source, destination, replacementAllowed);
+      publishControlledFile(root, source, destination, replacementAllowed);
     }
     if (invariantProofPublication !== undefined) {
-      replacePublishedFile(
+      publishControlledFile(
+        root,
         invariantProofPublication.source,
         invariantProofPublication.destination,
         invariantProofPublication.replacementAllowed
       );
     }
-    if (verificationDestination !== undefined) {
-      replacePublishedFile(verificationMarker, verificationDestination, markerRefreshed);
-    }
-    publishImmutableFileExclusive(root, verificationMarker, verificationDestination);
+    publishControlledFile(root, verificationMarker, verificationDestination, markerRefreshed);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -2640,35 +2546,213 @@ interface SealedModalTaskAuthority {
   >;
 }
 
-function copyTreeChecked(
-  source: string,
-  destination: string,
-  options: { excludedRootFileNames?: ReadonlySet<string> } = {}
-): void {
-  const stat = fs.lstatSync(source);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error("cloud handoff source must be a directory");
+function selectedTaskRequiresRuntimeAuthority(input: ModalNodeSandboxInput, executionSnapshotRoot: string): boolean {
+  const selected = input.selected_task!;
+  if (
+    selected.metadata.node.dynamic !== undefined ||
+    input.vulnerability_database !== undefined ||
+    (input.prompt_path !== undefined &&
+      !path.resolve(input.prompt_path).startsWith(`${path.resolve(input.execution_snapshot_root)}${path.sep}`))
+  ) {
+    return true;
   }
-  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    const childSource = path.join(source, entry.name);
-    const childDestination = path.join(destination, entry.name);
-    if (options.excludedRootFileNames?.has(entry.name) === true) {
-      const childStat = fs.lstatSync(childSource);
-      if (!entry.isFile() || entry.isSymbolicLink() || childStat.nlink !== 1) {
-        throw new Error("cloud handoff dependency presentation file is unsafe");
-      }
-      continue;
+  const taskBytes = readStableSnapshotRelativeFile(
+    executionSnapshotRoot,
+    "controls/tasks.json",
+    64 * 1024 * 1024,
+    "sealed task manifest"
+  );
+  const manifest = parseSmithersTaskManifestBytes(taskBytes);
+  const task = manifest.tasks.find(
+    (candidate) => candidate.attemptId === input.attempt_id && candidate.smithersNodeId === input.task_id
+  );
+  return (
+    task === undefined ||
+    (task.dynamicDependencies?.length ?? 0) > 0 ||
+    (task.deferredPromptGroups?.length ?? 0) > 0 ||
+    !isDeepStrictEqual(selected.dependencyArtifactDirs, input.dependency_artifact_dirs)
+  );
+}
+
+interface StableDirectorySnapshot {
+  path: string;
+  stat: fs.BigIntStats;
+}
+
+interface StableRelativeFileIdentity {
+  root: string;
+  relativePath: string;
+  path: string;
+  sha256: string;
+  stat: fs.BigIntStats;
+  directories: readonly StableDirectorySnapshot[];
+}
+
+interface StableRelativeFileSnapshot extends StableRelativeFileIdentity {
+  bytes: Buffer;
+}
+
+interface DependencyHandoffCapture {
+  snapshots: StableRelativeFileIdentity[];
+  omittedOptionalMarkers: StableAbsentPathSnapshot[];
+  entries: number;
+  totalBytes: bigint;
+}
+
+interface StableAbsentPathSnapshot {
+  missingPath: string;
+  parent: StableDirectorySnapshot;
+}
+
+function readSealedModalTaskAuthority(
+  input: ModalNodeSandboxInput,
+  runRoot: string,
+  snapshotRoot: string,
+  workflowPath: string,
+  promptPath: string | undefined,
+  artifactDir: string,
+  workspaceDir: string,
+  dependencyArtifactDirs: readonly string[],
+  referenceArtifactDirs: readonly string[],
+  optionalDependencyArtifactDirs: ReadonlySet<string>
+): SealedModalTaskAuthority {
+  const sealPath = path.join(runRoot, "smithers", "control-integrity.json");
+  const sealContents = readStableRegularFile(sealPath, 64 * 1024 * 1024, "workflow control seal");
+  const seal = parseRuntimeDocumentBytes(
+    WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+    sealContents,
+    "workflow control seal"
+  );
+  if (seal.run_id !== input.run_id) throw new Error("workflow control seal run ID does not match the cloud input");
+  assertSealedWorkflowInput(input, runRoot, seal.files.input);
+
+  const graphExpected = parseExpectedSnapshotFile(seal.files.graph, "sealed planned graph");
+  const graphBytes = readStableRegularFile(path.join(runRoot, "graph.json"), 64 * 1024 * 1024, "sealed planned graph");
+  assertExpectedBytes(graphBytes, graphExpected, "sealed planned graph");
+  let graph: PlannedGraphDocument;
+  try {
+    graph = assertPlannedGraph(
+      parseStrictJsonBytes(graphBytes, {
+        maxBytes: 64 * 1024 * 1024,
+        maxDepth: 128,
+        maxItems: 1_000_000,
+        maxProperties: 1_000_000
+      })
+    );
+  } catch (error) {
+    throw new Error("sealed planned graph is invalid", { cause: error });
+  }
+
+  const expectedSnapshotFiles = readExpectedExecutionSnapshotFiles(runRoot, snapshotRoot, workflowPath);
+  const tasksExpected = expectedSnapshotFiles.get("controls/tasks.json");
+  if (tasksExpected === undefined) throw new Error("workflow control seal is missing the sealed task manifest");
+  const sealedTasksExpected = parseExpectedSnapshotFile(seal.files.tasks, "sealed task manifest");
+  if (tasksExpected.sha256 !== sealedTasksExpected.sha256 || tasksExpected.size !== sealedTasksExpected.size) {
+    throw new Error("sealed task manifest execution binding does not match the workflow control seal");
+  }
+  const taskBytes = readStableSnapshotRelativeFile(
+    snapshotRoot,
+    "controls/tasks.json",
+    64 * 1024 * 1024,
+    "sealed task manifest"
+  );
+  assertExpectedBytes(taskBytes, tasksExpected, "sealed task manifest");
+  let document: SmithersTaskManifestDocument;
+  try {
+    document = parseSmithersTaskManifestBytes(taskBytes);
+    assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+  } catch (error) {
+    throw new Error("sealed task manifest is invalid", { cause: error });
+  }
+  if (document.run_id !== input.run_id) throw new Error("sealed task manifest run ID does not match the cloud input");
+
+  const byAttempt = document.tasks.find((task) => task.attemptId === input.attempt_id);
+  const byTaskId = document.tasks.find((task) => task.smithersNodeId === input.task_id);
+  if (byAttempt === undefined || byAttempt !== byTaskId) {
+    throw new Error("cloud input does not identify exactly one sealed task");
+  }
+  const consumer = byAttempt;
+  if (consumer.execution.mode !== "cloud" || consumer.execution.provider !== "modal") {
+    throw new Error("cloud input selected a task without sealed Modal execution");
+  }
+  assertExactSealedModalTaskInput({
+    input,
+    seal,
+    consumer,
+    runRoot,
+    snapshotRoot,
+    workflowPath,
+    promptPath,
+    artifactDir,
+    workspaceDir
+  });
+  assertExactPathArray(
+    consumer.dependencyArtifactDirs,
+    dependencyArtifactDirs,
+    "cloud dependency artifact directories"
+  );
+  assertExactPathArray(
+    consumer.referenceArtifactDirs ?? [],
+    referenceArtifactDirs,
+    "cloud reference artifact directories"
+  );
+  assertExactPathArray(
+    consumer.optionalDependencyArtifactDirs ?? [],
+    [...optionalDependencyArtifactDirs],
+    "cloud optional dependency artifact directories"
+  );
+
+  const consumerNode = graph.nodes.find((node) => node.id === consumer.concreteNodeId);
+  if (consumerNode === undefined || consumerNode.kind !== "agentic") {
+    throw new Error("sealed cloud task does not join to an agentic planned node");
+  }
+  const graphNodes = new Map(graph.nodes.map((node) => [node.id, node] as const));
+  const ancestorIds = plannedGraphAncestorIds(consumerNode, graphNodes);
+  const expectedDependencyDirs = new Set<string>();
+  const producersByArtifactDir = new Map<string, SmithersTaskManifestTask>();
+  const referencesByArtifactDir = new Map<string, PlannedGraphNodeDocument>();
+  const declaredVerificationAuthorities = new Map<
+    string,
+    StrictModalNodeInputDocument["dependency_verification_authorities"][number]
+  >();
+  for (const authority of input.dependency_verification_authorities) {
+    if (declaredVerificationAuthorities.has(authority.attempt_id)) {
+      throw new Error(
+        `cloud dependency verifier marker authorities repeat a producer attempt: ${authority.attempt_id}`
+      );
     }
-    if (entry.isDirectory()) {
-      copyTreeChecked(childSource, childDestination);
-    } else if (entry.isFile()) {
-      const childStat = fs.lstatSync(childSource);
-      if (childStat.nlink !== 1) throw new Error("cloud handoff files must not be hard-linked");
-      fs.mkdirSync(path.dirname(childDestination), { recursive: true });
-      fs.copyFileSync(childSource, childDestination, fs.constants.COPYFILE_EXCL);
-    } else {
-      throw new Error("cloud handoff excludes links and special files");
+    declaredVerificationAuthorities.set(authority.attempt_id, authority);
+  }
+  const verificationAuthoritiesByAttemptId = new Map<
+    string,
+    StrictModalNodeInputDocument["dependency_verification_authorities"][number]
+  >();
+  const tasksByAttempt = new Map(document.tasks.map((task) => [task.attemptId, task] as const));
+  for (const node of graph.nodes) {
+    if (!ancestorIds.has(node.id)) continue;
+    for (const attemptId of plannedGraphAttemptIds(node)) {
+      const dependencyDir = path.join(runRoot, "artifacts", attemptId);
+      expectedDependencyDirs.add(dependencyDir);
+      const verificationAuthority = declaredVerificationAuthorities.get(attemptId);
+      if (node.kind === "reference") {
+        if (verificationAuthority !== undefined) {
+          throw new Error(`sealed reference dependency must not have a verifier marker authority: ${attemptId}`);
+        }
+        referencesByArtifactDir.set(dependencyDir, node);
+        continue;
+      }
+      const producer = tasksByAttempt.get(attemptId);
+      if (producer === undefined || producer.artifactDir !== dependencyDir) {
+        throw new Error(`sealed dependency task has a mismatched artifact directory: ${attemptId}`);
+      }
+      if (verificationAuthority === undefined) {
+        if (!optionalDependencyArtifactDirs.has(dependencyDir)) {
+          throw new Error(`required cloud dependency has no verifier marker authority: ${attemptId}`);
+        }
+      } else {
+        verificationAuthoritiesByAttemptId.set(attemptId, verificationAuthority);
+      }
+      producersByArtifactDir.set(dependencyDir, producer);
     }
   }
   if (
@@ -2853,6 +2937,188 @@ function plannedGraphAncestorIds(
     pending.push(...node.depends_on);
   }
   return ancestors;
+}
+
+function stageRuntimeSelectedInputs(input: {
+  input: ModalNodeSandboxInput;
+  projectRoot: string;
+  runRoot: string;
+  staging: string;
+  promptPath: string | undefined;
+  executionSnapshotRoot: string;
+  dependencyArtifactDirs: readonly string[];
+  referenceArtifactDirs: readonly string[];
+  vulnerabilityDatabaseCatalog: string | undefined;
+  optionalDependencyArtifactDirs: ReadonlySet<string>;
+}): DependencyHandoffCapture {
+  const capture: DependencyHandoffCapture = {
+    snapshots: [],
+    omittedOptionalMarkers: [],
+    entries: 0,
+    totalBytes: 0n
+  };
+  const authorities = new Map(
+    input.input.dependency_verification_authorities.map((authority) => [authority.attempt_id, authority] as const)
+  );
+  const usedAuthorities = new Set<string>();
+  for (const dependencyDir of input.dependencyArtifactDirs) {
+    stageRuntimeSelectedDependency(input, dependencyDir, authorities, usedAuthorities, capture);
+  }
+  if (usedAuthorities.size !== authorities.size) {
+    throw new Error("cloud dependency verifier marker authorities contain an extra producer attempt");
+  }
+  for (const referenceDir of input.referenceArtifactDirs) {
+    stageRuntimeSelectedReference(input, referenceDir, capture);
+  }
+  if (input.promptPath !== undefined && !input.promptPath.startsWith(`${input.executionSnapshotRoot}${path.sep}`)) {
+    stageRuntimeSelectedProjectFile(input, input.promptPath, "runtime rendered prompt", capture);
+  }
+  if (input.vulnerabilityDatabaseCatalog !== undefined) {
+    const snapshot = stageRuntimeSelectedProjectFile(
+      input,
+      input.vulnerabilityDatabaseCatalog,
+      "vulnerability database catalog",
+      capture
+    );
+    if (snapshot.sha256 !== input.input.vulnerability_database?.catalogSha256) {
+      throw new Error("vulnerability database catalog changed during cloud handoff capture");
+    }
+  }
+  return capture;
+}
+
+function stageRuntimeSelectedProjectFile(
+  input: { projectRoot: string; staging: string },
+  sourcePath: string,
+  label: string,
+  capture: DependencyHandoffCapture
+): StableRelativeFileSnapshot {
+  const relativePath = path.relative(input.projectRoot, sourcePath).split(path.sep).join("/");
+  const snapshot = readStableRelativeFileSnapshot(
+    input.projectRoot,
+    relativePath,
+    MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+    label
+  );
+  rememberDependencySnapshot(capture, snapshot);
+  stageCapturedFile(input.staging, relativePath, snapshot.bytes);
+  return snapshot;
+}
+
+function stageRuntimeSelectedDependency(
+  input: {
+    projectRoot: string;
+    runRoot: string;
+    staging: string;
+    optionalDependencyArtifactDirs: ReadonlySet<string>;
+  },
+  dependencyDir: string,
+  authorities: ReadonlyMap<string, StrictModalNodeInputDocument["dependency_verification_authorities"][number]>,
+  usedAuthorities: Set<string>,
+  capture: DependencyHandoffCapture
+): void {
+  const attemptId = path.basename(dependencyDir);
+  const authority = authorities.get(attemptId);
+  if (authority === undefined) {
+    if (!input.optionalDependencyArtifactDirs.has(dependencyDir)) {
+      throw new Error(`required cloud dependency has no verifier marker authority: ${attemptId}`);
+    }
+    capture.omittedOptionalMarkers.push(captureStableOptionalMarkerAbsence(input.runRoot, attemptId));
+    return;
+  }
+  if (usedAuthorities.has(attemptId)) {
+    throw new Error(`cloud dependency verifier marker authority is reused: ${attemptId}`);
+  }
+  usedAuthorities.add(attemptId);
+  const markerRelativePath = path.posix.join(ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
+  const markerSnapshot = readStableRelativeFileSnapshot(
+    input.runRoot,
+    markerRelativePath,
+    MAX_HANDOFF_AUTHORITY_PROOF_BYTES,
+    `dependency verification marker ${attemptId}`
+  );
+  if (markerSnapshot.bytes.byteLength !== authority.size_bytes || markerSnapshot.sha256 !== authority.marker_sha256) {
+    throw new Error(`dependency verification marker does not match verifier authority: ${attemptId}`);
+  }
+  let markerValue: unknown;
+  try {
+    markerValue = parseStrictJsonBytes(markerSnapshot.bytes);
+  } catch (error) {
+    throw new Error(`dependency verification marker is not strict JSON: ${attemptId}`, { cause: error });
+  }
+  const validation = validateArtifactVerificationMarker(markerValue);
+  if (!validation.ok) throw new Error(`dependency verification marker is schema-invalid: ${attemptId}`);
+  const marker = markerValue as ArtifactVerificationMarker;
+  assertArtifactVerificationMarkerSemantics(marker);
+  if (marker.attempt_id !== attemptId) {
+    throw new Error(`dependency verification marker identity is invalid: ${attemptId}`);
+  }
+  rememberDependencySnapshot(capture, markerSnapshot);
+  const destinationRoot = path.join(input.staging, path.relative(input.projectRoot, dependencyDir));
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  for (const publication of marker.publications) {
+    const snapshot = readStableRelativeFileSnapshot(
+      dependencyDir,
+      publication.path,
+      MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+      `verified dependency publication ${attemptId}/${publication.path}`
+    );
+    if (snapshot.sha256 !== publication.sha256) {
+      throw new Error(`verified dependency publication digest changed: ${attemptId}/${publication.path}`);
+    }
+    rememberDependencySnapshot(capture, snapshot);
+    stageCapturedFile(destinationRoot, snapshot.relativePath, snapshot.bytes);
+  }
+  stageCapturedFile(
+    path.join(input.staging, path.relative(input.projectRoot, input.runRoot)),
+    markerRelativePath,
+    markerSnapshot.bytes
+  );
+}
+
+function stageRuntimeSelectedReference(
+  input: { input: ModalNodeSandboxInput; projectRoot: string; staging: string },
+  referenceDir: string,
+  capture: DependencyHandoffCapture
+): void {
+  const manifestSnapshot = readStableRelativeFileSnapshot(
+    referenceDir,
+    ARTIFACT_MANIFEST_FILE,
+    MAX_HANDOFF_AUTHORITY_PROOF_BYTES,
+    `reference artifact manifest ${path.basename(referenceDir)}`
+  );
+  let manifestValue: unknown;
+  try {
+    manifestValue = parseStrictJsonBytes(manifestSnapshot.bytes);
+  } catch (error) {
+    throw new Error("reference artifact manifest is not strict JSON", { cause: error });
+  }
+  const validation = validateArtifactManifest(manifestValue);
+  if (!validation.ok) throw new Error("reference artifact manifest is schema-invalid");
+  const manifest = manifestValue as ArtifactManifest;
+  if (manifest.run_id !== input.input.run_id || manifest.node_id !== path.basename(referenceDir)) {
+    throw new Error("reference artifact manifest identity does not match the selected task");
+  }
+  rememberDependencySnapshot(capture, manifestSnapshot);
+  const destinationRoot = path.join(input.staging, path.relative(input.projectRoot, referenceDir));
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  const paths = new Set<string>();
+  for (const file of manifest.files) {
+    if (paths.has(file.path)) throw new Error("reference artifact manifest repeats a file path");
+    paths.add(file.path);
+    const snapshot = readStableRelativeFileSnapshot(
+      referenceDir,
+      file.path,
+      MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+      `reference publication ${manifest.node_id}/${file.path}`
+    );
+    if (snapshot.bytes.byteLength !== file.size_bytes || snapshot.sha256 !== file.sha256) {
+      throw new Error(`reference publication changed: ${manifest.node_id}/${file.path}`);
+    }
+    rememberDependencySnapshot(capture, snapshot);
+    stageCapturedFile(destinationRoot, snapshot.relativePath, snapshot.bytes);
+  }
+  stageCapturedFile(destinationRoot, ARTIFACT_MANIFEST_FILE, manifestSnapshot.bytes);
 }
 
 function stageAuthenticatedDependencies(input: {
@@ -3421,15 +3687,10 @@ function assertSafeTree(root: string): void {
 }
 
 /**
- * Decides whether the invariant proof advances a prior published generation or republishes the
- * current one. The receipt is controller-owned because the proof schema intentionally describes
- * source provenance rather than Modal storage lineage.
- *
- * The proof is installed before its receipt. If the process stops between those renames, a retry
- * recognizes that the destination already has the incoming digest and completes the receipt update.
- * A legacy destination without a receipt is backfilled only when its bytes are already identical;
- * an ambiguous conflict fails closed. Once a receipt is present, conflicting bytes for that exact
- * generation remain immutable.
+ * Binds a stable invariant-proof destination to the controller-owned execution generation that
+ * published it. A reset may advance the proof and receipt together; same-generation bytes remain
+ * immutable. If publication was interrupted after the proof rename, the matching incoming digest
+ * is adopted and only the receipt advances.
  */
 function prepareInvariantSourceProofPublication(
   temporaryRoot: string,
@@ -3442,7 +3703,6 @@ function prepareInvariantSourceProofPublication(
   proofReplacementAllowed: boolean;
   provenance: { source: string; destination: string; replacementAllowed: boolean };
 } {
-  // Validate both proof endpoints before reading either one for the publication decision.
   assertPublishedFileReplacementAllowed(source, destination, true);
   const sourceDigest = crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex");
   const provenance: InvariantSourceProofPublication = {
@@ -3464,9 +3724,7 @@ function prepareInvariantSourceProofPublication(
   const destinationExists = fs.existsSync(destination);
   const provenanceExists = fs.existsSync(provenanceDestination);
   if (!destinationExists) {
-    if (provenanceExists) {
-      throw new Error("cloud node invariant source proof publication provenance is invalid");
-    }
+    if (provenanceExists) throw new Error("cloud node invariant source proof publication provenance is invalid");
     return {
       proofReplacementAllowed: false,
       provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
@@ -3475,8 +3733,6 @@ function prepareInvariantSourceProofPublication(
 
   const destinationDigest = crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex");
   if (!provenanceExists) {
-    // A receipt-less destination predates this publication contract, so its generation is
-    // unknowable. Only identical bytes may be adopted and backfilled; every conflict fails closed.
     return {
       proofReplacementAllowed: false,
       provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
@@ -3517,12 +3773,19 @@ function readInvariantSourceProofPublication(
   input: ModalNodeSandboxInput
 ): InvariantSourceProofPublication {
   const stat = fs.lstatSync(publicationPath);
-  if (stat.size > MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES) {
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    stat.size > MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES
+  ) {
     throw new Error("cloud node invariant source proof publication provenance is invalid");
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(publicationPath, "utf8")) as unknown;
+    parsed = parseStrictJsonBytes(
+      readRegularFileSnapshot(publicationPath, MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES)
+    );
   } catch (error) {
     throw new Error("cloud node invariant source proof publication provenance is invalid", { cause: error });
   }
@@ -3587,15 +3850,9 @@ function assertPublishedDirectoryReplacementAllowed(source: string, destination:
   }
 }
 
-function replacePublishedFile(source: string, destination: string, replacementAllowed = false): void {
-  assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  if (fs.existsSync(destination)) {
-    assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
-    if (!replacementAllowed) return;
-  }
-  const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fs.copyFileSync(source, pending);
+function publishImmutableFileExclusive(root: string, source: string, destination: string): void {
+  assertPublishedFileReplacementAllowed(source, destination);
+  const relativeDestination = path.relative(root, destination).split(path.sep).join("/");
   try {
     publishFileDurableExclusive(root, relativeDestination, fs.readFileSync(source));
   } catch (error) {
@@ -3606,6 +3863,19 @@ function replacePublishedFile(source: string, destination: string, replacementAl
     throw error;
   }
   assertPublishedFileReplacementAllowed(source, destination);
+}
+
+function publishControlledFile(root: string, source: string, destination: string, replacementAllowed = false): void {
+  assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
+  if (!replacementAllowed) {
+    publishImmutableFileExclusive(root, source, destination);
+    return;
+  }
+  const bytes = fs.readFileSync(source);
+  const destinationState = lstatIfPresent(destination);
+  if (destinationState !== undefined && fs.readFileSync(destination).equals(bytes)) return;
+  writeFileDurable(destination, bytes);
+  assertPublishedFileReplacementAllowed(source, destination, false);
 }
 
 function assertPublishedFileReplacementAllowed(source: string, destination: string, replacementAllowed = false): void {
@@ -3624,6 +3894,60 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
+  }
+}
+
+function isRefreshedVerificationMarker(source: string, destination: string, artifactDir: string): boolean {
+  if (!fs.existsSync(destination)) return false;
+  const remote = readVerificationMarkerDigests(source);
+  const published = readVerificationMarkerDigests(destination);
+  if (remote === undefined || published === undefined || remote.skeleton !== published.skeleton) return false;
+  let refreshed = false;
+  for (const [index, entry] of published.digests.entries()) {
+    if (remote.digests[index]?.sha256 === entry.sha256) continue;
+    if (!publishedArtifactHasDigest(artifactDir, entry.path, entry.sha256)) return false;
+    refreshed = true;
+  }
+  return refreshed;
+}
+
+function readVerificationMarkerDigests(
+  markerPath: string
+): { skeleton: string; digests: Array<{ path: string; sha256: string }> } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJsonBytes(readRegularFileSnapshot(markerPath, 4 * 1024 * 1024));
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  const digests: Array<{ path: string; sha256: string }> = [];
+  const skeleton: Record<string, unknown> = { ...parsed };
+  for (const key of ["artifacts", "publications"] as const) {
+    const entries = parsed[key];
+    if (!Array.isArray(entries)) continue;
+    skeleton[key] = entries.map((entry) => {
+      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sha256 !== "string") return entry;
+      digests.push({ path: entry.path, sha256: entry.sha256 });
+      return { ...entry, sha256: null };
+    });
+  }
+  return { skeleton: JSON.stringify(skeleton), digests };
+}
+
+function publishedArtifactHasDigest(artifactDir: string, relativePath: string, sha256: string): boolean {
+  if (!/^[0-9a-f]{64}$/u.test(sha256)) return false;
+  const resolved = path.resolve(artifactDir, relativePath);
+  const relative = path.relative(artifactDir, resolved);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+  try {
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || fs.realpathSync(resolved) !== resolved) {
+      return false;
+    }
+    return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex") === sha256;
+  } catch {
+    return false;
   }
 }
 

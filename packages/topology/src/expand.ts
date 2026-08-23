@@ -106,7 +106,17 @@ function expandNode(
             })
       };
     }),
-    modelFanout: modelFanoutFor(node, topology, loopIndex, options)
+    modelFanout: modelFanoutFor(node, topology, loopIndex, options),
+    ...(node.dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            from: { ...node.dynamic.from },
+            key: node.dynamic.key,
+            nodeIdTemplate: node.dynamic.node_id,
+            ...(promptText === undefined ? {} : { templateDigest: sha256(promptText) })
+          }
+        })
   };
 }
 

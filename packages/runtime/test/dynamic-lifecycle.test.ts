@@ -1,13 +1,52 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import type { RunState } from "@ultrafuzz/artifacts";
+import {
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  VALIDATOR_BUILD_IDENTITY,
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  layoutForRunRoot,
+  writeArtifactManifest,
+  type ExecutionNodeProvenance,
+  type RunState
+} from "@ultrafuzz/artifacts";
 
 import { initProject, materializeDynamicRuntime, startRun, syncRun } from "../src/index.js";
+import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "../src/smithers.js";
+import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
+
+const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
+  schema_version: "ultrafuzz.data-governance-policy.v1",
+  sensitivity: "public",
+  source_destinations: [
+    "model:anthropic",
+    "model:codex-route-7cb3cbc344a51b9df15967a7982030649706e28ea6123993a5f78e9d4270ffc7",
+    "model:openai"
+  ],
+  artifact_destinations: [],
+  destination_policies: [
+    "model:anthropic",
+    "model:codex-route-7cb3cbc344a51b9df15967a7982030649706e28ea6123993a5f78e9d4270ffc7",
+    "model:openai"
+  ].map((destination) => ({
+      destination,
+      processor: "test",
+      region: "local",
+      retention_policy: "test",
+      training_policy: "none",
+      dpa_status: "n/a",
+      minimization_policy: "synthetic",
+      data_handling_basis: "public"
+    })),
+  openrouter_model_allowlist: []
+});
 
 interface LifecycleStep {
   id: string;
@@ -52,14 +91,14 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
   fs.writeFileSync(promptPath, `---\nid: ${id}\ndisplay_name: ${id}\n---\n\n${body}\n`, "utf8");
 }
 
-function writeDynamicProject(project: string, modelFanout: boolean): void {
+function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false): void {
   initProject({ projectRoot: project, force: true });
   writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
   writePrompt(
     project,
     "dynamic/worker.md",
     "dynamic-worker",
-    "Your /goal is {{item.goal_prompt}} using threat model threat {{liquidation:overdue}}."
+    "Your /goal is {{item.goal_prompt}} using threat model threat {{liquidation:overdue}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
   writePrompt(project, "dynamic/join.md", "dynamic-join", "Summarize completed work in {{artifact_path}}/report.md.");
   fs.writeFileSync(
@@ -78,7 +117,7 @@ nodes:
     depends_on: [__start__]
     outputs:
       - path: plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/goal-plan@1
         primary: true
   - id: fanout
     kind: agentic
@@ -87,12 +126,12 @@ nodes:
 ${modelFanout ? "    model_profiles: [default, claude]\n" : ""}    dynamic:
       from:
         node: planner
-        path: $.goals
+        path: ${emptyGroup ? "$.class_goals" : "$.threat_goals"}
       key: id
       node_id: "dynamic:threat:{{ item.id }}"
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: strict-join
     kind: agentic
@@ -116,7 +155,7 @@ function lifecycleEnvironment(project: string): {
   inspectPath: string;
   eventsPath: string;
 } {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-lifecycle-runner-"));
   const inspectPath = path.join(project, "workflow-inspect.json");
   const eventsPath = path.join(project, "workflow-events.ndjson");
   const smithers = path.join(binDir, "smithers");
@@ -134,6 +173,17 @@ function lifecycleEnvironment(project: string): {
       "  events)",
       `    cat ${shellQuote(eventsPath)}`,
       "    ;;",
+      "  node)",
+      "    node_id=$2",
+      "    attempt_id=${node_id#node:}",
+      "    profile_id=default",
+      "    model_name=gpt-5.5",
+      "    case \"$attempt_id\" in",
+      "      *__model_1__*) profile_id=claude; model_name=claude-opus-4-8 ;;",
+      "    esac",
+      "    agent_id=ultrafuzz-agent:${attempt_id}:0:${profile_id}",
+      "    printf '{\"ok\":true,\"data\":{\"node\":{\"nodeId\":\"%s\"},\"attempts\":[{\"nodeId\":\"%s\",\"attempt\":1,\"state\":\"finished\",\"meta\":{\"agentChainIndex\":0,\"agentId\":\"%s\",\"agentModel\":\"%s\"}},{\"nodeId\":\"%s\",\"attempt\":2,\"state\":\"finished\",\"meta\":{\"agentChainIndex\":0,\"agentId\":\"%s\",\"agentModel\":\"%s\"}}]}}\\n' \"$node_id\" \"$node_id\" \"$agent_id\" \"$model_name\" \"$node_id\" \"$agent_id\" \"$model_name\"",
+      "    ;;",
       "  up)",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
@@ -150,15 +200,50 @@ function lifecycleEnvironment(project: string): {
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
+  const ambientRouteEnvironment = Object.fromEntries(
+    ["ClaudeAgent", "CodexAgent"]
+      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
+      .map((name) => [name, undefined])
+  );
   return {
-    env: {
+    env: bindSmithersExecutableCapability({
+      ...ambientRouteEnvironment,
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       SMITHERS_BIN: smithers,
+      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
       ULTRAFUZZ_PRICING_CATALOG_URL: "off"
-    },
+    }, smithers, project),
     inspectPath,
     eventsPath
   };
+}
+
+function fakeUltrafuzzCliEntrypoint(project: string): string {
+  const entrypoint = path.join(project, "validator-cli.mjs");
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const preflightResponse = {
+    schema_version: "ultrafuzz.cli.result.v2",
+    command: "json validate",
+    ok: true,
+    diagnostics: [],
+    data: {
+      status: "valid",
+      diagnostics: [],
+      schema: {
+        id: findings.id,
+        sha256: findings.sha256,
+        bundle_sha256: artifactSchemaBundleDigest(),
+        validator_build: VALIDATOR_BUILD_IDENTITY,
+        registered: true
+      },
+      artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+      truncated: false
+    }
+  };
+  fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
 }
 
 async function createDynamicFixture(input: {
@@ -167,9 +252,16 @@ async function createDynamicFixture(input: {
   modelFanout?: boolean;
 }): Promise<DynamicFixture> {
   const project = tempProject();
-  writeDynamicProject(project, input.modelFanout ?? false);
+  const emptyGroup = input.goals !== undefined && input.goals.length === 0;
+  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup);
   const lifecycle = lifecycleEnvironment(project);
-  const started = await startRun({ projectRoot: project, runId: input.runId, maxConcurrency: 2, env: lifecycle.env });
+  const started = await startRun({
+    projectRoot: project,
+    runId: input.runId,
+    maxConcurrency: 2,
+    env: lifecycle.env,
+    ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
+  });
   assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
   const runRoot = started.value!.run_root;
   const tasksPath = path.join(runRoot, "smithers", "tasks.json");
@@ -179,16 +271,73 @@ async function createDynamicFixture(input: {
     tasks: CompiledSmithersTask[];
     dynamic_groups: CompiledSmithersDynamicGroup[];
   };
-  const goals = input.goals ?? [
-    {
-      id: "liquidation.overdue",
-      goal_prompt: "find any vulnerability affecting overdue liquidation",
-      replacements: { "liquidation:overdue": "the persisted liquidation threat model" }
-    }
-  ];
+  const canonicalGoal = {
+    kind: "threat",
+    id: "liquidation:overdue",
+    node_id: "dynamic:threat:liquidation:overdue",
+    title: "Inspect overdue liquidation",
+    threat_ids: ["liquidation:overdue"],
+    class_ids: [],
+    attack_surface_ids: ["liquidation:overdue"],
+    goal_prompt: "find any vulnerability affecting {{liquidation:overdue}}",
+    replacements: { "liquidation:overdue": "the persisted liquidation threat model" },
+    selection_rationale: "Every modeled threat receives one focused goal."
+  };
+  const goals = input.goals ?? [canonicalGoal];
+  // The goal-plan contract requires at least one modeled threat. For the empty-group case the
+  // dynamic source is the valid-but-empty class_goals lane while the canonical threat remains in
+  // the authenticated plan outside that source.
+  const plannedThreatGoals = emptyGroup ? [canonicalGoal] : goals;
   const plannerArtifactDir = path.join(runRoot, "artifacts", "planner");
   fs.mkdirSync(plannerArtifactDir, { recursive: true });
-  fs.writeFileSync(path.join(plannerArtifactDir, "plan.json"), `${JSON.stringify({ goals }, null, 2)}\n`, "utf8");
+  const threatIds = plannedThreatGoals.map((goal) => String(goal.id));
+  const planDocument = {
+        schema_version: "ultrafuzz.goal-plan.v1",
+        policy: "additive-v1",
+        threat_model_sha256: "a".repeat(64),
+        vulnerability_database: {
+          planner_catalog_schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
+          snapshot_manifest_schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
+          database_schema_version: 1,
+          aggregate_sha256: "a".repeat(64),
+          catalog_sha256: "a".repeat(64)
+        },
+        catalog_class_ids: [],
+        modeled_threat_ids: threatIds,
+        threat_goals: plannedThreatGoals,
+        class_goals: [],
+        applicability_decisions: [],
+        selected_class_records: [],
+        roaming_goal: {
+          node_id: "goal-roaming",
+          prompt_path: "strategies/roaming-goal.md",
+          purpose: "Challenge taxonomy and threat-model completeness."
+        },
+        counts: {
+          threats: plannedThreatGoals.length,
+          applicable_classes: 0,
+          inapplicable_classes: 0,
+          dynamic_goals: plannedThreatGoals.length,
+          total_goals: plannedThreatGoals.length + 1
+        },
+        expected_child_count: plannedThreatGoals.length,
+        threat_count: plannedThreatGoals.length,
+        applicable_class_count: 0,
+        max_dynamic_nodes: 100,
+        goal_lanes: [
+          ...plannedThreatGoals.map((goal) => ({
+            kind: "threat",
+            lane_id: String(goal.id),
+            node_ids: [String(goal.node_id)]
+          })),
+          { kind: "roaming", lane_id: "goal-roaming", node_ids: ["goal-roaming"] }
+        ]
+      };
+  fs.writeFileSync(
+    path.join(plannerArtifactDir, "plan.json"),
+    `${JSON.stringify(planDocument, null, 2)}\n`,
+    "utf8"
+  );
   const materialized = materializeDynamicRuntime({
     runId: input.runId,
     projectRoot: project,
@@ -209,6 +358,7 @@ async function createDynamicFixture(input: {
   if (goals.length > 0) {
     assert.ok(generatedNode);
   }
+  writeVerifiedArtifactAuthorities(runRoot, plannerTask);
   return {
     project,
     runId: input.runId,
@@ -248,15 +398,23 @@ function workflowInspect(workflowRunId: string, inputSteps: LifecycleStep[]): un
         id: workflowRunId,
         workflow: workflowRunId,
         status: "running",
-        started: "2026-08-04T00:00:00.000Z"
+        started: "2026-08-04T00:00:00.000Z",
+        elapsed: "3s"
       },
       runState: {
         runId: workflowRunId,
         computedAt: "2026-08-04T00:00:03.000Z",
         state: "running"
       },
-      steps
-    }
+      steps,
+      nodes: steps.map((step) => ({
+        nodeId: step.id,
+        state: step.state,
+        attempt: step.attempt ?? 1,
+        label: step.id
+      }))
+    },
+    meta: { command: "inspect", duration: "1ms" }
   };
 }
 
@@ -266,9 +424,16 @@ function workflowEvents(workflowRunId: string, events: LifecycleEvent[]): string
     .map((event, index) => {
       const timestampMs = base + index * 100;
       const payload: Record<string, unknown> = { type: event.type, runId: workflowRunId, timestampMs };
-      if (event.nodeId !== undefined) payload.nodeId = event.nodeId;
+      if (event.nodeId !== undefined) {
+        payload.nodeId = event.nodeId;
+        payload.iteration = 0;
+      }
       if (event.attempt !== undefined) payload.attempt = event.attempt;
       if (event.error !== undefined) payload.error = event.error;
+      if (event.type === "TaskHeartbeatTimeout") {
+        payload.lastHeartbeatAtMs = timestampMs - 1_000;
+        payload.timeoutMs = 1_000;
+      }
       if (event.extra !== undefined) Object.assign(payload, event.extra);
       return JSON.stringify({
         runId: workflowRunId,
@@ -302,16 +467,79 @@ function writeFinding(task: CompiledSmithersTask): void {
     `${JSON.stringify(
       [
         {
-          schema_version: "1.0",
+          schema_version: "ultrafuzz.finding.v2",
           id: "overdue-liquidation",
           title: "Fixed-term liquidation can occur before overdue",
           status: "candidate",
-          severity_guess: "high",
+          severity_guess: "High",
           confidence: "high",
           summary: "A boundary check permits liquidation before the debt is overdue.",
-          producer_node_id: "dynamic:spoofed"
+          producer_node_id: task.concreteNodeId,
+          producer_attempt_id: task.attemptId,
+          source_node_id: task.concreteNodeId,
+          source_nodes: [task.concreteNodeId]
         }
       ],
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  writeVerifiedArtifactAuthorities(path.resolve(task.artifactDir, "..", ".."), task);
+}
+
+function writeVerifiedArtifactAuthorities(runRoot: string, task: CompiledSmithersTask): void {
+  const outputs = task.metadata.artifacts.outputs.map((output) => ({
+    path: output.path,
+    contract: output.contract,
+    contract_digest: output.contractDigest,
+    ...(output.schemaFile === undefined
+      ? {}
+      : {
+          schema_file: output.schemaFile,
+          schema_id: output.schemaId,
+          schema_sha256: output.schemaSha256,
+          schema_bundle_sha256: output.schemaBundleSha256,
+          validator_build: output.validatorBuild
+        }),
+    primary: output.primary
+  }));
+  const snapshots = outputs.map((output) => {
+    const bytes = fs.readFileSync(path.join(task.artifactDir, output.path));
+    return { output, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  });
+  writeArtifactManifest({
+    layout: layoutForRunRoot(runRoot),
+    nodeId: task.attemptId,
+    include: outputs.map((output) => output.path),
+    outputs,
+    prerequisiteNodeIds: task.dependencies,
+    provenance: {
+      producer_node_id: task.concreteNodeId,
+      logical_node_id: task.logicalNodeId,
+      attempt_index: task.metadata.loop.attemptIndex,
+      loop_index: task.metadata.loop.index,
+      model_index: task.metadata.model?.modelIndex ?? 0,
+      agent_ref: task.agentRef,
+      workflow_run_id: task.metadata.run.smithersWorkflowName,
+      workflow_task_id: task.smithersNodeId,
+      origin: "workflow",
+      metadata: { concrete_node_id: task.concreteNodeId }
+    }
+  });
+  const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(markerRoot, `${task.attemptId}.json`),
+    `${JSON.stringify(
+      {
+        schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+        attempt_id: task.attemptId,
+        node_id: task.logicalNodeId,
+        admitted_dependency_attempt_ids: task.dependencies,
+        artifacts: snapshots.map(({ output, sha256 }) => ({ ...output, sha256 })),
+        publications: snapshots.map(({ output, sha256 }) => ({ path: output.path, sha256 }))
+      },
       null,
       2
     )}\n`,
@@ -323,11 +551,11 @@ function readState(fixture: DynamicFixture): RunState {
   return JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "state.json"), "utf8")) as RunState;
 }
 
-function readUsageLedger(fixture: DynamicFixture): Array<{ attempt_id?: string; node_id?: string }> {
+function readUsageLedger(fixture: DynamicFixture): Array<{ node_id?: string; attempt?: number }> {
   const ledgerPath = path.join(fixture.runRoot, "usage.jsonl");
   if (!fs.existsSync(ledgerPath)) return [];
   const text = fs.readFileSync(ledgerPath, "utf8").trim();
-  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as { attempt_id?: string });
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as { node_id?: string; attempt?: number });
 }
 
 function readLedger(fixture: DynamicFixture): Array<Record<string, unknown>> {
@@ -357,7 +585,6 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
           iteration: 0,
           inputTokens: 12,
           outputTokens: 3,
-          totalTokens: 15,
           model: "dynamic-test-model",
           agent: "CodexAgent"
         }
@@ -375,34 +602,38 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
     { now: () => (clockReads++ === 0 ? 0 : 1_000), deadlineMs: 500 }
   );
   assert.equal(interrupted.ok, false);
-  assert.ok(interrupted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
+  assert.ok(
+    interrupted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"),
+    JSON.stringify(interrupted.diagnostics)
+  );
   assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
   assert.equal(fs.readFileSync(runEventsPath, "utf8"), eventsBefore);
 
   const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
   assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
   const state = readState(fixture);
+  const generatedProvenance = state.nodes[fixture.storageId!]?.provenance as ExecutionNodeProvenance | undefined;
+  const plannerProvenance = state.nodes.planner?.provenance as ExecutionNodeProvenance | undefined;
   assert.equal(state.nodes[fixture.storageId!]?.status, "succeeded");
-  assert.equal(state.nodes[fixture.storageId!]?.provenance?.producer_node_id, fixture.generatedNodeId);
+  assert.equal(generatedProvenance?.producer_node_id, fixture.generatedNodeId);
   // `source_node_id` is the one key both sides must agree on (#364): it is the term #183 uses and
   // exactly what the eval reader looks for on a dynamic node's provenance. The nested camelCase
   // record stays alongside it for the expansion key, item digest and manifest path.
-  assert.equal(state.nodes[fixture.storageId!]?.provenance?.source_node_id, "planner");
+  assert.equal(generatedProvenance?.source_node_id, "planner");
   assert.equal(
-    (state.nodes[fixture.storageId!]?.provenance?.dynamic as { sourceNodeId?: string } | undefined)?.sourceNodeId,
+    generatedProvenance?.dynamic?.sourceNodeId,
     "planner"
   );
   // A static node was never expanded from anything, so it must not claim a source.
-  assert.equal(state.nodes.planner?.provenance?.source_node_id, undefined);
+  assert.equal(plannerProvenance?.source_node_id, undefined);
 
-  // Per-lane cost is a join from the usage ledger onto `state.json`, so the ledger this real sync
-  // wrote must carry the identity `state.json` is keyed by. `attempt_id` cannot serve: it is a
-  // digest, and the usage event names the workflow task (`node:<attempt>`), not the state node.
+  // The current ledger preserves the runner's exact task/attempt identity; the sealed task plan is
+  // the authenticated join from that workflow identity to the storage-keyed state record.
   const usageLedger = readUsageLedger(fixture);
   assert.equal(usageLedger.length, 1);
-  assert.match(usageLedger[0]?.attempt_id ?? "", /^usage-attempt-[0-9a-f]{32}$/u);
-  assert.equal(usageLedger[0]?.node_id, fixture.storageId);
-  assert.ok(state.nodes[usageLedger[0]?.node_id ?? ""] !== undefined);
+  assert.equal(usageLedger[0]?.node_id, generated.smithersNodeId);
+  assert.equal(usageLedger[0]?.attempt, 1);
+  assert.ok(state.nodes[fixture.storageId!] !== undefined);
   assert.equal(state.nodes.fanout?.status, "succeeded");
   assert.equal(state.nodes["strict-join"]?.wait_reason, "ready");
   assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /persisted liquidation threat model/u);
@@ -436,26 +667,23 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
   const childSyncEvent = productEvents.find(
     (event) => event.event_type === "node-synced" && event.node_id === generated.attemptId
   );
-  assert.deepEqual(childSyncEvent?.provenance, {
-    producer_node_id: fixture.generatedNodeId,
-    concrete_node_id: fixture.generatedNodeId,
-    strategy_attempt_id: generated.attemptId,
-    storage_id: fixture.storageId,
-    dynamic: generated.metadata.node.dynamic
-  });
+  assert.ok(childSyncEvent);
+  assert.equal(childSyncEvent.provenance, undefined);
   const runMetadata = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "run.json"), "utf8")) as {
     accounting?: {
       current?: {
         total_tokens?: number;
         event_count?: number;
-        attempt_ids?: string[];
+        attempts?: Array<{ node_id?: string; iteration?: number; attempt?: number }>;
         models?: string[];
       };
     };
   };
   assert.equal(runMetadata.accounting?.current?.total_tokens, 15);
   assert.equal(runMetadata.accounting?.current?.event_count, 1);
-  assert.equal(runMetadata.accounting?.current?.attempt_ids?.length, 1);
+  assert.deepEqual(runMetadata.accounting?.current?.attempts, [
+    { node_id: generated.smithersNodeId, iteration: 0, attempt: 1 }
+  ]);
   assert.deepEqual(runMetadata.accounting?.current?.models, ["dynamic-test-model"]);
   const expansion = JSON.parse(
     fs.readFileSync(path.join(fixture.runRoot, "dynamic-expansions", "fanout.json"), "utf8")
@@ -487,7 +715,12 @@ test("dynamic child failure, skip, and timeout keep strict joins blocked with du
           : { type: "TaskHeartbeatTimeout", nodeId: generated.smithersNodeId, attempt: 1 };
     setLifecycle(
       fixture,
-      [...planner.steps, { id: generated.smithersNodeId, state: outcome, attempt: 1 }],
+      [
+        ...planner.steps,
+        // Smithers exposes timeout as terminal event evidence; its current inspect node enum has no
+        // synthetic "timed-out" state, so the corresponding node summary remains failed.
+        { id: generated.smithersNodeId, state: outcome === "timed-out" ? "failed" : outcome, attempt: 1 }
+      ],
       [...planner.events, { type: "NodeStarted", nodeId: generated.smithersNodeId, attempt: 1 }, terminalEvent]
     );
 
@@ -497,11 +730,13 @@ test("dynamic child failure, skip, and timeout keep strict joins blocked with du
     assert.equal(state.nodes[fixture.storageId!]?.status, outcome, outcome);
     assert.equal(state.nodes.fanout?.status, outcome, outcome);
     assert.equal(state.nodes["strict-join"]?.wait_reason, "dependency", outcome);
-    assert.equal(
-      readLedger(fixture).find((entry) => entry.strategy_attempt_id === generated.attemptId)?.outcome,
-      outcome,
-      outcome
-    );
+    const ledgerOutcome = readLedger(fixture).find(
+      (entry) => entry.strategy_attempt_id === generated.attemptId
+    )?.outcome;
+    // The current strict attempt ledger records only NodeFinished/NodeFailed terminal authorities.
+    // A skip or heartbeat timeout remains durable in state without inventing a ledger terminal
+    // event that the workflow runner did not emit.
+    assert.equal(ledgerOutcome, outcome === "failed" ? "failed" : undefined, outcome);
   }
 });
 
@@ -591,7 +826,10 @@ test("model-fanout dynamic aggregate state is materialized before child evidence
   assert.equal(state.nodes[fixture.storageId!]?.status, "pending");
   assert.equal(state.nodes[fixture.storageId!]?.wait_reason, "dependency");
   assert.equal(state.nodes[fixture.storageId!]?.next_eligible_action, "task-complete");
-  assert.equal(state.nodes[fixture.storageId!]?.provenance?.producer_node_id, fixture.generatedNodeId);
+  assert.equal(
+    (state.nodes[fixture.storageId!]?.provenance as ExecutionNodeProvenance | undefined)?.producer_node_id,
+    fixture.generatedNodeId
+  );
   assert.ok(fixture.generatedTasks.every((task) => state.nodes[task.attemptId]?.status === "pending"));
   assert.equal(state.nodes.fanout?.status, "pending");
   assert.equal(state.nodes["strict-join"]?.wait_reason, "dependency");

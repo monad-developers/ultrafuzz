@@ -1,3 +1,5 @@
+import type { CloudSelectedTask } from "@ultrafuzz/artifacts";
+
 export const MODAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:modal:common:1" as const;
 export const MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:benchmark-control-manifest:1" as const;
@@ -93,7 +95,7 @@ export interface StrictModalBenchmarkConfigBase {
 
 export interface StrictPrivateModalBenchmarkConfigDocument extends StrictModalBenchmarkConfigBase {
   target: { repo: string; ref: string; held_out_paths?: string[] };
-  benchmark_execution: { excluded_node_ids: string[] };
+  benchmark_execution: { excluded_node_ids: string[]; include_threat_model_goal_fanout?: boolean };
   eval_reporting: { provider: "braintrust" | "none" };
   ground_truth: {
     repo: string;
@@ -114,7 +116,7 @@ export interface StrictModalPublicBenchmarkTarget {
 export interface StrictPublicModalBenchmarkConfigDocument extends StrictModalBenchmarkConfigBase {
   public_benchmark: {
     benchmark: "evmbench" | "ultrafuzz-bench";
-    lane: "smoke" | "full";
+    lane: "smoke" | "threat-model" | "full";
     runner_model_profile: string;
     candidate_repository: string;
     candidate_commit: string;
@@ -388,8 +390,12 @@ export interface StrictModalNodeInputDocument {
   artifact_dir: string;
   workspace_dir: string;
   dependency_artifact_dirs: string[];
+  reference_artifact_dirs?: string[];
+  vulnerability_database?: { catalogPath: string; catalogSha256: string };
   optional_dependency_artifact_dirs?: string[];
   dependency_verification_authorities: StrictModalDependencyVerificationAuthorityDocument[];
+  selected_task?: CloudSelectedTask;
+  project_content_sha256?: string;
   project_archive_sha256?: string;
   resources: {
     cpu: number;
@@ -406,6 +412,7 @@ export interface StrictModalNodeResultDocument {
   artifact_archive: string;
   artifact_sha256: string;
   storage_lineage: string;
+  logical_dispatch_fingerprint: string;
   durable_checkpoint: string;
   durable_checkpoint_index: string;
 }
@@ -419,6 +426,7 @@ export interface StrictModalNodeCheckpointDocument {
   stage: StrictModalNodeCheckpointStage;
   created_at: string;
   storage_lineage: string;
+  logical_dispatch_fingerprint: string;
   workspace_path: string;
   run_root: string;
   execution_snapshot_root: string;
@@ -439,6 +447,7 @@ export interface StrictModalNodeCheckpointIndexEntry {
 export interface StrictModalNodeCheckpointIndexDocument {
   schema_version: "ultrafuzz.modal.node-checkpoint-index.v1";
   storage_lineage: string;
+  logical_dispatch_fingerprint: string;
   workspace_path: string;
   run_root: string;
   execution_snapshot_root: string;
@@ -611,7 +620,7 @@ export interface StrictModalPublicBenchmarkBundleTarget {
 export interface StrictModalPublicBenchmarkBundleDocument {
   schema_version: "ultrafuzz.modal.public-benchmark-bundle.v5";
   benchmark: "evmbench" | "ultrafuzz-bench";
-  lane: "smoke" | "full";
+  lane: "smoke" | "threat-model" | "full";
   model_slug: string;
   model: string;
   reasoning: string;

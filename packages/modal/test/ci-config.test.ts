@@ -636,7 +636,7 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["main"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
-      benchmark_lane: expect.objectContaining({
+      benchmark_mode: expect.objectContaining({
         default: "full",
         type: "choice",
         options: ["smoke", "full", "threat-model"]
@@ -654,11 +654,11 @@ describe("public Modal benchmark configuration", () => {
       deepseek_reasoning: expect.objectContaining({ default: "max", type: "string" })
     });
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
-    expect(workflow.env.BENCHMARK_MODE).toContain("inputs.benchmark_lane");
+    expect(workflow.env.BENCHMARK_MODE).toContain("inputs.benchmark_mode");
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.after");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.sha");
-    expect(workflow.concurrency.group).toContain("inputs.benchmark_lane || 'smoke'");
+    expect(workflow.concurrency.group).toContain("inputs.benchmark_mode || 'smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
     expect(workflow.concurrency.group).not.toContain("pull_request");
@@ -687,7 +687,7 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("'deepseek-v4-pro'");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
-    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.benchmark_lane == 'smoke'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.benchmark_mode == 'smoke'");
     expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
     expect(prepare?.env?.BENCHMARK_SMOKE_MODEL).toContain("inputs.smoke_model");
     expect(prepare?.env?.BENCHMARK_SMOKE_REASONING).toContain("inputs.smoke_reasoning");
@@ -884,8 +884,8 @@ describe("public Modal benchmark configuration", () => {
             lane: "package-gates",
             description: "Package, dependency, and policy gates",
             gates:
-              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
-            timeout_minutes: 30,
+              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,packed-install,security,references,topology,prompts,artifacts,dashboard,evals,evmbench,modal",
+            timeout_minutes: 45,
             build_modal_dependencies: true
           },
           {
@@ -1614,7 +1614,7 @@ describe("public Modal benchmark configuration", () => {
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
     const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
-    const laneProfile = worker.indexOf("modalTargetToml(model, config.node_timeout_seconds, scope.lane)", smithersSeed);
+    const laneProfile = worker.indexOf("modalTargetToml(model, config.node_timeout_seconds, auditProfile)", smithersSeed);
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
     const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
     const referenceSync = worker.indexOf('["node", CLI, "references", "sync"', init);

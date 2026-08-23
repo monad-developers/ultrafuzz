@@ -145,7 +145,7 @@ export const artifactManifestJsonSchema = {
     schema_version: { const: ARTIFACT_MANIFEST_SCHEMA_VERSION },
     run_id: { type: "string", minLength: 1 },
     node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    producer_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    producer_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$" },
     created_at: { type: "string", format: "date-time" },
     files: {
       type: "array",
@@ -267,7 +267,30 @@ export const artifactManifestJsonSchema = {
       additionalProperties: false,
       required: ["concrete_node_id"],
       properties: {
-        concrete_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+        concrete_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$" },
+        storage_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        dynamic: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "groupNodeId",
+            "sourceNodeId",
+            "sourceAttemptId",
+            "sourceDigest",
+            "expansionKey",
+            "itemDigest",
+            "manifestPath"
+          ],
+          properties: {
+            groupNodeId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+            sourceNodeId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+            sourceAttemptId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+            sourceDigest: { $ref: "#/$defs/sha256" },
+            expansionKey: { $ref: "#/$defs/nonNulString" },
+            itemDigest: { $ref: "#/$defs/sha256" },
+            manifestPath: { $ref: "#/$defs/safePath" }
+          }
+        }
       }
     },
     nonNulString: {

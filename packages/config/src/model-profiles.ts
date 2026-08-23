@@ -12,6 +12,7 @@ export interface DefaultProfileOverrides {
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
+const PI_REASONING_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 
@@ -236,14 +237,29 @@ function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic
       );
     }
     if (
-      profile.agent === "OpenRouterAgent" &&
+      (profile.agent === "OpenRouterAgent" || profile.agent === "OpenCodeAgent" || profile.agent === "PiAgent") &&
       (profile.model === undefined || profile.model.length > 256 || !OPENROUTER_MODEL_ID_PATTERN.test(profile.model))
     ) {
       diagnostics.push(
         diagnostic(
           "CONFIG_MODEL_OPENROUTER_ID_INVALID",
-          `OpenRouter model profile \`${id}\` model must be a non-empty catalogue ID without whitespace or control characters and at most 256 characters`,
+          `${profile.agent} model profile \`${id}\` model must be a non-empty catalogue ID without whitespace or control characters and at most 256 characters`,
           ["models", id, "model"],
+          "validation"
+        )
+      );
+    }
+    if (
+      profile.agent === "PiAgent" &&
+      reasoning !== undefined &&
+      reasoning !== "" &&
+      !PI_REASONING_EFFORTS.has(reasoning)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_PI_REASONING_UNSUPPORTED",
+          `Pi model profile \`${id}\` reasoning must be off, minimal, low, medium, high, or xhigh`,
+          ["models", id, "reasoning"],
           "validation"
         )
       );

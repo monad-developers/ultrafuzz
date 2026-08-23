@@ -64,6 +64,11 @@ const existingJsonContracts = {
       "A strict generated-test bundle manifest whose runnable tests and non-runnable support files live beneath generated-tests/.",
     schemaFile: "generated-tests.schema.json"
   },
+  "ultrafuzz/goal-plan@1": {
+    description:
+      "A validated additive goal plan with one item per modeled threat, one item per applicable vulnerability class, item-scoped replacements, and one fixed roaming goal.",
+    schemaFile: "goal-plan.schema.json"
+  },
   "ultrafuzz/coverage-evidence@1": {
     description:
       "Complete scoped coverage evidence with recon-selected-declaration-completeness and production-declaration-completeness views, explicit source inclusion, attributed counted ranges, and material zero-coverage components.",
@@ -102,6 +107,19 @@ const existingJsonContracts = {
   "ultrafuzz/workspace-patch@1": {
     description: "A provenance-bound workspace patch manifest.",
     schemaFile: "workspace-patch.schema.json"
+  },
+  "ultrafuzz/threat-model@1": {
+    description:
+      "A canonical threat model with evidence-backed capabilities, assets, actors, trust boundaries, attack surfaces, invariants, threats, assumptions, unknowns, and coverage gaps.",
+    schemaFile: "threat-model.schema.json"
+  },
+  "ultrafuzz/vulnerability-database-planner-catalog@1": {
+    description: "A digest-bound normalized vulnerability database catalog used for additive goal planning.",
+    schemaFile: "vulnerability-database-planner-catalog.schema.json"
+  },
+  "ultrafuzz/vulnerability-database-snapshot@1": {
+    description: "A source-bound manifest for the exact vulnerability database records selected by a goal plan.",
+    schemaFile: "vulnerability-database-snapshot.schema.json"
   }
 } as const;
 

@@ -58,7 +58,7 @@ run `date -u +%s` once at startup and add the working budget it states.
 Re-run `date -u +%s` before each expensive step and compare epochs. At the
 deadline, stop investigating, write `{{output_findings_path}}` and the
 generated-test manifest, and exit cleanly. An empty result is a
-negative result, not a failure: writing `[]` cleanly is strictly better
+negative result, not a failure: publishing the contract-defined empty result is strictly better
 than being killed at the timeout with no output, and better than inventing
 a finding.
 
@@ -66,12 +66,19 @@ Do not inspect sibling runs, historical reports, benchmark ground truth,
 host-global files, package internals, or network resources. Do not invent a
 finding to satisfy the goal.
 
-Write normalized findings to `{{output_findings_path}}`. Use `[]` when no
-supported vulnerability is found. The runtime records this generated node as
+Use these runtime-owned vocabularies exactly when authoring any finding:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
+Write normalized findings to `{{output_findings_path}}`. When no supported
+vulnerability is found, publish the empty result defined by the pinned schema.
+The runtime records this generated node as
 the producer; do not replace `source_node_id` or `source_nodes` with a parent
 group ID.
 
 If you create focused tests, place them below
 `{{strategy_attempt_test_dir}}` and write their ordinary manifest to
-`{{artifact_path}}/generated-tests.json`. Otherwise write the canonical empty
-generated-test manifest required by the output contract.
+`{{artifact_path}}/generated-tests.json`. Otherwise satisfy the pinned
+generated-test schema with its no-test result.

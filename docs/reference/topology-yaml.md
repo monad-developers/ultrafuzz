@@ -243,10 +243,10 @@ declares its machine-readable catalog as the primary output:
     - __start__
   outputs:
     - path: vulnerability-db/catalog.json
-      contract: ultrafuzz/json-object@1
+      contract: ultrafuzz/vulnerability-database-planner-catalog@1
       primary: true
     - path: references/manifest.json
-      contract: ultrafuzz/json-object@1
+      contract: ultrafuzz/reference-manifest@1
 ```
 
 The reference catalog entry's `kind: vulnerability-database` makes the runtime

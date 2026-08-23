@@ -151,7 +151,10 @@ function currentStep(state: RunState | undefined, nowMs: number): RunProgressSum
 }
 
 function displayNodeId(node: RunState["nodes"][string]): string {
-  const producerNodeId = node.provenance?.producer_node_id;
+  const producerNodeId =
+    node.provenance !== undefined && "producer_node_id" in node.provenance
+      ? node.provenance.producer_node_id
+      : undefined;
   return typeof producerNodeId === "string" && NODE_REFERENCE_PATTERN.test(producerNodeId)
     ? producerNodeId
     : (node.logical_node_id ?? node.node_id);

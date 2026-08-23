@@ -347,7 +347,10 @@ test("a relocated cloud worker rejects an unsafe dynamic selected_task handoff",
   }
   // A dispatch that omits the attempt identity cannot bind the handoff: a runtime-generated dynamic
   // attempt has no compiled spec to cross-check, so the identity would be attacker-chosen.
-  await assert.rejects(() => render(selected, ABSENT), /must identify one attempt_id/u);
+  await assert.rejects(
+    () => render(selected, ABSENT),
+    /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u
+  );
   // The unmodified handoff still renders, so the rejections above are not vacuous.
   assert.equal((await render(selected)).filter((task) => task.props.agent !== undefined).length, 1);
   fs.rmSync(worker, { recursive: true, force: true });
@@ -395,7 +398,10 @@ test("a relocated cloud worker rejects unknown outer dispatch keys", async () =>
   // The generation names the sandbox, durable attempt root, and storage lineage a worker publishes
   // under, and a relocated worker cannot rederive it, so the dispatch must state it.
   const { execution_generation: _generation, ...withoutGeneration } = dispatch;
-  await assert.rejects(() => render(withoutGeneration), /must identify one bounded execution_generation/u);
+  await assert.rejects(
+    () => render(withoutGeneration),
+    /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u
+  );
   await assert.rejects(
     () => render({ ...dispatch, execution_generation: "reset-one" }),
     /execution\.generation base is not the dispatched reset-one generation/u
@@ -407,14 +413,11 @@ test("a relocated cloud worker rejects unknown outer dispatch keys", async () =>
     workflowPath: fixture.compiled.workflowPath,
     cwd: fixture.project,
     workflowInput: {
-      schema_version: "ultrafuzz.smithers.compiled-workflow.v1",
-      operator_prompt: null,
+      schema_version: "ultrafuzz.smithers.workflow.v4",
+      ultrafuzz_run_id: "cloud-worker",
+      operator_prompt: "focus",
       operator_input: { issue: 2 },
-      tasks: [],
-      cloud_worker: null,
-      task_id: null,
-      attempt_id: null,
-      execution_generation: null
+      tasks: []
     }
   });
   assert.ok(
@@ -559,7 +562,7 @@ test("a relocated cloud worker refuses any dispatch that omits the selected_task
           forbidDynamicMaterialization: true,
           workflowInput: dispatch
         }),
-      /requires an explicit selected_task handoff/u,
+      /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u,
       concreteNodeId
     );
     // A `null` handoff is not a handoff either: it must fail the contract, not fall back to a spec.
@@ -664,7 +667,6 @@ test("a relocated cloud worker binds a generated attempt to every compiled const
     ["heartbeatTimeoutMs", 45_000],
     ["retries", 7],
     ["retryPolicy.initialDelayMs", 5],
-    ["retryPolicy.maxDelayMs", 6],
     ["referenceArtifactDirs", [`${runRoot}/artifacts/reference-vulnerability-database`]],
     ["vulnerabilityDatabase", ABSENT],
     ["vulnerabilityDatabase.catalogSha256", "b".repeat(64)],
@@ -1036,7 +1038,6 @@ test("a relocated cloud worker matches a compiled static selected_task against i
     ["heartbeatTimeoutMs", 45_000],
     ["retries", 7],
     ["retryPolicy.initialDelayMs", 5],
-    ["retryPolicy.maxDelayMs", 6],
     ["dependencyArtifactDirs", [`${runRoot}/artifacts/reference-vulnerability-database`]],
     ["referenceArtifactDirs", [`${runRoot}/artifacts/reference-vulnerability-database`]],
     ["vulnerabilityDatabase", ABSENT],
@@ -1147,7 +1148,7 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
     project,
     "dynamic/worker.md",
     "dynamic-worker",
-    "Your /goal is {{item.goal_prompt}}.\nDatabase: {{vulnerability_database_path}}\nArtifacts: {{artifact_path}}"
+    "Your /goal is {{item.goal_prompt}}.\nDatabase: {{vulnerability_database_path}}\nArtifacts: {{artifact_path}}\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
   writePrompt(
     project,
@@ -1160,7 +1161,12 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
     : CLOUD_TOPOLOGY;
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), topology, "utf8");
 
-  const plan = await planRun({ projectRoot: project, runId: "cloud-worker", env: {} });
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "cloud-worker",
+    runtimeOverrides: { auditProfile: "low-cost" },
+    env: {}
+  });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const runRoot = plan.value!.run_root;
 
@@ -1184,7 +1190,7 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
       modal: {
         app: "ultrafuzz-test",
         image: "ultrafuzz-test",
-        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       }
     }
   };
@@ -1199,7 +1205,7 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
   });
   compiled.workflowPath = materializeHarnessWorkflowSnapshot(compiled);
 
-  const sourceArtifactPath = compiled.dynamicGroups[0]!.source.artifactPath;
+  const sourceArtifactPath = path.resolve(project, compiled.dynamicGroups[0]!.source.artifactPath);
   fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
   fs.writeFileSync(
     sourceArtifactPath,
@@ -1222,7 +1228,15 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
   const controllerRendered = await renderGeneratedWorkflow({
     workflowPath: compiled.workflowPath,
     cwd: project,
-    workflowInput: { cloud_worker: false, tasks: [] }
+    // The handoff fixture exercises dispatch construction after dependency admission. The real
+    // workflow receives these verifier outputs from Smithers; the in-process harness must expose
+    // them explicitly now that runtime-materialized tasks retain their producer authorities.
+    allOutputsAvailable: true,
+    workflowInput: {
+      schema_version: "ultrafuzz.smithers.workflow.v4",
+      ultrafuzz_run_id: "cloud-worker",
+      tasks: []
+    }
   });
   const sandboxes = controllerRendered.filter((task) => task.component === "Sandbox");
   assert.ok(sandboxes.length >= 2, "the controller must dispatch both the dynamic child and its downstream join");
@@ -1269,7 +1283,7 @@ nodes:
     depends_on: [__start__]
     outputs:
       - path: plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/goal-plan@1
         primary: true
   - id: fanout
     kind: agentic
@@ -1283,7 +1297,7 @@ nodes:
       node_id: "dynamic:item:{{ item.id }}"
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: join
     kind: agentic
@@ -1330,7 +1344,12 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   let plan;
   try {
-    plan = await planRun({ projectRoot: project, runId: "cloud-database", env: {} });
+    plan = await planRun({
+      projectRoot: project,
+      runId: "cloud-database",
+      runtimeOverrides: { auditProfile: "low-cost" },
+      env: {}
+    });
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;
@@ -1361,7 +1380,7 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
   for (const logicalNodeId of ["threat-model", "goal-plan"]) {
     const task = compiled.tasks.find((candidate) => candidate.metadata.node.logicalNodeId === logicalNodeId);
     assert.ok(task, `${logicalNodeId} must compile`);
-    assert.deepEqual([...task.referenceArtifactDirs], [referenceAttemptDir], logicalNodeId);
+    assert.deepEqual([...(task.referenceArtifactDirs ?? [])], [referenceAttemptDir], logicalNodeId);
     assert.deepEqual(
       task.vulnerabilityDatabaseCatalog,
       { path: path.join(runRoot, database.relative_path), sha256: database.sha256 },
@@ -1372,7 +1391,12 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
   const rendered = await renderGeneratedWorkflow({
     workflowPath: compiled.workflowPath,
     cwd: project,
-    workflowInput: { cloud_worker: false, tasks: [] }
+    allOutputsAvailable: true,
+    workflowInput: {
+      schema_version: "ultrafuzz.smithers.workflow.v4",
+      ultrafuzz_run_id: "cloud-database",
+      tasks: []
+    }
   });
   for (const logicalNodeId of ["threat-model", "goal-plan"]) {
     const sandbox = rendered.find(
@@ -1438,7 +1462,7 @@ function cloudExecutionConfig() {
       modal: {
         app: "ultrafuzz-test",
         image: "ultrafuzz-test",
-        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       }
     }
   };
@@ -1458,10 +1482,10 @@ nodes:
     depends_on: [__start__]
     outputs:
       - path: vulnerability-db/catalog.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/vulnerability-database-planner-catalog@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: threat-model
     kind: agentic
     prompt: setup/threat-model-fixture.md
@@ -1476,7 +1500,7 @@ nodes:
     depends_on: [threat-model, reference-vulnerability-database]
     outputs:
       - path: goal-plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/goal-plan@1
         primary: true
   - id: __finish__
     kind: meta

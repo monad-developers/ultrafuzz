@@ -31,6 +31,12 @@ profiles:
     intended_use: General-purpose audits using the editable project topology.
     settings: {}
 
+  full:
+    description: Complete audit with direct discovery plus deep differential, stateful, and dynamic specialist lanes.
+    intended_use: Specialist audits that explicitly opt into the complete shipped workflow.
+    topology_path: topologies/full.yml
+    settings: {}
+
   exhaustive:
     description: Maximum repetition, concurrency, and dynamic enumeration for the configured project workflow.
     intended_use: Highest-cost repetition and resource limits for critical investigations using the configured topology.

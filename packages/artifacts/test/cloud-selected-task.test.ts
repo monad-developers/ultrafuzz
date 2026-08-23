@@ -140,6 +140,34 @@ test("a compiled attempt may only gain correlated evidence of the dependencies i
   }
 });
 
+test("runtime lowering replaces a declared dynamic-group placeholder with its authenticated child", () => {
+  const base = handoff();
+  const canonical = handoff({
+    metadata: {
+      ...base.metadata,
+      dependencies: { ...base.metadata.dependencies, concreteNodeIds: ["fanout"] }
+    }
+  });
+  const actual = handoff({
+    dependencyArtifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
+    metadata: {
+      ...canonical.metadata,
+      dependencies: {
+        concreteNodeIds: ["dynamic:item:one"],
+        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"],
+        smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:generated-one"]
+      }
+    }
+  });
+  assertCloudSelectedTaskMatchesCanonical(actual, canonical, {
+    runtimeDependencies: { ...EVIDENCE, replacedConcreteNodeIds: ["fanout"] }
+  });
+  assert.throws(
+    () => assertCloudSelectedTaskMatchesCanonical(actual, canonical, { runtimeDependencies: EVIDENCE }),
+    /concreteNodeIds must extend the compiled attempt without reordering, dropping, or repeating/u
+  );
+});
+
 /**
  * A group that expanded to no items substitutes its own source attempt, and a non-agentic source has
  * no verifier at all, so the verifier identities are a subsequence of the added attempts.
@@ -317,7 +345,7 @@ function handoff(overrides: Partial<CloudSelectedTask> = {}): CloudSelectedTask 
     timeoutMs: 600_000,
     heartbeatTimeoutMs: 120_000,
     retries: 1,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
     metadata: {
       schemaVersion: "ultrafuzz.smithers.task-metadata.v1",
       run: {

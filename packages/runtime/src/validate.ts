@@ -23,7 +23,11 @@ import type {
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
-import { transformTopologyForRun } from "./topology-transform.js";
+import {
+  promptTextsForCatalog,
+  transformPromptCatalogForRun,
+  transformTopologyForRun
+} from "./topology-transform.js";
 import {
   configDiagnostics,
   diagnosticFromError,

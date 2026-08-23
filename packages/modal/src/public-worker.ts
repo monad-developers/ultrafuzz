@@ -27,6 +27,7 @@ import {
   type EvalSuiteSpec,
   BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
 } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { loadVerifiedFinalReportSnapshot, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
@@ -87,6 +88,7 @@ export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
 // its 1,800-second attempts, so retain ten minutes beyond the four-hour
 // topology bound for workflow transitions and final synchronization.
 export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
+export const PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
 // A manual full row retains the packaged specialist timeouts, including the
 // 7,200-second invariant campaign. This is a bounded row execution budget, not
 // a guarantee that every topology node can consume its worst-case timeout.
@@ -412,7 +414,7 @@ export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnost
 }
 
 export function publicBenchmarkMaxParallelEvalRows(
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): number {
   if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
@@ -420,7 +422,7 @@ export function publicBenchmarkMaxParallelEvalRows(
 }
 
 export function publicBenchmarkMaxParallelWorkflowNodes(
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): number {
   if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
@@ -713,7 +715,14 @@ export async function publicBenchmarkWorkerSecretValues(
           remoteAuthDir("kimi"),
           path.join(dataRoot, "kimi-code-auth")
         );
-  return [...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env, env)])];
+  const referenceToken = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  return [
+    ...new Set([
+      ...runnerSecretValues,
+      requiredEnv(config.braintrust.judge_api_key_env, env),
+      ...(referenceToken === undefined || referenceToken === "" ? [] : [referenceToken])
+    ])
+  ];
 }
 
 async function preparePublicBenchmark(
@@ -757,6 +766,7 @@ async function preparePublicBenchmark(
     }
   });
   const suite = preparePublicEvalSuite(baseSuite, scope.lane, model.provider);
+  const auditProfile = scope.lane === "threat-model" ? "default" : scope.lane;
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");
@@ -776,7 +786,7 @@ async function preparePublicBenchmark(
     await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
-      modalTargetToml(model, config.node_timeout_seconds, scope.lane === "smoke" ? "smoke" : "default"),
+      modalTargetToml(model, config.node_timeout_seconds, auditProfile),
       { mode: 0o600 }
     );
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
@@ -942,7 +952,7 @@ export async function materializeBakedCandidate(
 
 export function preparePublicEvalSuite(
   baseSuite: EvalSuiteSpec,
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): EvalSuiteSpec {
   return {

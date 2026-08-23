@@ -19,7 +19,7 @@ export function privateBenchmarkExecutionControls(config: PrivateModalBenchmarkC
   // append the threat-model and goal fanout nodes they could not have named,
   // skipping any they already list.
   const implied =
-    curated.length === 0 || config.benchmark_execution.include_threat_model_goal_fanout
+    curated.length === 0 || config.benchmark_execution.include_threat_model_goal_fanout === true
       ? []
       : THREAT_MODEL_GOAL_FANOUT_NODE_IDS.filter((id) => !curated.includes(id));
   return {

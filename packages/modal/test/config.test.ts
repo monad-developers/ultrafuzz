@@ -477,8 +477,7 @@ describe("Modal benchmark config", () => {
     });
 
     expect("target" in config && config.benchmark_execution).toEqual({
-      excluded_node_ids: ["boundary-tests", "dynamic-strategy-generator"],
-      include_threat_model_goal_fanout: false
+      excluded_node_ids: ["boundary-tests", "dynamic-strategy-generator"]
     });
   });
 

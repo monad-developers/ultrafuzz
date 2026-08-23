@@ -29,6 +29,7 @@ import {
   type NodeState,
   type PlannedGraphOutput,
   type PlannedGraphDocument,
+  type PlannedGraphNodeDocument,
   type RunStatus,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -59,6 +60,7 @@ import {
   loadResolvedProject,
   modelProfilesForTopology,
   isVerifiedOutputAuthorityUnavailable,
+  loadGoalSearchCoverageSnapshot,
   loadVerifiedFinalReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
@@ -138,6 +140,8 @@ type DashboardCommand =
   | "clean";
 type CommandJobStatus = "running" | "succeeded" | "failed";
 type JsonObject = Record<string, unknown>;
+type PlannedGraph = PlannedGraphDocument;
+type PlannedGraphNode = PlannedGraphNodeDocument;
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type DashboardSseEventType = "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs";
 
@@ -578,13 +582,24 @@ class DashboardApp {
     const captured = await this.captureRunAuthorityContext();
     const { context, state, authorityProjection } = captured;
     const run = await this.runOverviewFrom(topology, expanded, captured);
+    const runtimeGraph = this.optionalRuntimeGraph(context);
+    const runtimeNodeById = new Map(runtimeGraph?.nodes.map((node) => [node.id, node]) ?? []);
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
-    const nodes = topology.nodes.map((node, index) =>
+    const staticNodes = topology.nodes.map((node, index) =>
       this.flowNode(node, index, attemptsByLogicalId.get(node.id) ?? [], state, context.runRoot, authorityProjection)
     );
     const generatedNodes = (runtimeGraph?.nodes ?? [])
       .filter((node) => node.dynamic_generated !== undefined)
-      .map((node, index) => this.dynamicFlowNode(node, staticNodes.length + index, state, context.runRoot, topology));
+      .map((node, index) =>
+        this.dynamicFlowNode(
+          node,
+          staticNodes.length + index,
+          state,
+          context.runRoot,
+          topology,
+          authorityProjection
+        )
+      );
     const nodes = [...staticNodes, ...generatedNodes];
     const dependencyIds = (logicalNode: TopologyNode): string[] => {
       const runtimeNodes = (runtimeGraph?.nodes ?? []).filter(
@@ -614,6 +629,25 @@ class DashboardApp {
         };
       })
     );
+    const generatedEdges = (runtimeGraph?.nodes ?? [])
+      .filter((node) => node.dynamic_generated !== undefined)
+      .flatMap((node) =>
+        node.depends_on.map((dependency) => {
+          const producer = runtimeNodeById.get(dependency);
+          const source = producer?.dynamic_generated === undefined ? (producer?.logical_id ?? dependency) : dependency;
+          const status = dynamicNodeStatus(node, state);
+          return {
+            id: `${source}->${node.id}`,
+            source,
+            target: node.id,
+            animated: status === "running" || status === "ready" || status === "runnable",
+            data: { status },
+            style: { stroke: edgeColorForStatus(status), strokeWidth: 2 },
+            zIndex: 1
+          };
+        })
+      );
+    const edges = uniqueEdges([...staticEdges, ...generatedEdges]);
     const strategies = nodes.flatMap((node) => {
       const data = node.data;
       if (!isRecord(data)) throw new Error(`flow node ${String(node.id)} has invalid data`);
@@ -636,7 +670,8 @@ class DashboardApp {
     index: number,
     state: RunState | undefined,
     runRoot: string,
-    topology: ProjectTopology
+    topology: ProjectTopology,
+    authorityProjection?: DashboardFlowAuthorityProjection
   ): JsonObject {
     const attempts = plannedDynamicAttempts(node);
     const status = dynamicNodeStatus(node, state);
@@ -665,11 +700,11 @@ class DashboardApp {
         dependencies: [...node.depends_on],
         artifactDir: artifactDirs[0] ?? node.artifact_dir,
         artifactDirs,
-        artifacts: this.artifactAvailability(attempts, runRoot),
+        artifacts: this.artifactAvailability(attempts, runRoot, authorityProjection),
         promptAvailable: true,
         promptEditable: false,
         topologyConnectable: false,
-        findingCount: this.countFindings(attempts, runRoot),
+        findingCount: authorityProjection?.findingsByLogicalId.get(node.logical_id)?.length ?? 0,
         propertySummary: null,
         latestError: state?.nodes[node.dynamic_generated!.storage_id]?.last_error ?? null,
         logicalNodeId: node.id,
@@ -797,6 +832,7 @@ class DashboardApp {
     const { context, state, authorityProjection } = captured;
     const events = await this.events(context);
     const findings = authorityProjection?.allFindings ?? [];
+    const runtimeGraph = this.optionalRuntimeGraph(context);
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
     const nodeCounts: Record<string, number> = {};
     const activeNodes: string[] = [];
@@ -806,6 +842,11 @@ class DashboardApp {
       if (status === "running" || status === "ready" || status === "runnable") {
         activeNodes.push(node.id);
       }
+    }
+    for (const node of runtimeGraph?.nodes.filter((candidate) => candidate.dynamic_generated !== undefined) ?? []) {
+      const status = dynamicNodeStatus(node, state);
+      nodeCounts[status] = (nodeCounts[status] ?? 0) + 1;
+      if (status === "running" || status === "ready" || status === "runnable") activeNodes.push(node.id);
     }
     const report = await this.report(context);
     return dashboardHttpDocument("run-overview", {
@@ -836,12 +877,15 @@ class DashboardApp {
   async graphDetail(): Promise<JsonObject> {
     const topology = this.loadTopologyForDisplay();
     const expanded = await this.expandCurrentTopology(topology);
+    const context = await this.runContext();
+    const runtimeGraph = this.optionalRuntimeGraph(context);
     return dashboardHttpDocument("graph", {
       topology,
       expandedGraph: expanded,
       runtimeGraph,
       logicalNodes: topology.nodes.length,
-      expandedNodes: expanded.nodes.length
+      expandedNodes: runtimeGraph?.nodes.length ?? expanded.nodes.length,
+      generatedNodes: runtimeGraph?.nodes.filter((node) => node.dynamic_generated !== undefined).length ?? 0
     });
   }
 
@@ -850,17 +894,17 @@ class DashboardApp {
     const node = topology.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) {
       const humanNodeId = validateNodeReference(nodeId, "node ID");
-      const context = await this.runContext();
+      const captured = await this.captureRunAuthorityContext();
+      const { context, state, authorityProjection } = captured;
       const generated = this.optionalRuntimeGraph(context)?.nodes.find(
         (candidate) => candidate.id === humanNodeId && candidate.dynamic_generated !== undefined
       );
       if (generated === undefined) throw new HttpError(404, `node ${humanNodeId} not found`);
       const attempts = plannedDynamicAttempts(generated);
-      const state = await this.optionalRunState();
-      const attemptArtifacts = await this.artifactEntriesForAttempts(attempts);
+      const attemptArtifacts = await this.artifactEntriesForAttempts(attempts, context);
       const primary = attemptArtifacts[0];
-      return {
-        run_id: await this.selectedRunId(),
+      const document = dashboardHttpDocument("node-detail", {
+        run_id: context.runId,
         node: {
           id: generated.id,
           label: generated.display_name,
@@ -880,10 +924,11 @@ class DashboardApp {
         stdout: primary?.stdout,
         stderr: primary?.stderr,
         rendered_prompt: primary?.renderedPrompt,
-        findings: this.findingsForAttempts(attempts),
-        metadata: { dynamic: generated.dynamic_generated, expandedAttempts: attempts },
-        transcript: primary?.transcript
-      };
+        findings: authorityProjection?.findingsByLogicalId.get(generated.logical_id) ?? [],
+        metadata: { dynamic: generated.dynamic_generated, expandedAttempts: attempts }
+      });
+      await this.assertCapturedRunAuthorityRemainedCurrent(captured);
+      return document;
     }
     const safeNodeId = node.id;
     const expanded = await this.expandCurrentTopology(topology);
@@ -1643,11 +1688,7 @@ class DashboardApp {
     const graphPath = path.join(context.runRoot, "graph.json");
     if (!fs.existsSync(graphPath)) return undefined;
     assertRegularFileInside(context.runRoot, graphPath, "runtime graph");
-    const graph = readJsonFile<PlannedGraph>(graphPath);
-    if (graph.schema_version !== "1.0" || !Array.isArray(graph.nodes)) {
-      throw new Error("runtime graph is invalid");
-    }
-    return graph;
+    return readPlannedGraphDocument(graphPath);
   }
 
   async expandCurrentTopology(topology: ProjectTopology): Promise<ExpandedGraph> {
@@ -2522,7 +2563,9 @@ function readVerifiedFindingsDeclaration(
     if (markdown.length !== 1) {
       throw new Error("dashboard report findings declaration does not have one exact Markdown companion");
     }
-    const projection = projectCanonicalFinalReport(report.value);
+    const projection = projectCanonicalFinalReport(report.value, {
+      goalSearchCoverage: loadGoalSearchCoverageSnapshot(authority.run_root)
+    });
     if (!isDeepStrictEqual(projection.report, report.value)) {
       throw new Error("dashboard verified report JSON is not its canonical final-report projection");
     }

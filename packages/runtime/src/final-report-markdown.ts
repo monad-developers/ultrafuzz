@@ -1,19 +1,52 @@
-import { redactValue, validateArtifactContract } from "@ultrafuzz/artifacts";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  assertRegularFileInside,
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  redactValue,
+  safeResolveInside,
+  validateArtifactContract
+} from "@ultrafuzz/artifacts";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
+const SAFE_REPORT_RELATIVE_LINK_PATTERN =
+  /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
  *
- * Exported from the renderer because the renderer is the consumer of last resort: every producer of
- * `report.goal_search_coverage` -- the generated workflow's reconstruction pass and the CLI report
- * reconciler -- has to name the same file and the same schema version, and a census silently written
- * under one name and read under another would render as "coverage unknown" on a run that measured its
- * coverage perfectly well. One definition, one failure mode.
+ * Exported from the renderer because every runtime producer and external verified-output reader has
+ * to name the same file and schema version. The census stays beside the run, never inside the closed
+ * report.json contract.
  */
 export const GOAL_SEARCH_COVERAGE_FILE = "goal-search-coverage.json";
 export const GOAL_SEARCH_COVERAGE_SCHEMA_VERSION = "ultrafuzz.goal-search-coverage.v1";
+export const MAX_GOAL_SEARCH_COVERAGE_BYTES = 64 * 1024 * 1024;
+
+export function loadGoalSearchCoverageSnapshot(runRoot: string): unknown | undefined {
+  const coveragePath = safeResolveInside(runRoot, GOAL_SEARCH_COVERAGE_FILE, "goal search coverage census");
+  if (!fs.existsSync(coveragePath)) return undefined;
+  assertRegularFileInside(runRoot, coveragePath, "goal search coverage census");
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJsonBytes(readRegularFileSnapshot(coveragePath, MAX_GOAL_SEARCH_COVERAGE_BYTES), {
+      maxBytes: MAX_GOAL_SEARCH_COVERAGE_BYTES
+    });
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.schema_version !== GOAL_SEARCH_COVERAGE_SCHEMA_VERSION ||
+    parsed.run_id !== path.basename(path.resolve(runRoot))
+  ) {
+    return undefined;
+  }
+  return parsed;
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -54,6 +87,11 @@ export interface CanonicalFinalReportProjection {
   markdown: string;
 }
 
+export interface CanonicalFinalReportContext {
+  /** Runtime-owned run-root census; it is never copied into the closed report.json contract. */
+  goalSearchCoverage?: unknown;
+}
+
 /**
  * Project a verified internal report across the public privacy boundary.
  *
@@ -62,13 +100,16 @@ export interface CanonicalFinalReportProjection {
  * copy with private filesystem paths redacted, then re-validates and renders
  * that copy as an exact canonical JSON/Markdown pair.
  */
-export function projectPublicCanonicalFinalReport(report: unknown): CanonicalFinalReportProjection {
-  const internal = projectCanonicalFinalReport(report);
+export function projectPublicCanonicalFinalReport(
+  report: unknown,
+  context: CanonicalFinalReportContext = {}
+): CanonicalFinalReportProjection {
+  const internal = projectCanonicalFinalReport(report, context);
   const publicReport = redactPrivatePathsInValue(internal.report);
   if (!isRecord(publicReport)) {
     throw new Error("public final-report projection did not produce an object");
   }
-  const projection = projectCanonicalFinalReport(publicReport);
+  const projection = projectCanonicalFinalReport(publicReport, context);
   if (containsPrivatePathInValue(projection.report)) {
     throw new Error("public final-report projection contains a private filesystem path");
   }
@@ -102,7 +143,10 @@ export function supportsCanonicalFinalReportProjection(report: unknown): report 
  * This function is intentionally filesystem-free so the CLI and generated
  * runtime use exactly the same checks and rendering.
  */
-export function projectCanonicalFinalReport(report: unknown): CanonicalFinalReportProjection {
+export function projectCanonicalFinalReport(
+  report: unknown,
+  context: CanonicalFinalReportContext = {}
+): CanonicalFinalReportProjection {
   assertReportJsonWithinBound(report);
   const input = validateReport(report);
   if (isCanonicalEmptyReport(input)) {
@@ -114,7 +158,7 @@ export function projectCanonicalFinalReport(report: unknown): CanonicalFinalRepo
 
   assertCanonicalIssuePresentation(input);
 
-  const markdown = renderCanonicalReport(input);
+  const markdown = renderCanonicalReport(input, context.goalSearchCoverage);
   if (Buffer.byteLength(markdown, "utf8") > MAX_FINAL_REPORT_MARKDOWN_BYTES) {
     throw new Error(`canonical final report Markdown exceeds ${MAX_FINAL_REPORT_MARKDOWN_BYTES} bytes`);
   }
@@ -376,7 +420,7 @@ function markdownOutsideFencedCode(markdown: string): string {
   return prose.join("\n");
 }
 
-function renderCanonicalReport(report: JsonRecord): string {
+function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown): string {
   const issues = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const outcomes = Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes.filter(isRecord) : [];
   const lines = ["# Ultrafuzz report", ""];
@@ -400,7 +444,8 @@ function renderCanonicalReport(report: JsonRecord): string {
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
   appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
-  const goalCoverage = summarizeGoalSearchCoverage(report.goal_search_coverage);
+  appendCoverageEvidence(lines, report.coverage_evidence);
+  const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
 
   for (const issue of issues) {
     appendProductionIssue(lines, issue);

@@ -31,7 +31,7 @@
       "enum": ["evmbench", "ultrafuzz-bench"]
     },
     "lane": {
-      "enum": ["smoke", "full"]
+      "enum": ["smoke", "threat-model", "full"]
     },
     "model_slug": {
       "$ref": "#/$defs/safeId"

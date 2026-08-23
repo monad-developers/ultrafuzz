@@ -39,6 +39,7 @@
     "outputDir": ".ultrafuzz/runs",
     "maxParallelAgents": 4,
     "maxParallelNodes": 8,
+    "maxDynamicNodes": 2048,
     "keepWorkspaces": false,
     "forgeGuardEnabled": true,
     "forgeVmemLimitKb": 12582912,

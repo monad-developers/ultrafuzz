@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
+import {
+  BENCHMARK_LANE_NAMES,
+  benchmarkLaneSelectedTargetIds,
+  loadBenchmarkCohortManifest,
+  loadBenchmarkLanesManifest
+} from "../../packages/evals/dist/index.js";
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { readModalDocument } from "../../packages/modal/dist/modal-documents.js";

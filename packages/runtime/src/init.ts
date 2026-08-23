@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertNoSymlinkComponents, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import {
+  assertNoSymlinkComponents,
+  goalPlanJsonSchema,
+  parseStrictJsonBytes,
+  threatModelJsonSchema
+} from "@ultrafuzz/artifacts";
 import {
   packagedTopology,
   redactResolvedConfig,
@@ -56,6 +61,18 @@ const AGENT_TEMPLATES = [
       "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
       "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f"
     ])
+  },
+  {
+    file: "opencode.ts",
+    template: "smithers/agents/opencode.tsx",
+    ref: "OpenCodeAgent",
+    stockSha256: new Set<string>()
+  },
+  {
+    file: "openrouter.ts",
+    template: "smithers/agents/openrouter.tsx",
+    ref: "OpenRouterAgent",
+    stock032Sha256: []
   },
   {
     file: "pi.ts",
@@ -345,7 +362,9 @@ function upgradeStockSmithers032Adapters(
       continue;
     }
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (!(agent.stock032Sha256 as readonly string[]).includes(digest)) continue;
+    if (!("stock032Sha256" in agent)) continue;
+    const stock032Sha256 = agent.stock032Sha256 as readonly string[];
+    if (!stock032Sha256.includes(digest)) continue;
     writeProjectFile(
       projectRoot,
       relativePath,

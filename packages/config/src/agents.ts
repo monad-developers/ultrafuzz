@@ -3,13 +3,23 @@ import { diagnostic, type AgentConfig, type ConfigDiagnostic } from "./types.js"
 
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const PROVIDER_HOME_COMPONENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-export const STOCK_AGENT_IDS = ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"] as const;
+export const STOCK_AGENT_IDS = [
+  "ClaudeAgent",
+  "CodexAgent",
+  "DeepSeekAgent",
+  "KimiAgent",
+  "OpenCodeAgent",
+  "OpenRouterAgent",
+  "PiAgent"
+] as const;
 const BUILT_IN_CREDENTIAL_ENVIRONMENT_VARIABLES: Readonly<Record<(typeof STOCK_AGENT_IDS)[number], string>> = {
   ClaudeAgent: "ANTHROPIC_API_KEY",
   CodexAgent: "OPENAI_API_KEY",
   DeepSeekAgent: "DEEPSEEK_API_KEY",
   KimiAgent: "KIMI_API_KEY",
-  OpenRouterAgent: "OPENROUTER_API_KEY"
+  OpenCodeAgent: "OPENROUTER_API_KEY",
+  OpenRouterAgent: "OPENROUTER_API_KEY",
+  PiAgent: "OPENROUTER_API_KEY"
 };
 
 const agentIdSchema = z.enum(STOCK_AGENT_IDS);
@@ -81,6 +91,17 @@ function validateProviderAgentConfigs(agents: Record<string, AgentConfig>): Conf
         "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED",
         "OpenRouterAgent supports only api-key authentication",
         ["agents", "OpenRouterAgent", "auth"],
+        "validation"
+      )
+    );
+  }
+  for (const agentRef of ["OpenCodeAgent", "PiAgent"] as const) {
+    if (agents[agentRef]?.auth !== "subscription") continue;
+    diagnostics.push(
+      diagnostic(
+        `CONFIG_AGENT_${agentRef === "OpenCodeAgent" ? "OPENCODE" : "PI"}_AUTH_UNSUPPORTED`,
+        `${agentRef} supports only api-key authentication`,
+        ["agents", agentRef, "auth"],
         "validation"
       )
     );

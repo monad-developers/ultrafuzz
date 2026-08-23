@@ -5,19 +5,15 @@ groups:
   setup:
     label: Setup
     color: "#2563eb"
-    defaults:
-      max_attempts: 2
   properties:
     label: Properties
     color: "#a16207"
-    defaults:
-      max_attempts: 2
   goals:
     label: Threat goals
     color: "#be123c"
     defaults:
       loops: 1
-      max_attempts: 2
+      failure_policy: continue
       timeout_seconds: 7200
       model_profiles:
         - default
@@ -26,7 +22,6 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 3
-      max_attempts: 2
       timeout_seconds: 7200
       model_profiles:
         - default
@@ -36,8 +31,6 @@ groups:
   review:
     label: Review
     color: "#0f766e"
-    defaults:
-      max_attempts: 2
 nodes:
   - id: __start__
     kind: meta
@@ -56,10 +49,10 @@ nodes:
       - __start__
     outputs:
       - path: vulnerability-db/catalog.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/vulnerability-database-planner-catalog@1
         primary: true
       - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/reference-manifest@1
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
@@ -109,7 +102,7 @@ nodes:
         contract: ultrafuzz/goal-plan@1
         primary: true
       - path: vulnerability-db-manifest.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/vulnerability-database-snapshot@1
   - id: goal-roaming
     kind: agentic
     prompt: strategies/roaming-goal.md
@@ -119,10 +112,10 @@ nodes:
     loops: 1
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: threat-goals
     kind: agentic
     prompt: strategies/goal-hunter.mdx
@@ -138,10 +131,10 @@ nodes:
       node_id: "dynamic:threat:{{ item.id }}"
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: class-goals
     kind: agentic
     prompt: strategies/goal-hunter.mdx
@@ -157,10 +150,10 @@ nodes:
       node_id: "dynamic:class:{{ item.id }}"
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
       - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+        contract: ultrafuzz/generated-tests@3
   - id: setup-foundry
     kind: agentic
     prompt: setup/prepare-foundry-harness.md
@@ -731,6 +724,9 @@ nodes:
       - order-replacement-collateral
       - state-machine-boundaries
       - lifecycle-view-boundaries
+      - goal-roaming
+      - threat-goals
+      - class-goals
     outputs:
       - path: deduped-findings.json
         contract: ultrafuzz/findings@2

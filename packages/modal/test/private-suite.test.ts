@@ -44,7 +44,12 @@ function privateConfig(excludedNodeIds: string[], includeThreatModelGoalFanout?:
     node_timeout_seconds: 7_200,
     loops: 1,
     models: [MODEL],
-    benchmark_execution: { excluded_node_ids: excludedNodeIds },
+    benchmark_execution: {
+      excluded_node_ids: excludedNodeIds,
+      ...(includeThreatModelGoalFanout === undefined
+        ? {}
+        : { include_threat_model_goal_fanout: includeThreatModelGoalFanout })
+    },
     eval_reporting: { provider: "braintrust" }
   });
   if (!("target" in config)) throw new Error("expected private config");

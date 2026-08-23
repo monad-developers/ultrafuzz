@@ -29,7 +29,6 @@
     "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",

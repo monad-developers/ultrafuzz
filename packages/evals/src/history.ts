@@ -7,13 +7,12 @@ import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@
 import { z } from "zod/v4";
 
 import {
-  BENCHMARK_LANE_NAMES,
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
-  type BenchmarkLaneName,
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
+import { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
 import {
   isEvalPublicBenchmarkWorkflowInput,
   type EvalEfficiencyCompleteness,

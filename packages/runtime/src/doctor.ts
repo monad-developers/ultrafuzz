@@ -30,6 +30,8 @@ const AGENT_EXECUTABLES: Record<string, string> = {
   CodexAgent: "codex",
   DeepSeekAgent: "claude",
   KimiAgent: "kimi",
+  OpenCodeAgent: "opencode",
+  OpenRouterAgent: "codex",
   PiAgent: "pi"
 };
 

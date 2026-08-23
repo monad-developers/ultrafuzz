@@ -927,6 +927,6 @@
     "coverage_gaps"
   ],
   "additionalProperties": false,
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model",
+  "$id": "urn:ultrafuzz:schema:artifacts:threat-model:1",
   "title": "Ultrafuzz threat model"
 }

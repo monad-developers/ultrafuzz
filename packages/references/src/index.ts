@@ -19,6 +19,12 @@ import {
 import { parse, stringify } from "yaml";
 
 import {
+  redactReferenceGitCredential,
+  referenceGitCredential,
+  referenceGitCredentialEnv,
+  type ReferenceGitCredential
+} from "./git-credential.js";
+import {
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
   REFERENCE_CACHE_SCHEMA_VERSION,
   referenceCacheManifestJsonSchema
@@ -29,6 +35,18 @@ import {
   referenceSchemaEntry,
   referenceSchemaRegistry
 } from "./schema-registry.js";
+import {
+  VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH,
+  VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY,
+  VULNERABILITY_DATABASE_REFERENCE_KIND,
+  VULNERABILITY_DATABASE_REQUIRED_PATHS,
+  parseVulnerabilityDatabaseCatalog,
+  parseVulnerabilityDatabaseGitTree,
+  validateVulnerabilityDatabaseDirectory,
+  validateVulnerabilityDatabaseGitTree,
+  vulnerabilityDatabaseReferencePaths,
+  type VulnerabilityDatabaseGitTreeEntry
+} from "./vulnerability-database.js";
 
 export {
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
@@ -39,6 +57,8 @@ export {
   referenceSchemaEntry,
   referenceSchemaRegistry
 };
+export * from "./git-credential.js";
+export * from "./vulnerability-database.js";
 
 export const PROJECT_REFERENCES_FILE = ".ultrafuzz/references.yml";
 export const REFERENCES_VERSION = 1;

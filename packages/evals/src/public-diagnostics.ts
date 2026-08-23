@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod/v4";
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
+import { BENCHMARK_LANE_NAMES } from "./benchmark-lane-names.js";
 import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import { boundedEvalId } from "./utils.js";
 

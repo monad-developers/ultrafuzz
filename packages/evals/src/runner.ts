@@ -552,7 +552,7 @@ function packagedBenchmarkAuditPolicy(
   input: EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput
 ): { auditProfile: "smoke" | "full"; catalogDigest: string; topologyDigest: string } {
   const catalog = loadAuditProfileCatalog();
-  const auditProfileId = input.benchmark_lane;
+  const auditProfileId = input.benchmark_lane === "threat-model" ? "full" : input.benchmark_lane;
   const topologyDigest = packagedTopologyDigest(auditProfile(auditProfileId, catalog), catalog);
   if (topologyDigest === undefined) {
     throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", `${auditProfileId} benchmark packaged topology is missing`);

@@ -4,10 +4,11 @@
   "title": "Ultrafuzz public benchmark lane policy",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "smoke", "full"],
+  "required": ["schema_version", "smoke", "threat-model", "full"],
   "properties": {
     "schema_version": { "const": "ultrafuzz.benchmark.lanes.v2" },
     "smoke": { "$ref": "#/$defs/lane" },
+    "threat-model": { "$ref": "#/$defs/lane" },
     "full": { "$ref": "#/$defs/lane" }
   },
   "$defs": {

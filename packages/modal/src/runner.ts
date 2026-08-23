@@ -2815,7 +2815,12 @@ export async function publicBenchmarkCollectionSecretValues(
       ? [requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider))]
       : await kimiSubscriptionAuthSecretValues(model.model, env);
   return [
-    ...new Set([...retainedSecretValues, ...runnerSecretValues, requiredEnv(env, config.braintrust.judge_api_key_env)])
+    ...new Set([
+      ...retainedSecretValues,
+      ...runnerSecretValues,
+      requiredEnv(env, config.braintrust.judge_api_key_env),
+      ...modalReferenceCredentialRedactionValues(env)
+    ])
   ];
 }
 

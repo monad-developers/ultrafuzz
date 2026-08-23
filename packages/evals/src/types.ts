@@ -58,7 +58,7 @@ export interface EvalPrivateBenchmarkWorkflowInput {
 }
 
 export interface EvalPublicFullBenchmarkWorkflowInput {
-  benchmark_lane: "full";
+  benchmark_lane: "full" | "threat-model";
   target_frameworks: Record<string, string>;
   excluded_strategy_families: string[];
   benchmark_execution: EvalBenchmarkExecutionInput;
@@ -366,7 +366,20 @@ export interface EvalEfficiency {
 
 export type EvalNodeStatusCounts = Record<NodeStatus, number>;
 
-export type EvalExpansionCompleteness = { status: "complete"; reason: null };
+export type EvalExpansionReason =
+  | "workflow-state-unavailable"
+  | "run-graph-unavailable"
+  | "concurrency-unavailable"
+  | "goal-plan-unavailable"
+  | "goal-plan-unreadable"
+  | "usage-ledger-unavailable"
+  | "usage-ledger-node-unmatched"
+  | "usage-incomplete"
+  | "pricing-incomplete"
+  | "goal-lane-nodes-unobserved";
+
+export type EvalExpansionCompleteness =
+  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalExpansionReason };
 
 /** One node the run added after the graph was fixed, with its declared lineage. */
 export interface EvalDynamicNode {

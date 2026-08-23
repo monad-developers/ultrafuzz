@@ -23,24 +23,62 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
-    "run_count": { "$ref": "#/$defs/count" },
-    "accounted_run_count": { "$ref": "#/$defs/count" },
-    "runtime_observed_run_count": { "$ref": "#/$defs/count" },
-    "runtime_seconds": { "type": ["number", "null"], "minimum": 0 },
-    "input_tokens": { "$ref": "#/$defs/count" },
-    "output_tokens": { "$ref": "#/$defs/count" },
-    "cache_read_tokens": { "$ref": "#/$defs/count" },
-    "cache_write_tokens": { "$ref": "#/$defs/count" },
-    "reasoning_tokens": { "$ref": "#/$defs/count" },
-    "total_tokens": { "$ref": "#/$defs/count" },
-    "estimated_spend_usd": { "type": ["number", "null"], "minimum": 0 },
-    "partial_pricing": { "type": "boolean" },
-    "event_count": { "$ref": "#/$defs/count" },
-    "priced_event_count": { "$ref": "#/$defs/count" },
-    "unpriced_event_count": { "$ref": "#/$defs/count" }
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
+    "run_count": {
+      "$ref": "#/$defs/count"
+    },
+    "accounted_run_count": {
+      "$ref": "#/$defs/count"
+    },
+    "runtime_observed_run_count": {
+      "$ref": "#/$defs/count"
+    },
+    "runtime_seconds": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "input_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "output_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "cache_read_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "cache_write_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "reasoning_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "total_tokens": {
+      "$ref": "#/$defs/count"
+    },
+    "estimated_spend_usd": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "partial_pricing": {
+      "type": "boolean"
+    },
+    "event_count": {
+      "$ref": "#/$defs/count"
+    },
+    "priced_event_count": {
+      "$ref": "#/$defs/count"
+    },
+    "unpriced_event_count": {
+      "$ref": "#/$defs/count"
+    }
   },
   "$defs": {
-    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
   }
 }

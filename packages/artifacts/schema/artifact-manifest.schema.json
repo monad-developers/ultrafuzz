@@ -3,7 +3,6 @@
   "$id": "urn:ultrafuzz:schema:artifacts:artifact-manifest:3",
   "title": "Ultrafuzz artifact manifest",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "schema_version",
     "run_id",
@@ -15,6 +14,7 @@
     "prerequisite_manifests",
     "provenance"
   ],
+  "additionalProperties": false,
   "properties": {
     "schema_version": {
       "const": "ultrafuzz.artifact-manifest.v3"
@@ -29,7 +29,7 @@
     },
     "producer_node_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
     },
     "created_at": {
       "type": "string",
@@ -39,8 +39,8 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": ["path", "size_bytes", "sha256", "provenance"],
+        "additionalProperties": false,
         "properties": {
           "path": {
             "$ref": "#/$defs/safePath"
@@ -63,8 +63,8 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": ["path", "contract", "contract_digest", "primary"],
+        "additionalProperties": false,
         "properties": {
           "path": {
             "$ref": "#/$defs/safePath"
@@ -92,6 +92,7 @@
               "ultrafuzz/finding-lifecycle-ledger@1",
               "ultrafuzz/findings@2",
               "ultrafuzz/generated-tests@3",
+              "ultrafuzz/goal-plan@1",
               "ultrafuzz/harness-repairs@1",
               "ultrafuzz/implemented-properties@3",
               "ultrafuzz/invariant-campaign-plan@2",
@@ -109,7 +110,10 @@
               "ultrafuzz/severity-classified-findings@1",
               "ultrafuzz/strategy-detections@1",
               "ultrafuzz/text@1",
+              "ultrafuzz/threat-model@1",
               "ultrafuzz/triaged-findings@1",
+              "ultrafuzz/vulnerability-database-planner-catalog@1",
+              "ultrafuzz/vulnerability-database-snapshot@1",
               "ultrafuzz/workspace-patch@1"
             ]
           },
@@ -152,14 +156,36 @@
             "then": {
               "not": {
                 "anyOf": [
-                  { "properties": { "schema_file": true }, "required": ["schema_file"] },
-                  { "properties": { "schema_id": true }, "required": ["schema_id"] },
-                  { "properties": { "schema_sha256": true }, "required": ["schema_sha256"] },
                   {
-                    "properties": { "schema_bundle_sha256": true },
+                    "properties": {
+                      "schema_file": true
+                    },
+                    "required": ["schema_file"]
+                  },
+                  {
+                    "properties": {
+                      "schema_id": true
+                    },
+                    "required": ["schema_id"]
+                  },
+                  {
+                    "properties": {
+                      "schema_sha256": true
+                    },
+                    "required": ["schema_sha256"]
+                  },
+                  {
+                    "properties": {
+                      "schema_bundle_sha256": true
+                    },
                     "required": ["schema_bundle_sha256"]
                   },
-                  { "properties": { "validator_build": true }, "required": ["validator_build"] }
+                  {
+                    "properties": {
+                      "validator_build": true
+                    },
+                    "required": ["validator_build"]
+                  }
                 ]
               }
             },
@@ -181,8 +207,8 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": ["node_id", "sha256"],
+        "additionalProperties": false,
         "properties": {
           "node_id": {
             "type": "string",
@@ -337,7 +363,50 @@
       "properties": {
         "concrete_node_id": {
           "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+        },
+        "storage_id": {
+          "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "dynamic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "groupNodeId",
+            "sourceNodeId",
+            "sourceAttemptId",
+            "sourceDigest",
+            "expansionKey",
+            "itemDigest",
+            "manifestPath"
+          ],
+          "properties": {
+            "groupNodeId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "sourceNodeId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "sourceAttemptId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            },
+            "sourceDigest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expansionKey": {
+              "$ref": "#/$defs/nonNulString"
+            },
+            "itemDigest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "manifestPath": {
+              "$ref": "#/$defs/safePath"
+            }
+          }
         }
       }
     },

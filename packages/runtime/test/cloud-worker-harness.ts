@@ -72,6 +72,8 @@ export async function renderGeneratedWorkflow(input: {
   forbidDynamicMaterialization?: boolean;
   /** Receives the task-spec inventory after the workflow has applied cloud-worker narrowing. */
   captureTaskSpecs?: HarnessTaskSpecSummary[];
+  /** Simulates previously durable Smithers outputs for dependency-gated controller renders. */
+  allOutputsAvailable?: boolean;
 }): Promise<RenderedTask[]> {
   const source = fs.readFileSync(input.workflowPath, "utf8");
   const runtimeModule = /const runtimeModule = process\.env\.ULTRAFUZZ_RUNTIME_MODULE \?\? "([^"]+)"/u.exec(source);
@@ -84,11 +86,13 @@ export async function renderGeneratedWorkflow(input: {
       module: ts.ModuleKind.ESNext,
       target: ts.ScriptTarget.ES2022,
       jsx: ts.JsxEmit.ReactJSX,
-      jsxImportSource: "smithers-orchestrator",
+      jsxImportSource: "smthrs",
       verbatimModuleSyntax: true
     }
   });
   const productSource = transpiled.outputText
+    .replaceAll('"smthrs/jsx-runtime"', JSON.stringify(stubs.jsxRuntime))
+    .replaceAll('"smthrs"', JSON.stringify(stubs.orchestrator))
     .replaceAll('"smithers-orchestrator/jsx-runtime"', JSON.stringify(stubs.jsxRuntime))
     .replaceAll('"smithers-orchestrator"', JSON.stringify(stubs.orchestrator))
     .replaceAll('"react"', JSON.stringify(stubs.react))
@@ -133,7 +137,18 @@ export async function renderGeneratedWorkflow(input: {
       default: (ctx: unknown) => RenderedElement;
       __ultrafuzzHarnessTaskSpecs: () => HarnessTaskSpecSummary[];
     };
-    const rendered = module.default({ input: input.workflowInput, outputMaybe: () => undefined });
+    const rendered = module.default({
+      input: input.workflowInput,
+      outputMaybe: () =>
+        input.allOutputsAvailable === true
+          ? {
+              verification_marker_sha256: "a".repeat(64),
+              verification_marker_size_bytes: 1,
+              artifacts: [],
+              primary_artifact: "fixture"
+            }
+          : undefined
+    });
     input.captureTaskSpecs?.push(...module.__ultrafuzzHarnessTaskSpecs());
     return collectTasks(rendered);
   } finally {

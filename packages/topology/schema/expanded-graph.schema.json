@@ -3,7 +3,12 @@
   "$id": "urn:ultrafuzz:schema:topology:expanded-graph:4",
   "title": "Ultrafuzz expanded graph",
   "type": "object",
-  "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
+  "required": [
+    "graphVersion",
+    "topologyVersion",
+    "groups",
+    "nodes"
+  ],
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
@@ -60,7 +65,10 @@
                 }
               },
               "failure_policy": {
-                "enum": ["halt", "continue"]
+                "enum": [
+                  "halt",
+                  "continue"
+                ]
               }
             }
           }
@@ -118,10 +126,17 @@
             "minLength": 1
           },
           "kind": {
-            "enum": ["agentic", "meta", "reference"]
+            "enum": [
+              "agentic",
+              "meta",
+              "reference"
+            ]
           },
           "role": {
-            "enum": ["start", "finish"]
+            "enum": [
+              "start",
+              "finish"
+            ]
           },
           "promptPath": {
             "type": "string",
@@ -133,11 +148,20 @@
           },
           "referenceRevision": {
             "type": "object",
-            "required": ["kind", "provider", "repo", "commit", "paths"],
+            "required": [
+              "kind",
+              "provider",
+              "repo",
+              "commit",
+              "paths"
+            ],
             "additionalProperties": false,
             "properties": {
               "kind": {
-                "enum": ["document", "vulnerability-database"]
+                "enum": [
+                  "document",
+                  "vulnerability-database"
+                ]
               },
               "provider": {
                 "const": "github"
@@ -189,7 +213,9 @@
           },
           "retryPolicy": {
             "type": "object",
-            "required": ["maxAttempts"],
+            "required": [
+              "maxAttempts"
+            ],
             "additionalProperties": false,
             "properties": {
               "maxAttempts": {
@@ -201,7 +227,12 @@
           },
           "loop": {
             "type": "object",
-            "required": ["index", "count", "mode", "attemptIndex"],
+            "required": [
+              "index",
+              "count",
+              "mode",
+              "attemptIndex"
+            ],
             "additionalProperties": false,
             "properties": {
               "index": {
@@ -213,7 +244,10 @@
                 "minimum": 1
               },
               "mode": {
-                "enum": ["parallel", "series"]
+                "enum": [
+                  "parallel",
+                  "series"
+                ]
               },
               "attemptIndex": {
                 "type": "integer",
@@ -225,7 +259,12 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["path", "contract", "primary", "contractDigest"],
+              "required": [
+                "path",
+                "contract",
+                "primary",
+                "contractDigest"
+              ],
               "additionalProperties": false,
               "properties": {
                 "path": {
@@ -255,6 +294,7 @@
                     "ultrafuzz/finding-lifecycle-ledger@1",
                     "ultrafuzz/findings@2",
                     "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/goal-plan@1",
                     "ultrafuzz/harness-repairs@1",
                     "ultrafuzz/implemented-properties@3",
                     "ultrafuzz/invariant-campaign-plan@2",
@@ -272,7 +312,10 @@
                     "ultrafuzz/severity-classified-findings@1",
                     "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/threat-model@1",
                     "ultrafuzz/triaged-findings@1",
+                    "ultrafuzz/vulnerability-database-planner-catalog@1",
+                    "ultrafuzz/vulnerability-database-snapshot@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },
@@ -309,10 +352,15 @@
                   "if": {
                     "properties": {
                       "contract": {
-                        "enum": ["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]
+                        "enum": [
+                          "ultrafuzz/nonempty-markdown@1",
+                          "ultrafuzz/text@1"
+                        ]
                       }
                     },
-                    "required": ["contract"]
+                    "required": [
+                      "contract"
+                    ]
                   },
                   "then": {
                     "not": {
@@ -321,37 +369,53 @@
                           "properties": {
                             "schemaFile": true
                           },
-                          "required": ["schemaFile"]
+                          "required": [
+                            "schemaFile"
+                          ]
                         },
                         {
                           "properties": {
                             "schemaId": true
                           },
-                          "required": ["schemaId"]
+                          "required": [
+                            "schemaId"
+                          ]
                         },
                         {
                           "properties": {
                             "schemaSha256": true
                           },
-                          "required": ["schemaSha256"]
+                          "required": [
+                            "schemaSha256"
+                          ]
                         },
                         {
                           "properties": {
                             "schemaBundleSha256": true
                           },
-                          "required": ["schemaBundleSha256"]
+                          "required": [
+                            "schemaBundleSha256"
+                          ]
                         },
                         {
                           "properties": {
                             "validatorBuild": true
                           },
-                          "required": ["validatorBuild"]
+                          "required": [
+                            "validatorBuild"
+                          ]
                         }
                       ]
                     }
                   },
                   "else": {
-                    "required": ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]
+                    "required": [
+                      "schemaFile",
+                      "schemaId",
+                      "schemaSha256",
+                      "schemaBundleSha256",
+                      "validatorBuild"
+                    ]
                   }
                 }
               ]
@@ -361,7 +425,13 @@
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["modelProfileId", "agentRef", "modelIndex", "loopIndex", "attemptIndex"],
+              "required": [
+                "modelProfileId",
+                "agentRef",
+                "modelIndex",
+                "loopIndex",
+                "attemptIndex"
+              ],
               "additionalProperties": false,
               "properties": {
                 "modelProfileId": {
@@ -401,12 +471,19 @@
           },
           "dynamic": {
             "type": "object",
-            "required": ["from", "key", "nodeIdTemplate"],
+            "required": [
+              "from",
+              "key",
+              "nodeIdTemplate"
+            ],
             "additionalProperties": false,
             "properties": {
               "from": {
                 "type": "object",
-                "required": ["node", "path"],
+                "required": [
+                  "node",
+                  "path"
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "node": {

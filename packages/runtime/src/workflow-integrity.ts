@@ -312,17 +312,25 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
   const seal = parseWorkflowControlIntegritySeal(integrityContents);
   if (seal.run_id !== layout.runId) throw new Error(`workflow control seal run ID does not match ${layout.runId}`);
 
-  const graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
-  const contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
-  for (const [key, bytes] of [
+  let graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
+  let contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
+  const runtimeControlsChanged = ([
     ["graph", graphContents],
     ["tasks", contents]
-  ] as const) {
+  ] as const).some(([key, bytes]) => {
     const observed = digestBytes(bytes);
     const expected = seal.files[key];
-    if (observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes) {
-      throw new Error(`sealed workflow control file changed: ${controlFileLabel(key)}`);
+    return observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes;
+  });
+  if (runtimeControlsChanged) {
+    const currentDocument = parseSmithersTaskManifestBytes(contents);
+    const projectRoot = currentDocument.dynamic_groups?.[0]?.promptContext.projectRoot;
+    if (projectRoot === undefined) {
+      throw new Error("sealed workflow graph or task plan changed without a compiled dynamic group");
     }
+    const verified = verifyWorkflowControlSnapshot(projectRoot, layout);
+    graphContents = verified.contents.graph;
+    contents = verified.contents.tasks;
   }
 
   const graph = assertPlannedGraph(parseStrictJsonBytes(graphContents));
@@ -346,11 +354,16 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
     ]),
     "workflow task node"
   );
-  if (
-    JSON.stringify(graphNodeIds) !== JSON.stringify(seal.bindings.expected_state_node_ids) ||
-    JSON.stringify(taskAttemptIds) !== JSON.stringify(seal.bindings.expected_task_attempt_ids) ||
-    JSON.stringify(taskNodeIds) !== JSON.stringify(seal.bindings.expected_task_node_ids)
-  ) {
+  const exactCompleteness =
+    JSON.stringify(graphNodeIds) === JSON.stringify(seal.bindings.expected_state_node_ids) &&
+    JSON.stringify(taskAttemptIds) === JSON.stringify(seal.bindings.expected_task_attempt_ids) &&
+    JSON.stringify(taskNodeIds) === JSON.stringify(seal.bindings.expected_task_node_ids);
+  const dynamicCompleteness =
+    runtimeControlsChanged &&
+    seal.bindings.expected_state_node_ids.every((nodeId) => graphNodeIds.includes(nodeId)) &&
+    seal.bindings.expected_task_attempt_ids.every((attemptId) => taskAttemptIds.includes(attemptId)) &&
+    seal.bindings.expected_task_node_ids.every((nodeId) => taskNodeIds.includes(nodeId));
+  if (!exactCompleteness && !dynamicCompleteness) {
     throw new Error("workflow task manifest no longer matches the sealed completeness binding");
   }
   const state = parseRecordJson(readBoundedRegularFile(layout.root, layout.statePath, "run state"), "run state");
@@ -425,22 +438,15 @@ export function verifyWorkflowControlSnapshot(
       );
     }
   }
-  const executionFiles = seal.execution_files.map((entry) => {
-    const bytes = readBoundedRegularFileExact(
-      hasPublishedSnapshot
-        ? snapshotPath(publishedSnapshotRoot, entry.snapshot_path, "published workflow execution file")
-        : entry.source_path,
-      `workflow execution file ${entry.snapshot_path}`
-    );
-    const observed = digestBytes(bytes);
-    if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
-      // Never tolerated, even for an observer. The snapshot env binds SMITHERS_BIN and the sealed
-      // artifacts/runtime module URLs to paths INSIDE this snapshot, so `ultrafuzz status` executes
-      // these files to obtain a status summary. Downgrading this to a warning would mean running
-      // tampered code in order to report that the code was tampered with.
-      throw new Error(
-        `sealed workflow execution file changed: ${entry.snapshot_path} (sealed ${entry.sha256} ${entry.size_bytes} bytes, observed ${observed.sha256} ${observed.size_bytes} bytes)`
-      );
+  const currentGraph = readBoundedRegularFile(layout.root, paths.graphPath, "runtime graph");
+  const currentTasks = readBoundedRegularFile(layout.root, paths.tasksPath, "runtime task plan");
+  const runtimeControlsChanged =
+    digestBytes(currentGraph).sha256 !== seal.files.graph.sha256 ||
+    digestBytes(currentTasks).sha256 !== seal.files.tasks.sha256;
+  let runtimeStateNodeIds: readonly string[] | undefined;
+  if (runtimeControlsChanged) {
+    if (baseGraph === undefined || baseTasks === undefined) {
+      throw new Error("sealed workflow graph or task plan changed");
     }
     const taskDocument = parseRecordJson(baseTasks.contents, "sealed base workflow task manifest");
     if (!Array.isArray(taskDocument.tasks) || !Array.isArray(taskDocument.dynamic_groups)) {

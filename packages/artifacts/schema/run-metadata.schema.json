@@ -191,13 +191,27 @@
         "acknowledgement_status"
       ],
       "properties": {
-        "schema_version": { "const": "ultrafuzz.data-governance-provenance.v1" },
-        "path": { "const": "data-governance.json" },
-        "sha256": { "$ref": "#/$defs/sha256" },
-        "policy_digest": { "$ref": "#/$defs/sha256" },
-        "input_digest": { "$ref": "#/$defs/sha256" },
-        "sensitivity": { "enum": ["public", "private"] },
-        "acknowledgement_status": { "enum": ["approved", "not-required", "pending"] }
+        "schema_version": {
+          "const": "ultrafuzz.data-governance-provenance.v1"
+        },
+        "path": {
+          "const": "data-governance.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sensitivity": {
+          "enum": ["public", "private"]
+        },
+        "acknowledgement_status": {
+          "enum": ["approved", "not-required", "pending"]
+        }
       }
     },
     "safeId": {

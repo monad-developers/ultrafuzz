@@ -6,24 +6,40 @@
   "required": ["schema_version", "omissions"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
     "omissions": {
       "type": "array",
       "maxItems": 5,
       "items": {
         "oneOf": [
-          { "$ref": "#/$defs/terminal_status" },
-          { "$ref": "#/$defs/evaluation_metrics" },
-          { "$ref": "#/$defs/accounting_summary" },
-          { "$ref": "#/$defs/attempt_history" },
-          { "$ref": "#/$defs/recovery_summary" }
+          {
+            "$ref": "#/$defs/terminal_status"
+          },
+          {
+            "$ref": "#/$defs/evaluation_metrics"
+          },
+          {
+            "$ref": "#/$defs/accounting_summary"
+          },
+          {
+            "$ref": "#/$defs/attempt_history"
+          },
+          {
+            "$ref": "#/$defs/recovery_summary"
+          }
         ]
       },
       "allOf": [
         {
           "contains": {
             "type": "object",
-            "properties": { "kind": { "const": "terminal-status" } },
+            "properties": {
+              "kind": {
+                "const": "terminal-status"
+              }
+            },
             "required": ["kind"]
           },
           "minContains": 0,
@@ -32,7 +48,11 @@
         {
           "contains": {
             "type": "object",
-            "properties": { "kind": { "const": "evaluation-metrics" } },
+            "properties": {
+              "kind": {
+                "const": "evaluation-metrics"
+              }
+            },
             "required": ["kind"]
           },
           "minContains": 0,
@@ -41,7 +61,11 @@
         {
           "contains": {
             "type": "object",
-            "properties": { "kind": { "const": "accounting-summary" } },
+            "properties": {
+              "kind": {
+                "const": "accounting-summary"
+              }
+            },
             "required": ["kind"]
           },
           "minContains": 0,
@@ -50,7 +74,11 @@
         {
           "contains": {
             "type": "object",
-            "properties": { "kind": { "const": "attempt-history" } },
+            "properties": {
+              "kind": {
+                "const": "attempt-history"
+              }
+            },
             "required": ["kind"]
           },
           "minContains": 0,
@@ -59,7 +87,11 @@
         {
           "contains": {
             "type": "object",
-            "properties": { "kind": { "const": "recovery-summary" } },
+            "properties": {
+              "kind": {
+                "const": "recovery-summary"
+              }
+            },
             "required": ["kind"]
           },
           "minContains": 0,
@@ -74,9 +106,15 @@
       "required": ["kind", "path", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "const": "terminal-status" },
-        "path": { "const": "data/terminal-status.json" },
-        "reason": { "$ref": "#/$defs/reason" }
+        "kind": {
+          "const": "terminal-status"
+        },
+        "path": {
+          "const": "data/terminal-status.json"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
       }
     },
     "evaluation_metrics": {
@@ -84,9 +122,15 @@
       "required": ["kind", "path", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "const": "evaluation-metrics" },
-        "path": { "const": "data/evaluation-metrics.json" },
-        "reason": { "$ref": "#/$defs/reason" }
+        "kind": {
+          "const": "evaluation-metrics"
+        },
+        "path": {
+          "const": "data/evaluation-metrics.json"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
       }
     },
     "accounting_summary": {
@@ -94,9 +138,15 @@
       "required": ["kind", "path", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "const": "accounting-summary" },
-        "path": { "const": "data/accounting-summary.json" },
-        "reason": { "$ref": "#/$defs/reason" }
+        "kind": {
+          "const": "accounting-summary"
+        },
+        "path": {
+          "const": "data/accounting-summary.json"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
       }
     },
     "attempt_history": {
@@ -104,9 +154,15 @@
       "required": ["kind", "path", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "const": "attempt-history" },
-        "path": { "const": "data/attempt-history.json" },
-        "reason": { "$ref": "#/$defs/reason" }
+        "kind": {
+          "const": "attempt-history"
+        },
+        "path": {
+          "const": "data/attempt-history.json"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
       }
     },
     "recovery_summary": {
@@ -114,11 +170,19 @@
       "required": ["kind", "path", "reason"],
       "additionalProperties": false,
       "properties": {
-        "kind": { "const": "recovery-summary" },
-        "path": { "const": "data/recovery-summary.json" },
-        "reason": { "$ref": "#/$defs/reason" }
+        "kind": {
+          "const": "recovery-summary"
+        },
+        "path": {
+          "const": "data/recovery-summary.json"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
       }
     },
-    "reason": { "enum": ["source-missing", "source-invalid", "not-terminal", "data-unavailable"] }
+    "reason": {
+      "enum": ["source-missing", "source-invalid", "not-terminal", "data-unavailable"]
+    }
   }
 }

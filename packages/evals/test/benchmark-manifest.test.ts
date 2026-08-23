@@ -17,6 +17,8 @@ import {
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
   BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+  DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
+  THREAT_MODEL_GOAL_FANOUT_NODE_IDS,
   evmbenchCohortZodSchema,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -569,7 +571,7 @@ describe("public benchmark manifests", () => {
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "ultrafuzz-bench",
       lane: "smoke",
-      cohort: loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json")),
+      cohort: loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH),
       lanes: loadBenchmarkLanesManifest(LANES_PATH)
     });
     const transform = benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input });

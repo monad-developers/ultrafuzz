@@ -42,6 +42,7 @@ import {
   PublicWorkerCommandInterruptedError,
   publicBenchmarkMaxParallelEvalRows,
   publicBenchmarkMaxParallelWorkflowNodes,
+  publicBenchmarkWorkerSecretValues,
   publicBenchmarkWorkRoot,
   publicBundleSources,
   optionalRowArtifactSources,
@@ -432,11 +433,11 @@ it("treats the private reference token as an exact worker-side forbidden secret"
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v1",
+    schema_version: "ultrafuzz.modal.benchmark.v2",
     run_id: "public-reference-secret",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    braintrust: publicBraintrustConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -446,6 +447,7 @@ it("treats the private reference token as an exact worker-side forbidden secret"
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
+      targets: publicTargets(),
       max_runtime_seconds: 3_600
     }
   } satisfies PublicModalBenchmarkConfig;

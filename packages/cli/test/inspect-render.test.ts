@@ -16,15 +16,13 @@ function status(graph: unknown): RunStatusValue {
       total: 1,
       executed: 1,
       reused: 0,
-      outcomes: { succeeded: 0, failed: 0, "timed-out": 0, canceled: 0, skipped: 0, reused: 0 },
+      outcomes: { succeeded: 0, failed: 0, "timed-out": 0, canceled: 0, reused: 0 },
       strategy_attempts: 1,
-      executor_retries: 1,
-      checkpoint_generations: 1,
-      workflow_executions: 1,
-      controller_invocations: 1
+      workflow_runs: 1,
+      control_generations: 1
     },
     state: {
-      schema_version: "ultrafuzz.state.v1",
+      schema_version: "ultrafuzz.run-state.v5",
       run_id: "dynamic-inspect",
       status: "running",
       graph_fingerprint: "graph",

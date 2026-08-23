@@ -85,8 +85,8 @@ jobs:
         include:
           - lane: package-gates
             description: Package, dependency, and policy gates
-            gates: dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal
-            timeout_minutes: 30
+            gates: dependency-advisories,ci-scripts,docs,config,audit-profile-package,packed-install,security,references,topology,prompts,artifacts,dashboard,evals,evmbench,modal
+            timeout_minutes: 45
             build_modal_dependencies: true
           - lane: runtime-supporting
             description: Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts

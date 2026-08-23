@@ -81,13 +81,13 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
           },
           "threat_ids": {
+            "minItems": 1,
+            "maxItems": 1,
             "type": "array",
-            "prefixItems": [
-              {
-                "type": "string",
-                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
-              }
-            ]
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+            }
           },
           "class_ids": {
             "type": "array",
@@ -208,7 +208,8 @@
                 "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "pattern": "^vulnerability-db\\/selected\\/(?:(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}\\/)*[A-Za-z0-9@+_-][A-Za-z0-9._@+-]{0,127}\\.(?:md|yml)$"
               },
               "sha256": {
                 "type": "string",
@@ -367,7 +368,8 @@
             "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
           },
           "path": {
-            "type": "string"
+            "type": "string",
+            "pattern": "^vulnerability-db\\/selected\\/(?:(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}\\/)*[A-Za-z0-9@+_-][A-Za-z0-9._@+-]{0,127}\\.(?:md|yml)$"
           },
           "sha256": {
             "type": "string",
@@ -510,6 +512,6 @@
     "goal_lanes"
   ],
   "additionalProperties": false,
-  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan",
+  "$id": "urn:ultrafuzz:schema:artifacts:goal-plan:1",
   "title": "Ultrafuzz goal plan"
 }

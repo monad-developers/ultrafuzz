@@ -44,7 +44,7 @@
         ],
         "properties": {
           "id": {
-            "$ref": "#/$defs/safeId"
+            "$ref": "#/$defs/nodeReference"
           },
           "logical_id": {
             "$ref": "#/$defs/safeId"
@@ -63,7 +63,7 @@
             "type": "array",
             "uniqueItems": true,
             "items": {
-              "$ref": "#/$defs/safeId"
+              "$ref": "#/$defs/nodeReference"
             }
           },
           "artifact_dir": {
@@ -108,6 +108,7 @@
                     "ultrafuzz/finding-lifecycle-ledger@1",
                     "ultrafuzz/findings@2",
                     "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/goal-plan@1",
                     "ultrafuzz/harness-repairs@1",
                     "ultrafuzz/implemented-properties@3",
                     "ultrafuzz/invariant-campaign-plan@2",
@@ -125,7 +126,10 @@
                     "ultrafuzz/severity-classified-findings@1",
                     "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/threat-model@1",
                     "ultrafuzz/triaged-findings@1",
+                    "ultrafuzz/vulnerability-database-planner-catalog@1",
+                    "ultrafuzz/vulnerability-database-snapshot@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },
@@ -224,6 +228,9 @@
             "additionalProperties": false,
             "required": ["provider", "repo", "commit", "paths"],
             "properties": {
+              "kind": {
+                "enum": ["document", "vulnerability-database"]
+              },
               "provider": {
                 "const": "github"
               },
@@ -242,6 +249,108 @@
                 "items": {
                   "$ref": "#/$defs/safePath"
                 }
+              }
+            }
+          },
+          "artifact_dirs": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          },
+          "dynamic": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "key", "node_id"],
+            "properties": {
+              "from": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["node", "path"],
+                "properties": {
+                  "node": {
+                    "$ref": "#/$defs/safeId"
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "node_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "template_digest": {
+                "$ref": "#/$defs/sha256"
+              },
+              "status": {
+                "enum": ["pending", "expanded"]
+              },
+              "generated_node_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "$ref": "#/$defs/nodeReference"
+                }
+              }
+            }
+          },
+          "dynamic_dependencies": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/safeId"
+            }
+          },
+          "declared_depends_on": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/safeId"
+            }
+          },
+          "dynamic_generated": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "group_node_id",
+              "source_node_id",
+              "source_attempt_id",
+              "expansion_key",
+              "item_sha256",
+              "storage_id",
+              "manifest_path"
+            ],
+            "properties": {
+              "group_node_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "source_node_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "source_attempt_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "expansion_key": {
+                "type": "string",
+                "minLength": 1
+              },
+              "item_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "storage_id": {
+                "$ref": "#/$defs/safeId"
+              },
+              "manifest_path": {
+                "$ref": "#/$defs/safePath"
               }
             }
           },
@@ -388,6 +497,10 @@
     "safeId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "nodeReference": {
+      "type": "string",
+      "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
     },
     "workflowTaskId": {
       "type": "string",

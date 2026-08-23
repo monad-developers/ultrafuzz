@@ -20,6 +20,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/finding-lifecycle-ledger@1",
   "ultrafuzz/findings@2",
   "ultrafuzz/generated-tests@3",
+  "ultrafuzz/goal-plan@1",
   "ultrafuzz/harness-repairs@1",
   "ultrafuzz/implemented-properties@3",
   "ultrafuzz/invariant-campaign-plan@2",
@@ -37,7 +38,10 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/severity-classified-findings@1",
   "ultrafuzz/strategy-detections@1",
   "ultrafuzz/text@1",
+  "ultrafuzz/threat-model@1",
   "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/vulnerability-database-planner-catalog@1",
+  "ultrafuzz/vulnerability-database-snapshot@1",
   "ultrafuzz/workspace-patch@1"
 ] as const;
 

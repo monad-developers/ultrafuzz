@@ -142,7 +142,12 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     const dependencies = graphNode?.depends_on ?? [];
     if (
       dependencies.some(
-        (dependency) => !dependencySatisfied(state.nodes[dependency], graphById.get(dependency), input.graph.groups)
+        (dependency) =>
+          !dependencySatisfied(
+            state.nodes[stateIdByGraphNodeId.get(dependency) ?? dependency],
+            graphById.get(dependency),
+            input.graph.groups
+          )
       )
     ) {
       provisional.set(nodeId, waitState("dependency", "dependency-complete"));

@@ -33,6 +33,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "ancestor_contract_artifact_authority",
   "ancestor_artifact_path_authority",
   "run_metadata_path",
+  "goal_search_coverage_path",
   "output_findings_path",
   "output_patch_path",
   "output_stage_findings_path",
@@ -50,6 +51,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
+  "vulnerability_database_path",
+  "artifact_schema_dir",
   "finding_reachability_vocabulary",
   "finding_note_key_vocabulary",
   "coverage_evidence_markdown_projection"
@@ -410,19 +413,18 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       if (value === undefined) {
         throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
       }
+      if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
+        const contractDescription =
+          occurrence.name === "output_findings_path"
+            ? "findings@2"
+            : "findings, triaged-findings, or severity-classified-findings";
+        throw new PromptError(
+          "invalid-artifact-reference",
+          `${occurrence.name} requires exactly one declared ${contractDescription} output`
+        );
+      }
       rendered += value;
     }
-    if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
-      const contractDescription =
-        occurrence.name === "output_findings_path"
-          ? "findings@2"
-          : "findings, triaged-findings, or severity-classified-findings";
-      throw new PromptError(
-        "invalid-artifact-reference",
-        `${occurrence.name} requires exactly one declared ${contractDescription} output`
-      );
-    }
-    rendered += value;
     consumed = occurrence.end;
   }
   rendered += unescapePromptTemplateLiterals(body.slice(consumed));
@@ -455,7 +457,10 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   // dependency handoff, but must not be presented as files for the agent to
   // author (an agent can only see a partial pre-capture patch).
   const outputs = artifactOutputsFor(current).filter(
-    (output) => output.path !== "workspace.patch" && output.path !== "workspace-patch.json"
+    (output) =>
+      output.path !== "workspace.patch" &&
+      output.path !== "workspace-patch.json" &&
+      output.path !== "vulnerability-db-manifest.json"
   );
   if (outputs.length === 0) {
     return rendered;
@@ -1146,6 +1151,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
+    goal_search_coverage_path: path.join(path.dirname(input.run.metadataPath), "goal-search-coverage.json"),
     output_findings_path: (() => {
       const relativePath = findingsOutputRelativePath(input);
       return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
@@ -1169,6 +1175,8 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
+    vulnerability_database_path: input.resolvedConfig?.vulnerabilityDatabasePath ?? "unavailable",
+    artifact_schema_dir: input.resolvedConfig?.artifactSchemaDir ?? "unavailable",
     finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
     finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
     coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
@@ -1220,6 +1228,60 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
       throw new PromptError("invalid-render-input", `invalid prompt render variable value for ${key}`);
     }
   }
+}
+
+function validateDynamicVariables(variables: PromptRenderInput["dynamicVariables"]): void {
+  if (!variables) return;
+  for (const [key, value] of Object.entries(variables)) {
+    if (!isDynamicItemTemplateVariable(key)) {
+      throw new PromptError("missing-template-variable", `invalid dynamic item template variable: ${key}`);
+    }
+    if (isSupportedTemplateVariable(key)) {
+      throw new PromptError("invalid-render-input", `dynamic item variable cannot override built-in variable: ${key}`);
+    }
+    if (
+      !(
+        typeof value === "string" ||
+        typeof value === "boolean" ||
+        (typeof value === "number" && Number.isFinite(value))
+      )
+    ) {
+      throw new PromptError("invalid-render-input", `invalid dynamic item variable value for ${key}`);
+    }
+  }
+}
+
+function resolveDynamicVariable(
+  name: string,
+  variables: NonNullable<PromptRenderInput["dynamicVariables"]>,
+  stack: string[] = []
+): { value: string; variablesUsed: string[] } {
+  if (stack.includes(name) || stack.length >= 16) {
+    throw new PromptError("invalid-render-input", `cyclic or over-deep dynamic item template variable: ${name}`);
+  }
+  const candidate = variables[name];
+  if (candidate === undefined) {
+    throw new PromptError("missing-template-variable", `missing dynamic item template variable: ${name}`);
+  }
+  const value = String(candidate);
+  const variablesUsed = [name];
+  let rendered = "";
+  let consumed = 0;
+  for (const occurrence of findTemplateOccurrences(value)) {
+    if (!isDynamicItemTemplateVariable(occurrence.name)) {
+      throw new PromptError(
+        "missing-template-variable",
+        `dynamic item value ${name} references non-item variable: ${occurrence.name}`
+      );
+    }
+    const nested = resolveDynamicVariable(occurrence.name, variables, [...stack, name]);
+    rendered += value.slice(consumed, occurrence.start);
+    rendered += nested.value;
+    variablesUsed.push(...nested.variablesUsed);
+    consumed = occurrence.end;
+  }
+  rendered += value.slice(consumed);
+  return { value: rendered, variablesUsed };
 }
 
 function isTopologyDerivedFindingsVariable(value: string): boolean {

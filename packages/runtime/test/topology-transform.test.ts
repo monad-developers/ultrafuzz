@@ -13,8 +13,12 @@ import {
   type ProjectTopology
 } from "@ultrafuzz/topology";
 
-import { promptTextsForCatalog, toPlannedGraph, transformPromptCatalogForRun } from "../src/plan-run.js";
-import { transformTopologyForRun } from "../src/topology-transform.js";
+import { toPlannedGraph } from "../src/plan-run.js";
+import {
+  promptTextsForCatalog,
+  transformPromptCatalogForRun,
+  transformTopologyForRun
+} from "../src/topology-transform.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 

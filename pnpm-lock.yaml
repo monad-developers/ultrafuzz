@@ -55,9 +55,6 @@ importers:
 
   packages/artifacts:
     dependencies:
-      '@ultrafuzz/prompts':
-        specifier: workspace:*
-        version: link:../prompts
       '@ultrafuzz/security':
         specifier: workspace:*
         version: link:../security

@@ -23,7 +23,7 @@
     "schema_version": { "const": "ultrafuzz.modal.public-eval-diagnostics.v2" },
     "stage": { "const": "post-eval-pre-score" },
     "benchmark": { "enum": ["evmbench", "ultrafuzz-bench"] },
-    "lane": { "enum": ["smoke", "full"] },
+    "lane": { "enum": ["smoke", "threat-model", "full"] },
     "model_slug": { "$ref": "#/$defs/safeId" },
     "model": { "type": "string", "minLength": 1, "maxLength": 256 },
     "reasoning": { "type": "string", "minLength": 1, "maxLength": 64 },

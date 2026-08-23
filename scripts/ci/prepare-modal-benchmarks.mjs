@@ -4,7 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseStrictJsonBytes } from "../../packages/artifacts/dist/index.js";
-import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
+import {
+  BENCHMARK_LANE_COHORTS,
+  benchmarkLaneSelectedTargetIds,
+  loadBenchmarkCohortManifest,
+  loadBenchmarkLanesManifest
+} from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { serializeModalDocument } from "../../packages/modal/dist/modal-documents.js";
@@ -203,8 +208,10 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
-  const expectedProviders =
-    benchmarkMode === "smoke" && configured !== undefined
+  const singleRunnerLane = benchmarkMode !== "full";
+  const expectedProviders = !singleRunnerLane
+    ? ["openai", "anthropic", "kimi", "deepseek"]
+    : configured !== undefined
       ? validated.length === 1
         ? [validated[0].provider]
         : []

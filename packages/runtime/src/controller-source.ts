@@ -13,9 +13,8 @@ const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_DECLARATION = Buffer.from(
 );
 const UNTRUSTED_SOURCE =
   "controller adapter source must exactly match the packaged stock closure; rerun ultrafuzz init --force";
-const CONTROLLER_NAMES = "claude codex deepseek environment index kimi openrouter provider-home strict-json toml".split(
-  " "
-);
+const CONTROLLER_NAMES =
+  "claude codex deepseek environment index kimi opencode openrouter pi provider-home strict-json toml".split(" ");
 export const STOCK_CONTROLLER_SOURCE_TEMPLATES: Readonly<Record<string, string>> = Object.freeze(
   Object.fromEntries(CONTROLLER_NAMES.map((name) => [`${name}.ts`, `smithers/agents/${name}.tsx`]))
 );

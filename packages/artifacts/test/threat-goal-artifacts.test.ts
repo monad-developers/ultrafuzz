@@ -20,9 +20,10 @@ import {
   verifyThreatModelEvidenceFiles,
   verifyGoalPlanSelectedRecordSnapshotBytes,
   verifyGoalPlanSelectedRecordSnapshots,
-  verifyGoalPlanThreatModelBytes
+  verifyGoalPlanThreatModelBytes,
+  isNamespacedDynamicReplacementKey,
+  promptTemplateOccurrences
 } from "../src/index.js";
-import { isNamespacedDynamicReplacementKey, promptTemplateOccurrences } from "@ultrafuzz/prompts";
 
 const digest = "a".repeat(64);
 
@@ -647,14 +648,14 @@ test("goal-plan dynamic provenance IDs retain valid dotted threat and class segm
   assert.equal(result.value?.class_goals[0]?.node_id, "dynamic:class:oracle.v2:stale-price");
   assert.equal(
     validateArtifactContract(
-      "ultrafuzz/findings@1",
+      "ultrafuzz/findings@2",
       JSON.stringify([
         {
-          schema_version: "1.0",
+          schema_version: "ultrafuzz.finding.v2",
           id: "oracle-v2-finding",
           title: "Stale oracle price",
           status: "candidate",
-          severity_guess: "high",
+          severity_guess: "High",
           confidence: "high",
           summary: "The v2 oracle can retain a stale observation.",
           producer_node_id: "dynamic:threat:oracle:price.v2",

@@ -8,6 +8,7 @@ import {
   assertPathInside,
   assertRegularFileInside,
   safeResolveInside,
+  PLANNED_GRAPH_SCHEMA_VERSION,
   sha256Bytes,
   validateNodeReference,
   validateSafeId,
@@ -259,6 +260,7 @@ function instantiateDynamicTasks(input: {
       ...structuredClone(template),
       attemptId,
       concreteNodeId: input.item.node_id,
+      preparationSmithersNodeId: `prepare:${attemptId}`,
       smithersNodeId: smithersNodeIdForAttempt(attemptId),
       verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(attemptId),
       workspacePath,
@@ -297,6 +299,13 @@ function instantiateDynamicGraphNode(input: {
       itemTasks.length === 0
         ? [`artifacts/${input.item.storage_id}`]
         : itemTasks.map((task) => `artifacts/${task.attemptId}`),
+    model_fanout:
+      itemTasks.length === 0
+        ? structuredClone(input.template.model_fanout)
+        : itemTasks.map((task, index) => ({
+            ...structuredClone(input.template.model_fanout[index]!),
+            attempt_id: task.attemptId
+          })),
     dynamic: undefined,
     dynamic_dependencies: undefined,
     declared_depends_on: undefined,
@@ -309,10 +318,14 @@ function instantiateDynamicGraphNode(input: {
       storage_id: input.item.storage_id,
       manifest_path: `dynamic-expansions/${input.group.groupNodeId}.json`
     },
-    workflow: {
-      ...(itemTasks[0] === undefined ? {} : { node_id: itemTasks[0].smithersNodeId }),
-      task_node_ids: itemTasks.map((task) => task.smithersNodeId)
-    }
+    ...(itemTasks[0] === undefined
+      ? {}
+      : {
+          workflow: {
+            node_id: itemTasks[0].smithersNodeId,
+            task_node_ids: itemTasks.map((task) => task.smithersNodeId)
+          }
+        })
   };
 }
 
@@ -328,7 +341,10 @@ function lowerTaskDynamicDependencies(
   const dependencies = [...task.dependencies];
   const dependencySmithersNodeIds = [...task.dependencySmithersNodeIds];
   const dependencyArtifactDirs = [...task.dependencyArtifactDirs];
-  const concreteNodeIds = [...task.metadata.dependencies.concreteNodeIds];
+  const optionalDependencyArtifactDirs = [...(task.optionalDependencyArtifactDirs ?? [])];
+  const concreteNodeIds = task.metadata.dependencies.concreteNodeIds.filter(
+    (nodeId) => !dynamicDependencies.includes(nodeId)
+  );
   for (const groupId of dynamicDependencies) {
     const group = groups.find((candidate) => candidate.groupNodeId === groupId);
     if (group === undefined) throw new Error(`task ${task.attemptId} references unknown dynamic group ${groupId}`);
@@ -340,13 +356,18 @@ function lowerTaskDynamicDependencies(
       if (group.source.verifierSmithersNodeId !== undefined) {
         dependencySmithersNodeIds.push(group.source.verifierSmithersNodeId);
       }
-      dependencyArtifactDirs.push(path.join(runRoot, "artifacts", group.source.attemptId));
+      const sourceArtifactDir = path.join(runRoot, "artifacts", group.source.attemptId);
+      dependencyArtifactDirs.push(sourceArtifactDir);
+      if (group.continueOnFail) optionalDependencyArtifactDirs.push(sourceArtifactDir);
       concreteNodeIds.push(group.source.concreteNodeId);
       continue;
     }
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
+    if (group.continueOnFail) {
+      optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
+    }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));
   }
   return {
@@ -354,6 +375,7 @@ function lowerTaskDynamicDependencies(
     dependencies: unique(dependencies),
     dependencySmithersNodeIds: unique(dependencySmithersNodeIds),
     dependencyArtifactDirs: unique(dependencyArtifactDirs),
+    optionalDependencyArtifactDirs: unique(optionalDependencyArtifactDirs),
     metadata: {
       ...structuredClone(task.metadata),
       dependencies: {
@@ -452,7 +474,6 @@ function renderReadyRuntimePrompts(input: {
         metadataPath: path.join(input.runRoot, path.basename(groupContext.runMetadataPath))
       },
       outputs: {
-        findingsPath: path.join(artifactDir, "findings.json"),
         patchPath: path.join(artifactDir, "patch.diff")
       },
       resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
@@ -521,6 +542,7 @@ function promptGraphContext(
       .map((task) => task.artifactDir);
     logical.set(node.logical_id, {
       id: node.logical_id,
+      kind: previous?.kind === "reference" ? "reference" : node.kind,
       dependsOn: unique([...(previous?.dependsOn ?? []), ...dependencies]),
       outputs: node.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);
@@ -595,7 +617,11 @@ function assertRuntimeIdentityUniqueness(
 
 function readPlannedGraph(graphPath: string): PlannedGraph {
   const value = JSON.parse(fs.readFileSync(graphPath, "utf8")) as Partial<PlannedGraph>;
-  if (value.schema_version !== "1.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
+  if (
+    value.schema_version !== PLANNED_GRAPH_SCHEMA_VERSION ||
+    !Array.isArray(value.nodes) ||
+    typeof value.groups !== "object"
+  ) {
     throw new Error("persisted runtime graph is invalid");
   }
   return value as PlannedGraph;
@@ -619,7 +645,7 @@ function checkedRunFile(runRoot: string, candidate: string, label: string): stri
 
 function remapProjectPath(value: string, sourceProjectRoot: string, projectRoot: string): string {
   const sourceRoot = path.resolve(sourceProjectRoot);
-  const candidate = path.resolve(value);
+  const candidate = path.isAbsolute(value) ? path.resolve(value) : path.resolve(sourceRoot, value);
   const relative = path.relative(sourceRoot, candidate);
   if (relative === "" || relative === ".") return projectRoot;
   if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {

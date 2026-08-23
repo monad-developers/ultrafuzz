@@ -1,4 +1,4 @@
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 audit_profile = "default"
 dynamic_strategies_enumerator = 3
 
@@ -72,6 +72,13 @@ reasoning = "max"
 agent = "PiAgent"
 model = "openai/gpt-mini-latest"
 
+# Automatic retries resend the same effective task in a fresh session. The
+# count includes the first primary attempt; `agents` optionally selects an
+# ordered model-profile fallback chain.
+[retry]
+same_agent_attempts = 3
+agents = []
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
@@ -113,6 +120,12 @@ api_key_env = "DEEPSEEK_API_KEY"
 # unreachable and the agent would run unauthenticated. config_dir relocates the
 # state root; it is the XDG parent, so pointing it at ~/.config/opencode or
 # ~/.local/share/opencode picks nothing up.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+
+[agents.OpenRouterAgent]
+# OpenRouter is API-key only. The generated Codex adapter routes through the
+# configured OpenRouter endpoint without exposing credentials on argv.
 auth = "api-key"
 api_key_env = "OPENROUTER_API_KEY"
 

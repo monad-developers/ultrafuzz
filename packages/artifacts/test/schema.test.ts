@@ -3106,7 +3106,7 @@ test("finding schema snapshot node-reference patterns and the runtime validator 
     id: "finding-1",
     title: "Unbounded input",
     status: "needs-review",
-    severity_guess: "high",
+    severity_guess: "High",
     confidence: "medium",
     summary: "Input length reaches an expensive path."
   };

@@ -33,7 +33,7 @@ function writeDynamicProject(project: string, options: { excludableContextNode?:
     project,
     "dynamic/worker.md",
     "dynamic-worker",
-    "Your /goal is {{item.goal_prompt}} using {{context:detail}}."
+    "Your /goal is {{item.goal_prompt}} using {{context:detail}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
   writePrompt(project, "dynamic/join.md", "dynamic-join", "Summarize all completed work.");
   fs.writeFileSync(
@@ -54,7 +54,7 @@ ${
     depends_on: [__start__]
     outputs:
       - path: notes.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/goal-plan@1
         primary: true
 `
     : ""
@@ -64,7 +64,7 @@ ${
     depends_on: [__start__]
     outputs:
       - path: plan.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/goal-plan@1
         primary: true
   - id: fanout
     kind: agentic
@@ -78,7 +78,7 @@ ${
       node_id: "dynamic:item:{{ item.id }}"
     outputs:
       - path: findings.json
-        contract: ultrafuzz/findings@1
+        contract: ultrafuzz/findings@2
         primary: true
   - id: join
     kind: agentic
@@ -147,7 +147,7 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
     []
   );
 
-  const sourceArtifactPath = compiled.dynamicGroups[0]!.source.artifactPath;
+  const sourceArtifactPath = path.resolve(project, compiled.dynamicGroups[0]!.source.artifactPath);
   fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
   fs.writeFileSync(
     sourceArtifactPath,
@@ -233,7 +233,12 @@ test("compilation snapshots the exact transformed prompt body used during planni
     project,
     "dynamic/worker.md",
     "dynamic-worker",
-    ["Your /goal is {{item.goal_prompt}} using {{context:detail}}.", excludedLine].join("\n")
+    [
+      "Your /goal is {{item.goal_prompt}} using {{context:detail}}.",
+      "{{finding_reachability_vocabulary}}",
+      "{{finding_note_key_vocabulary}}",
+      excludedLine
+    ].join("\n")
   );
   writePrompt(project, "dynamic/join.md", "dynamic-join", ["Summarize all completed work.", excludedLine].join("\n"));
 
@@ -258,7 +263,10 @@ test("compilation snapshots the exact transformed prompt body used during planni
   const deferredJoinTemplatePath = compiled.tasks.find((task) => task.concreteNodeId === "join")!.promptTemplatePath!;
   // Both deferred templates resolve to immutable run-root snapshots, never to the project file.
   for (const snapshotPath of [templatePath, deferredJoinTemplatePath]) {
-    assert.equal(snapshotPath.startsWith(path.join(plan.value!.layout.root, "dynamic-prompt-templates")), true);
+    assert.equal(
+      path.resolve(project, snapshotPath).startsWith(path.join(plan.value!.layout.root, "dynamic-prompt-templates")),
+      true
+    );
   }
   // Both snapshots carry the transformed bytes: the excluded reference is gone and the surviving body
   // is intact. Asserting only the path would pass even if a snapshot held the untransformed project
@@ -268,7 +276,8 @@ test("compilation snapshots the exact transformed prompt body used during planni
     ["deferred join", deferredJoinTemplatePath, "Summarize all completed work"]
   ];
   for (const [label, snapshotPath, survivingBody] of snapshots) {
-    const bytes = fs.readFileSync(snapshotPath, "utf8");
+    const absoluteSnapshotPath = path.resolve(project, snapshotPath);
+    const bytes = fs.readFileSync(absoluteSnapshotPath, "utf8");
     assert.doesNotMatch(bytes, /artifact_path:context/u, `${label} snapshot must hold the transformed bytes`);
     assert.match(bytes, new RegExp(survivingBody.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"), label);
     assert.notEqual(
@@ -293,6 +302,6 @@ test("compilation snapshots the exact transformed prompt body used during planni
   });
   const recompiledJoinTemplate = recompiled.tasks.find((task) => task.concreteNodeId === "join")!.promptTemplatePath!;
   assert.equal(recompiledJoinTemplate, deferredJoinTemplatePath);
-  assert.doesNotMatch(fs.readFileSync(recompiledJoinTemplate, "utf8"), /Divergent project bytes/u);
-  assert.match(fs.readFileSync(recompiledJoinTemplate, "utf8"), /Summarize all completed work/u);
+  assert.doesNotMatch(fs.readFileSync(path.resolve(project, recompiledJoinTemplate), "utf8"), /Divergent project bytes/u);
+  assert.match(fs.readFileSync(path.resolve(project, recompiledJoinTemplate), "utf8"), /Summarize all completed work/u);
 });

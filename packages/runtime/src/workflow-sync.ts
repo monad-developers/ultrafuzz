@@ -15,6 +15,7 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  createNodeState,
   createNodeAttemptLedgerEntry,
   createUsageLedgerEntry,
   getNodeArtifactDir,
@@ -31,7 +32,6 @@ import {
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
   replayUsageEvents,
-  assertRegularFileInside,
   safeResolveInside,
   sensitiveEnvironmentValues,
   sha256Bytes,
@@ -2846,7 +2846,8 @@ async function synchronizeTasks(input: {
     input.graph,
     input.tasks,
     graphNodeById,
-    input.control
+    input.control,
+    input.forbiddenSecretValues
   );
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
@@ -2981,7 +2982,7 @@ async function synchronizeTasks(input: {
       updateNodeState(input.layout, task.attemptId, patch, undefined, {
         forbiddenSecretValues: input.forbiddenSecretValues
       });
-      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control, input.forbiddenSecretValues);
+      appendNodeEvents(input.layout, task, finalization.events, input.control, input.forbiddenSecretValues);
       changed = true;
     }
     syncedNodes += 1;
@@ -3016,17 +3017,21 @@ async function synchronizeTasks(input: {
     if (statuses.length === 1 && attemptIds[0] === aggregateStateId) {
       continue;
     }
-    const aggregateStatus = aggregateAttemptStatuses(statuses);
-    const previous = readRunState(input.layout).nodes[concreteNodeId];
+    const currentState = readRunState(input.layout);
+    const aggregateStatuses = concreteTasks.map(
+      (task) => currentState.nodes[task.attemptId]?.status ?? ("pending" as NodeStatus)
+    );
+    const aggregateStatus = aggregateAttemptStatuses(aggregateStatuses);
+    const previous = currentState.nodes[aggregateStateId];
     if (
       previous !== undefined &&
       terminalStatus(previous.status) &&
       !(previous.status === "failed" && aggregateStatus === "succeeded")
     ) {
-      nodeStatuses.set(concreteNodeId, previous.status);
+      nodeStatuses.set(aggregateStateId, previous.status);
       continue;
     }
-    nodeStatuses.set(concreteNodeId, aggregateStatus);
+    nodeStatuses.set(aggregateStateId, aggregateStatus);
     const patch = {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
@@ -3042,7 +3047,57 @@ async function synchronizeTasks(input: {
     };
     if (nodePatchChanges(previous, patch)) {
       assertSynchronizationBudget(input.control);
-      updateNodeState(input.layout, concreteNodeId, patch, undefined, {
+      updateNodeState(input.layout, aggregateStateId, patch, undefined, {
+        forbiddenSecretValues: input.forbiddenSecretValues
+      });
+      changed = true;
+    }
+  }
+
+  const aggregateState = readRunState(input.layout);
+  for (const groupNode of input.graph.nodes.filter((node) => node.dynamic !== undefined)) {
+    assertSynchronizationBudget(input.control);
+    const generatedIds = groupNode.dynamic?.generated_node_ids ?? [];
+    if (groupNode.dynamic?.status !== "expanded") continue;
+    const generatedStatuses: NodeStatus[] = [];
+    for (const generatedId of generatedIds) {
+      assertSynchronizationBudget(input.control);
+      const generatedTasks = tasksByConcreteNode.get(generatedId) ?? [];
+      if (generatedTasks.length === 0) {
+        generatedStatuses.push("pending");
+        continue;
+      }
+      const storageId = generatedTasks[0]?.metadata.node.storageId;
+      if (storageId !== undefined && aggregateState.nodes[storageId] !== undefined) {
+        generatedStatuses.push(aggregateState.nodes[storageId]!.status);
+        continue;
+      }
+      const attemptStatuses = generatedTasks.flatMap((task) => {
+        const status = aggregateState.nodes[task.attemptId]?.status;
+        return status === undefined ? [] : [status];
+      });
+      generatedStatuses.push(attemptStatuses.length === 0 ? "pending" : aggregateAttemptStatuses(attemptStatuses));
+    }
+    const aggregateStatus = generatedIds.length === 0 ? "succeeded" : aggregateAttemptStatuses(generatedStatuses);
+    nodeStatuses.set(groupNode.id, aggregateStatus);
+    workflowStates.set(groupNode.id, workflowStateForNodeStatus(aggregateStatus));
+    const previous = aggregateState.nodes[groupNode.id];
+    const patch = {
+      status: aggregateStatus,
+      timed_out: aggregateStatus === "timed-out",
+      finished_at: finishedAtForStatus(aggregateStatus, previous),
+      provenance: {
+        ...withoutTerminalDisposition(previous?.provenance),
+        dynamic_group: {
+          status: "expanded" as const,
+          generated_count: generatedIds.length,
+          generated_node_ids: generatedIds
+        }
+      }
+    };
+    if (nodePatchChanges(previous, patch)) {
+      assertSynchronizationBudget(input.control);
+      updateNodeState(input.layout, groupNode.id, patch, undefined, {
         forbiddenSecretValues: input.forbiddenSecretValues
       });
       changed = true;
@@ -3848,7 +3903,12 @@ function appendNodeEvents(
   const provenance = eventProvenanceForTask(task);
   for (const event of events) {
     assertSynchronizationBudget(control);
-    appendEvent(layout, { ...event, nodeId, forbiddenSecretValues });
+    appendEvent(layout, {
+      ...event,
+      nodeId: task.attemptId,
+      ...(provenance === undefined ? {} : { provenance }),
+      forbiddenSecretValues
+    });
   }
 }
 
@@ -3951,7 +4011,7 @@ function appendTerminalTaskAttempts(input: {
     const appendInput: AppendNodeAttemptInput = {
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
-      nodeId: input.task.concreteNodeId,
+      nodeId: input.task.metadata.node.storageId ?? input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
       iteration: attempt.iteration,
       attempt: attempt.retry,
@@ -4595,8 +4655,23 @@ function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
   return "pending";
 }
 
+function workflowStateForNodeStatus(status: NodeStatus): SmithersNodeState {
+  if (status === "succeeded" || status === "reused-from-prior-run") return "finished";
+  if (status === "failed" || status === "invalidated" || status === "timed-out") return "failed";
+  if (status === "skipped") return "skipped";
+  if (status === "running" || status === "ready" || status === "runnable") return "in-progress";
+  return "pending";
+}
+
 function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
+}
+
+// Mirrors the preparation wrapper ID compiled into the task manifest. Deriving
+// it preserves attribution when resuming manifests written before the explicit
+// preparationSmithersNodeId field was introduced.
+function preparationSmithersNodeIdForAttempt(attemptId: string): string {
+  return `prepare:${attemptId}`;
 }
 
 function immutableTerminalFinalization(previous: NodeState | undefined): boolean {
@@ -4939,6 +5014,90 @@ function artifactProvenance(
       ...(task.metadata?.node?.dynamic === undefined ? {} : { dynamic: task.metadata.node.dynamic })
     }
   };
+}
+
+function dynamicNodeLineage(
+  dynamic: SmithersTaskManifestTask["metadata"]["node"]["dynamic"],
+  fallbackSourceNodeId?: string
+): Record<string, unknown> {
+  const sourceNodeId = dynamic?.sourceNodeId ?? fallbackSourceNodeId;
+  return {
+    ...(sourceNodeId === undefined ? {} : { source_node_id: sourceNodeId }),
+    ...(dynamic === undefined ? {} : { dynamic })
+  };
+}
+
+function ensureWorkflowTaskStateRecords(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  tasks: readonly StoredWorkflowTask[],
+  graphNodeById: ReadonlyMap<string, PlannedGraphNode>,
+  control: WorkflowSynchronizationControl,
+  forbiddenSecretValues: readonly string[]
+): boolean {
+  assertSynchronizationBudget(control);
+  const state = readRunState(layout);
+  let changed = false;
+  for (const task of tasks) {
+    assertSynchronizationBudget(control);
+    if (state.nodes[task.attemptId] !== undefined) continue;
+    const node = graphNodeById.get(task.concreteNodeId);
+    if (node === undefined) continue;
+    state.nodes[task.attemptId] = createNodeState({
+      id: task.attemptId,
+      logicalNodeId: task.logicalNodeId,
+      artifactDir: `artifacts/${task.attemptId}`,
+      outputs: node.outputs,
+      attemptIndex: task.metadata.model.attemptIndex ?? task.metadata.loop.attemptIndex,
+      loopIndex: task.metadata.loop.index ?? node.loop.index,
+      modelId: task.metadata.model.profileId ?? node.model_fanout[0]?.model_profile_id,
+      model: task.metadata.model.modelName ?? task.modelName ?? node.model_fanout[0]?.model_name,
+      modelIndex: task.metadata.model.modelIndex ?? node.model_fanout[0]?.model_index,
+      waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
+      nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
+    });
+    state.nodes[task.attemptId]!.provenance = {
+      ...(task.metadata.node.producerNodeId === undefined
+        ? {}
+        : { producer_node_id: task.metadata.node.producerNodeId }),
+      ...(task.metadata.node.storageId === undefined ? {} : { storage_id: task.metadata.node.storageId }),
+      ...dynamicNodeLineage(task.metadata.node.dynamic)
+    };
+    changed = true;
+  }
+  const firstTaskByConcreteNode = new Map<string, StoredWorkflowTask>();
+  for (const task of tasks) {
+    if (!firstTaskByConcreteNode.has(task.concreteNodeId)) firstTaskByConcreteNode.set(task.concreteNodeId, task);
+  }
+  for (const node of graph.nodes) {
+    assertSynchronizationBudget(control);
+    const dynamicGenerated = node.dynamic_generated;
+    const storageId = dynamicGenerated?.storage_id;
+    if (dynamicGenerated === undefined || storageId === undefined || state.nodes[storageId] !== undefined) continue;
+    const task = firstTaskByConcreteNode.get(node.id);
+    if (task === undefined) continue;
+    state.nodes[storageId] = createNodeState({
+      id: storageId,
+      logicalNodeId: node.logical_id,
+      artifactDir: node.artifact_dir,
+      outputs: node.outputs,
+      attemptIndex: node.loop.attempt_index,
+      loopIndex: node.loop.index,
+      waitReason: "dependency",
+      nextEligibleAction: "task-complete"
+    });
+    state.nodes[storageId]!.provenance = {
+      producer_node_id: node.id,
+      storage_id: storageId,
+      ...dynamicNodeLineage(task.metadata.node.dynamic, dynamicGenerated.source_node_id)
+    };
+    changed = true;
+  }
+  if (changed) {
+    assertSynchronizationBudget(control);
+    writeRunState(layout, state, { forbiddenSecretValues });
+  }
+  return changed;
 }
 
 function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: string): RuntimeDiagnostic {

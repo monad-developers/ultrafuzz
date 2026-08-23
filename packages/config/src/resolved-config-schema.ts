@@ -141,13 +141,24 @@ const modelProfileSchema = z
       });
     }
     if (
-      profile.agent === "OpenRouterAgent" &&
+      (profile.agent === "OpenRouterAgent" || profile.agent === "OpenCodeAgent" || profile.agent === "PiAgent") &&
       (profile.model === undefined || profile.model.length > 256 || !OPENROUTER_MODEL_ID_PATTERN.test(profile.model))
     ) {
       context.addIssue({
         code: "custom",
         path: ["model"],
         message: "CONFIG_MODEL_OPENROUTER_ID_INVALID"
+      });
+    }
+    if (
+      profile.agent === "PiAgent" &&
+      profile.reasoning !== undefined &&
+      !["off", "minimal", "low", "medium", "high", "xhigh"].includes(profile.reasoning)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["reasoning"],
+        message: "CONFIG_MODEL_PI_REASONING_UNSUPPORTED"
       });
     }
   });
@@ -239,6 +250,20 @@ const agentConfigsSchema = z
         message: "CONFIG_AGENT_OPENROUTER_AUTH_UNSUPPORTED"
       });
     }
+    if (agents.OpenCodeAgent?.auth === "subscription") {
+      context.addIssue({
+        code: "custom",
+        path: ["OpenCodeAgent", "auth"],
+        message: "CONFIG_AGENT_OPENCODE_AUTH_UNSUPPORTED"
+      });
+    }
+    if (agents.PiAgent?.auth === "subscription") {
+      context.addIssue({
+        code: "custom",
+        path: ["PiAgent", "auth"],
+        message: "CONFIG_AGENT_PI_AUTH_UNSUPPORTED"
+      });
+    }
   });
 
 /**
@@ -265,6 +290,7 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         outputDir: projectLocalPathSchema,
         maxParallelAgents: positiveIntegerSchema,
         maxParallelNodes: positiveIntegerSchema,
+        maxDynamicNodes: positiveIntegerSchema,
         keepWorkspaces: z.boolean(),
         forgeGuardEnabled: z.boolean(),
         forgeVmemLimitKb: positiveIntegerSchema,

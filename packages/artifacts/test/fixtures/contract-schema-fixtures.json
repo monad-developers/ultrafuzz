@@ -93,7 +93,9 @@
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
       "sequence_length": 100,
-      "implemented_property_suite_refs": ["x"],
+      "implemented_property_suite_refs": [
+        "x"
+      ],
       "campaign_plan_ref": "x",
       "backend_results": [],
       "finding_refs": [],
@@ -107,7 +109,9 @@
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
       "sequence_length": 100,
-      "implemented_property_suite_refs": ["x"],
+      "implemented_property_suite_refs": [
+        "x"
+      ],
       "campaign_plan_ref": "x",
       "backend_results": [],
       "finding_refs": [],
@@ -133,8 +137,16 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       },
       "views": [
-        { "scope": "recon-selected-declaration-completeness", "covered_ranges": 1, "total_ranges": 1 },
-        { "scope": "production-declaration-completeness", "covered_ranges": 1, "total_ranges": 2 }
+        {
+          "scope": "recon-selected-declaration-completeness",
+          "covered_ranges": 1,
+          "total_ranges": 1
+        },
+        {
+          "scope": "production-declaration-completeness",
+          "covered_ranges": 1,
+          "total_ranges": 2
+        }
       ],
       "files": [
         {
@@ -192,8 +204,16 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       },
       "views": [
-        { "scope": "recon-selected-declaration-completeness", "covered_ranges": 1, "total_ranges": 1 },
-        { "scope": "production-declaration-completeness", "covered_ranges": 1, "total_ranges": 2 }
+        {
+          "scope": "recon-selected-declaration-completeness",
+          "covered_ranges": 1,
+          "total_ranges": 1
+        },
+        {
+          "scope": "production-declaration-completeness",
+          "covered_ranges": 1,
+          "total_ranges": 2
+        }
       ],
       "files": [
         {
@@ -252,7 +272,9 @@
       "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
-      "stop_conditions": ["x"],
+      "stop_conditions": [
+        "x"
+      ],
       "timeout_seconds": 1,
       "finalization_reserve_seconds": 0,
       "blockers": []
@@ -266,7 +288,9 @@
       "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
-      "stop_conditions": ["x"],
+      "stop_conditions": [
+        "x"
+      ],
       "timeout_seconds": 1,
       "finalization_reserve_seconds": 0,
       "blockers": [],
@@ -338,13 +362,19 @@
         "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
-        "public_evidence_paths": ["x"],
-        "exact_observable_equality_assertions": ["x"],
+        "public_evidence_paths": [
+          "x"
+        ],
+        "exact_observable_equality_assertions": [
+          "x"
+        ],
         "oracle_type": "independent_reference",
         "calibration_bucket": "red_seeking_adversarial",
         "red_seeking_priority": "high"
       },
-      "authored_paths": ["x"],
+      "authored_paths": [
+        "x"
+      ],
       "focused_command": "x",
       "focused_command_ran": true,
       "matched_test_count": 1,
@@ -378,13 +408,19 @@
         "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
-        "public_evidence_paths": ["x"],
-        "exact_observable_equality_assertions": ["x"],
+        "public_evidence_paths": [
+          "x"
+        ],
+        "exact_observable_equality_assertions": [
+          "x"
+        ],
         "oracle_type": "independent_reference",
         "calibration_bucket": "red_seeking_adversarial",
         "red_seeking_priority": "high"
       },
-      "authored_paths": ["x"],
+      "authored_paths": [
+        "x"
+      ],
       "focused_command": "x",
       "focused_command_ran": true,
       "matched_test_count": 1,
@@ -408,8 +444,12 @@
       "planner_attempt_index": 0,
       "candidate_surfaces": [],
       "reference_model_rules": {
-        "allowed_structures": ["x"],
-        "forbidden_sources": ["x"]
+        "allowed_structures": [
+          "x"
+        ],
+        "forbidden_sources": [
+          "x"
+        ]
       },
       "deployment_assumptions": [],
       "phase_priorities": [],
@@ -422,8 +462,12 @@
       "planner_attempt_index": 0,
       "candidate_surfaces": [],
       "reference_model_rules": {
-        "allowed_structures": ["x"],
-        "forbidden_sources": ["x"]
+        "allowed_structures": [
+          "x"
+        ],
+        "forbidden_sources": [
+          "x"
+        ]
       },
       "deployment_assumptions": [],
       "phase_priorities": [],
@@ -648,6 +692,152 @@
       "__unexpected_fixture_field": true
     }
   },
+  "ultrafuzz/goal-plan@1": {
+    "schema_file": "goal-plan.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.goal-plan.v1",
+      "policy": "additive-v1",
+      "threat_model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "vulnerability_database": {
+        "planner_catalog_schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
+        "snapshot_manifest_schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
+        "database_schema_version": 1,
+        "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "catalog_class_ids": [],
+      "modeled_threat_ids": [
+        "surface:canonical"
+      ],
+      "threat_goals": [
+        {
+          "kind": "threat",
+          "id": "surface:canonical",
+          "node_id": "dynamic:threat:surface:canonical",
+          "title": "Inspect the canonical surface",
+          "threat_ids": [
+            "surface:canonical"
+          ],
+          "class_ids": [],
+          "attack_surface_ids": [
+            "surface:canonical"
+          ],
+          "goal_prompt": "Your /goal is to inspect {{surface:canonical}}.",
+          "replacements": {
+            "surface:canonical": "Canonical modeled threat"
+          },
+          "selection_rationale": "Every modeled threat receives a focused goal."
+        }
+      ],
+      "class_goals": [],
+      "applicability_decisions": [],
+      "selected_class_records": [],
+      "roaming_goal": {
+        "node_id": "goal-roaming",
+        "prompt_path": "strategies/roaming-goal.md",
+        "purpose": "Challenge taxonomy and threat-model completeness."
+      },
+      "counts": {
+        "threats": 1,
+        "applicable_classes": 0,
+        "inapplicable_classes": 0,
+        "dynamic_goals": 1,
+        "total_goals": 2
+      },
+      "expected_child_count": 1,
+      "threat_count": 1,
+      "applicable_class_count": 0,
+      "max_dynamic_nodes": 8,
+      "goal_lanes": [
+        {
+          "kind": "threat",
+          "lane_id": "surface:canonical",
+          "node_ids": [
+            "dynamic:threat:surface:canonical"
+          ]
+        },
+        {
+          "kind": "roaming",
+          "lane_id": "goal-roaming",
+          "node_ids": [
+            "goal-roaming"
+          ]
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.goal-plan.v1",
+      "policy": "additive-v1",
+      "threat_model_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "vulnerability_database": {
+        "planner_catalog_schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
+        "snapshot_manifest_schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
+        "database_schema_version": 1,
+        "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "catalog_class_ids": [],
+      "modeled_threat_ids": [
+        "surface:canonical"
+      ],
+      "threat_goals": [
+        {
+          "kind": "threat",
+          "id": "surface:canonical",
+          "node_id": "dynamic:threat:surface:canonical",
+          "title": "Inspect the canonical surface",
+          "threat_ids": [
+            "surface:canonical"
+          ],
+          "class_ids": [],
+          "attack_surface_ids": [
+            "surface:canonical"
+          ],
+          "goal_prompt": "Your /goal is to inspect {{surface:canonical}}.",
+          "replacements": {
+            "surface:canonical": "Canonical modeled threat"
+          },
+          "selection_rationale": "Every modeled threat receives a focused goal."
+        }
+      ],
+      "class_goals": [],
+      "applicability_decisions": [],
+      "selected_class_records": [],
+      "roaming_goal": {
+        "node_id": "goal-roaming",
+        "prompt_path": "strategies/roaming-goal.md",
+        "purpose": "Challenge taxonomy and threat-model completeness."
+      },
+      "counts": {
+        "threats": 1,
+        "applicable_classes": 0,
+        "inapplicable_classes": 0,
+        "dynamic_goals": 1,
+        "total_goals": 2
+      },
+      "expected_child_count": 1,
+      "threat_count": 1,
+      "applicable_class_count": 0,
+      "max_dynamic_nodes": 8,
+      "goal_lanes": [
+        {
+          "kind": "threat",
+          "lane_id": "surface:canonical",
+          "node_ids": [
+            "dynamic:threat:surface:canonical"
+          ]
+        },
+        {
+          "kind": "roaming",
+          "lane_id": "goal-roaming",
+          "node_ids": [
+            "goal-roaming"
+          ]
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
+  },
   "ultrafuzz/harness-repairs@1": {
     "schema_file": "harness-repairs.schema.json",
     "valid": [
@@ -671,7 +861,9 @@
       "properties": [],
       "selection": {
         "priority_threshold": "high",
-        "priorities": ["high"],
+        "priorities": [
+          "high"
+        ],
         "property_ids": []
       }
     },
@@ -680,7 +872,9 @@
       "properties": [],
       "selection": {
         "priority_threshold": "high",
-        "priorities": ["high"],
+        "priorities": [
+          "high"
+        ],
         "property_ids": []
       },
       "__unexpected_fixture_field": true
@@ -1107,6 +1301,238 @@
     ],
     "invalid": null
   },
+  "ultrafuzz/threat-model@1": {
+    "schema_file": "threat-model.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.threat-model.v1",
+      "title": "Canonical threat model",
+      "scope": {
+        "summary": "The canonical contract is in scope.",
+        "repository_evidence": [],
+        "exclusions": []
+      },
+      "protocol": {
+        "summary": "A minimal protocol fixture.",
+        "archetypes": [
+          "canonical protocol"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "canonical.capability",
+          "status": "unknown",
+          "rationale": "The fixture intentionally records an unknown capability.",
+          "evidence": []
+        }
+      ],
+      "assets": [
+        {
+          "id": "asset:canonical",
+          "name": "Canonical asset",
+          "description": "An asset used by the fixture.",
+          "value_at_risk": "The canonical asset.",
+          "evidence": []
+        }
+      ],
+      "actors": [
+        {
+          "id": "actor:canonical",
+          "name": "Canonical actor",
+          "role": "Exercises the canonical surface.",
+          "trust": "untrusted",
+          "privileges": [],
+          "evidence": []
+        }
+      ],
+      "trust_boundaries": [],
+      "attack_surfaces": [
+        {
+          "id": "surface:canonical",
+          "name": "Canonical surface",
+          "description": "The surface used by the fixture.",
+          "entry_points": [
+            "Canonical.run"
+          ],
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "actor_ids": [
+            "actor:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "trust_boundary_ids": [],
+          "evidence": []
+        }
+      ],
+      "value_flows": [],
+      "lifecycle_transitions": [],
+      "invariants": [
+        {
+          "id": "invariant:canonical",
+          "name": "Canonical invariant",
+          "kind": "state",
+          "statement": "Canonical state remains valid.",
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "evidence": []
+        }
+      ],
+      "threats": [
+        {
+          "id": "surface:canonical",
+          "title": "Canonical surface violation",
+          "description": "The canonical surface may violate its invariant.",
+          "preconditions": [
+            "The canonical surface is reachable."
+          ],
+          "impact": "The canonical asset may be affected.",
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "actor_ids": [
+            "actor:canonical"
+          ],
+          "attack_surface_ids": [
+            "surface:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "trust_boundary_ids": [],
+          "invariant_ids": [
+            "invariant:canonical"
+          ],
+          "assumption_ids": [],
+          "unknown_ids": [],
+          "evidence": []
+        }
+      ],
+      "assumptions": [],
+      "unknowns": [],
+      "coverage_gaps": []
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.threat-model.v1",
+      "title": "Canonical threat model",
+      "scope": {
+        "summary": "The canonical contract is in scope.",
+        "repository_evidence": [],
+        "exclusions": []
+      },
+      "protocol": {
+        "summary": "A minimal protocol fixture.",
+        "archetypes": [
+          "canonical protocol"
+        ]
+      },
+      "capabilities": [
+        {
+          "id": "canonical.capability",
+          "status": "unknown",
+          "rationale": "The fixture intentionally records an unknown capability.",
+          "evidence": []
+        }
+      ],
+      "assets": [
+        {
+          "id": "asset:canonical",
+          "name": "Canonical asset",
+          "description": "An asset used by the fixture.",
+          "value_at_risk": "The canonical asset.",
+          "evidence": []
+        }
+      ],
+      "actors": [
+        {
+          "id": "actor:canonical",
+          "name": "Canonical actor",
+          "role": "Exercises the canonical surface.",
+          "trust": "untrusted",
+          "privileges": [],
+          "evidence": []
+        }
+      ],
+      "trust_boundaries": [],
+      "attack_surfaces": [
+        {
+          "id": "surface:canonical",
+          "name": "Canonical surface",
+          "description": "The surface used by the fixture.",
+          "entry_points": [
+            "Canonical.run"
+          ],
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "actor_ids": [
+            "actor:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "trust_boundary_ids": [],
+          "evidence": []
+        }
+      ],
+      "value_flows": [],
+      "lifecycle_transitions": [],
+      "invariants": [
+        {
+          "id": "invariant:canonical",
+          "name": "Canonical invariant",
+          "kind": "state",
+          "statement": "Canonical state remains valid.",
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "evidence": []
+        }
+      ],
+      "threats": [
+        {
+          "id": "surface:canonical",
+          "title": "Canonical surface violation",
+          "description": "The canonical surface may violate its invariant.",
+          "preconditions": [
+            "The canonical surface is reachable."
+          ],
+          "impact": "The canonical asset may be affected.",
+          "asset_ids": [
+            "asset:canonical"
+          ],
+          "actor_ids": [
+            "actor:canonical"
+          ],
+          "attack_surface_ids": [
+            "surface:canonical"
+          ],
+          "capability_ids": [
+            "canonical.capability"
+          ],
+          "trust_boundary_ids": [],
+          "invariant_ids": [
+            "invariant:canonical"
+          ],
+          "assumption_ids": [],
+          "unknown_ids": [],
+          "evidence": []
+        }
+      ],
+      "assumptions": [],
+      "unknowns": [],
+      "coverage_gaps": [],
+      "__unexpected_fixture_field": true
+    }
+  },
   "ultrafuzz/triaged-findings@1": {
     "schema_file": "triaged-findings.schema.json",
     "valid": [
@@ -1119,10 +1545,202 @@
         "confidence": "medium",
         "summary": "A canonical typed triage fixture.",
         "triage_classification": "true-positive",
-        "notes": ["triage_reason=confirmed"]
+        "notes": [
+          "triage_reason=confirmed"
+        ]
       }
     ],
     "invalid": null
+  },
+  "ultrafuzz/vulnerability-database-planner-catalog@1": {
+    "schema_file": "vulnerability-database-planner-catalog.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
+      "database_schema_version": 3,
+      "database_aggregate_algorithm": "sha256",
+      "database_aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "capabilities": [
+        {
+          "id": "accounting.shares",
+          "title": "Share accounting",
+          "description": "Tracks share accounting."
+        }
+      ],
+      "records": [
+        {
+          "id": "accounting.share-rounding",
+          "title": "Share rounding",
+          "domain": "accounting",
+          "primary_category": "accounting",
+          "secondary_categories": [],
+          "capabilities": {
+            "required": [
+              "accounting.shares"
+            ],
+            "optional": [],
+            "incompatible": []
+          },
+          "attack_surfaces": [
+            "deposit"
+          ],
+          "sources": [
+            {
+              "title": "Reference",
+              "url": "https://example.com/reference"
+            }
+          ],
+          "review_status": "reviewed",
+          "source_path": "classes/accounting/share-rounding.yml",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source_size_bytes": 1,
+          "selected_artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml"
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
+      "database_schema_version": 3,
+      "database_aggregate_algorithm": "sha256",
+      "database_aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "capabilities": [
+        {
+          "id": "accounting.shares",
+          "title": "Share accounting",
+          "description": "Tracks share accounting."
+        }
+      ],
+      "records": [
+        {
+          "id": "accounting.share-rounding",
+          "title": "Share rounding",
+          "domain": "accounting",
+          "primary_category": "accounting",
+          "secondary_categories": [],
+          "capabilities": {
+            "required": [
+              "accounting.shares"
+            ],
+            "optional": [],
+            "incompatible": []
+          },
+          "attack_surfaces": [
+            "deposit"
+          ],
+          "sources": [
+            {
+              "title": "Reference",
+              "url": "https://example.com/reference"
+            }
+          ],
+          "review_status": "reviewed",
+          "source_path": "classes/accounting/share-rounding.yml",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source_size_bytes": 1,
+          "selected_artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml"
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
+  },
+  "ultrafuzz/vulnerability-database-snapshot@1": {
+    "schema_file": "vulnerability-database-snapshot.schema.json",
+    "valid": {
+      "schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
+      "source": {
+        "provider": "github",
+        "repo": "example/vulnerability-database",
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resolved_at": "2026-01-01T00:00:00Z"
+      },
+      "database_schema_version": 3,
+      "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "files": {
+        "metadata": {
+          "path": "database.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        },
+        "capabilities": {
+          "path": "capabilities.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        },
+        "catalog": {
+          "path": "catalog.json",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      },
+      "records": [
+        {
+          "id": "accounting.share-rounding",
+          "path": "classes/accounting/share-rounding.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      ],
+      "selected_records": [
+        {
+          "id": "accounting.share-rounding",
+          "path": "classes/accounting/share-rounding.yml",
+          "artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      ]
+    },
+    "invalid": {
+      "schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
+      "source": {
+        "provider": "github",
+        "repo": "example/vulnerability-database",
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resolved_at": "2026-01-01T00:00:00Z"
+      },
+      "database_schema_version": 3,
+      "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "files": {
+        "metadata": {
+          "path": "database.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        },
+        "capabilities": {
+          "path": "capabilities.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        },
+        "catalog": {
+          "path": "catalog.json",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      },
+      "records": [
+        {
+          "id": "accounting.share-rounding",
+          "path": "classes/accounting/share-rounding.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      ],
+      "selected_records": [
+        {
+          "id": "accounting.share-rounding",
+          "path": "classes/accounting/share-rounding.yml",
+          "artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size_bytes": 1
+        }
+      ],
+      "__unexpected_fixture_field": true
+    }
   },
   "ultrafuzz/workspace-patch@1": {
     "schema_file": "workspace-patch.schema.json",
@@ -1132,7 +1750,13 @@
       "base_tree": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_tree": "0000000000000000000000000000000000000000000000000000000000000000",
       "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "source_snapshot": { "status": "preserved", "protected_roots": ["contracts", "src"] },
+      "source_snapshot": {
+        "status": "preserved",
+        "protected_roots": [
+          "contracts",
+          "src"
+        ]
+      },
       "files": []
     },
     "invalid": {
@@ -1141,7 +1765,13 @@
       "base_tree": "0000000000000000000000000000000000000000000000000000000000000000",
       "result_tree": "0000000000000000000000000000000000000000000000000000000000000000",
       "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "source_snapshot": { "status": "preserved", "protected_roots": ["contracts", "src"] },
+      "source_snapshot": {
+        "status": "preserved",
+        "protected_roots": [
+          "contracts",
+          "src"
+        ]
+      },
       "files": [],
       "__unexpected_fixture_field": true
     }

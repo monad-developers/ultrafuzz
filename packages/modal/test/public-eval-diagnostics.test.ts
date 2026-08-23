@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  BENCHMARK_LANE_NAMES,
   EVAL_RUN_SCHEMA_VERSION,
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
   type EvalMatrixRow,

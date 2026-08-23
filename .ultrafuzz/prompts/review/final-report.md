@@ -165,11 +165,11 @@ The Run summary contains exactly these public fields when available: `Run ID`,
 digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
 Render each concrete value as Markdown inline code.
 
-Goal search coverage census:
-`goal-search-coverage.json` next to `{{run_metadata_path}}`
+Goal search coverage census: `{{goal_search_coverage_path}}`
 
-Schema `ultrafuzz.goal-search-coverage.v1`, written by the runtime and the only
-source of truth for coverage. `totals` carries `planned`, `completed`,
+This runtime-owned `ultrafuzz.goal-search-coverage.v1` document is the only
+source of truth for coverage. `totals`
+carries `planned`, `completed`,
 `completed_with_findings`, `completed_no_findings`, `stopped_early`, and
 `unverified`; recompute each from the per-lane `goals` array. A `stopped-early`
 or `unverified` lane measured nothing; only the three `completed` statuses are

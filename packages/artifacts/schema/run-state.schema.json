@@ -248,6 +248,7 @@
                     "ultrafuzz/finding-lifecycle-ledger@1",
                     "ultrafuzz/findings@2",
                     "ultrafuzz/generated-tests@3",
+                    "ultrafuzz/goal-plan@1",
                     "ultrafuzz/harness-repairs@1",
                     "ultrafuzz/implemented-properties@3",
                     "ultrafuzz/invariant-campaign-plan@2",
@@ -265,7 +266,10 @@
                     "ultrafuzz/severity-classified-findings@1",
                     "ultrafuzz/strategy-detections@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/threat-model@1",
                     "ultrafuzz/triaged-findings@1",
+                    "ultrafuzz/vulnerability-database-planner-catalog@1",
+                    "ultrafuzz/vulnerability-database-snapshot@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },
@@ -573,12 +577,24 @@
           "else": {
             "not": {
               "anyOf": [
-                { "required": ["workflow_run_id"] },
-                { "required": ["workflow_link_id"] },
-                { "required": ["lifecycle_result_event_id"] },
-                { "required": ["lifecycle_result_at"] },
-                { "required": ["lifecycle_submission_event_id"] },
-                { "required": ["lifecycle_submitted_at"] }
+                {
+                  "required": ["workflow_run_id"]
+                },
+                {
+                  "required": ["workflow_link_id"]
+                },
+                {
+                  "required": ["lifecycle_result_event_id"]
+                },
+                {
+                  "required": ["lifecycle_result_at"]
+                },
+                {
+                  "required": ["lifecycle_submission_event_id"]
+                },
+                {
+                  "required": ["lifecycle_submitted_at"]
+                }
               ]
             }
           }
@@ -696,6 +712,88 @@
         "source_node_id": {
           "type": "string",
           "minLength": 1
+        },
+        "producer_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "concrete_node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storage_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dynamic": {
+          "type": "object",
+          "required": [
+            "groupNodeId",
+            "sourceNodeId",
+            "sourceAttemptId",
+            "sourceDigest",
+            "expansionKey",
+            "itemDigest",
+            "manifestPath"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "groupNodeId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceNodeId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceAttemptId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceDigest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "expansionKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "itemDigest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "manifestPath": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "dynamic_group": {
+          "type": "object",
+          "required": ["status", "generated_count", "generated_node_ids"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "expanded"
+            },
+            "generated_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "generated_node_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         },
         "workflow": {
           "oneOf": [

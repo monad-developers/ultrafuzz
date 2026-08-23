@@ -89,31 +89,19 @@ path it needs.
 
 ## Output
 
-The authoritative contract for this artifact is the canonical JSON Schema
-`{{artifact_schema_dir}}/goal-plan.schema.json`
-(`$id: https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan`),
-generated from the same `ultrafuzz/goal-plan@1` validator that gates this node.
-The rules below restate that schema; when the two ever disagree, the schema
-file wins.
+Read `{{artifact_schema_dir}}/goal-plan.schema.json` before authoring the plan.
+It is the sole authority for field names, types, required values, and the
+registered contract identity. Write `{{artifact_path}}/goal-plan.json` to that
+schema and validate it with the exact command in the injected output contract.
 
-Write `{{artifact_path}}/goal-plan.json` with
-`schema_version: "ultrafuzz.goal-plan.v1"` and `policy: "additive-v1"`.
-Include:
-
-- `threat_model_sha256`, computed over the exact bytes of the supplied upstream
-  `threat-model.json` file (not reserialized JSON);
-- `vulnerability_database` with explicit planner-catalog and snapshot-manifest
-  schema versions, database schema version, aggregate digest, and
-  planner-catalog digest (`catalog_sha256`, computed over the exact bytes of
-  the supplied planner catalog file itself, like `threat_model_sha256`);
-- all `modeled_threat_ids`;
-- all `catalog_class_ids`;
-- `threat_goals`;
-- `class_goals`;
-- every `applicability_decision`;
-- `selected_class_records`;
-- fixed `roaming_goal`;
-- exact `counts`.
+Bind the plan to the SHA-256 of the exact supplied `threat-model.json` bytes,
+not reserialized JSON. Likewise bind it to the database version and aggregate
+identity copied from the supplied planner catalog and to the SHA-256 of that
+catalog's exact bytes. The snapshot-manifest identity is the constant required
+by the pinned schema. Copy every modeled threat and catalog class into the
+corresponding plan collections, record every applicability decision, retain the
+selected source-record identities, and include the fixed roaming goal and
+reconciled counts required by the schema.
 
 Do not write `expected_child_count`, `threat_count`, `applicable_class_count`,
 `max_dynamic_nodes`, or `goal_lanes`. After the agent returns, Ultrafuzz
@@ -125,18 +113,12 @@ the plan is validated.
 `modeled_threat_ids` must exactly equal the IDs in the upstream threat model;
 class goals may reference only those IDs.
 
-Name the two schema fields `planner_catalog_schema_version` and
-`snapshot_manifest_schema_version`. Set the latter to
-`"ultrafuzz.vulnerability-db.snapshot.v1"`. Copy the former,
-`database_schema_version`, and `aggregate_sha256` (from
-`database_aggregate_sha256`) out of the supplied catalog document. Set
-`catalog_sha256` to the SHA-256 you compute over the exact bytes of the
-planner catalog file at the supplied read-only catalog path above, the same
-way `threat_model_sha256` hashes the upstream threat-model file. The
-catalog's embedded `upstream_catalog_sha256` names the upstream source file
-and never validates here. For selected records, copy
-`selected_artifact_path`, `source_sha256`, and `source_size_bytes` exactly into
-the plan's `path`, `sha256`, and `size_bytes` fields.
+Copy the database version and aggregate identity from the supplied catalog.
+Compute the planner-catalog digest over the exact bytes at the supplied
+read-only path, the same way the threat-model digest is computed. The catalog's
+embedded upstream-catalog digest names a different source file and must not be
+substituted. For selected records, copy their selected artifact path, source
+digest, and byte size exactly into the schema-designated fields.
 
 Each threat goal has `kind`, `id`, `node_id`, `title`, one-element
 `threat_ids`, `class_ids`, `attack_surface_ids`, `goal_prompt`,
@@ -171,15 +153,9 @@ Each applicability decision has `class_id`, `decision`, `checks`, and
 `rationale`. Each check has `capability_id`, `requirement`,
 `observed_status`, `evidence`, and `rationale`.
 
-Set the fixed roaming record to:
-
-```json
-{
-  "node_id": "goal-roaming",
-  "prompt_path": "strategies/roaming-goal.md",
-  "purpose": "Challenge taxonomy and threat-model completeness."
-}
-```
+The fixed roaming record names node `goal-roaming`, prompt
+`strategies/roaming-goal.md`, and the purpose of challenging taxonomy and
+threat-model completeness.
 
 Use each catalog record's source digest, byte size, and selected artifact path
 for `selected_class_records`; do not reconstruct source records from the catalog's

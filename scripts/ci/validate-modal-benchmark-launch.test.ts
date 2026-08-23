@@ -234,7 +234,7 @@ function preparedSmokeFixture(env: Record<string, string> = {}) {
     input: {
       manifestPath,
       policyRoot: workspace,
-      expectedMode: mode
+      expectedMode: "smoke"
     }
   };
 }

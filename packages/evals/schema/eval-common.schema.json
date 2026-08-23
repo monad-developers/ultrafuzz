@@ -179,7 +179,7 @@
       "additionalProperties": false,
       "required": ["benchmark_lane", "target_frameworks", "excluded_strategy_families", "benchmark_execution"],
       "properties": {
-        "benchmark_lane": { "const": "full" },
+        "benchmark_lane": { "enum": ["full", "threat-model"] },
         "target_frameworks": {
           "type": "object",
           "minProperties": 1,
@@ -741,12 +741,132 @@
       }
     },
     "expansionCompleteness": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "const": "complete" },
+            "reason": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": { "enum": ["partial", "unavailable"] },
+            "reason": {
+              "enum": [
+                "workflow-state-unavailable",
+                "run-graph-unavailable",
+                "concurrency-unavailable",
+                "goal-plan-unavailable",
+                "goal-plan-unreadable",
+                "usage-ledger-unavailable",
+                "usage-ledger-node-unmatched",
+                "usage-incomplete",
+                "pricing-incomplete",
+                "goal-lane-nodes-unobserved"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "expansionPlan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "reason"],
+      "required": [
+        "expected_child_count",
+        "threat_count",
+        "applicable_class_count",
+        "max_dynamic_nodes",
+        "lane_count"
+      ],
       "properties": {
-        "status": { "const": "complete" },
-        "reason": { "type": "null" }
+        "expected_child_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "threat_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "applicable_class_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "max_dynamic_nodes": { "$ref": "#/$defs/positiveInteger" },
+        "lane_count": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "expansionExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_child_count", "actual_dynamic_node_count", "delta", "matches"],
+      "properties": {
+        "expected_child_count": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "actual_dynamic_node_count": { "$ref": "#/$defs/nullableNonNegativeInteger" },
+        "delta": {
+          "oneOf": [
+            { "type": "integer", "minimum": -9007199254740991, "maximum": 9007199254740991 },
+            { "type": "null" }
+          ]
+        },
+        "matches": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] }
+      }
+    },
+    "goalLaneObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lane_id",
+        "kind",
+        "planned_node_ids",
+        "observed_planned_node_ids",
+        "observed_node_ids",
+        "observed_node_count",
+        "status_counts",
+        "failed",
+        "failed_node_ids",
+        "timed_out_node_ids",
+        "retried_node_count",
+        "usage_matched_node_count",
+        "total_tokens",
+        "cost_usd",
+        "cost_evidence",
+        "wall_time_seconds"
+      ],
+      "properties": {
+        "lane_id": { "$ref": "#/$defs/nonEmptyString" },
+        "kind": { "$ref": "#/$defs/nonEmptyString" },
+        "planned_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "observed_planned_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "observed_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "observed_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "status_counts": { "$ref": "#/$defs/nodeStatusCounts" },
+        "failed": { "type": "boolean" },
+        "failed_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "timed_out_node_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonEmptyString" },
+          "uniqueItems": true
+        },
+        "retried_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "usage_matched_node_count": { "$ref": "#/$defs/nonNegativeInteger" },
+        "total_tokens": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "cost_usd": { "$ref": "#/$defs/nullableNonNegativeNumber" },
+        "cost_evidence": { "$ref": "#/$defs/expansionCompleteness" },
+        "wall_time_seconds": { "$ref": "#/$defs/nullableNonNegativeNumber" }
       }
     },
     "nodeStatusCounts": {
@@ -826,10 +946,15 @@
         "timed_out_node_count",
         "timed_out_node_ids",
         "concurrency",
+        "plan",
+        "expected_vs_actual",
+        "goal_lanes",
         "truncated",
         "nodes",
         "lineage",
-        "concurrency_evidence"
+        "concurrency_evidence",
+        "plan_evidence",
+        "lane_cost_evidence"
       ],
       "properties": {
         "node_count": { "$ref": "#/$defs/nonNegativeInteger" },
@@ -868,10 +993,26 @@
             "active_work": { "$ref": "#/$defs/nonNegativeInteger" }
           }
         },
+        "plan": {
+          "oneOf": [{ "$ref": "#/$defs/expansionPlan" }, { "type": "null" }]
+        },
+        "expected_vs_actual": { "$ref": "#/$defs/expansionExpectation" },
+        "goal_lanes": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/goalLaneObservation" },
+              "maxItems": 256
+            },
+            { "type": "null" }
+          ]
+        },
         "truncated": { "type": "boolean" },
         "nodes": { "$ref": "#/$defs/expansionCompleteness" },
         "lineage": { "$ref": "#/$defs/expansionCompleteness" },
-        "concurrency_evidence": { "$ref": "#/$defs/expansionCompleteness" }
+        "concurrency_evidence": { "$ref": "#/$defs/expansionCompleteness" },
+        "plan_evidence": { "$ref": "#/$defs/expansionCompleteness" },
+        "lane_cost_evidence": { "$ref": "#/$defs/expansionCompleteness" }
       }
     },
     "recoveryEquivalence": {

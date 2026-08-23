@@ -102,6 +102,7 @@
         "outputDir",
         "maxParallelAgents",
         "maxParallelNodes",
+        "maxDynamicNodes",
         "keepWorkspaces",
         "forgeGuardEnabled",
         "forgeVmemLimitKb",
@@ -119,6 +120,9 @@
           "$ref": "#/$defs/positiveInteger"
         },
         "maxParallelNodes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "maxDynamicNodes": {
           "$ref": "#/$defs/positiveInteger"
         },
         "keepWorkspaces": {
@@ -252,6 +256,36 @@
           ]
         },
         "OpenRouterAgent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agentConfig"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "auth": {
+                  "const": "api-key"
+                }
+              }
+            }
+          ]
+        },
+        "OpenCodeAgent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/agentConfig"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "auth": {
+                  "const": "api-key"
+                }
+              }
+            }
+          ]
+        },
+        "PiAgent": {
           "allOf": [
             {
               "$ref": "#/$defs/agentConfig"
@@ -548,7 +582,15 @@
     },
     "agentId": {
       "type": "string",
-      "enum": ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"]
+      "enum": [
+        "ClaudeAgent",
+        "CodexAgent",
+        "DeepSeekAgent",
+        "KimiAgent",
+        "OpenCodeAgent",
+        "OpenRouterAgent",
+        "PiAgent"
+      ]
     },
     "nodeId": {
       "type": "string",
@@ -658,7 +700,7 @@
             "type": "object",
             "properties": {
               "agent": {
-                "const": "OpenRouterAgent"
+                "enum": ["OpenCodeAgent", "OpenRouterAgent", "PiAgent"]
               }
             },
             "required": ["agent"]
@@ -690,6 +732,25 @@
             "properties": {
               "reasoning": {
                 "enum": ["low", "high", "max"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "agent": {
+                "const": "PiAgent"
+              }
+            },
+            "required": ["agent"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "reasoning": {
+                "enum": ["off", "minimal", "low", "medium", "high", "xhigh"]
               }
             }
           }

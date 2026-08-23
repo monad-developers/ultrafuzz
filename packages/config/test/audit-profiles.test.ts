@@ -18,7 +18,14 @@ describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
     const catalog = loadAuditProfileCatalog();
     expect(catalog.defaultProfile).toBe("default");
-    expect(Object.keys(catalog.profiles)).toEqual(["default", "exhaustive", "invariant-only", "low-cost", "smoke"]);
+    expect(Object.keys(catalog.profiles)).toEqual([
+      "default",
+      "exhaustive",
+      "full",
+      "invariant-only",
+      "low-cost",
+      "smoke"
+    ]);
     expect(catalog.digest).toMatch(/^[0-9a-f]{64}$/u);
 
     const smoke = auditProfile("smoke", catalog);
@@ -30,6 +37,10 @@ describe("audit profile catalog", () => {
     expect(smokePath).toBeDefined();
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
     expect(packagedTopologyDigest(smoke, catalog)).toMatch(/^[0-9a-f]{64}$/u);
+
+    const full = auditProfile("full", catalog);
+    expect(full.topologyPath).toBe("topologies/full.yml");
+    expect(packagedTopologyPath(full, catalog)).toBeDefined();
 
     const invariantOnly = auditProfile("invariant-only", catalog);
     expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
@@ -152,7 +163,7 @@ profiles:
   it.each(["balanced", "fuzz-only", "thorough"])(
     "rejects removed profile %s with the available profile vocabulary",
     (profile) => {
-      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, invariant-only/u);
+      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
     }
   );
 

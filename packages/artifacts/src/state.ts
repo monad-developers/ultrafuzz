@@ -233,6 +233,24 @@ export interface NodeReferenceExpectationProvenance {
 
 export interface ExecutionNodeProvenance {
   source_node_id?: string;
+  producer_node_id?: string;
+  concrete_node_id?: string;
+  strategy_attempt_id?: string;
+  storage_id?: string;
+  dynamic?: {
+    groupNodeId: string;
+    sourceNodeId: string;
+    sourceAttemptId: string;
+    sourceDigest: string;
+    expansionKey: string;
+    itemDigest: string;
+    manifestPath: string;
+  };
+  dynamic_group?: {
+    status: "expanded";
+    generated_count: number;
+    generated_node_ids: string[];
+  };
   workflow?: NodeWorkflowProvenance;
   output_contracts?: NodeOutputContractProvenance;
   findings_count?: number;

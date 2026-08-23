@@ -55,7 +55,7 @@ describe("validateTopology", () => {
         key: "id",
         node_id: "dynamic:nested:{{ item.id }}"
       },
-      outputs: [{ path: "nested.json", contract: "ultrafuzz/json-object@1", primary: true }]
+      outputs: [{ path: "nested.json", contract: "ultrafuzz/goal-plan@1", primary: true }]
     });
     topology.nodes[5] = { ...topology.nodes[5]!, depends_on: ["nested"] };
     expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "NESTED_DYNAMIC_NODE" }));
@@ -306,7 +306,7 @@ function dynamicTopology() {
   const topology = validTopology({ defaults: { strategy_loops: 1 } });
   topology.nodes[2] = {
     ...topology.nodes[2]!,
-    outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+    outputs: [{ path: "plan.json", contract: "ultrafuzz/goal-plan@1", primary: true }]
   };
   topology.nodes.splice(3, 0, {
     id: "fanout",
@@ -318,7 +318,7 @@ function dynamicTopology() {
       key: "id",
       node_id: "dynamic:item:{{ item.id }}"
     },
-    outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+    outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true }]
   });
   topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
   return topology;
@@ -329,7 +329,7 @@ describe("dynamic source cardinality", () => {
     const topology = validTopology({ defaults: { strategy_loops: 1 } });
     topology.nodes[2] = {
       ...topology.nodes[2]!,
-      outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+      outputs: [{ path: "plan.json", contract: "ultrafuzz/goal-plan@1", primary: true }]
     };
     topology.nodes.splice(3, 0, {
       id: "fanout",
@@ -341,7 +341,7 @@ describe("dynamic source cardinality", () => {
         key: "id",
         node_id: "dynamic:item:{{ item.id }}"
       },
-      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2", primary: true }]
     });
     topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
     return topology;

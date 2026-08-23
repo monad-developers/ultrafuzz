@@ -2,8 +2,6 @@ import fs from "node:fs";
 
 import { z } from "zod/v4";
 
-import { isNamespacedDynamicReplacementKey, promptTemplateOccurrences } from "@ultrafuzz/prompts";
-
 import {
   NODE_REFERENCE_PATTERN,
   ArtifactPathError,
@@ -18,7 +16,7 @@ import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from
 
 export const GOAL_PLAN_SCHEMA_VERSION = "ultrafuzz.goal-plan.v1" as const;
 export const GOAL_PLAN_POLICY = "additive-v1" as const;
-export const GOAL_PLAN_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan" as const;
+export const GOAL_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:goal-plan:1" as const;
 
 const nonEmptyString = z.string().trim().min(1);
 const nodeReference = z.string().regex(NODE_REFERENCE_PATTERN);
@@ -35,6 +33,31 @@ const uniqueIds = z
 const replacementKey = z.string().refine(isNamespacedDynamicReplacementKey, {
   message: "Replacement keys must be namespaced as <namespace>:<name>"
 });
+
+/** Keep planner replacement keys aligned with the dynamic prompt renderer. */
+export function isNamespacedDynamicReplacementKey(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_.-]*(?::[a-z0-9][a-z0-9_.-]*)+$/u.test(name);
+}
+
+/** Return the unescaped template occurrences that the prompt renderer binds. */
+export function promptTemplateOccurrences(template: string): Array<{ name: string }> {
+  const occurrences: Array<{ name: string }> = [];
+  let offset = 0;
+  while (true) {
+    const start = template.indexOf("{{", offset);
+    if (start === -1) return occurrences;
+    if (template[start - 1] === "\\") {
+      offset = start + 2;
+      continue;
+    }
+    const end = template.indexOf("}}", start + 2);
+    if (end === -1) throw new Error("template variable is missing a closing delimiter");
+    const name = template.slice(start + 2, end).trim();
+    if (name === "") throw new Error("template variable name cannot be empty");
+    occurrences.push({ name });
+    offset = end + 2;
+  }
+}
 /**
  * A replacement value is substituted directly into the goal sentence, so its length is the length of
  * the agent's authoritative goal statement. It must be a LABEL, not a payload.
@@ -131,7 +154,7 @@ const threatGoalSchema = z
     kind: z.literal("threat"),
     id: threatId,
     node_id: nodeReference,
-    threat_ids: z.tuple([threatId]),
+    threat_ids: z.array(threatId).length(1),
     class_ids: uniqueIds,
     attack_surface_ids: uniqueIds,
     ...promptGoalFields
@@ -147,6 +170,8 @@ const threatGoalSchema = z
   });
 
 const SELECTED_RECORD_PATH_PREFIX = "vulnerability-db/selected/" as const;
+const SELECTED_RECORD_PATH_PATTERN =
+  /^vulnerability-db\/selected\/(?:(?!\.{1,2}(?:\/|$))[A-Za-z0-9._@+-]{1,128}\/)*[A-Za-z0-9@+_-][A-Za-z0-9._@+-]{0,127}\.(?:md|yml)$/u;
 
 /**
  * Composes the canonical safe-relative-path validator with the required prefix and `.md` suffix.
@@ -154,34 +179,37 @@ const SELECTED_RECORD_PATH_PREFIX = "vulnerability-db/selected/" as const;
  * segments are rejected in the contract instead of only being caught by a later filesystem check.
  * Remote and in-memory consumers of the exported snapshot verifier get the same guarantee.
  */
-const selectedRecordPath = z.string().superRefine((value, context) => {
-  let normalized: string;
-  try {
-    normalized = normalizeSafeRelativePath(value, "selected vulnerability record path");
-  } catch (error) {
-    context.addIssue({
-      code: "custom",
-      message:
-        error instanceof ArtifactPathError
-          ? `Selected record path is unsafe: ${error.message}`
-          : "Selected record path is unsafe"
-    });
-    return;
-  }
-  if (normalized !== value) {
-    context.addIssue({ code: "custom", message: "Selected record path must already be canonical" });
-    return;
-  }
-  if (!value.startsWith(SELECTED_RECORD_PATH_PREFIX) || value.length === SELECTED_RECORD_PATH_PREFIX.length) {
-    context.addIssue({
-      code: "custom",
-      message: `Selected record path must start with ${SELECTED_RECORD_PATH_PREFIX}`
-    });
-  }
-  if (!value.endsWith(".md") && !value.endsWith(".yml")) {
-    context.addIssue({ code: "custom", message: "Selected record path must be a Markdown or YAML file" });
-  }
-});
+const selectedRecordPath = z
+  .string()
+  .regex(SELECTED_RECORD_PATH_PATTERN)
+  .superRefine((value, context) => {
+    let normalized: string;
+    try {
+      normalized = normalizeSafeRelativePath(value, "selected vulnerability record path");
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        message:
+          error instanceof ArtifactPathError
+            ? `Selected record path is unsafe: ${error.message}`
+            : "Selected record path is unsafe"
+      });
+      return;
+    }
+    if (normalized !== value) {
+      context.addIssue({ code: "custom", message: "Selected record path must already be canonical" });
+      return;
+    }
+    if (!value.startsWith(SELECTED_RECORD_PATH_PREFIX) || value.length === SELECTED_RECORD_PATH_PREFIX.length) {
+      context.addIssue({
+        code: "custom",
+        message: `Selected record path must start with ${SELECTED_RECORD_PATH_PREFIX}`
+      });
+    }
+    if (!value.endsWith(".md") && !value.endsWith(".yml")) {
+      context.addIssue({ code: "custom", message: "Selected record path must be a Markdown or YAML file" });
+    }
+  });
 
 const selectedRecordSchema = z.strictObject({
   id: stableId,

@@ -1,6 +1,7 @@
 import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
+import { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
 import { readStrictJsonDocument } from "./eval-durable.js";
 import {
   EVAL_BENCHMARK_COHORT_SCHEMA_ID,
@@ -16,6 +17,13 @@ import { EvalError } from "./utils.js";
 export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as const;
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
 export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v2" as const;
+export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
+export { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
+export const BENCHMARK_LANE_COHORTS: Record<BenchmarkLaneName, "evmbench" | "ultrafuzz-bench"> = {
+  smoke: "ultrafuzz-bench",
+  "threat-model": "ultrafuzz-bench",
+  full: "evmbench"
+};
 export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;

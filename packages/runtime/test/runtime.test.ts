@@ -24,11 +24,15 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  GOAL_PLAN_JSON_SCHEMA_ID,
+  THREAT_MODEL_JSON_SCHEMA_ID,
   appendEvent,
   createEventRecord,
+  goalPlanJsonSchema,
   layoutForRunRoot,
   promptArtifactAuthorityPathSelectorId,
   replayEvents,
+  threatModelJsonSchema,
   VALIDATOR_BUILD_IDENTITY,
   type RunState,
   type SMITHERS_NODE_STATES,
@@ -44,7 +48,9 @@ import {
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
-  RUN_REFERENCE_MANIFEST_FILE
+  RUN_REFERENCE_MANIFEST_FILE,
+  loadReferenceCatalog,
+  parseReferenceCatalog
 } from "@ultrafuzz/references";
 
 import {
@@ -91,8 +97,14 @@ import { bindSmithersExecutableCapability } from "../src/smithers-executable-cap
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
+import {
+  shippedReferenceCatalog,
+  writeShippedDocumentReferenceCaches,
+  writeShippedVulnerabilityDatabaseCache
+} from "./reference-fixtures.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
@@ -506,6 +518,701 @@ async function loadGeneratedPiAgent(project: string): Promise<{
     };
   };
   return { createPiAgent: piModule.createPiAgent };
+}
+
+async function loadGeneratedOpenRouterAgent(
+  project: string,
+  retryPolicy?: {
+    retryWindowMs: number;
+    initialDelayMs: number;
+    maxDelayMs: number;
+    jitterFraction: number;
+    provisionalCallbackLimit?: number;
+    actionSnapshotLimit?: number;
+    actionSnapshotBytes?: number;
+  },
+  testInstrumentation?: {
+    acknowledgeProvisionalRateLimit?: boolean;
+    expireRetryDeadlineBeforeReplacementBuild?: number;
+  }
+): Promise<{
+  OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+    generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+    buildCommand: (params: {
+      prompt: string;
+      cwd: string;
+      options: Record<string, unknown>;
+    }) => Promise<Record<string, unknown>>;
+  };
+  decideOpenRouter429Recovery(input: {
+    retryAttempt: number;
+    nowMs: number;
+    retryDeadlineMs: number;
+    totalDeadlineMs?: number;
+    random: number;
+  }):
+    | { kind: "rate-limit-exhausted" }
+    | { kind: "total-timeout" }
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+  createOpenRouterAgent(options?: Record<string, unknown>): {
+    opts: Record<string, unknown> & { env?: Record<string, string> };
+    generate(options?: {
+      prompt?: unknown;
+      onEvent?: (event: Record<string, unknown>) => unknown;
+      onStderr?: (text: string) => void;
+      abortSignal?: AbortSignal;
+      [key: string]: unknown;
+    }): Promise<{ text: string }>;
+    stream(options?: {
+      prompt?: unknown;
+      onEvent?: (event: Record<string, unknown>) => unknown;
+      onStderr?: (text: string) => void;
+      abortSignal?: AbortSignal;
+      [key: string]: unknown;
+    }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command?: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+      cleanup?: () => Promise<void>;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "openrouter-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const codexSource = fs
+    .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  let openRouterSource = fs
+    .readFileSync(path.join(agentsDir, "openrouter.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./codex"', 'from "./codex.mjs"')
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./provider-home"', 'from "./provider-home.mjs"');
+  if (retryPolicy !== undefined) {
+    for (const [from, to] of [
+      [
+        "const OPENROUTER_429_RECOVERY_WINDOW_MS = 120_000;",
+        `const OPENROUTER_429_RECOVERY_WINDOW_MS = ${retryPolicy.retryWindowMs};`
+      ],
+      [
+        "const OPENROUTER_429_INITIAL_DELAY_MS = 1_000;",
+        `const OPENROUTER_429_INITIAL_DELAY_MS = ${retryPolicy.initialDelayMs};`
+      ],
+      ["const OPENROUTER_429_MAX_DELAY_MS = 30_000;", `const OPENROUTER_429_MAX_DELAY_MS = ${retryPolicy.maxDelayMs};`],
+      [
+        "const OPENROUTER_429_JITTER_FRACTION = 0.25;",
+        `const OPENROUTER_429_JITTER_FRACTION = ${retryPolicy.jitterFraction};`
+      ]
+    ] as const) {
+      const replaced = openRouterSource.replace(from, to);
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter retry policy source: ${from}`);
+      openRouterSource = replaced;
+    }
+    if (retryPolicy.provisionalCallbackLimit !== undefined) {
+      const from = "const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = 256;";
+      const replaced = openRouterSource.replace(
+        from,
+        `const OPENROUTER_PROVISIONAL_CALLBACK_LIMIT = ${retryPolicy.provisionalCallbackLimit};`
+      );
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
+      openRouterSource = replaced;
+    }
+    for (const [from, value] of [
+      ["const OPENROUTER_ACTION_SNAPSHOT_LIMIT = 256;", retryPolicy.actionSnapshotLimit],
+      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes]
+    ] as const) {
+      if (value === undefined) continue;
+      const replaced = openRouterSource.replace(from, from.replace(/= .*;/u, `= ${value};`));
+      assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
+      openRouterSource = replaced;
+    }
+  }
+  if (testInstrumentation?.acknowledgeProvisionalRateLimit === true) {
+    const from = 'this.#provisionalRateLimit = matchState === "provisional";';
+    const replaced = openRouterSource.replace(
+      from,
+      `${from}
+    if (
+      this.#provisionalRateLimit &&
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE === "stderr-provisional-post-terminal"
+    ) {
+      const acknowledgementPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
+      if (acknowledgementPath !== undefined) writeFileSync(acknowledgementPath, "observed\\n", "utf8");
+    }`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter provisional transition source");
+    openRouterSource = replaced;
+  }
+  const expirationBuild = testInstrumentation?.expireRetryDeadlineBeforeReplacementBuild;
+  if (expirationBuild !== undefined) {
+    assert.equal(
+      Number.isSafeInteger(expirationBuild) && expirationBuild > 0,
+      true,
+      "generated OpenRouter deadline expiration build must be a positive integer"
+    );
+    const counterFrom = 'const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");';
+    const counterReplacement = `${counterFrom}\nlet openRouterTestReplacementBuildCount = 0;`;
+    let replaced = openRouterSource.replace(counterFrom, counterReplacement);
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter attempt-deadline source");
+    openRouterSource = replaced;
+
+    const deadlineFrom = "    const deadlineError = openRouterAttemptDeadlineError(params.options);";
+    replaced = openRouterSource.replace(
+      deadlineFrom,
+      `    const instrumentedAttemptDeadlines = (params.options as Record<PropertyKey, unknown>)[
+      OPENROUTER_ATTEMPT_DEADLINES
+    ] as OpenRouterAttemptDeadlines | undefined;
+    if (
+      instrumentedAttemptDeadlines?.retryDeadlineMs !== undefined &&
+      ++openRouterTestReplacementBuildCount >= ${expirationBuild}
+    ) {
+      instrumentedAttemptDeadlines.retryDeadlineMs = performance.now() - 1;
+    }
+${deadlineFrom}`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter build deadline source");
+    openRouterSource = replaced;
+  }
+  fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
+  fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "provider-home.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
+  return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
+      generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+      buildCommand: (params: {
+        prompt: string;
+        cwd: string;
+        options: Record<string, unknown>;
+      }) => Promise<Record<string, unknown>>;
+    };
+    decideOpenRouter429Recovery(input: {
+      retryAttempt: number;
+      nowMs: number;
+      retryDeadlineMs: number;
+      totalDeadlineMs?: number;
+      random: number;
+    }):
+      | { kind: "rate-limit-exhausted" }
+      | { kind: "total-timeout" }
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+    createOpenRouterAgent(options?: Record<string, unknown>): {
+      opts: Record<string, unknown> & { env?: Record<string, string> };
+      generate(options?: {
+        prompt?: unknown;
+        onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
+        onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
+        abortSignal?: AbortSignal;
+        [key: string]: unknown;
+      }): Promise<{ text: string }>;
+      stream(options?: {
+        prompt?: unknown;
+        onEvent?: (event: Record<string, unknown>) => unknown;
+        onStdout?: (text: string) => void;
+        onStderr?: (text: string) => void;
+        onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
+        abortSignal?: AbortSignal;
+        [key: string]: unknown;
+      }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command?: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+        cleanup?: () => Promise<void>;
+      }>;
+    };
+  };
+}
+
+function installOpenRouterRetryCodexFixture(project: string): {
+  bin: string;
+  counter: string;
+  journal: string;
+  sentinel: string;
+  provisionalAck: string;
+  warningAck: string;
+} {
+  const bin = path.join(project, "openrouter-retry-bin");
+  const counter = path.join(project, "openrouter-retry-count");
+  const journal = path.join(project, "openrouter-retry-journal.jsonl");
+  const sentinel = path.join(project, "openrouter-retry-sentinel");
+  const provisionalAck = path.join(project, "openrouter-retry-provisional-ack");
+  const warningAck = path.join(project, "openrouter-retry-warning-ack");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(counter, "0", "utf8");
+  fs.writeFileSync(journal, "", "utf8");
+  const executable = path.join(bin, "codex");
+  fs.writeFileSync(
+    executable,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+if (process.argv.includes("--version")) {
+  process.stdout.write("codex-cli 0.147.0\\n");
+  process.exit(0);
+}
+const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
+const journalPath = process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL;
+const sentinelPath = process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL;
+const provisionalAckPath = process.env.OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK;
+const warningAckPath = process.env.OPENROUTER_RETRY_FIXTURE_WARNING_ACK;
+let count = 0;
+try { count = Number(fs.readFileSync(counterPath, "utf8")); } catch {}
+count += 1;
+fs.writeFileSync(counterPath, String(count), "utf8");
+const failureCount = Number(process.env.OPENROUTER_RETRY_FIXTURE_FAILURES ?? "1");
+const mode = process.env.OPENROUTER_RETRY_FIXTURE_MODE ?? "initial";
+const argv = process.argv.slice(2);
+const resumed = argv[0] === "exec" && argv[1] === "resume";
+const resumeSession = resumed ? argv.at(-2) : undefined;
+let stdin = "";
+process.stdin.resume();
+process.stdin.on("data", (chunk) => { stdin += chunk; });
+process.stdin.on("end", () => {
+  const substantiveMode = mode.startsWith("substantive-") ||
+    [
+      "missing-session",
+      "conflicting-session",
+      "fresh-conflicting-session",
+      "late-conflicting-session",
+      "stderr-only",
+      "resume-hang"
+    ].includes(mode);
+  if (substantiveMode && !resumed) fs.appendFileSync(sentinelPath, "mutation\\n", "utf8");
+  fs.appendFileSync(journalPath, JSON.stringify({
+    count,
+    argv,
+    stdin,
+    invocation: resumed ? "resume" : "fresh",
+    resumeSession,
+    sentinel: fs.existsSync(sentinelPath) ? fs.readFileSync(sentinelPath, "utf8") : ""
+  }) + "\\n", "utf8");
+  const sessionId = mode === "conflicting-session" && resumed
+    ? "conflicting-session"
+    : mode === "initial"
+      ? "fixture-" + count
+      : "fixture-session";
+  if (!(mode === "missing-session" && count === 1)) {
+    process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");
+  }
+  process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
+  if (mode === "callback-hang") {
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stdout-callback-hang") {
+    // BaseCliAgent's onStdout contract carries extracted assistant text rather
+    // than raw Codex JSONL. Emit a recognized streaming-text envelope so this
+    // fixture exercises a live onStdout callback before the child exits.
+    process.stdout.write(JSON.stringify({
+      type: "message",
+      role: "assistant",
+      content: "live stdout before hang"
+    }) + "\\n");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-callback-hang") {
+    process.stderr.write("live stderr before hang");
+    setTimeout(() => process.exit(0), 600);
+    return;
+  }
+  if (mode === "stderr-429-hang" && count <= failureCount) {
+    process.stderr.write("HTTP 429 request id: fixture-" + count + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-replay" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "fixture progress" }
+    }) + "\\n");
+  }
+  if (mode === "substantive-snapshot-overflow" && resumed) {
+    for (const snapshot of [1, 4]) {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+      }) + "\\n");
+    }
+  }
+  if (mode === "late-conflicting-session" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "late-before-conflict", type: "agent_message", text: "before conflict" }
+    }) + "\\n");
+    process.stdout.write(
+      JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) +
+        "\\n" +
+        JSON.stringify({ type: "message", role: "assistant", content: "must stay quarantined" }) +
+        "\\n"
+    );
+    setTimeout(() => {
+      fs.appendFileSync(sentinelPath, "wrong-session-mutation\\n", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "post-conflict", type: "agent_message", text: "must stay quarantined" }
+      }) + "\\n");
+      process.stderr.write("wrong-session-stderr must stay quarantined\\n");
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "WRONG", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 100);
+    return;
+  }
+  if (mode === "resume-hang" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "resume-message", type: "agent_message", text: "resume began" }
+    }) + "\\n");
+    setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode === "substantive-updates" && resumed) {
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "item.updated",
+      item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "completed" }
+    }) + "\\n");
+  }
+  if (mode === "warning-burst") {
+    for (let warning = 0; warning < 256; warning += 1) {
+      process.stderr.write("ordinary warning " + warning + "\\n");
+    }
+    // stdout and stderr use separate pipes. Wait for an explicit parent
+    // acknowledgement so success cannot overtake the warning burst.
+    const warningAckDeadline = setTimeout(() => {
+      clearInterval(warningAckTimer);
+      process.stderr.write("warning-burst acknowledgement timed out\\n");
+      process.exitCode = 1;
+    }, 5_000);
+    const warningAckTimer = setInterval(() => {
+      if (!fs.existsSync(warningAckPath)) return;
+      clearInterval(warningAckTimer);
+      clearTimeout(warningAckDeadline);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 1);
+    return;
+  }
+  if (
+    mode === "stderr-left-boundary-negative" ||
+    mode === "stderr-right-boundary-negative" ||
+    mode === "stderr-long-s-boundary-negative"
+  ) {
+    const first =
+      mode === "stderr-left-boundary-negative"
+        ? "prefix"
+        : mode === "stderr-long-s-boundary-negative"
+          ? "HTTP ſtatus 429"
+          : "HTTP 429";
+    const second = mode === "stderr-left-boundary-negative" ? "HTTP 429 suffix\\n" : "suffix\\n";
+    process.stderr.write(first);
+    setTimeout(() => {
+      if (mode === "stderr-right-boundary-negative" || mode === "stderr-long-s-boundary-negative") {
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: mode + " boundary disproved"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "provisional-safe", type: "agent_message", text: mode + " event preserved" }
+        }) + "\\n");
+      }
+      process.stderr.write(second);
+      const outputIndex = process.argv.indexOf("--output-last-message");
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "final-message", type: "agent_message", text: "OK" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+    }, 10);
+    return;
+  }
+  if (count <= failureCount && mode !== "empty-success" && mode !== "warning-burst") {
+    const rateLimitMessage =
+      "exceeded retry limit, last status: 429 Too Many Requests, request id: fixture-" + count;
+    if (mode === "stderr-provisional-post-terminal") {
+      // The test-generated relay acknowledges only after its actual
+      // provisional transition, regardless of how this write is chunked.
+      process.stderr.write("provisional boundary ready\\nHTTP 429");
+      const provisionalAckDeadline = setTimeout(() => {
+        clearInterval(provisionalAckTimer);
+        process.stderr.write("\\nprovisional boundary acknowledgement timed out\\n");
+        process.exitCode = 1;
+      }, 5_000);
+      const provisionalAckTimer = setInterval(() => {
+        if (!provisionalAckPath || !fs.existsSync(provisionalAckPath)) return;
+        clearInterval(provisionalAckTimer);
+        clearTimeout(provisionalAckDeadline);
+        fs.appendFileSync(sentinelPath, "provisional-post-terminal-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "provisional post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "provisional-post-terminal",
+            type: "command_execution",
+            command: "provisional post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        process.stderr.write("\\n");
+        process.exitCode = 1;
+      }, 1);
+      return;
+    }
+    if (mode === "stderr-post-terminal" || mode === "stdout-post-terminal") {
+      if (mode === "stderr-post-terminal") {
+        process.stderr.write(rateLimitMessage + "\\n");
+      } else {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+      }
+      setTimeout(() => {
+        fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
+        process.stdout.write(JSON.stringify({
+          type: "message",
+          role: "assistant",
+          content: "post-terminal stdout must stay quarantined"
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "item.started",
+          item: {
+            id: "post-terminal",
+            type: "command_execution",
+            command: "post-terminal event must stay quarantined",
+            status: "in_progress"
+          }
+        }) + "\\n");
+        process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
+        process.exitCode = 1;
+      }, 20);
+      return;
+    }
+    if (mode === "stderr-oversized") {
+      process.stderr.write(
+        "429 Too Many Requests request id: fixture-" + count + " " + "x".repeat(70 * 1024)
+      );
+      process.exitCode = 1;
+      return;
+    }
+    if (mode === "stderr-character-split") {
+      const splitMessage = "HTTP\\n429 Too Many Requests request id: fixture-" + count;
+      let splitIndex = 0;
+      const splitTimer = setInterval(() => {
+        process.stderr.write(splitMessage[splitIndex] ?? "");
+        splitIndex += 1;
+        if (splitIndex >= splitMessage.length) {
+          clearInterval(splitTimer);
+          process.exitCode = 1;
+        }
+      }, 1);
+      return;
+    }
+    if (mode === "stderr-unicode-prefix-split") {
+      process.stderr.write("İ\\nH");
+      setTimeout(() => {
+        process.stderr.write("TTP 429 request id: fixture-" + count + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
+    if (mode === "structured-429-partial-stderr") {
+      process.stderr.write("HTT");
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
+    const substantiveEvents = {
+      "substantive-command": {
+        type: "item.started",
+        item: { id: "command-1", type: "command_execution", command: "fixture-command", status: "in_progress" }
+      },
+      "substantive-message": {
+        type: "item.completed",
+        item: { id: "message-1", type: "agent_message", text: "fixture model output" }
+      },
+      "substantive-reasoning": {
+        type: "item.started",
+        item: { id: "reasoning-1", type: "reasoning", text: "fixture reasoning" }
+      },
+      "substantive-file": {
+        type: "item.completed",
+        item: { id: "file-1", type: "file_change", changes: [{ path: "fixture.txt", kind: "update" }] }
+      },
+      "substantive-tool": {
+        type: "item.started",
+        item: { id: "tool-1", type: "mcp_tool_call", server: "fixture", tool: "probe", status: "in_progress" }
+      },
+      "substantive-web": {
+        type: "item.completed",
+        item: { id: "web-1", type: "web_search", query: "fixture query" }
+      },
+      "substantive-todo": {
+        type: "item.started",
+        item: { id: "todo-1", type: "todo_list", items: [{ text: "fixture task", completed: false }] }
+      },
+      "substantive-429-message": {
+        type: "item.completed",
+        item: { id: "message-429", type: "agent_message", text: "Investigated HTTP 429 handling" }
+      }
+    };
+    if (mode === "substantive-updates" && count === 1) {
+      process.stdout.write(JSON.stringify({
+        type: "item.updated",
+        item: { id: "update-1", type: "command_execution", command: "fixture-update", status: "in_progress" }
+      }) + "\\n");
+    }
+    if ((mode === "substantive-stdout-only" && count === 1) || mode === "substantive-stdout-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: mode === "substantive-stdout-replay" ? "replayed stdout progress" : "stdout-only substantive progress"
+      }) + "\\n");
+    }
+    if (mode === "substantive-stdout-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "message",
+        role: "assistant",
+        content: "oversized-replay-" + "x".repeat(1_024)
+      }) + "\\n");
+    }
+    if (mode === "substantive-action-oversized-replay") {
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "oversized-action", type: "agent_message", text: "x".repeat(1_024) }
+      }) + "\\n");
+    }
+    if (mode === "substantive-snapshot-overflow" && count === 1) {
+      for (const snapshot of [1, 2, 3, 4]) {
+        process.stdout.write(JSON.stringify({
+          type: "item.completed",
+          item: { id: "snapshot-" + snapshot, type: "agent_message", text: "snapshot " + snapshot }
+        }) + "\\n");
+      }
+    }
+    const substantiveEvent = count === 1
+      ? substantiveEvents[mode] ?? (substantiveMode && mode !== "substantive-updates" && mode !== "substantive-snapshot-overflow" && mode !== "substantive-stdout-only" && mode !== "substantive-stdout-replay" && mode !== "substantive-stdout-oversized-replay" && mode !== "substantive-action-oversized-replay"
+        ? { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "fixture progress" } }
+        : undefined)
+      : undefined;
+    if (substantiveEvent) process.stdout.write(JSON.stringify(substantiveEvent) + "\\n");
+    if (mode === "fresh-conflicting-session" && count === 1) {
+      process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "conflicting-session" }) + "\\n");
+    }
+    const message = mode === "unrelated"
+      ? "fixture path /tmp/job-429 is unavailable"
+      : rateLimitMessage;
+    if (mode === "stderr-only") {
+      const splitAt = Math.max(1, message.indexOf("429") + 2);
+      process.stderr.write(message.slice(0, splitAt));
+      setTimeout(() => {
+        process.stderr.write(message.slice(splitAt) + "\\n");
+        process.exitCode = 1;
+      }, 10);
+      return;
+    }
+    process.stdout.write(JSON.stringify({ type: "error", message }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message } }) + "\\n");
+    process.exitCode = 1;
+    return;
+  }
+  const outputIndex = process.argv.indexOf("--output-last-message");
+  if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "OK", "utf8");
+  if (mode !== "empty-success") {
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "final-message", type: "agent_message", text: "OK" }
+    }) + "\\n");
+  }
+  process.stdout.write(JSON.stringify({
+    type: "turn.completed",
+    usage: { input_tokens: 2, output_tokens: 1 }
+  }) + "\\n");
+});
+`,
+    { encoding: "utf8", mode: 0o755 }
+  );
+  return { bin, counter, journal, sentinel, provisionalAck, warningAck };
+}
+
+type OpenRouterRetryFixtureEntry = {
+  count: number;
+  argv: string[];
+  stdin: string;
+  invocation: "fresh" | "resume";
+  resumeSession?: string;
+  sentinel: string;
+};
+
+function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFixtureEntry[] {
+  const text = fs.readFileSync(pathname, "utf8").trim();
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as OpenRouterRetryFixtureEntry);
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
@@ -7690,16 +8397,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     /materializeGeneratedTestCompanion|const workspaceRelativePath = relativePath\.slice/
   );
   assert.match(workflowSource, /generatedTestNodeIds\(task\)/);
-  assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
-  assert.match(workflowSource, /typeof finding\.confidence === "number"/);
-  assert.match(workflowSource, /finding\.confidence = String\(finding\.confidence\)/);
-  assert.match(workflowSource, /\(strategy as Record<string, unknown>\)\.origin/);
-  assert.match(workflowSource, /finding\.strategy = legacyStrategy\.trim\(\)/);
-  assert.match(workflowSource, /finding\.evidence = \[evidence\]/);
-  assert.match(workflowSource, /report\.issues\.map/);
-  assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
-  assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
-  assert.match(workflowSource, /verifyArtifacts\(task, \{ agentReturned: true \}\);/);
+  assert.doesNotMatch(workflowSource, /typeof entry === "string" \? \{ path: entry \}/u);
+  assert.doesNotMatch(
+    workflowSource,
+    /typeof finding\.confidence === "number"|finding\.confidence = String|finding\.strategy = legacyStrategy|finding\.evidence = \[evidence\]/u
+  );
+  assert.match(workflowSource, /verifyArtifacts\(task, capturedOutputs\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);

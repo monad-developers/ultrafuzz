@@ -758,12 +758,7 @@ function validateDynamicContracts(
       });
     }
     const primary = source.outputs.find((output) => output.primary);
-    if (
-      primary === undefined ||
-      (primary.contract !== "ultrafuzz/json-array@1" &&
-        primary.contract !== "ultrafuzz/json-object@1" &&
-        primary.contract !== "ultrafuzz/goal-plan@1")
-    ) {
+    if (primary === undefined || primary.contract !== "ultrafuzz/goal-plan@1") {
       throw topologyError(
         "INVALID_DYNAMIC_SOURCE",
         `Dynamic node \`${node.id}\` source must declare a primary JSON output`,

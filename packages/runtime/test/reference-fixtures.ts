@@ -7,6 +7,7 @@ import {
   CACHE_MANIFEST_FILE,
   defaultReferenceCatalogYaml,
   parseReferenceCatalog,
+  REFERENCE_CACHE_SCHEMA_VERSION,
   type ReferenceCatalog
 } from "@ultrafuzz/references";
 
@@ -48,7 +49,7 @@ export function writeShippedDocumentReferenceCaches(xdgCacheHome: string, catalo
       path.join(cacheDir, CACHE_MANIFEST_FILE),
       `${JSON.stringify(
         {
-          schema_version: "1.0",
+          schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
           provider: "github",
           repo: reference.repo,
           commit: reference.commit,
@@ -243,7 +244,7 @@ export function writeShippedVulnerabilityDatabaseCache(xdgCacheHome: string): vo
     path.join(cacheDir, CACHE_MANIFEST_FILE),
     `${JSON.stringify(
       {
-        schema_version: "1.0",
+        schema_version: REFERENCE_CACHE_SCHEMA_VERSION,
         provider: "github",
         repo: "aviggiano/web3-vulnerability-database",
         commit: SHIPPED_VULNERABILITY_DATABASE.commit,

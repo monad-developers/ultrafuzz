@@ -8,7 +8,7 @@ import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from
 
 export const THREAT_MODEL_SCHEMA_VERSION = "ultrafuzz.threat-model.v1" as const;
 export const THREAT_MODEL_JSON_SCHEMA_ID =
-  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model" as const;
+  "urn:ultrafuzz:schema:artifacts:threat-model:1" as const;
 export const CAPABILITY_STATUSES = ["present", "absent", "unknown"] as const;
 export const INVARIANT_KINDS = ["economic", "accounting", "state", "authorization", "integration"] as const;
 

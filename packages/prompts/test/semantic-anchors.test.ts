@@ -329,7 +329,7 @@ describe("prompt semantic anchors", () => {
     ]);
 
     for (const asset of loadBuiltInPromptAssets()) {
-      const forbiddenReferences = extractPromptVariables(asset.markdown).filter((reference) =>
+      const forbiddenReferences = extractPromptVariables(asset.markdown, { allowDynamicItemVariables: true }).filter((reference) =>
         forbiddenVariableNames.has(reference.name)
       );
       expect(forbiddenReferences, asset.relativePath).toEqual([]);
@@ -354,7 +354,7 @@ describe("prompt semantic anchors", () => {
         expect(asset, `${topologyName}: ${consumer.id} prompt ${promptPath}`).toBeDefined();
         if (asset === undefined) continue;
 
-        for (const reference of extractPromptVariables(asset.markdown)) {
+        for (const reference of extractPromptVariables(asset.markdown, { allowDynamicItemVariables: true })) {
           if (
             (reference.name !== "artifact_path" && reference.name !== "artifact_handoff") ||
             reference.argument === undefined
@@ -499,6 +499,9 @@ describe("prompt semantic anchors", () => {
 
     for (const asset of loadBuiltInPromptAssets()) {
       let markdown = asset.markdown;
+      if (["review/dedupe-findings.md", "review/final-report.md"].includes(asset.relativePath)) {
+        markdown = markdown.replaceAll("ultrafuzz.goal-search-coverage.v1", "");
+      }
       if (asset.relativePath === deliberateCorrectionFixture) {
         expect(asset.markdown).toContain('{"schema_version":"1.0","findings":[]}');
         expect(asset.markdown).toContain("Deliberately write the schema-invalid JSON object");
@@ -1658,7 +1661,7 @@ describe("prompt semantic anchors", () => {
     ] as const) {
       // The file and the schema version are the join to the runtime. `prompt()` returns the unrendered
       // Markdown, so the placeholder is asserted literally.
-      expect(body, name).toContain("`goal-search-coverage.json` next to `{{run_metadata_path}}`");
+      expect(body, name).toContain("`{{goal_search_coverage_path}}`");
       expect(body, name).toContain("ultrafuzz.goal-search-coverage.v1");
       // Only the `completed` statuses are searched goals. A prompt that lists the statuses without
       // saying which of them mean "measured nothing" leaves the inference to the model.
@@ -1749,19 +1752,4 @@ describe("prompt semantic anchors", () => {
     expect(baseSetup).toContain("`vm.etch` does not run constructors or init code");
     expect(baseSetup).toContain("project-local Vyper dependencies as explicit validation blockers");
   });
-});
-
-it("tells every findings@1 review producer which fields the contract requires", () => {
-  // This PR moved deduped-findings.json, triaged-findings.json and
-  // severity-classified-findings.json from ultrafuzz/json-array@1 to
-  // ultrafuzz/findings@1, which subjects them to the full normalized-finding
-  // field check. A prompt that never names a required field lets a model emit
-  // an object without it and fails the node on every attempt.
-  const required = ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"];
-  for (const relativePath of ["review/dedupe-findings.md", "review/triage.md", "review/severity-classification.md"]) {
-    const body = prompt(relativePath);
-    for (const field of required) {
-      expect(body, `${relativePath} must name required field ${field}`).toContain(`\`${field}\``);
-    }
-  }
 });

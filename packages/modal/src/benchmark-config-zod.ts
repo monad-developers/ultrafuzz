@@ -68,7 +68,8 @@ const publicBenchmarkTargetSchema = z
 
 const privateBenchmarkExecutionSchema = z
   .object({
-    excluded_node_ids: z.array(safeId).max(512)
+    excluded_node_ids: z.array(safeId).max(512),
+    include_threat_model_goal_fanout: z.boolean().optional()
   })
   .strict()
   .superRefine((execution, context) => {
@@ -135,7 +136,7 @@ const publicBenchmarkConfigSchema = z
     public_benchmark: z
       .object({
         benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-        lane: z.enum(["smoke", "full"]),
+        lane: z.enum(["smoke", "threat-model", "full"]),
         runner_model_profile: safeId,
         candidate_repository: httpsUrl,
         candidate_commit: fullSha,

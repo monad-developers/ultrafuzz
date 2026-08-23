@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
+import {
+  ARTIFACT_CONTRACT_IDS,
+  NON_JSON_ARTIFACT_CONTRACT_IDS,
+  artifactContractSchemaBinding
+} from "@ultrafuzz/artifacts";
+
 import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -32,6 +38,7 @@ const DIRECT_BUG_FIRST_STRATEGIES = [
   "state-machine-boundaries",
   "lifecycle-view-boundaries"
 ] as const;
+const GOAL_STRATEGIES = ["goal-roaming", "threat-goals", "class-goals"] as const;
 const STATEFUL_SPECIALIST_STRATEGIES = [
   "stateful-invariant-setup",
   "stateful-invariant-handlers",
@@ -64,7 +71,7 @@ const NO_FINDINGS_NO_TESTS: OutputRole = { findings: 0, generatedTests: 0 };
 const NO_FINDINGS_WITH_GENERATED_TESTS: OutputRole = { findings: 0, generatedTests: 1 };
 
 const DEFAULT_PROFILE_ROLES: Record<string, OutputRole> = Object.fromEntries(
-  DIRECT_BUG_FIRST_STRATEGIES.map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
+  [...DIRECT_BUG_FIRST_STRATEGIES, ...GOAL_STRATEGIES].map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
 );
 const FULL_PROFILE_ROLES: Record<string, OutputRole> = {
   ...DEFAULT_PROFILE_ROLES,
@@ -104,10 +111,11 @@ const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
 };
 
 describe("packaged topology collection", () => {
-  it("keeps the packaged full graph byte-identical to the initialized project graph", () => {
+  it("keeps the goal topology in the initialized default and packaged full graphs", () => {
+    const packagedDefaultPath = path.join(TOPOLOGY_ROOT, "default.yml");
     const packagedPath = path.join(TOPOLOGY_ROOT, "full.yml");
     const projectPath = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
-    expect(fs.readFileSync(packagedPath)).toEqual(fs.readFileSync(projectPath));
+    expect(readFileSync(packagedDefaultPath)).toEqual(readFileSync(projectPath));
 
     const topology = loadTopology(REPOSITORY_ROOT, {
       topologyPath: packagedPath,
@@ -284,14 +292,18 @@ describe("packaged topology collection", () => {
     }
 
     expect(canonical.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
-      ...DIRECT_BUG_FIRST_STRATEGIES
+      ...DIRECT_BUG_FIRST_STRATEGIES,
+      ...GOAL_STRATEGIES
     ]);
+    expect(canonical.groups.goals?.defaults?.failure_policy).toBe("continue");
+    expect(full.groups.goals?.defaults?.failure_policy).toBe("continue");
     expect(full.groups.specialists?.defaults?.failure_policy).toBe("continue");
     expect(full.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
       ...DIRECT_BUG_FIRST_STRATEGIES,
       "stateful-invariant-campaign",
       "differential-repair-and-report-review",
-      "dynamic-strategy-generator"
+      "dynamic-strategy-generator",
+      ...GOAL_STRATEGIES
     ]);
     for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
       expect(full.nodes.find((node) => node.id === id)?.group, `full optional group:${id}`).toBe("specialists");
@@ -358,29 +370,6 @@ describe("packaged topology collection", () => {
     }
   });
 
-  // Regression guard for #673. `maxAttemptsFor` falls back to 1, so an agentic group that
-  // forgets `max_attempts` silently compiles to `retries: 0` and the bounded retry policy
-  // from #572 never engages. That is how an 18-hour run ended up with all 179 compiled
-  // tasks at `retries: 0`, where one stochastic provider failure was terminal for the node
-  // and everything downstream of it.
-  it("gives every agentic node in every shipped topology a retry budget", () => {
-    for (const name of ["full", "fuzz-only", "invariant-only", "smoke"]) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
-      const graph = expandTopology(topology, { projectRoot: REPOSITORY_ROOT });
-      const agentic = graph.nodes.filter((node) => node.kind === "agentic");
-      expect(agentic.length, `${name} must ship agentic nodes`).toBeGreaterThan(0);
-
-      const withoutBudget = agentic.filter((node) => node.retryPolicy.maxAttempts < 2).map((node) => node.id);
-      expect(
-        withoutBudget,
-        `${name}.yml compiles these agentic nodes with no retry budget; set max_attempts on their group defaults`
-      ).toEqual([]);
-    }
-  });
-
   // Regression guard for #675, re-derived for #672/#677.
   //
   // #675's actual defect is a SHADOWING one, not a sizing one. `timeoutSecondsFor` resolves a
@@ -410,12 +399,12 @@ describe("packaged topology collection", () => {
    * Read from the shipped files rather than hardcoded, so raising a default is what trips the guard.
    */
   function largestShadowedDefault(): { seconds: number; source: string } {
-    const toml = fs.readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
+    const toml = readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
     const configured = /^\s*default_timeout_seconds\s*=\s*(\d+)\s*$/mu.exec(toml);
     expect(configured, "ultrafuzz.toml must declare run.default_timeout_seconds").not.toBeNull();
     const candidates = [{ seconds: Number(configured![1]), source: "ultrafuzz.toml `run.default_timeout_seconds`" }];
     const profiles = YAML.parse(
-      fs.readFileSync(path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml"), "utf8")
+      readFileSync(path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml"), "utf8")
     ) as { profiles?: Record<string, { settings?: Record<string, unknown> } | null> };
     for (const [profileId, profile] of Object.entries(profiles.profiles ?? {})) {
       const override = profile?.settings?.default_timeout_seconds;
@@ -429,7 +418,7 @@ describe("packaged topology collection", () => {
   it("pins every agentic timeout to the reviewed window and never below the default it shadows", () => {
     const shadowed = largestShadowedDefault();
     let pinsChecked = 0;
-    for (const name of ["full", "fuzz-only", "invariant-only", "smoke"]) {
+    for (const name of PACKAGED_TOPOLOGY_IDS) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -473,25 +462,22 @@ describe("packaged topology collection", () => {
     expect(pinsChecked, "the shipped topologies must still pin an agentic timeout somewhere").toBeGreaterThan(0);
   });
 
-  // The other half of the #672/#677 window decision, and the one the reverted 14400 pin made
-  // invisible. A group `timeout_seconds` pin is multiplied by that group's `max_attempts` before it
-  // is spent: a node that reaches its window is retried, so the worst case a single stuck agentic
-  // node can cost is `timeout_seconds * max_attempts`. That product is spent out of the run's
-  // `workflow_deadline_seconds`, which each audit profile may pin independently of the topology it
-  // selects — so the pin and the deadline are set in two different files by two different edits and
-  // nothing connected them. At 7200 x 2 the worst case is 14400, which is a third of the tightest
-  // deadline any profile using a pinned topology declares; at 14400 x 2 it would have been 28800 of
-  // the same 43200, leaving a real audit two-thirds of its window to do everything else in.
+  // The other half of the #672/#677 window decision, updated for #708's config-owned retry budget.
+  // A node window may be spent once per topology attempt and once per configured same-agent attempt.
+  // That complete product is spent out of `workflow_deadline_seconds`, while the timeout, retry
+  // budget, and deadline live in different shipped files and can otherwise drift independently.
   //
   // This is what makes "is the reviewed window the right size" a mechanical question rather than a
-  // taste one, and it fails if either side moves: raising a pin, raising `max_attempts`, or lowering
-  // a profile's deadline.
+  // taste one, and it fails if either side moves: raising a pin, raising either retry budget, or
+  // lowering a profile's deadline.
   it("keeps one stuck agentic node from consuming a whole profile's workflow deadline", () => {
-    const toml = fs.readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
+    const toml = readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
     const configuredDeadline = /^\s*workflow_deadline_seconds\s*=\s*(\d+)\s*$/mu.exec(toml);
     expect(configuredDeadline, "ultrafuzz.toml must declare run.workflow_deadline_seconds").not.toBeNull();
+    const configuredAttempts = /^\s*same_agent_attempts\s*=\s*(\d+)\s*$/mu.exec(toml);
+    expect(configuredAttempts, "ultrafuzz.toml must declare retry.same_agent_attempts").not.toBeNull();
     const catalogPath = path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml");
-    const catalog = YAML.parse(fs.readFileSync(catalogPath, "utf8")) as {
+    const catalog = YAML.parse(readFileSync(catalogPath, "utf8")) as {
       profiles?: Record<string, { topology_path?: string; settings?: Record<string, unknown> } | null>;
     };
 
@@ -505,6 +491,9 @@ describe("packaged topology collection", () => {
           : path.resolve(path.dirname(catalogPath), profile.topology_path);
       const declaredDeadline = profile?.settings?.workflow_deadline_seconds;
       const deadlineSeconds = typeof declaredDeadline === "number" ? declaredDeadline : Number(configuredDeadline![1]);
+      const declaredAttempts = profile?.settings?.same_agent_attempts;
+      const sameAgentAttempts =
+        typeof declaredAttempts === "number" ? declaredAttempts : Number(configuredAttempts![1]);
 
       const graph = expandTopology(loadTopology(REPOSITORY_ROOT, { topologyPath, requirePromptFiles: true }), {
         projectRoot: REPOSITORY_ROOT
@@ -514,11 +503,12 @@ describe("packaged topology collection", () => {
           continue;
         }
         profilesChecked += 1;
-        const worstCaseSeconds = node.timeoutSeconds * node.retryPolicy.maxAttempts;
+        const worstCaseSeconds = node.timeoutSeconds * node.retryPolicy.maxAttempts * sameAgentAttempts;
         expect(
           worstCaseSeconds,
           `audit profile \`${profileId}\` runs ${path.basename(topologyPath)} with workflow_deadline_seconds=${deadlineSeconds}, ` +
-            `but node \`${node.id}\` can spend ${node.timeoutSeconds} x ${node.retryPolicy.maxAttempts} = ${worstCaseSeconds} seconds of it`
+            `but node \`${node.id}\` can spend ${node.timeoutSeconds} x ${node.retryPolicy.maxAttempts} topology attempts x ` +
+            `${sameAgentAttempts} same-agent attempts = ${worstCaseSeconds} seconds of it`
         ).toBeLessThan(deadlineSeconds);
       }
     }

@@ -30,8 +30,8 @@ import {
 import { benchmarkTopologyTransform } from "../src/runner.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
-const COHORT_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json");
+const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "lanes.json");
+const COHORT_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "cohort.json");
 const TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
 const DIGEST = "a".repeat(64);
 const MAX_DYNAMIC_NODES = 512;
@@ -122,7 +122,7 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
     // `eval run --provider none` constructs no reporters, so this list cannot
     // retain the threat-model artifacts. The public worker collects those
     // independently through optionalRowArtifactSources.
-    expect(suite.reporting.artifacts?.include).toEqual(["report.md", "report.json", "findings.normalized.json"]);
+    expect(suite.reporting.artifacts?.include).toEqual(["report.md", "report.json"]);
     expect(
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "ultrafuzz-bench",
@@ -130,7 +130,7 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
         cohort: loadBenchmarkCohortManifest(COHORT_PATH),
         lanes: loadBenchmarkLanesManifest(LANES_PATH)
       }).reporting.artifacts?.include
-    ).toEqual(["report.md", "report.json", "findings.normalized.json"]);
+    ).toEqual(["report.md", "report.json"]);
   });
 
   it("refuses to compile a gate that prunes the nodes it exists to exercise", () => {
@@ -163,7 +163,9 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
       const directory = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP ?? "/tmp", "ufz-gate-lane-"));
       const file = path.join(directory, "lanes.json");
       fs.writeFileSync(file, JSON.stringify({ ...lanes, "threat-model": { ...lanes["threat-model"], [flag]: true } }));
-      expect(() => loadBenchmarkLanesManifest(file)).toThrow(/run the whole production topology/u);
+      expect(() => loadBenchmarkLanesManifest(file)).toThrowError(
+        expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
+      );
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
@@ -175,7 +177,7 @@ describe("v0.1.0 threat-model release-gate benchmark lane", () => {
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "evmbench",
         lane: "threat-model",
-        cohort: loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json")),
+        cohort: loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench", "cohort.json")),
         lanes: loadBenchmarkLanesManifest(LANES_PATH)
       })
     ).toThrow(/Ultrafuzz-bench cohort/u);

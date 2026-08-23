@@ -351,6 +351,7 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
       templatePath,
       templateDigest: digest(fs.readFileSync(templatePath)),
       templateFingerprint: digest("template-fingerprint"),
+      continueOnFail: true,
       maxDynamicNodes: 100,
       reservedNodeIds: ["planner", "fanout", "join"],
       taskTemplates: [templateTask],
@@ -384,6 +385,7 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
       assert.deepEqual(join.depends_on, ["planner"]);
       assert.deepEqual(storedJoin.dependencies, ["planner"]);
       assert.deepEqual(storedJoin.dependencySmithersNodeIds, ["verify:planner"]);
+      assert.deepEqual(storedJoin.optionalDependencyArtifactDirs, [path.join(runRoot, "artifacts", "planner")]);
     } else {
       assert.deepEqual(join.depends_on, ["dynamic:item:goal-0"]);
       const generated = materialized.tasks.find((task) => task.metadata.node.producerNodeId === "dynamic:item:goal-0")!;
@@ -391,6 +393,7 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
       assert.ok(!generated.attemptId.includes(":"));
       assert.deepEqual(storedJoin.dependencies, [generated.attemptId]);
       assert.deepEqual(storedJoin.dependencySmithersNodeIds, [generated.verifierSmithersNodeId]);
+      assert.deepEqual(storedJoin.optionalDependencyArtifactDirs, [generated.artifactDir]);
       assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /goal 0 using context 0/u);
     }
   }
@@ -435,12 +438,12 @@ test("100 generated attempts remain queued under the ordinary concurrency projec
 function plannedGraph(_runId: string): PlannedGraph {
   const base = {
     display_name: "Node",
-    kind: "agentic",
+    kind: "agentic" as const,
     artifact_dir: "artifacts/node",
     outputs: [
       {
         path: "findings.json",
-        contract: "ultrafuzz/findings@1" as const,
+        contract: "ultrafuzz/findings@2" as const,
         contract_digest: digest("contract"),
         primary: true
       }
@@ -448,13 +451,13 @@ function plannedGraph(_runId: string): PlannedGraph {
     prompt_id: "worker",
     prompt_path: "worker.md",
     timeout_seconds: 60,
-    retry_policy: { max_attempts: 2 },
+    retry_policy: { max_attempts: 2, same_agent_attempts: 2 },
     loop: { index: 0, count: 1, mode: "parallel" as const, attempt_index: 0 },
     model_fanout: []
   };
   return {
-    schema_version: "1.0",
-    graph_version: "2.0",
+    schema_version: "ultrafuzz.planned-graph.v4",
+    graph_version: "4",
     topology_version: 2,
     groups: {},
     nodes: [
@@ -499,13 +502,15 @@ function compiledTask(
     attemptId,
     concreteNodeId: attemptId,
     logicalNodeId,
+    preparationSmithersNodeId: `prepare:${attemptId}`,
     smithersNodeId: `node:${attemptId}`,
     verifierSmithersNodeId: `verify:${attemptId}`,
     agentRef: "CodexAgent",
+    agentChain: [{ profileId: "default", agentRef: "CodexAgent", role: "primary" }],
     timeoutMs: 60_000,
     heartbeatTimeoutMs: 30_000,
     retries: 1,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1000, maxDelayMs: 10_000 },
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1000 },
     dependencies: [],
     dependencySmithersNodeIds: [],
     workspacePath: path.join(runRoot, "workspaces", attemptId),
@@ -520,11 +525,11 @@ function compiledTask(
       agentCredentialEnv: []
     },
     metadata: {
-      schemaVersion: "ultrafuzz.smithers.task.v1",
+      schemaVersion: "ultrafuzz.smithers.task.v3",
       run: {
         ultrafuzzRunId: path.basename(runRoot),
         smithersWorkflowName: "test",
-        graphVersion: "2.0",
+        graphVersion: "4",
         topologyVersion: 2
       },
       node: {
@@ -537,11 +542,18 @@ function compiledTask(
       },
       dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
       loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+      model: {
+        profileId: "default",
+        agentRef: "CodexAgent",
+        modelIndex: 0,
+        attemptIndex: 0,
+        agentChain: [{ profileId: "default", agentRef: "CodexAgent", role: "primary" }]
+      },
       workspace: {
         primitive: "worktree",
         path: path.join(runRoot, "workspaces", attemptId),
         repoPath: projectRoot,
-        trustModel: "isolated"
+        trustModel: "skip-permissions"
       },
       artifacts: {
         dir: artifactDir,
@@ -549,7 +561,7 @@ function compiledTask(
         outputs: [
           {
             path: "findings.json",
-            contract: "ultrafuzz/findings@1",
+            contract: "ultrafuzz/findings@2",
             contractDigest: digest("contract"),
             primary: true
           }
@@ -559,7 +571,7 @@ function compiledTask(
         mode: "local",
         resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 60 }
       },
-      retryPolicy: { maxAttempts: 2, smithersRetries: 1 },
+      retryPolicy: { maxAttempts: 2, sameAgentAttempts: 2, smithersRetries: 1 },
       timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 30_000 }
     }
   };

@@ -28,7 +28,8 @@ import {
 import type {
   BenchmarkCohortManifest,
   BenchmarkLanesManifest,
-  BenchmarkModelProfileManifest
+  BenchmarkModelProfileManifest,
+  BenchmarkLaneName
 } from "./benchmark-manifest.js";
 import type {
   AdjudicationHandoff,
@@ -210,10 +211,18 @@ const BENCHMARK_JUDGE_PROFILE: BenchmarkModelProfileManifest = {
   reasoning: "xhigh"
 };
 
-const BENCHMARK_RUNNER_PROFILES: Readonly<Record<"smoke" | "full", readonly BenchmarkModelProfileManifest[]>> = {
+const BENCHMARK_RUNNER_PROFILES: Readonly<Record<BenchmarkLaneName, readonly BenchmarkModelProfileManifest[]>> = {
   smoke: [
     {
       id: "benchmark-smoke-gpt-5-6-luna-high",
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    }
+  ],
+  "threat-model": [
+    {
+      id: "benchmark-threat-model-gpt-5-6-luna-high",
       agent: "CodexAgent",
       model: "gpt-5.6-luna",
       reasoning: "high"
@@ -251,7 +260,7 @@ function benchmarkLanesPolicy(value: unknown): EvalSemanticGateIssue[] {
   const gate = "eval-benchmark-lanes-policy";
   const manifest = value as BenchmarkLanesManifest;
   const issues: EvalSemanticGateIssue[] = [];
-  for (const laneName of ["smoke", "full"] as const) {
+  for (const laneName of ["smoke", "threat-model", "full"] as const) {
     const lane = manifest[laneName];
     issues.push(
       ...uniqueFieldIssues(
@@ -297,6 +306,20 @@ function benchmarkLanesPolicy(value: unknown): EvalSemanticGateIssue[] {
         gate,
         "$.smoke",
         "smoke lane must use one strategy loop and disable invariant, differential, and dynamic strategies"
+      )
+    );
+  }
+  if (
+    manifest["threat-model"].strategy_loops !== 1 ||
+    manifest["threat-model"].disable_invariant_tests ||
+    manifest["threat-model"].disable_differential_tests ||
+    manifest["threat-model"].disable_dynamic_strategies
+  ) {
+    issues.push(
+      issue(
+        gate,
+        "$.threat-model",
+        "threat-model lane must use one strategy loop and run the whole production topology"
       )
     );
   }

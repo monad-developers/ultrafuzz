@@ -75,76 +75,17 @@ hunter selection belong to `goal-plan`.
 
 ## Canonical JSON
 
-The authoritative contract for this artifact is the canonical JSON Schema
-`{{artifact_schema_dir}}/threat-model.schema.json`
-(`$id: https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model`),
-generated from the same `ultrafuzz/threat-model@1` validator that gates this
-node. The shape below restates that schema for convenience; when the two ever
-disagree, the schema file wins.
+Read `{{artifact_schema_dir}}/threat-model.schema.json` before authoring the
+structured artifact. It is the sole authority for field names, types,
+required values, and the registered contract identity. Write
+`{{artifact_path}}/threat-model.json` to that schema and validate it with the
+exact command in the injected output contract.
 
-Write `{{artifact_path}}/threat-model.json` first with this exact top-level
-shape and `schema_version: "ultrafuzz.threat-model.v1"`:
-
-```json
-{
-  "schema_version": "ultrafuzz.threat-model.v1",
-  "title": "Protocol threat model",
-  "scope": {
-    "summary": "...",
-    "repository_evidence": [],
-    "exclusions": []
-  },
-  "protocol": {
-    "summary": "...",
-    "archetypes": ["..."]
-  },
-  "capabilities": [],
-  "assets": [],
-  "actors": [],
-  "trust_boundaries": [],
-  "attack_surfaces": [],
-  "value_flows": [],
-  "lifecycle_transitions": [],
-  "invariants": [],
-  "threats": [],
-  "assumptions": [],
-  "unknowns": [],
-  "coverage_gaps": []
-}
-```
-
-Required record shapes:
-
-- capability: `id`, `status`, `rationale`, `evidence`;
-- asset: `id`, `name`, `description`, `value_at_risk`, `evidence`;
-- actor: `id`, `name`, `role`, `trust`, `privileges`, `evidence`;
-- trust boundary: `id`, `name`, `description`, `actor_ids`, `evidence`;
-- attack surface: `id`, `name`, `description`, `entry_points`, `asset_ids`,
-  `actor_ids`, `capability_ids`, `trust_boundary_ids`, `evidence`;
-- value flow: `id`, `name`, `description`, ordered `steps`, `asset_ids`,
-  `actor_ids`, `evidence`;
-- lifecycle transition: `id`, `name`, `from`, `to`, `trigger`, `guards`,
-  `effects`, `evidence`;
-- invariant: `id`, `name`, `kind` (exactly one of `economic`, `accounting`,
-  `state`, `authorization`, or `integration`; no other value validates),
-  `statement`, `asset_ids`, `capability_ids`, `evidence`;
-- threat: `id`, `title`, `description`, `preconditions`, `impact`, `asset_ids`,
-  `actor_ids`, `attack_surface_ids`, `capability_ids`, `trust_boundary_ids`,
-  `invariant_ids`, `assumption_ids`, `unknown_ids`, `evidence`;
-- assumption: `id`, `name`, `statement`, `evidence`;
-- unknown: `id`, `name`, `description`, `security_impact`,
-  `evidence_needed`;
-- coverage gap: `id`, `name`, `description`, `reason`.
-
-All referenced IDs must exist in their corresponding top-level collection.
-Keep IDs unique within every collection. Use empty arrays, not omitted fields,
-when no optional references exist.
-
-Every `*_ids` field, `privileges`, `entry_points`, `steps`, `guards`,
-`effects`, `preconditions`, `exclusions`, `archetypes`, and `evidence` is a
-JSON array. Every other leaf field is a single JSON string — in particular
-`value_at_risk`, `impact`, `security_impact`, and `evidence_needed` are
-strings, never arrays.
+Keep every identifier unique within its collection and resolve every reference
+to an identifier in the corresponding collection. Preserve ordered protocol
+steps and lifecycle effects in source order. Empty relationships remain empty
+collections rather than invented links. The capability status and repository
+evidence rules above are semantic requirements in addition to the schema.
 
 ## Human artifact
 

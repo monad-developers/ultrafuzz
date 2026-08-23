@@ -107,7 +107,20 @@ const handoffArtifactOutput = z.strictObject({
   path: handoffPath,
   contract: handoffText,
   contractDigest: handoffDigest,
+  schemaFile: handoffText.optional(),
+  schemaId: handoffText.optional(),
+  schemaSha256: handoffDigest.optional(),
+  schemaBundleSha256: handoffDigest.optional(),
+  validatorBuild: handoffText.optional(),
   primary: z.boolean()
+});
+
+const handoffAgentChainEntry = z.strictObject({
+  profileId: handoffIdentity,
+  agentRef: handoffIdentity,
+  modelName: handoffText.optional(),
+  reasoningEffort: handoffText.optional(),
+  role: z.enum(["primary", "fallback"])
 });
 
 const handoffExecutionResources = z.strictObject({
@@ -172,7 +185,8 @@ const handoffMetadata = z.strictObject({
       modelName: handoffText.optional(),
       reasoningEffort: handoffText.optional(),
       modelIndex: handoffCount,
-      attemptIndex: handoffCount
+      attemptIndex: handoffCount,
+      agentChain: z.array(handoffAgentChainEntry).min(1)
     })
     .optional(),
   // `repoPath` is deliberately absent: it is controller-only provenance the worker never reads, and a
@@ -238,8 +252,7 @@ export const cloudSelectedTaskSchema = z.strictObject({
   retries: handoffCount,
   retryPolicy: z.strictObject({
     backoff: z.literal("exponential"),
-    initialDelayMs: handoffCount,
-    maxDelayMs: handoffCount
+    initialDelayMs: handoffCount
   }),
   metadata: handoffMetadata,
   execution: z.strictObject({
@@ -458,6 +471,11 @@ export const CLOUD_SELECTED_TASK_GENERATED_EXPANSION_FIELDS = [
  */
 export interface CloudSelectedTaskRuntimeDependencyEvidence {
   /**
+   * Declared dynamic-group placeholders that runtime lowering replaces with generated concrete
+   * nodes (or with the authenticated source node when the expansion is empty).
+   */
+  replacedConcreteNodeIds?: readonly string[];
+  /**
    * Every attempt ID the declared dynamic groups could legitimately materialize for one generated
    * concrete node ID, derived from compile-time constants alone.
    */
@@ -548,9 +566,13 @@ function assertCorrelatedRuntimeDependencies(
     canonical.metadata.dependencies.smithersNodeIds,
     "metadata.dependencies.smithersNodeIds"
   );
+  const replacedConcreteNodeIds = new Set(evidence.replacedConcreteNodeIds ?? []);
+  const retainedCanonicalConcreteNodeIds = canonical.metadata.dependencies.concreteNodeIds.filter(
+    (nodeId) => !replacedConcreteNodeIds.has(nodeId)
+  );
   const concreteNodeIds = runtimeExtension(
     actual.metadata.dependencies.concreteNodeIds,
-    canonical.metadata.dependencies.concreteNodeIds,
+    retainedCanonicalConcreteNodeIds,
     "metadata.dependencies.concreteNodeIds"
   );
   const artifactsRoot = `${actual.runRoot}/artifacts`;

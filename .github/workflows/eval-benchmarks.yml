@@ -10,13 +10,13 @@ on:
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
-      benchmark_lane:
+      benchmark_mode:
         description: >-
           Which lane to dispatch. `smoke` runs one selected runner over the three smoke targets;
           `full` is the EVMBench model matrix; `threat-model` is the v0.1.0 release gate from #183:
           the pinned three-target Ultrafuzz-bench cohort through the PRODUCTION topology, so the
           threat-model, goal-plan and dynamic goal-fanout nodes actually run. The threat-model lane
-          ignores every model input below and uses the checked-in benchmarks/lanes.json profile
+          ignores every model input below and uses the checked-in benchmarks/ultrafuzzbench/lanes.json profile
           (OpenAI gpt-5.6-luna / high), and it is never published to longitudinal history. It costs
           real money: confirm an owner and a compute budget before dispatching.
         required: true
@@ -89,7 +89,7 @@ on:
         type: string
 
 env:
-  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
@@ -97,7 +97,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -120,7 +120,7 @@ jobs:
 
       # Keep the selected lane visible in the job metadata for operators. The
       # publication qualifier independently derives it from exact-run artifacts.
-      - name: Benchmark lane ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_lane || 'smoke' }}
+      - name: Benchmark lane ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}
         run: echo "Dispatching the $BENCHMARK_MODE benchmark lane"
 
       - name: Set up pnpm
@@ -181,9 +181,9 @@ jobs:
           BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
           BENCHMARK_DEEPSEEK_MODEL: ${{ inputs.deepseek_model || 'deepseek-v4-pro' }}
           BENCHMARK_DEEPSEEK_REASONING: ${{ inputs.deepseek_reasoning || 'max' }}
-          BENCHMARK_SMOKE_PROVIDER: ${{ inputs.benchmark_lane == 'smoke' && (inputs.smoke_provider || 'openai') || 'openai' }}
-          BENCHMARK_SMOKE_MODEL: ${{ inputs.benchmark_lane == 'smoke' && inputs.smoke_model || '' }}
-          BENCHMARK_SMOKE_REASONING: ${{ inputs.benchmark_lane == 'smoke' && inputs.smoke_reasoning || '' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ inputs.benchmark_mode == 'smoke' && (inputs.smoke_provider || 'openai') || 'openai' }}
+          BENCHMARK_SMOKE_MODEL: ${{ inputs.benchmark_mode == 'smoke' && inputs.smoke_model || '' }}
+          BENCHMARK_SMOKE_REASONING: ${{ inputs.benchmark_mode == 'smoke' && inputs.smoke_reasoning || '' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
@@ -191,7 +191,7 @@ jobs:
           # unset makes prepare-modal-benchmarks.mjs fall back to the lane's own
           # checked-in profile, so no dispatch-form value can retune the gate.
           if [ "$BENCHMARK_MODE" = threat-model ]; then
-            BENCHMARK_MODELS_JSON=""
+            unset BENCHMARK_MODELS_JSON
           elif [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             # A dispatched smoke run uses the requested single runner. Its targets,
             # loops, topology transform, and judge remain pinned by the smoke lane.

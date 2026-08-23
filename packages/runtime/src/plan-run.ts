@@ -80,13 +80,23 @@ import { assertControllerSourceDigest, inspectControllerSource } from "./control
 import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import { projectArtifactSchemaDir } from "./init.js";
 import {
   assertLaunchCheckoutRevision,
   captureLaunchSourceRevision,
   deleteRunSourceRevision,
   publishRunSourceRevision
 } from "./source-revision.js";
-import { transformTopologyForRun } from "./topology-transform.js";
+import {
+  promptTextsForCatalog,
+  transformPromptCatalogForRun,
+  transformTopologyForRun
+} from "./topology-transform.js";
+import {
+  materializeVulnerabilityDatabasePlannerCatalog,
+  VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
+  type MaterializedVulnerabilityDatabaseCatalog
+} from "./vulnerability-database.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
@@ -434,6 +444,11 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   }
 
   const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+  try {
+    persistDeferredPromptTemplates(layout, catalog, expandedGraph);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);
+  }
   if (validation.value.topology === undefined) {
     throw new Error("validated run plan is missing its topology summary");
   }
@@ -520,7 +535,15 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       resolved_config: resolved.config,
       validation: validation.value,
       layout,
-      rendered_prompts: renderedPrompts
+      rendered_prompts: renderedPrompts,
+      ...(vulnerabilityDatabase === undefined
+        ? {}
+        : {
+            vulnerability_database: {
+              relative_path: path.relative(layout.root, vulnerabilityDatabase.path).split(path.sep).join("/"),
+              sha256: vulnerabilityDatabase.sha256
+            }
+          })
     },
     preMaterializeDiagnostics
   );
@@ -567,32 +590,40 @@ function persistRenderedPromptSnapshots(
   });
 }
 
-export function transformPromptCatalogForRun(
+/**
+ * Persist the exact transformed prompt bodies needed by runtime-generated and deferred nodes.
+ * Compilation must never reread mutable project prompt files after planning sealed their digests.
+ */
+function persistDeferredPromptTemplates(
+  layout: RunLayout,
   catalog: PromptCatalog,
-  transform: PlanRunInput["topologyTransform"]
-): PromptCatalog {
-  const excluded = transform?.excludedNodeIds ?? [];
-  if (excluded.length === 0) return catalog;
-  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
-  const entries = new Map(
-    [...catalog.entries].map(([id, entry]) => {
-      const body = entry.body
-        .split("\n")
-        .filter((line) => !tokens.some((token) => line.includes(token)))
-        .join("\n");
-      return [id, { ...entry, body }];
-    })
-  );
-  return { ...catalog, entries };
-}
-
-export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
-  return Object.fromEntries(
-    [...catalog.entries.values()].flatMap((entry) => [
-      [entry.id, entry.body],
-      [entry.relativePath, entry.body]
-    ])
-  );
+  graph: ExpandedGraph
+): Map<string, string> {
+  const digests = graph.fingerprintInputs?.promptDigests ?? {};
+  const persisted = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "agentic" || node.promptPath === undefined) continue;
+    const expected = digests[node.promptPath] ?? node.dynamic?.templateDigest;
+    if (expected === undefined) continue;
+    const body = promptEntryForPath(catalog, node.promptPath, node.logicalId).body;
+    const digest = sha256Text(body);
+    if (digest !== expected) {
+      throw new Error(`transformed prompt template digest does not match the plan for ${node.promptPath}`);
+    }
+    if (persisted.has(digest)) continue;
+    const relativePath = `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`;
+    const snapshotPath = safeResolveInside(layout.root, relativePath, "deferred prompt template snapshot");
+    if (fs.existsSync(snapshotPath)) {
+      assertRegularFileInside(layout.root, snapshotPath, "deferred prompt template snapshot");
+      if (sha256Text(fs.readFileSync(snapshotPath, "utf8")) !== digest) {
+        throw new Error(`immutable deferred prompt template snapshot digest collision for ${node.promptPath}`);
+      }
+    } else {
+      writeFileDurable(snapshotPath, body);
+    }
+    persisted.set(digest, snapshotPath);
+  }
+  return persisted;
 }
 
 interface ReferenceExpectationProvision {

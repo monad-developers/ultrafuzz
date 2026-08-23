@@ -13,6 +13,8 @@ import { z } from "zod/v4";
 
 import {
   artifactContractDefinition,
+  artifactContractSchemaBinding,
+  assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
   executeSchemaSemanticGates,
@@ -26,6 +28,10 @@ import {
   prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
+  readRegularFileSnapshot,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+  sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
   validatePropertiesSchema,
@@ -37,12 +43,19 @@ import {
   type SmithersTaskManifestOutput,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
-import { loadTopology } from "@ultrafuzz/topology";
 import {
-  GOAL_SEARCH_COVERAGE_FILE,
-  GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
-  projectCanonicalFinalReport
-} from "../src/final-report-markdown.js";
+  canonicalPropertiesMarkdownParityIssues,
+  invariantLedgerMarkdownParityIssues
+} from "../src/canonical-properties-markdown.js";
+import {
+  derivePromptArtifactAuthority,
+  parsePromptArtifactAuthorityBytes,
+  serializePromptArtifactAuthority,
+  type DerivePromptArtifactAuthorityInput,
+  type PromptArtifactAuthorityDocument,
+  type PromptArtifactAuthoritySelector
+} from "../src/prompt-artifact-authority.js";
+import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -92,8 +105,16 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     operator_input: { tickets: [1, true, null, "three"] }
   };
   assert.equal(inputSchema.safeParse(local).success, true);
+  const cloud = {
+    cloud_worker: true,
+    task_id: "node:one",
+    attempt_id: "one",
+    execution_generation: "base",
+    selected_task: {},
+    operator_prompt: "focus"
+  };
   assert.equal(
-    inputSchema.safeParse({ cloud_worker: true, task_id: "node:one", operator_prompt: "focus" }).success,
+    inputSchema.safeParse(cloud).success,
     true
   );
 
@@ -104,7 +125,8 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     { ...local, run_id: local.ultrafuzz_run_id },
     { schema_version: local.schema_version, ultrafuzz_run_id: local.ultrafuzz_run_id },
     { ...local, tasks: [{ ...local.tasks[0], extra: true }] },
-    { cloud_worker: true, task_id: "node:one", tasks: [] },
+    { ...cloud, tasks: [{ id: "smuggled" }] },
+    { ...cloud, selected_task: undefined },
     { cloud_worker: false, task_id: "node:one" }
   ]) {
     assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
@@ -143,23 +165,359 @@ function loadArtifactAwareAgent(
   admittedAgent?: () => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> }
 ) => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function renderEmbeddedPromptTemplate");
+  const helperStart = source.indexOf("function artifactAwareAgent");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  const retryFailureTemplate = fs
-    .readFileSync(
-      path.join(repositoryRoot, ".ultrafuzz", "prompts", "_templates", "agent-preamble", "retry-failure.mdx"),
-      "utf8"
-    )
-    .trimEnd();
-  return new Function("untrustedContentBoundary", "retryFailureTemplate", `${helper}; return retryFailureAwareArgs;`)(
-    "UNTRUSTED CONTENT BOUNDARY",
-    retryFailureTemplate
-  ) as ReturnType<typeof loadRetryFailureAwareArgs>;
+  return new Function(
+    "assertWorkspaceSourceRevision",
+    "resetTaskArtifactsForRetry",
+    "authoritativeFinalReportCoverage",
+    "materializeFinalReportPromptAuthority",
+    "authoritativeFinalReportRunMetadataArgs",
+    "authoritativeFinalReportPromptAuthorityArgs",
+    "rememberFinalReportAgentExecutionAuthority",
+    "finalReportAgentExecution",
+    "declaredFinalReportOutputPair",
+    "smithersTaskAgentId",
+    "normalizeNodeAttemptFailureMessage",
+    "sensitiveEnvironmentValues",
+    "assertDependencyArtifactAdmissionCurrent",
+    "assertPromptArtifactAuthorityUnchanged",
+    "assertFinalReportRunMetadataAuthorityUnchanged",
+    "assertFinalReportPromptAuthorityUnchanged",
+    `${helper}; return artifactAwareAgent;`
+  )(
+    () => options.onSourceVerify?.(),
+    () => options.onReset?.(),
+    () => undefined,
+    () => undefined,
+    (_task: unknown, args: unknown) => args,
+    (_task: unknown, args: unknown) => args,
+    () => undefined,
+    () => ({ planned_chain: [], failed_attempts: [], producer: {} }),
+    () => undefined,
+    () => "ultrafuzz-agent:test",
+    normalizeNodeAttemptFailureMessage,
+    sensitiveEnvironmentValues,
+    () => undefined,
+    () => options.onAuthorityCheck?.(),
+    () => undefined,
+    () => undefined
+  ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+type NormalizedAgentFailure = Error & { code?: string; details?: Record<string, unknown> };
+
+async function captureAgentFailure(
+  failure: unknown,
+  task: unknown = { agentChain: [{}] },
+  preflight = false
+): Promise<NormalizedAgentFailure> {
+  const fail = async (): Promise<never> => {
+    throw failure;
+  };
+  const wrapped = loadArtifactAwareAgent()(task, 0, "prompt", {
+    ...(preflight ? { preflight: fail } : {}),
+    generate: fail
+  });
+  try {
+    await (preflight ? wrapped.preflight!({}) : wrapped.generate({ taskContext: { attempt: 1 } }));
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    return error;
+  }
+  return assert.fail("agent failure was not propagated");
+}
+
+async function withEnvironment(values: Record<string, string>, callback: () => Promise<void>): Promise<void> {
+  const previous = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, values);
+  try {
+    await callback();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+function loadFinalReportAgentExecution(): (
+  task: unknown,
+  producerChainIndex: number,
+  observedSelections?: ReadonlyArray<{ attempt: number; chainIndex: number }>
+) => unknown {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function finalReportAgentExecution");
+  const helperEnd = source.indexOf("\n\ntype FinalReportPromptAuthorityProjection", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(`${helper}; return finalReportAgentExecution;`)() as ReturnType<
+    typeof loadFinalReportAgentExecution
+  >;
+}
+
+function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
+  prompt: string,
+  authorityPath: string,
+  reportPath: string
+) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function promptWithAuthoritativeFinalReportPromptAuthority");
+  const helperEnd = source.indexOf("\n\nfunction authoritativeFinalReportPromptAuthorityArgs", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "untrustedContentBoundary",
+    `${helper}; return promptWithAuthoritativeFinalReportPromptAuthority;`
+  )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportPromptAuthority>;
+}
+
+function loadFinalReportAgentExecutionAuthority(
+  options: {
+    smithersDetail?: unknown;
+    chainIndex?: number;
+    execution?: unknown;
+  } = {}
+): {
+  remember(task: unknown, execution: unknown): void;
+  read(task: unknown): unknown;
+  smithersReads(): number;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
+  const helperEnd = source.indexOf("\n\nfunction baseAgentForProfile", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  let reads = 0;
+  const loaded = new Function(
+    "declaredFinalReportOutputPair",
+    "execFileSync",
+    "parseStrictJsonBytes",
+    "isPlainJsonRecord",
+    "reconcileSmithersAttemptAgentSelection",
+    "finalReportAgentExecution",
+    `${helper}; return {
+      remember: rememberFinalReportAgentExecutionAuthority,
+      read: authoritativeFinalReportAgentExecution
+    };`
+  )(
+    () => ({}),
+    () => {
+      reads += 1;
+      if (options.smithersDetail === undefined) {
+        throw new Error("Smithers fallback should not be needed");
+      }
+      return JSON.stringify(options.smithersDetail);
+    },
+    (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")),
+    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    () => ({ chainIndex: options.chainIndex ?? 0 }),
+    () => options.execution ?? {}
+  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown };
+  return { ...loaded, smithersReads: () => reads };
+}
+
+function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
+  materialize(task: unknown, coverage: unknown, execution: unknown): void;
+  assertUnchanged(task: unknown): void;
+  relativePath(task: unknown): string;
+  prompt(prompt: string, authorityPath: string, reportPath: string): string;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("type FinalReportPromptAuthorityProjection");
+  const helperEnd = source.indexOf("\n\nconst finalReportAgentExecutionAuthority", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const readSnapshot = (root: string, filePath: string, _label: string, maxBytes: number, nonEmpty = false) => {
+    assert.ok(path.resolve(filePath).startsWith(`${path.resolve(root)}${path.sep}`));
+    const resolvedPath = fs.realpathSync(filePath);
+    const stat = fs.statSync(resolvedPath, { bigint: true });
+    const bytes = fs.readFileSync(resolvedPath);
+    assert.ok(bytes.length <= maxBytes);
+    if (nonEmpty) assert.ok(bytes.length > 0);
+    return {
+      path: resolvedPath,
+      bytes,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        size: stat.size,
+        mtimeNs: stat.mtimeNs,
+        ctimeNs: stat.ctimeNs
+      }
+    };
+  };
+  const sameIdentity = (
+    left: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint },
+    right: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+  ) =>
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+  return new Function(
+    "path",
+    "realpathSync",
+    "declaredFinalReportOutputPair",
+    "prepareTaskLocalAuthorityPath",
+    "writeFileDurable",
+    "readBoundedRegularArtifactSnapshot",
+    "parseStrictJsonSnapshot",
+    "isDeepStrictEqual",
+    "sameImmutableFileIdentity",
+    "Buffer",
+    "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
+    "MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES",
+    "untrustedContentBoundary",
+    `${helper}; return {
+      materialize: materializeFinalReportPromptAuthority,
+      assertUnchanged: assertFinalReportPromptAuthorityUnchanged,
+      relativePath: finalReportPromptAuthorityRelativePath,
+      prompt: promptWithAuthoritativeFinalReportPromptAuthority
+    };`
+  )(
+    path,
+    fs.realpathSync,
+    () => ({}),
+    (workspaceRoot: string, relativePath: string) => {
+      const authorityPath = prepareSafeFilePath(workspaceRoot, relativePath);
+      try {
+        if (fs.lstatSync(authorityPath).isDirectory()) {
+          fs.rmSync(authorityPath, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      return authorityPath;
+    },
+    writeFileDurable,
+    readSnapshot,
+    (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    isDeepStrictEqual,
+    sameIdentity,
+    Buffer,
+    ".ultrafuzz/authorities",
+    maxAuthorityBytes,
+    "UNTRUSTED CONTENT BOUNDARY"
+  ) as ReturnType<typeof loadFinalReportPromptAuthorityHarness>;
+}
+
+function loadFinalReportRunMetadataAuthorityHarness(
+  remote = "https://github.com/example/project.git?session=private-id\n"
+): {
+  normalize(remoteValue: string): string;
+  derive(task: unknown): unknown;
+  materialize(task: unknown): void;
+  assertUnchanged(task: unknown): void;
+  authoritative(task: unknown): unknown;
+  relativePath(task: unknown): string;
+  prompt(prompt: string, authorityPath: string, reportPath: string): string;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function declaredFinalReportOutputPair");
+  const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const readSnapshot = (root: string, filePath: string, _label: string, maxBytes: number, nonEmpty = false) => {
+    assert.ok(path.resolve(filePath).startsWith(`${path.resolve(root)}${path.sep}`));
+    const resolvedPath = fs.realpathSync(filePath);
+    const stat = fs.statSync(resolvedPath, { bigint: true });
+    const bytes = fs.readFileSync(resolvedPath);
+    assert.ok(bytes.length <= maxBytes);
+    if (nonEmpty) assert.ok(bytes.length > 0);
+    return {
+      path: resolvedPath,
+      bytes,
+      identity: {
+        dev: stat.dev,
+        ino: stat.ino,
+        size: stat.size,
+        mtimeNs: stat.mtimeNs,
+        ctimeNs: stat.ctimeNs
+      }
+    };
+  };
+  const sameIdentity = (
+    left: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint },
+    right: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+  ) =>
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+  return new Function(
+    "path",
+    "realpathSync",
+    "execFileSync",
+    "readBoundedRegularArtifactSnapshot",
+    "assertRunMetadataDocument",
+    "parseStrictJsonSnapshot",
+    "MAX_FINAL_REPORT_RUN_METADATA_BYTES",
+    "MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES",
+    "prepareSafeFilePath",
+    "prepareTaskLocalAuthorityPath",
+    "writeFileDurable",
+    "isDeepStrictEqual",
+    "sameImmutableFileIdentity",
+    "Buffer",
+    "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
+    "untrustedContentBoundary",
+    `${helper}; return {
+      normalize: normalizeFinalReportGitHubRemote,
+      derive: deriveAuthoritativeFinalReportRunMetadata,
+      materialize: materializeFinalReportRunMetadataAuthority,
+      assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
+      authoritative: authoritativeFinalReportRunMetadata,
+      relativePath: finalReportRunMetadataAuthorityRelativePath,
+      prompt: promptWithAuthoritativeFinalReportRunMetadata
+    };`
+  )(
+    path,
+    fs.realpathSync,
+    () => remote,
+    readSnapshot,
+    assertRunMetadataDocument,
+    (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    64 * 1024 * 1024,
+    1024 * 1024,
+    prepareSafeFilePath,
+    (workspaceRoot: string, relativePath: string) => {
+      const authorityPath = prepareSafeFilePath(workspaceRoot, relativePath);
+      try {
+        if (fs.lstatSync(authorityPath).isDirectory()) {
+          fs.rmSync(authorityPath, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      return authorityPath;
+    },
+    writeFileDurable,
+    isDeepStrictEqual,
+    sameIdentity,
+    Buffer,
+    ".ultrafuzz/authorities",
+    "UNTRUSTED CONTENT BOUNDARY"
+  ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
 function loadTaskPromptPathForArtifactReset(): (
@@ -4947,7 +5305,7 @@ test("Smithers rerenders a cloud Sandbox only after its required verifier output
 
 test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const taskProjectionStart = source.indexOf("const taskSpecs = serializedTaskSpecs.map");
+  const taskProjectionStart = source.indexOf("function hydrateTaskSpec");
   const taskProjectionEnd = source.indexOf("\n\ntype AuthenticatedAggregationSourceEntry", taskProjectionStart);
   const baseAgentStart = source.indexOf("function baseAgentForProfile");
   const baseAgentEnd = source.indexOf("\n\nfunction agentForTask", baseAgentStart);
@@ -5407,19 +5765,6 @@ test("generated Smithers workflow does not precreate runtime-owned workspace pat
   assert.doesNotMatch(helper, /workspace\.patch|workspace-patch\.json|writeFileDurable/u);
 });
 
-test("generated Smithers workflow leaves the runtime-owned vulnerability-db snapshot manifest unmaterialized", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function canonicalEmptyArtifact");
-  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
-
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-
-  const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /output\.path === "vulnerability-db-manifest\.json"/u);
-  assert.match(helper, /conflict with the exclusive canonical bytes the snapshot publishes/u);
-});
-
 test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
@@ -5560,12 +5905,367 @@ test("generated local and cloud prompt relocation rebases task-local authority p
     destinationPath: string
   ) => string;
 
-  assert.ok(schemaStart >= 0, source);
-  assert.ok(schemaEnd > schemaStart, source);
-  assert.doesNotMatch(source.slice(schemaStart, schemaEnd), /\brun_id\s*:/u);
-  assert.match(source, /Smithers reserves `run_id`/u);
-  assert.match(source, /Smithers persistence represents absent top-level workflow inputs as null/u);
-  assert.match(source.slice(schemaStart, schemaEnd), /\.nullish\(\)[\s\S]*?value \?\? undefined/u);
+  const sourceRoot = "/tmp/controller-a's-project";
+  const localRoot = "/tmp/local-b's-project";
+  const cloudRoot = "/workspace/cloud-b's-project";
+  const sourceArtifactDir = `${sourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+  const sourceWorkspace = `${sourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`;
+  const sourceAuthority = `${sourceWorkspace}/.ultrafuzz/authorities/task-0.json`;
+  const sourceSchema = `${sourceWorkspace}/.ultrafuzz/schemas/findings.schema.json`;
+  const encodedSourceRoot = sourceRoot.replaceAll("'", `'"'"'`);
+  const rendered = [
+    `- Path: \`${sourceArtifactDir}/findings.json\``,
+    `- Artifact authority: \`${sourceAuthority}\``,
+    `  Validate against: \`${sourceSchema}\``,
+    `  Validation command: \`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``,
+    `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``
+  ].join("\n");
+  assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
+
+  for (const [label, destinationRoot] of [
+    ["local", localRoot],
+    ["cloud", cloudRoot]
+  ] as const) {
+    const destinationArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+    const mirroredTaskArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`;
+    const expectedAuthority = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/authorities/task-0.json`;
+    let relocated = relocatePromptPath(rendered, sourceRoot, destinationRoot);
+    relocated = relocatePromptPath(relocated, destinationArtifactDir, mirroredTaskArtifactDir);
+    const encodedDestinationRoot = destinationRoot.replaceAll("'", `'"'"'`);
+    const encodedExpectedArtifactDir = mirroredTaskArtifactDir.replaceAll("'", `'"'"'`);
+
+    assert.ok(relocated.includes(mirroredTaskArtifactDir), `${label}: ${relocated}`);
+    assert.ok(relocated.includes(expectedAuthority), `${label}: ${relocated}`);
+    assert.equal(relocated.includes(sourceRoot), false, label);
+    assert.doesNotMatch(relocated, /tasks\.json|execution-snapshots|\/controls\//u);
+    assert.ok(
+      relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`),
+      `${label}: ${relocated}`
+    );
+    assert.ok(relocated.includes(`--file '${encodedExpectedArtifactDir}/findings.json'`), `${label}: ${relocated}`);
+    assert.ok(
+      relocated.includes(
+        `ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedExpectedArtifactDir}/findings.json'`
+      ),
+      `${label}: ${relocated}`
+    );
+    assert.equal(relocated.includes(encodedSourceRoot), false, `${label}: stale encoded controller root`);
+    assert.equal(
+      relocated.includes(`'${encodedDestinationRoot}/.ultrafuzz/runs/run-1/artifacts`),
+      false,
+      `${label}: stale canonical artifact root`
+    );
+  }
+});
+
+test("generated prompt authority is derived from sealed controls immediately before each first generation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const runtimeImportStart = source.indexOf("const {", source.indexOf("await import(artifactsModule)"));
+  const runtimeImportEnd = source.indexOf("} = await import(runtimeModule);", runtimeImportStart);
+  const authorityStart = source.indexOf("const promptArtifactAuthoritySnapshotsByTask");
+  const authorityEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", authorityStart);
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
+  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const resetEnd = source.indexOf("\n\nfunction resetTaskArtifactContents", resetStart);
+  assert.ok(runtimeImportStart >= 0 && runtimeImportEnd > runtimeImportStart, source);
+  assert.ok(authorityStart >= 0 && authorityEnd > authorityStart, source);
+  assert.ok(agentStart >= 0 && agentEnd > agentStart, source);
+  assert.ok(resetStart >= 0 && resetEnd > resetStart, source);
+  const runtimeImport = source.slice(runtimeImportStart, runtimeImportEnd);
+  const authority = source.slice(authorityStart, authorityEnd);
+  const agent = source.slice(agentStart, agentEnd);
+  const reset = source.slice(resetStart, resetEnd);
+
+  for (const runtimeHelper of [
+    "derivePromptArtifactAuthority",
+    "parsePromptArtifactAuthorityBytes",
+    "serializePromptArtifactAuthority"
+  ]) {
+    assert.match(runtimeImport, new RegExp(`\\b${runtimeHelper}\\b`, "u"));
+  }
+  assert.match(authority, /PROMPT_ARTIFACT_AUTHORITY_DIRECTORY, `\$\{task\.attemptId\}\.json`/u);
+  assert.match(authority, /const manifestPath = path\.resolve\(task\.taskManifestPath\)/u);
+  assert.match(
+    authority,
+    /readBoundedRegularArtifactSnapshot\([\s\S]*?manifestPath[\s\S]*?MAX_SEALED_TASK_MANIFEST_BYTES[\s\S]*?true/u
+  );
+  assert.match(
+    authority,
+    /const admission = assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?derivePromptArtifactAuthority\(\{[\s\S]*?sealedTaskManifestBytes: manifest\.bytes,[\s\S]*?currentAttemptId: task\.attemptId,[\s\S]*?relocatedRunRoot: realpathSync\(task\.runRoot\),[\s\S]*?admittedDependencyArtifactDirs: admission\.directories,[\s\S]*?selectors[\s\S]*?\}\)/u
+  );
+  assert.match(
+    authority,
+    /const expected = serializePromptArtifactAuthority\(authority\);[\s\S]*?prepareTaskLocalAuthorityPath\(workspaceRoot, promptArtifactAuthorityRelativePath\(task\)\)[\s\S]*?writeFileDurable\(authorityPath, expected\)/u
+  );
+  assert.match(authority, /writeFileDurable\(authorityPath, expected\)/u);
+  assert.match(authority, /parsePromptArtifactAuthorityBytes\(captured\.bytes\)/u);
+  assert.match(authority, /captured\.bytes\.equals\(expected\)/u);
+  assert.match(authority, /sameImmutableFileIdentity\(captured\.identity, expected\.identity\)/u);
+  assert.match(authority, /captured\.bytes\.equals\(expected\.bytes\)/u);
+  assert.doesNotMatch(authority, /task\.metadata|task\.modelName|task\.workspacePath\s*[,}]/u);
+
+  assert.match(
+    reset,
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
+  );
+  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(attemptArgs)"));
+  assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)/u);
+  assert.match(
+    agent,
+    /else \{\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*\}/u
+  );
+  assert.match(
+    agent,
+    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+  );
+  assert.match(
+    agent,
+    /catch \(error\) \{\s*try \{\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\)/u
+  );
+  assert.equal(source.match(/materializePromptArtifactAuthority\(task\);/gu)?.length, 1);
+});
+
+test("generated immutable file identities preserve bigint device, inode, size, and nanosecond precision", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const identityStart = source.indexOf("type ImmutableFileIdentity");
+  const comparatorStart = source.indexOf("function sameImmutableFileIdentity", identityStart);
+  const comparatorEnd = source.indexOf("\n\nfunction decodeStrictUtf8Snapshot", comparatorStart);
+  assert.ok(identityStart >= 0 && comparatorStart > identityStart && comparatorEnd > comparatorStart, source);
+  const emitted = ts.transpileModule(source.slice(comparatorStart, comparatorEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const sameIdentity = new Function(`${emitted}; return sameImmutableFileIdentity;`)() as (
+    left: Record<string, bigint>,
+    right: Record<string, bigint>
+  ) => boolean;
+  const base = {
+    dev: 9_007_199_254_740_992n,
+    ino: 9_007_199_254_740_993n,
+    size: 9_007_199_254_740_994n,
+    mtimeNs: 9_007_199_254_740_995n,
+    ctimeNs: 9_007_199_254_740_996n
+  };
+
+  assert.equal(sameIdentity(base, { ...base }), true);
+  assert.equal(
+    sameIdentity(base, { ...base, ino: 9_007_199_254_740_992n }),
+    false,
+    "values that collapse to the same IEEE-754 number must remain distinguishable"
+  );
+  assert.match(source.slice(identityStart, comparatorEnd), /dev: bigint[\s\S]*ino: bigint[\s\S]*size: bigint/u);
+  assert.match(source, /statSync\(resolvedPath, \{ bigint: true \}\)/u);
+  assert.match(source, /before\.mtimeNs !== after\.mtimeNs/u);
+  assert.match(source, /before\.ctimeNs !== after\.ctimeNs/u);
+  assert.match(source, /BigInt\(bytes\.length\) !== after\.size/u);
+});
+
+test("generated task-local prompt authority is minimized, tamper-evident, and restored for retries", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-prompt-authority-"));
+  try {
+    const controllerRunRoot = path.join(root, "controller-host-private", ".ultrafuzz", "runs", "run-1");
+    const relocatedRunRoot = path.join(root, "execution-b", ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(relocatedRunRoot, "workspaces", "consumer");
+    const requiredDir = path.join(relocatedRunRoot, "artifacts", "required-producer");
+    const optionalDir = path.join(relocatedRunRoot, "artifacts", "optional-producer");
+    const controlsDir = path.join(root, "sealed-snapshot", "controls");
+    const taskManifestPath = path.join(controlsDir, "tasks.json");
+    for (const directory of [workspacePath, requiredDir, optionalDir, controlsDir]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+
+    const selectors: PromptArtifactAuthoritySelector[] = [
+      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
+      {
+        kind: "path",
+        id: promptArtifactAuthorityPathSelectorId(["findings.json"]),
+        paths: ["findings.json"]
+      }
+    ];
+    const manifest = promptAuthorityManifestFixture(controllerRunRoot, selectors);
+    const sealedManifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    writeFileDurable(taskManifestPath, sealedManifestBytes);
+    const task: GeneratedPromptArtifactAuthorityTask & { agentChain: [Record<string, never>] } = {
+      attemptId: "consumer",
+      runRoot: relocatedRunRoot,
+      taskManifestPath,
+      workspacePath,
+      promptArtifactAuthoritySelectors: selectors,
+      agentChain: [{}]
+    };
+    const harness = loadGeneratedPromptArtifactAuthorityHarness([requiredDir]);
+    const authorityPath = path.join(workspacePath, ".ultrafuzz", "authorities", "consumer.json");
+
+    harness.materialize(task);
+    assert.equal(harness.relativePath(task), ".ultrafuzz/authorities/consumer.json");
+    assert.equal(harness.path(task, fs.realpathSync(workspacePath)), authorityPath);
+    assert.equal(harness.derivationInputs.length, 1);
+    assert.equal(harness.derivationInputs[0]!.selectors, selectors);
+    assert.deepEqual(harness.derivationInputs[0]!.admittedDependencyArtifactDirs, [requiredDir]);
+    assert.deepEqual(Buffer.from(harness.derivationInputs[0]!.sealedTaskManifestBytes), sealedManifestBytes);
+
+    const originalBytes = fs.readFileSync(authorityPath);
+    const original = parsePromptArtifactAuthorityBytes(originalBytes);
+    assert.deepEqual(original.selectors, selectors);
+    assert.equal(original.artifact_path_base, fs.realpathSync(relocatedRunRoot));
+    assert.deepEqual(
+      original.producers.map((producer) => producer.attempt_id),
+      ["required-producer"]
+    );
+    assert.deepEqual(original.producers[0]?.outputs, [
+      { path: "findings.json", contract: "ultrafuzz/findings@2" },
+      { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }
+    ]);
+    const exposedJson = originalBytes.toString("utf8");
+    assert.equal(exposedJson.includes(controllerRunRoot), false);
+    assert.equal(exposedJson.includes(taskManifestPath), false);
+    assert.doesNotMatch(
+      exposedJson,
+      /controller-(?:host|model|reasoning)|private-profile|source_revision|source_ref|workspacePath|workspace_path|dependencyArtifactDirs|tasks\.json/u
+    );
+
+    harness.setAdmittedDependencyArtifactDirs([requiredDir, optionalDir]);
+    harness.materialize(task);
+    assert.deepEqual(
+      parsePromptArtifactAuthorityBytes(fs.readFileSync(authorityPath)).producers.map(
+        (producer) => producer.attempt_id
+      ),
+      ["optional-producer", "required-producer"]
+    );
+    harness.setAdmittedDependencyArtifactDirs([requiredDir]);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+
+    fs.writeFileSync(taskManifestPath, "{}\n", "utf8");
+    assert.throws(() => harness.materialize(task), /Smithers task manifest violates its registered schema/u);
+    assert.ok(harness.derivationInputs.length >= 4);
+    writeFileDurable(taskManifestPath, sealedManifestBytes);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+
+    const lifecycle: string[] = [];
+    let generation = 0;
+    const wrapped = loadArtifactAwareAgent({
+      onAuthorityCheck: () => {
+        lifecycle.push("check");
+        harness.assertUnchanged(task);
+      },
+      onReset: () => {
+        lifecycle.push("materialize");
+        harness.materialize(task);
+      },
+      onSourceVerify: () => lifecycle.push("source")
+    })(task, 0, "prompt", {
+      async generate(): Promise<unknown> {
+        generation += 1;
+        lifecycle.push(`generate-${generation}`);
+        assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+        if (generation === 3) throw new Error("provider failed after reading exact authority");
+        return { summary: `generation-${generation}` };
+      }
+    });
+    assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), { summary: "generation-1" });
+    assert.deepEqual(
+      await wrapped.generate({
+        messages: [{ role: "user", content: "correct the schema" }],
+        taskContext: { attempt: 1 }
+      }),
+      { summary: "generation-2" }
+    );
+    await assert.rejects(
+      () => wrapped.generate({ taskContext: { attempt: 2 } }),
+      /provider failed after reading exact authority/u
+    );
+    assert.deepEqual(lifecycle, [
+      "source",
+      "materialize",
+      "generate-1",
+      "check",
+      "check",
+      "generate-2",
+      "check",
+      "source",
+      "materialize",
+      "generate-3",
+      "check"
+    ]);
+
+    const tamperedDocument = structuredClone(original) as PromptArtifactAuthorityDocument;
+    tamperedDocument.run_id = "tampered-run";
+    const tamperedBytes = serializePromptArtifactAuthority(tamperedDocument);
+    for (const outcome of ["success", "failure", "schema-correction"] as const) {
+      let calls = 0;
+      const tamperAware = loadArtifactAwareAgent({
+        onAuthorityCheck: () => harness.assertUnchanged(task),
+        onReset: () => harness.materialize(task)
+      })(task, 0, "prompt", {
+        async generate(): Promise<unknown> {
+          calls += 1;
+          const shouldTamper = outcome !== "schema-correction" || calls === 2;
+          if (shouldTamper) fs.writeFileSync(authorityPath, tamperedBytes);
+          if (outcome === "failure") throw new Error("provider failure must not hide authority tampering");
+          return { summary: "candidate" };
+        }
+      });
+      if (outcome === "schema-correction") {
+        assert.deepEqual(await tamperAware.generate({ taskContext: { attempt: 1 } }), { summary: "candidate" });
+      }
+      await assert.rejects(
+        () =>
+          tamperAware.generate({
+            ...(outcome === "schema-correction" ? { messages: [{ role: "user", content: "schema correction" }] } : {}),
+            taskContext: { attempt: 1 }
+          }),
+        /prompt artifact authority was modified consumer/u,
+        outcome
+      );
+    }
+
+    harness.materialize(task);
+    fs.writeFileSync(authorityPath, tamperedBytes);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority was modified consumer/u);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes, "retry rematerialization restores exact bytes");
+
+    const identicalReplacementPath = path.join(workspacePath, ".ultrafuzz", "identical-authority.json");
+    fs.writeFileSync(identicalReplacementPath, originalBytes);
+    fs.renameSync(identicalReplacementPath, authorityPath);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    assert.throws(
+      () => harness.assertUnchanged(task),
+      /prompt artifact authority was modified consumer/u,
+      "an identical-byte inode replacement must not preserve authority"
+    );
+    harness.materialize(task);
+
+    fs.rmSync(authorityPath);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
+    harness.materialize(task);
+    const linkedAuthorityTarget = path.join(workspacePath, ".ultrafuzz", "linked-authority.json");
+    fs.writeFileSync(linkedAuthorityTarget, originalBytes);
+    fs.rmSync(authorityPath);
+    fs.symlinkSync(linkedAuthorityTarget, authorityPath);
+    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
+    harness.materialize(task);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    assert.equal(fs.lstatSync(authorityPath).isSymbolicLink(), false);
+
+    for (const directoryContents of [undefined, "hostile/retained.txt"] as const) {
+      fs.rmSync(authorityPath);
+      fs.mkdirSync(authorityPath);
+      if (directoryContents !== undefined) {
+        const retainedPath = path.join(authorityPath, ...directoryContents.split("/"));
+        fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
+        fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
+      }
+      harness.materialize(task);
+      assert.equal(fs.lstatSync(authorityPath).isFile(), true);
+      assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+      assert.doesNotThrow(() => harness.assertUnchanged(task));
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test(
@@ -5734,10 +6434,15 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.ok(proofEnd > proofStart, source);
   assert.ok(workflowStart > proofStart, source);
   assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
-  assert.match(source, /baseBranch=\{usesPinnedSource \? pinnedSourceBranch : localSourceCommit\}/u);
-  assert.match(source, /function resolveLocalSourceCommit\(\): string \| undefined/u);
-  assert.match(source, /if \(usesPinnedSource\) return undefined/u);
-  assert.match(source, /\/\^\[0-9a-f\]\{40\}\$\/u\.test\(commit\)/u);
+  assert.match(
+    source,
+    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision/u
+  );
+  assert.match(source, /function assertWorkspaceSourceRevision/u);
+  assert.match(source, /git\("HEAD\^\{commit\}"\)/u);
+  assert.match(source, /head !== task\.sourceRevision \|\| sourceRef !== task\.sourceRevision/u);
+  assert.match(source, /if \(firstGenerationForAttempt\) \{\s*assertWorkspaceSourceRevision\(task\)/u);
+  assert.match(source, /replayWorkspacePatches !== false\) assertWorkspaceSourceRevision\(task\)/u);
   assert.match(source, /if \(!usesPinnedSource\) return/u);
   assert.match(source, /preservePinnedSourceProof\(task\)/u);
   assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
@@ -6908,110 +7613,24 @@ test("generated Smithers agent boundary performs only task-local authority check
     agent,
     /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
   );
-  assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
-  assert.match(agent, /materializeCanonicalThreatModelArtifact\(task\)/u);
-  assert.match(agent, /reconstructAuthoritativeReportImplementationCoverage\(task\)/u);
-  assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
-  assert.match(agent, /normalizeFindingProvenance\(task\)/u);
-  assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
-  assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
-  assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
-  assert.match(agent, /verifyArtifacts\(task, \{ agentReturned: true \}\)/u);
-  assert.ok(
-    agent.indexOf("normalizeLegacyFindingFields(task)") <
-      agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)")
+  assert.doesNotMatch(
+    agent,
+    /prepareArtifactMirror|materializeMissing|normalizeLegacy|materializeGeneratedTestCompanions|verifyArtifacts/u
   );
-  assert.ok(
-    agent.indexOf("reconstructAuthoritativeReportImplementationCoverage(task)") <
-      agent.indexOf("normalizeLegacyReportProvenance(task)")
-  );
-  assert.ok(
-    agent.indexOf("normalizeLegacyReportProvenance(task)") <
-      agent.indexOf("materializeMissingFinalReportArtifacts(task)")
-  );
-  assert.ok(
-    agent.indexOf("materializeMissingFinalReportArtifacts(task)") <
-      agent.indexOf("verifyArtifacts(task, { agentReturned: true })")
-  );
-  assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
-  assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+  assert.match(source, /function finalizeAndVerifyArtifacts/u);
+  assert.match(source, /dependsOn=\{\[task\.id\]\}[\s\S]*?retries=\{0\}/u);
 });
 
 test("generated Smithers workflow contains no output repair or legacy normalization helpers", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
-  const provenanceStart = source.indexOf("function normalizeFindingProvenance");
-  const legacyArrayStart = source.indexOf("function normalizeLegacyFindingArray");
-  assert.ok(agentStart >= 0 && resetStart > agentStart, source);
-  assert.ok(provenanceStart > agentStart && legacyArrayStart > provenanceStart, source);
-  const agent = source.slice(agentStart, resetStart);
-  assert.ok(
-    agent.indexOf("normalizeFindingProvenance(task)") < agent.indexOf("verifyArtifacts(task, { agentReturned: true })"),
-    agent
+  assert.doesNotMatch(
+    source,
+    /canonicalEmptyArtifact|materializeMissingMarkdownArtifacts|materializeMissingDedupeArtifact|materializeMissingFinalReportArtifacts|materializeGeneratedTestCompanion|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
   );
-  const provenance = source.slice(provenanceStart, legacyArrayStart);
-  assert.match(provenance, /producerNodeId = task\.metadata\.node\.producerNodeId \?\? task\.attemptId/u);
-  assert.match(provenance, /relativePath: output\.path/u);
-  assert.match(provenance, /preserveSourceNodes/u);
-  assert.match(provenance, /requireSourceNodes: preserveSourceNodes/u);
-  assert.match(provenance, /buildFindingSourceExpectations/u);
-  assert.match(provenance, /requireLifecycleCoverage/u);
-  assert.match(provenance, /sourceExpectations: sourceProvenance\?\.expectations/u);
-  assert.match(provenance, /requireSourceExpectation: preserveSourceNodes/u);
-  assert.match(provenance, /"dedupe-findings", "triage", "severity-classification", "final-report"/u);
-  assert.match(source, /normalizeReportFindingSourceNodes/u);
-  assert.match(source, /report finding does not match dependency provenance/u);
 });
 
-test("generated Smithers verifier canonicalizes threat Markdown and materializes verified selected database records before sealing outputs", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
-  const canonicalStart = source.indexOf("function materializeCanonicalThreatModelArtifact");
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(agentStart >= 0 && resetStart > agentStart, source);
-  assert.ok(canonicalStart > agentStart && canonicalStart < verifierStart, source);
-  assert.ok(workflowStart > verifierStart, source);
-
-  const agent = source.slice(agentStart, resetStart);
-  assert.ok(
-    agent.indexOf("materializeCanonicalThreatModelArtifact(task)") <
-      agent.indexOf("verifyArtifacts(task, { agentReturned: true })"),
-    agent
-  );
-  assert.ok(
-    agent.indexOf("materializeGoalPlanDatabaseArtifacts(task)") <
-      agent.indexOf("verifyArtifacts(task, { agentReturned: true })"),
-    agent
-  );
-  const canonical = source.slice(canonicalStart, verifierStart);
-  assert.match(canonical, /logicalNodeId !== "threat-model"/u);
-  assert.match(canonical, /const runRoot = realpathSync\(path\.resolve\(artifactDir, "\.\.", "\.\."\)\)/u);
-  assert.match(canonical, /const workspaceRoot = realpathSync\(task\.workspacePath\)/u);
-  assert.match(canonical, /verifyThreatModelVulnerabilityDatabaseCapabilities\(artifactRoot, runRoot\)/u);
-  assert.match(canonical, /verifyThreatModelEvidenceFiles\(model, workspaceRoot\)/u);
-  assert.match(canonical, /materializeCanonicalThreatModelMarkdown\(artifactRoot\)/u);
-  assert.match(canonical, /logicalNodeId !== "goal-plan"/u);
-  assert.match(
-    canonical,
-    /materializeGoalPlanVulnerabilityDatabaseSnapshots\(artifactRoot, \{\s*threatModelArtifactDirs,\s*runRoot,\s*maxDynamicNodes\s*\}\)/u
-  );
-
-  const verifier = source.slice(verifierStart, workflowStart);
-  assert.match(verifier, /output\.contract === "ultrafuzz\/goal-plan@1"/u);
-  assert.match(verifier, /verifyGoalPlanSelectedRecordSnapshots\(artifactRoot, validation\.value\)/u);
-  assert.match(verifier, /rememberVerifiedPublication\(publications, selected\.path, selected\.contents\)/u);
-});
-
-test("generated Smithers coverage reconstruction bounds report JSON before parsing", () => {
-  const readReport = loadBoundedFinalReportReader();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-bounded-report-json-"));
-  const small = path.join(root, "small.json");
-  const oversized = path.join(root, "oversized.json");
-  const symlink = path.join(root, "symlink.json");
+test("durable writer replaces a destination symlink without overwriting its target", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-durable-writer-"));
   try {
     const symlinkTarget = path.join(root, "target.txt");
     const output = path.join(root, "output.txt");
@@ -7051,7 +7670,8 @@ test("generated Smithers verifier treats the final-report projector only as a no
 
   assert.match(verifier, /authoritativeFinalReportCoverage\(task\)/u);
   assert.match(verifier, /authoritativeFinalReportRunMetadata\(task\)/u);
-  assert.match(verifier, /projectCanonicalFinalReport\(report\.value\)/u);
+  assert.match(verifier, /projectCanonicalFinalReport\(report\.value,\s*\{/u);
+  assert.match(verifier, /goalSearchCoverage: readGoalSearchCoverage\(task\.runRoot\)/u);
   assert.match(verifier, /isDeepStrictEqual\(projection\.report, report\.value\)/u);
   assert.match(verifier, /markdown\.file\.bytes\.equals\(Buffer\.from\(projection\.markdown, "utf8"\)\)/u);
   assert.match(verifier, /agent-owned bytes were left unchanged/u);
@@ -7104,6 +7724,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     "projectCanonicalFinalReport",
     "authoritativeFinalReportAgentExecution",
     "authoritativeFinalReportRunMetadata",
+    "readGoalSearchCoverage",
     "Buffer",
     `${emitted}; return verifyFinalReportCanonicalProjection;`
   )(
@@ -7112,6 +7733,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
     () => FINAL_REPORT_AGENT_EXECUTION_FIXTURE,
     () => FINAL_REPORT_RUN_METADATA_FIXTURE,
+    () => undefined,
     Buffer
   ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
 }
@@ -8033,971 +8655,6 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
     source.slice(finalizerStart, verifierStart),
     /prepareArtifactMirror\(task, \{[\s\S]*?replayWorkspacePatches: false,[\s\S]*?evidenceMode: "require",[\s\S]*?pinnedSubmodules: "verify"[\s\S]*?\}\);/u
   );
-});
-
-/**
- * Loads the goal-search predicates as executable functions.
- *
- * They sit between `assertTaskInputs` and `assertVerifiedDependency` in the template, deliberately
- * outside the `assertVerifiedDependency` slice that the fail-closed test above type-strips by hand.
- */
-function loadGoalSearchPredicates(
-  artifactVerificationMarkerLocation: (
-    runRoot: string,
-    attemptId: string,
-    createRoot: boolean
-  ) => { path: string } | undefined
-): {
-  isGoalSearchTask: (task: { metadata: { node: { group?: string } } }) => boolean;
-  goalSearchDependencyIsUnverified: (
-    task: { runRoot: string },
-    dependencyTask: { attemptId: string; metadata: { node: { group?: string } } }
-  ) => boolean;
-} {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function isGoalSearchTask");
-  const helperEnd = source.indexOf("\n\nfunction assertVerifiedDependency", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return new Function(
-    "GOAL_SEARCH_TOPOLOGY_GROUP",
-    "artifactVerificationMarkerLocation",
-    "lstatSync",
-    "isMissingPathError",
-    `${helper}; return { isGoalSearchTask, goalSearchDependencyIsUnverified };`
-  )(
-    "goals",
-    artifactVerificationMarkerLocation,
-    fs.lstatSync,
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT"
-  ) as ReturnType<typeof loadGoalSearchPredicates>;
-}
-
-function loadGoalSearchCoverageRecorder(
-  coveragePath: (runRoot: string) => string | undefined,
-  findingCount: (task: { attemptId: string }) => number | undefined
-): (
-  tasks: ReadonlyArray<unknown>,
-  hasAgentOutput: (nodeId: string) => boolean,
-  hasVerification: (nodeId: string) => boolean
-) => void {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("/** Last recorded lane-state signature");
-  // `readGoalSearchCoverage` carries its own doc comment, so the slice ends at that comment rather
-  // than at the `function` keyword.
-  const helperEnd = source.indexOf("\n\n/**\n * Read the census back", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return new Function(
-    "GOAL_SEARCH_COVERAGE_SCHEMA_VERSION",
-    "__ULTRAFUZZ_RUN_ID_LITERAL__",
-    "isGoalSearchTask",
-    "goalSearchCoveragePath",
-    "verifiedGoalSearchFindingCount",
-    "writeFileDurable",
-    `${helper}; return recordGoalSearchCoverage;`
-  )(
-    "ultrafuzz.goal-search-coverage.v1",
-    "run-goal-coverage",
-    (task: { metadata: { node: { group?: string } } }) => task.metadata.node.group === "goals",
-    coveragePath,
-    findingCount,
-    writeFileDurable
-  ) as ReturnType<typeof loadGoalSearchCoverageRecorder>;
-}
-
-function loadReportGoalSearchCoverageReplacer(): (contents: string, coverage: unknown) => string | undefined {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function replaceReportGoalSearchCoverage");
-  const helperEnd = source.indexOf("function reconstructAuthoritativeGoalSearchCoverage", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return new Function("isPlainRecord", `${helper}; return replaceReportGoalSearchCoverage;`)(
-    (value: unknown): value is Record<string, unknown> =>
-      typeof value === "object" && value !== null && !Array.isArray(value)
-  ) as ReturnType<typeof loadReportGoalSearchCoverageReplacer>;
-}
-
-// #672/#677. Finding no bug for an assigned goal is a NEGATIVE RESULT, and `goal-hunter` already
-// contracts it as `[]`, but a goal node killed at its timeout still became a failed node -- and
-// `dynamic-strategy-generator` and `dedupe-findings` depend on every goal node, so both fan-ins failed
-// with it. That produced 97 downstream `artifact dependency has not passed verification` events in an
-// 18-hour local default-profile run, the largest single failure class. The tolerance that fixes it is
-// dangerous in exactly one direction: it must stay confined to goal searches, or an absent artifact
-// stops being a broken contract everywhere.
-test("generated Smithers scopes goal-search fault tolerance to the goals topology group", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-
-  // The discriminator is the topology GROUP, not a list of logical node IDs, so a fourth goal lane
-  // inherits the behavior and a node moved out of the group loses it.
-  assert.match(source, /const GOAL_SEARCH_TOPOLOGY_GROUP = "goals";/u);
-  assert.match(source, /function isGoalSearchTask\(task: \(typeof taskSpecs\)\[number\]\): boolean \{/u);
-  assert.match(source, /return task\.metadata\.node\.group === GOAL_SEARCH_TOPOLOGY_GROUP;/u);
-  assert.match(source, /const goalSearch = isGoalSearchTask\(task\);/u);
-
-  // Every tolerance site is gated on that one predicate, and there are exactly four of them: the cloud
-  // sandbox task, the cloud verifier, the local agent task, and the local verifier. A bare
-  // `continueOnFail` or one gated on anything else would let a non-goal node fail silently, so the
-  // count and the spelling are both asserted rather than just the presence.
-  //
-  // The two local-path sites additionally exclude `cloudWorker`. That branch is what the relocated
-  // worker renders for its own single task, and tolerating a failure there would let the inner run
-  // exit 0, record a "completed" durability checkpoint, and make the sandbox retry skip re-running the
-  // agent entirely -- spending the lane's second attempt on a publication retry. A worker render has
-  // one task and no siblings to protect, so it has nothing to gain from the tolerance and a retry to
-  // lose. The controller-path sites keep the bare predicate because there the tolerance is what stops
-  // one goal lane from taking its siblings and the fan-ins down with it.
-  const tolerated = [...source.matchAll(/continueOnFail=\{[^}]*\}/gu)].map((match) => match[0]);
-  assert.deepEqual(tolerated, [
-    "continueOnFail={goalSearch}",
-    "continueOnFail={goalSearch}",
-    "continueOnFail={goalSearch && !cloudWorker}",
-    "continueOnFail={goalSearch && !cloudWorker}"
-  ]);
-
-  // Preparation must stay fatal. It is synchronous, deterministic, model-free work, so a failure there
-  // is a real defect rather than a negative result, and a lane whose mirror was never prepared cannot
-  // produce a defensible negative result anyway.
-  const preparationStart = source.indexOf("id={task.preparationId}");
-  const preparationEnd = source.indexOf("{() => prepareArtifactMirror(task)}", preparationStart);
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(preparationEnd > preparationStart, source);
-  assert.doesNotMatch(source.slice(preparationStart, preparationEnd), /continueOnFail/u);
-
-  // `depsOptional` is not the lever: it relaxes `deps`, the typed render-time output wiring, and this
-  // template expresses dependencies as `dependsOn` plus its own artifact handoff. The equivalent
-  // tolerance therefore has to live in `assertTaskInputs`, and it must present as MISSING (skipped),
-  // never as an unverified dependency that still gets read.
-  // The prop, not the word: the template explains in a comment why `depsOptional` is not the lever,
-  // and that explanation is the thing keeping a future editor from reaching for it.
-  assert.doesNotMatch(source, /depsOptional[=:]/u);
-  assert.match(
-    source,
-    /const unverifiedGoalSearch = \s*dependencyTask !== undefined && goalSearchDependencyIsUnverified\(task, dependencyTask\);/u
-  );
-  assert.match(source, /if \(unverifiedGoalSearch && !existsSync\(dependency\)\) \{\s*continue;/u);
-  assert.match(
-    source,
-    /if \(dependencyTask !== undefined\) \{\s*if \(unverifiedGoalSearch\) \{\s*continue;\s*\}\s*assertVerifiedDependency\(task, dependency\);/u
-  );
-
-  // Tolerating a MISSING goal lane must not become consuming an UNVERIFIED one. These are the two
-  // places that read dependency findings bytes directly -- provenance joins, and the dedupe recovery
-  // path that falls back to a dependency's unpublished worktree mirror -- so both exclude a goal lane
-  // that never passed verification.
-  const provenanceStart = source.indexOf("function dependencyFindingSources");
-  const provenanceEnd = source.indexOf("\n\nfunction ", provenanceStart + 1);
-  assert.ok(provenanceStart >= 0, source);
-  assert.match(
-    source.slice(provenanceStart, provenanceEnd),
-    /if \(goalSearchDependencyIsUnverified\(task, dependency\)\) continue;/u
-  );
-  const dedupeStart = source.indexOf("function materializeMissingDedupeArtifact");
-  const dedupeEnd = source.indexOf("\n\nfunction ", dedupeStart + 1);
-  assert.ok(dedupeStart >= 0, source);
-  const dedupeRecovery = source.slice(dedupeStart, dedupeEnd);
-  assert.match(dedupeRecovery, /if \(goalSearchDependencyIsUnverified\(task, dependency\)\) \{\s*continue;/u);
-  assert.ok(
-    dedupeRecovery.indexOf("goalSearchDependencyIsUnverified") <
-      dedupeRecovery.indexOf("mirroredArtifactDir(dependency)"),
-    dedupeRecovery
-  );
-});
-
-test("goal-search dependency tolerance reads only the marker's presence and only for goal lanes", () => {
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-goal-tolerance-"));
-  try {
-    const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
-    fs.mkdirSync(markerRoot);
-    const markerLocations: string[] = [];
-    const predicates = loadGoalSearchPredicates((_runRoot, attemptId) => {
-      const markerPath = path.join(markerRoot, `${attemptId}.json`);
-      markerLocations.push(markerPath);
-      if (attemptId === "unsafe-lane") {
-        // Stands in for `artifactVerificationMarkerLocation`'s own safety check. A hostile symlink over
-        // the verification directory must surface as an error, never be reinterpreted as "this goal
-        // simply found nothing" -- which is why the predicate does not catch it.
-        throw new Error("artifact-contract failure: unsafe artifact verification marker root");
-      }
-      if (attemptId === "unmaterialized-lane") {
-        return undefined;
-      }
-      return { path: markerPath };
-    });
-
-    const goalLane = (attemptId: string) => ({ attemptId, metadata: { node: { group: "goals" } } });
-    const task = { runRoot };
-
-    assert.equal(predicates.isGoalSearchTask({ metadata: { node: { group: "goals" } } }), true);
-    assert.equal(predicates.isGoalSearchTask({ metadata: { node: { group: "strategies" } } }), false);
-    assert.equal(predicates.isGoalSearchTask({ metadata: { node: {} } }), false);
-
-    // A killed or contract-failing goal lane leaves no marker: tolerated as missing.
-    assert.equal(predicates.goalSearchDependencyIsUnverified(task, goalLane("killed-lane")), true);
-
-    // A completed goal lane has one: NOT tolerated, so it still goes through the unchanged
-    // `assertVerifiedDependency`, which is what re-checks the digests and the contract. The predicate
-    // deliberately reads presence only and must not be mistaken for a verification of its own.
-    fs.writeFileSync(path.join(markerRoot, "completed-lane.json"), "{}\n");
-    assert.equal(predicates.goalSearchDependencyIsUnverified(task, goalLane("completed-lane")), false);
-
-    // A marker that is not a regular file is not a marker.
-    fs.mkdirSync(path.join(markerRoot, "directory-lane.json"));
-    assert.equal(predicates.goalSearchDependencyIsUnverified(task, goalLane("directory-lane")), true);
-    assert.equal(predicates.goalSearchDependencyIsUnverified(task, goalLane("unmaterialized-lane")), true);
-
-    // Every other dependency class fails closed exactly as before, marker or no marker.
-    assert.equal(
-      predicates.goalSearchDependencyIsUnverified(task, {
-        attemptId: "killed-lane",
-        metadata: { node: { group: "strategies" } }
-      }),
-      false
-    );
-    assert.equal(
-      predicates.goalSearchDependencyIsUnverified(task, { attemptId: "killed-lane", metadata: { node: {} } }),
-      false
-    );
-    // A non-goal dependency must not even be probed for a marker; only its group decides.
-    assert.equal(markerLocations.includes(path.join(markerRoot, "never-probed.json")), false);
-
-    assert.throws(
-      () => predicates.goalSearchDependencyIsUnverified(task, goalLane("unsafe-lane")),
-      /unsafe artifact verification marker root/u
-    );
-  } finally {
-    fs.rmSync(runRoot, { recursive: true, force: true });
-  }
-});
-
-// #677. Once a goal lane may end with nothing and the run still finishes, "no vulnerabilities found"
-// stops being a statement about the target unless something records how many of the planned searches
-// ran. It cannot be read from the artifacts: preparation seeds every goal lane with the canonical
-// empty findings array, so a lane killed at 7200000ms and a lane that genuinely found nothing leave
-// the same valid empty `findings.json` behind. The distinguishing evidence is Smithers' own durable
-// output rows, which is why the two probes are passed in from the render.
-test("generated Smithers records goal-search coverage from durable output rows, not from artifacts", () => {
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-goal-coverage-"));
-  try {
-    const coveragePath = path.join(runRoot, "goal-search-coverage.json");
-    const findingCounts = new Map<string, number | undefined>([
-      ["with-findings", 2],
-      ["no-findings", 0],
-      ["uncountable", undefined]
-    ]);
-    const record = loadGoalSearchCoverageRecorder(
-      () => coveragePath,
-      (task) => findingCounts.get(task.attemptId)
-    );
-    const lane = (attemptId: string, group: string) => ({
-      id: `task:${attemptId}`,
-      verifierId: `verify:${attemptId}`,
-      attemptId,
-      runRoot,
-      metadata: {
-        node: { group, concreteNodeId: `dynamic:class:${attemptId}`, logicalNodeId: "class-goals" }
-      }
-    });
-    const tasks = [
-      lane("with-findings", "goals"),
-      lane("no-findings", "goals"),
-      lane("uncountable", "goals"),
-      lane("killed", "goals"),
-      lane("contract-failed", "goals"),
-      lane("not-a-goal", "strategies")
-    ];
-    const returned = new Set(["task:with-findings", "task:no-findings", "task:uncountable", "task:contract-failed"]);
-    const verified = new Set(["verify:with-findings", "verify:no-findings", "verify:uncountable"]);
-    const hasAgentOutput = (nodeId: string) => returned.has(nodeId);
-    const hasVerification = (nodeId: string) => verified.has(nodeId);
-
-    record(tasks, hasAgentOutput, hasVerification);
-    const census = JSON.parse(fs.readFileSync(coveragePath, "utf8")) as {
-      schema_version: string;
-      run_id: string;
-      totals: Record<string, number>;
-      goals: Array<{ attempt_id: string; status: string; finding_count: number | null; node_id: string }>;
-    };
-    assert.equal(census.schema_version, "ultrafuzz.goal-search-coverage.v1");
-    assert.equal(census.run_id, "run-goal-coverage");
-
-    // Only `goals`-group lanes are the census, so a strategy node cannot pad the coverage numbers.
-    assert.deepEqual(
-      census.goals.map((goal) => goal.attempt_id),
-      ["contract-failed", "killed", "no-findings", "uncountable", "with-findings"]
-    );
-    assert.deepEqual(Object.fromEntries(census.goals.map((goal) => [goal.attempt_id, goal.status])), {
-      // The agent never returned: timed out or killed. This is the case that must never read as
-      // coverage, and it is the one the 18-hour run produced 9 times at exactly the node timeout.
-      killed: "stopped-early",
-      // The agent returned but its artifacts failed their contract. Also not coverage, and a
-      // different defect with a different fix, so it is a distinct status rather than a lumped one.
-      "contract-failed": "unverified",
-      "with-findings": "completed-with-findings",
-      "no-findings": "completed-no-findings",
-      // An unreadable count is reported as unknown. Reporting it as zero is precisely the mistake
-      // this record exists to prevent.
-      uncountable: "completed"
-    });
-    assert.deepEqual(Object.fromEntries(census.goals.map((goal) => [goal.attempt_id, goal.finding_count])), {
-      killed: null,
-      "contract-failed": null,
-      "with-findings": 2,
-      "no-findings": 0,
-      uncountable: null
-    });
-    assert.deepEqual(census.totals, {
-      planned: 5,
-      completed: 3,
-      completed_with_findings: 1,
-      completed_no_findings: 1,
-      stopped_early: 1,
-      unverified: 1
-    });
-
-    // The census runs on every render pass, of which a long run has thousands, so it is gated on a
-    // lane-state signature. The gate has to be exact and not merely cheap: an unchanged lane state
-    // writes nothing, and any lane settling further must write again.
-    fs.rmSync(coveragePath);
-    record(tasks, hasAgentOutput, hasVerification);
-    assert.equal(fs.existsSync(coveragePath), false, "an unchanged lane state must not rewrite the census");
-    verified.add("verify:contract-failed");
-    record(tasks, hasAgentOutput, hasVerification);
-    assert.equal(fs.existsSync(coveragePath), true, "a lane that settles further must rewrite the census");
-    const updated = JSON.parse(fs.readFileSync(coveragePath, "utf8")) as { totals: Record<string, number> };
-    assert.equal(updated.totals.unverified, 0);
-    assert.equal(updated.totals.completed, 4);
-  } finally {
-    fs.rmSync(runRoot, { recursive: true, force: true });
-  }
-});
-
-test("generated Smithers report coverage stamp replaces any model-authored goal coverage", () => {
-  const replace = loadReportGoalSearchCoverageReplacer();
-  const coverage = { schema_version: "ultrafuzz.goal-search-coverage.v1", totals: { planned: 77, completed: 3 } };
-
-  // The added key survives because `ultrafuzz/report@1` is a loose object, the same mechanism that
-  // already carries authoritative property-implementation coverage into the report.
-  const stamped = replace(
-    `${JSON.stringify({ schema_version: "ultrafuzz.report@1", findings: [] }, null, 2)}\n`,
-    coverage
-  );
-  assert.ok(stamped);
-  assert.deepEqual(JSON.parse(stamped), {
-    schema_version: "ultrafuzz.report@1",
-    findings: [],
-    goal_search_coverage: coverage
-  });
-  assert.equal(stamped.endsWith("\n"), true, "the stamped report must stay newline-terminated");
-
-  // Whatever the report agent claimed about its own coverage is discarded, not merged. A model that
-  // ran out of budget is the last thing that should be describing how much budget it had.
-  const overwritten = replace(
-    `${JSON.stringify({ schema_version: "ultrafuzz.report@1", goal_search_coverage: "all goals completed" })}\n`,
-    coverage
-  );
-  assert.ok(overwritten);
-  assert.deepEqual((JSON.parse(overwritten) as { goal_search_coverage: unknown }).goal_search_coverage, coverage);
-
-  // Unknown coverage is stamped as an explicit sentinel by the caller, so the report can still say
-  // "unknown" rather than silently omitting the claim.
-  const sentinel = replace(`${JSON.stringify({ schema_version: "ultrafuzz.report@1" })}\n`, "unavailable");
-  assert.ok(sentinel);
-  assert.equal((JSON.parse(sentinel) as { goal_search_coverage: unknown }).goal_search_coverage, "unavailable");
-
-  // A report that is not a JSON object is left entirely alone rather than rewritten.
-  assert.equal(replace("not json", coverage), undefined);
-  assert.equal(replace("[]", coverage), undefined);
-});
-
-/**
- * The one goal-lane task-spec shape the #677 behavioural chain below drives end to end.
- *
- * Deliberately the real thing rather than a reduction: two outputs (`findings.json` primary plus
- * `generated-tests.json`), exactly what `class-goals` declares in the shipped topology, because both
- * are pre-seeded into the lane's worktree mirror and both are therefore available to be laundered.
- */
-type GoalLaneTaskSpec = {
-  attemptId: string;
-  runRoot: string;
-  workspacePath: string;
-  artifactDir: string;
-  outputs: Array<{ path: string; contract: string; contractDigest: string; primary: boolean }>;
-  metadata: {
-    artifacts: { dir: string };
-    dependencies: { attemptIds: string[] };
-    node: { group: string; logicalNodeId: string; concreteNodeId: string; producerNodeId?: string };
-    run: { ultrafuzzRunId: string };
-  };
-};
-
-/**
- * Loads the whole #677 attestation chain as executable code over a real filesystem.
- *
- * Source-text assertions cannot decide this one. The defect was not a missing string, it was that
- * `verifyArtifacts` was a pure function of the filesystem while preparation pre-seeded that same
- * filesystem with contract-valid empty artifacts, so a lane that never ran produced bytes
- * indistinguishable from a lane that ran and found nothing. Proving that is fixed means running the
- * seeding, the verification, the marker write and the dedupe provenance read against real files.
- *
- * Nothing here is a mock of behaviour under test: `canonicalEmptyArtifact` is the real seeder,
- * `publishFileDurableExclusive` and `validateArtifactContract` are the real `@ultrafuzz/artifacts`
- * implementations, and the marker helpers, `verifyArtifacts`, the goal-search predicates and
- * `dependencyFindingSources` are all transpiled from the template. Only three collaborators a goal
- * lane can never reach are injected, and each asserts it was not reached rather than returning a
- * convenient value.
- */
-function loadGoalLaneVerificationChain(taskSpecs: readonly GoalLaneTaskSpec[]): {
-  canonicalEmptyArtifact: (task: GoalLaneTaskSpec, output: GoalLaneTaskSpec["outputs"][number]) => string | undefined;
-  verifyArtifacts: (
-    task: GoalLaneTaskSpec,
-    evidence: { agentReturned: boolean }
-  ) => { artifacts: Array<{ path: string; sha256: string; primary: boolean }>; primary_artifact: string };
-  goalSearchDependencyIsUnverified: (task: GoalLaneTaskSpec, dependencyTask: GoalLaneTaskSpec) => boolean;
-  dependencyFindingSources: (
-    task: GoalLaneTaskSpec,
-    artifactDir: string
-  ) => Array<{ node_id: string; artifact_path: string; finding: unknown }>;
-} {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const slice = (start: string, end: string): string => {
-    const startIndex = source.indexOf(start);
-    assert.ok(startIndex >= 0, `missing template slice start ${start}`);
-    const endIndex = source.indexOf(end, startIndex);
-    assert.ok(endIndex > startIndex, `missing template slice end ${end}`);
-    return source.slice(startIndex, endIndex);
-  };
-  const helper = ts.transpileModule(
-    [
-      slice("function isStrictlyInsideDirectory", "\n\nfunction mirroredArtifactDir"),
-      slice("function mirroredArtifactDir", "\n\nfunction taskPromptPathForArtifactReset"),
-      slice("function isMissingPathError", "\n\nfunction taskArtifactRoots"),
-      slice("function taskArtifactRoots", "\n\n/**\n * Name the preparation step that threw"),
-      slice("function formatSchemaValidationIssues", "\n\n"),
-      slice("function isGoalSearchTask", "\n\nfunction assertVerifiedDependency"),
-      slice("function assertSafeVerifiedPublicationPath", "\n\n"),
-      slice("function canonicalEmptyArtifact", "\n\nfunction materializeMissingMarkdownArtifacts"),
-      slice("function dependencyFindingSources", "\n\nfunction currentFindingLifecycleLedger"),
-      slice("function resolveRegularArtifactFile", "\n\n/**\n * Validate, publish, and attest"),
-      slice("function rememberVerifiedPublication", "\n\nfunction verifyGeneratedTestFiles"),
-      slice("function verifyGeneratedTestFiles", "\n\n/**\n * Where the run-level goal-search census lives"),
-      slice("function verifyArtifacts", "\n\nfunction readInvariantSourceSnapshot")
-    ].join("\n\n"),
-    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
-  ).outputText;
-  const unreachableForGoalLane = (name: string) => (): never => {
-    throw new Error(`a goal lane must not reach ${name}`);
-  };
-  return new Function(
-    "path",
-    "createHash",
-    "existsSync",
-    "lstatSync",
-    "mkdirSync",
-    "readFileSync",
-    "realpathSync",
-    "rmSync",
-    "statSync",
-    "assertRegularFileInside",
-    "publishFileDurableExclusive",
-    "validateArtifactContract",
-    "artifactContractDefinition",
-    "taskSpecs",
-    "GOAL_SEARCH_TOPOLOGY_GROUP",
-    "ARTIFACT_VERIFICATION_DIRECTORY",
-    "ARTIFACT_VERIFICATION_SCHEMA_VERSION",
-    "invariantSuiteNodeIds",
-    "verifyInvariantLedgerSourceEvidence",
-    "verifyGoalPlanSelectedRecordSnapshots",
-    "rememberInvariantSuitePublications",
-    `${helper};
-     return {
-       canonicalEmptyArtifact,
-       verifyArtifacts,
-       goalSearchDependencyIsUnverified,
-       dependencyFindingSources
-     };`
-  )(
-    path,
-    createHash,
-    fs.existsSync,
-    fs.lstatSync,
-    fs.mkdirSync,
-    fs.readFileSync,
-    fs.realpathSync,
-    fs.rmSync,
-    fs.statSync,
-    assertRegularFileInside,
-    publishFileDurableExclusive,
-    validateArtifactContract,
-    artifactContractDefinition,
-    taskSpecs,
-    "goals",
-    ".ultrafuzz-verification",
-    "ultrafuzz.artifact-verification.v1",
-    new Set<string>(),
-    // Guards on `logicalNodeId !== "project-discovery"` and returns immediately for everything else,
-    // so a goal lane never reaches its body. Asserted rather than assumed: if that guard ever widens
-    // to cover goal lanes, this fails loudly instead of quietly testing a different function.
-    (task: GoalLaneTaskSpec) => {
-      assert.notEqual(task.metadata.node.logicalNodeId, "project-discovery");
-    },
-    unreachableForGoalLane("verifyGoalPlanSelectedRecordSnapshots"),
-    unreachableForGoalLane("rememberInvariantSuitePublications")
-  ) as ReturnType<typeof loadGoalLaneVerificationChain>;
-}
-
-/**
- * #677, the whole laundering chain, executed.
- *
- * The round that made goal searches non-fatal was right about the intent and wrong about the
- * mechanism. `continueOnFail={goalSearch}` on the agent task makes a lane killed at its timeout
- * TERMINAL, which is what makes its verifier runnable at all; `prepareArtifactMirror` has already
- * written `canonicalEmptyArtifact` into that lane's worktree mirror, and for a goal lane that is a
- * contract-valid `findings.json` of `[]` (the seeder deliberately permits a PRIMARY
- * `ultrafuzz/findings@1`) plus a `generated-tests.json` with no tests. A verifier that reads only the
- * filesystem therefore finds a complete, valid output set for work that never happened, publishes it
- * into the canonical artifact directory, and writes a verification marker over it. From there
- * `goalSearchDependencyIsUnverified` reports the lane verified and `dependencyFindingSources` counts
- * it as a legitimate zero-finding source: an attestation of a search nobody ran, which for a security
- * audit is worse than the 97-event dependency cascade the tolerance replaced.
- *
- * So this test seeds with the real seeder, verifies with the real verifier, and then asks the three
- * questions that decide whether a phantom lane can still reach a report:
- *   1. is there a marker?
- *   2. were the seeded bytes published into the canonical artifact directory?
- *   3. does the dedupe stage count the lane as a zero-finding source?
- * All three must be no for a lane with no durable agent output row, and all three must be yes for the
- * lane beside it that genuinely ran and genuinely found nothing -- the negative result the tolerance
- * exists to protect.
- */
-test("a goal lane with no durable agent output row is never published, attested, or counted as a zero-finding source", () => {
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-goal-attestation-"));
-  try {
-    const lane = (attemptId: string): GoalLaneTaskSpec => {
-      const artifactDir = path.join(runRoot, "artifacts", attemptId);
-      const workspacePath = path.join(runRoot, "workspaces", attemptId);
-      fs.mkdirSync(artifactDir, { recursive: true });
-      fs.mkdirSync(path.join(workspacePath, "artifacts", attemptId), { recursive: true });
-      return {
-        attemptId,
-        runRoot,
-        workspacePath,
-        artifactDir,
-        outputs: [
-          { path: "findings.json", contract: "ultrafuzz/findings@1", contractDigest: "findings-digest", primary: true },
-          {
-            path: "generated-tests.json",
-            contract: "ultrafuzz/generated-tests@1",
-            contractDigest: "generated-tests-digest",
-            primary: false
-          }
-        ],
-        metadata: {
-          artifacts: { dir: artifactDir },
-          dependencies: { attemptIds: [] },
-          node: {
-            group: "goals",
-            logicalNodeId: "class-goals",
-            concreteNodeId: `dynamic:class:${attemptId}`,
-            producerNodeId: `dynamic:class:${attemptId}`
-          },
-          run: { ultrafuzzRunId: "run-goal-attestation" }
-        }
-      };
-    };
-
-    const killed = lane("killed-goal-lane");
-    const searched = lane("searched-goal-lane");
-    const dedupe: GoalLaneTaskSpec = {
-      ...lane("dedupe"),
-      metadata: {
-        ...lane("dedupe").metadata,
-        dependencies: { attemptIds: [killed.attemptId, searched.attemptId] },
-        node: {
-          group: "review",
-          logicalNodeId: "dedupe-findings",
-          concreteNodeId: "dedupe-findings",
-          producerNodeId: "dedupe-findings"
-        }
-      }
-    };
-    const chain = loadGoalLaneVerificationChain([killed, searched, dedupe]);
-
-    // Preparation, verbatim: every declared output of every goal lane gets its contract's canonical
-    // empty representation written into the lane's worktree mirror BEFORE the agent starts. This is
-    // the pre-seeding half of the laundering machine, and it is asserted here rather than assumed
-    // because the gate below is only load-bearing while it keeps happening.
-    for (const task of [killed, searched]) {
-      const mirrorRoot = path.join(task.workspacePath, "artifacts", task.attemptId);
-      for (const output of task.outputs) {
-        const seeded = chain.canonicalEmptyArtifact(task, output);
-        assert.ok(
-          seeded !== undefined,
-          `#677 depends on ${output.path} being pre-seeded for a goal lane; if it no longer is, this test is checking the wrong thing`
-        );
-        fs.writeFileSync(path.join(mirrorRoot, output.path), seeded);
-      }
-      assert.deepEqual(
-        JSON.parse(fs.readFileSync(path.join(mirrorRoot, "findings.json"), "utf8")),
-        [],
-        "the seeded primary findings artifact must be a valid empty findings array"
-      );
-    }
-
-    // The stale-marker case, which is the reason the refusal is ordered AFTER the clear. In-agent
-    // verification writes the marker inside the agent task, before Smithers commits that task's row,
-    // so an attempt killed in exactly that window leaves a marker with no row behind it. Declining to
-    // write a new one would not be enough -- the old one would still answer for the lane.
-    const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
-    fs.mkdirSync(markerRoot, { recursive: true, mode: 0o700 });
-    const killedMarkerPath = path.join(markerRoot, `${killed.attemptId}.json`);
-    fs.writeFileSync(killedMarkerPath, `${JSON.stringify({ attempt_id: killed.attemptId })}\n`);
-
-    assert.throws(
-      () => chain.verifyArtifacts(killed, { agentReturned: false }),
-      /artifact-contract failure: refusing to verify killed-goal-lane because its agent produced no output row/u
-    );
-
-    // 1. No attestation, and the stale one is gone rather than merely un-refreshed.
-    assert.equal(fs.existsSync(killedMarkerPath), false, "a lane with no output row must not keep a marker");
-
-    // 2. Nothing published. The canonical artifact directory is what every downstream consumer reads
-    // and what a cloud worker copies back, so a phantom lane must leave it exactly as empty as the
-    // agent left it -- including the non-primary output, which is just as forgeable as the primary.
-    assert.deepEqual(fs.readdirSync(killed.artifactDir), [], "no seeded artifact may reach the canonical dir");
-
-    // 3. The lane is invisible to the dedupe stage. Not "contributes zero findings" -- absent. A lane
-    // counted as a zero-finding source is a lane whose silence is reported as a searched negative.
-    assert.equal(chain.goalSearchDependencyIsUnverified(dedupe, killed), true);
-
-    // The other side of the bargain, and the regression this must not cause: a lane that really ran
-    // and really found nothing still verifies, still publishes, still attests. Its evidence is the
-    // durable output row, which is why an empty `findings.json` is enough here and not enough above --
-    // the bytes are byte-for-byte identical in both cases.
-    const verification = chain.verifyArtifacts(searched, { agentReturned: true });
-    assert.equal(verification.primary_artifact, "findings.json");
-    assert.deepEqual(verification.artifacts.map((artifact) => artifact.path).sort(), [
-      "findings.json",
-      "generated-tests.json"
-    ]);
-    assert.equal(fs.existsSync(path.join(markerRoot, `${searched.attemptId}.json`)), true);
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(searched.artifactDir, "findings.json"), "utf8")), []);
-    assert.equal(chain.goalSearchDependencyIsUnverified(dedupe, searched), false);
-
-    // Provenance, read the way `dedupe-findings` reads it. This is the third question, and it is asked
-    // twice on purpose. The publication gate above already keeps the seeded bytes out of the canonical
-    // directory this reader scans, but relying on that alone would make the exclusion an accident of
-    // one code path: a cloud worker copies its whole artifact directory back on success, a retry
-    // re-seeds, and a resumed run inherits whatever the volume holds. So the killed lane is given a
-    // fully contract-valid `findings.json` in its canonical directory -- exactly what the defect
-    // published there -- and must still contribute nothing, because the decision belongs to the
-    // marker and not to the bytes.
-    const finding = (id: string, node: string) => ({
-      id,
-      title: "example goal finding",
-      status: "open",
-      severity_guess: "low",
-      confidence: "low",
-      summary: "example",
-      source_node_id: node
-    });
-    fs.writeFileSync(
-      path.join(killed.artifactDir, "findings.json"),
-      `${JSON.stringify([finding("GOAL-PHANTOM", killed.metadata.node.producerNodeId!)])}\n`
-    );
-    assert.deepEqual(
-      chain.dependencyFindingSources(dedupe, dedupe.artifactDir),
-      [],
-      "an unattested goal lane must contribute no provenance even when its canonical findings validate"
-    );
-
-    // ...and the reader is not simply blind: the attested lane's findings do come through, so the
-    // emptiness above is the marker probe working rather than the scan failing.
-    fs.rmSync(path.join(searched.artifactDir, "findings.json"));
-    fs.writeFileSync(
-      path.join(searched.artifactDir, "findings.json"),
-      `${JSON.stringify([finding("GOAL-1", searched.metadata.node.producerNodeId!)])}\n`
-    );
-    const sources = chain.dependencyFindingSources(dedupe, dedupe.artifactDir);
-    assert.deepEqual(
-      sources.map((source) => source.node_id),
-      [searched.metadata.node.producerNodeId]
-    );
-    assert.deepEqual(
-      sources.map((source) => (source.finding as { id: string }).id),
-      ["GOAL-1"],
-      "the phantom lane's finding must never appear in dedupe provenance"
-    );
-  } finally {
-    fs.rmSync(runRoot, { recursive: true, force: true });
-  }
-});
-
-/**
- * The half of the #677 gate that lives in the render and that no executable test of `verifyArtifacts`
- * can reach.
- *
- * `verifyArtifacts` refusing without evidence is only worth anything while the evidence is real. A
- * render that passed `{ agentReturned: true }` unconditionally, or that derived the flag from anything
- * in the workspace, would satisfy every behavioural assertion above and restore the defect exactly.
- * So the source of the evidence is asserted here, and it has to be the one fact in the run a model
- * cannot author: Smithers' own durable output row for the agent task.
- *
- * The literal `true` is allowed at exactly one site -- the in-agent call, which sits after
- * `await agent.generate(...)` and therefore cannot be reached unless the agent returned. That is why
- * the count of literal-true call sites is asserted rather than just their presence.
- */
-test("the #677 evidence for a goal lane's verifier is Smithers' own durable agent output row", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-
-  // Mandatory second parameter, no default and no optional marker: omitting it must be a call-site
-  // error rather than a silent `undefined` that the `!== true` check then happens to reject. The
-  // template is not covered by `tsc`, so the shape is asserted as text.
-  assert.match(
-    source,
-    /function verifyArtifacts\(\s*task: \(typeof taskSpecs\)\[number\],\s*evidence: \{ agentReturned: boolean \}\s*\): z\.infer<typeof verificationOutput> \{/u
-  );
-  assert.doesNotMatch(source, /evidence\?: \{ agentReturned/u);
-  assert.doesNotMatch(source, /agentReturned: boolean = /u);
-
-  // The probe, read once per render and passed into both execution modes' verifiers.
-  assert.match(
-    source,
-    /const agentReturned = ctx\.outputMaybe\(outputs\.task, \{ nodeId: task\.id \}\) !== undefined;/u
-  );
-  assert.deepEqual(
-    [...source.matchAll(/verifyArtifacts\(task, \{ agentReturned[^)]*\}\)/gu)].map((match) => match[0]),
-    [
-      // The in-agent call: reachable only after `agent.generate` resolved.
-      "verifyArtifacts(task, { agentReturned: true })",
-      // The cloud verifier node and the local verifier node, both fed by the render-time probe.
-      "verifyArtifacts(task, { agentReturned })",
-      "verifyArtifacts(task, { agentReturned })"
-    ],
-    "the only literal-true evidence may be the in-agent call; both verifier nodes must read the row"
-  );
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  assert.ok(agentStart >= 0 && preparationStart > agentStart, source);
-  const agent = source.slice(agentStart, preparationStart);
-  assert.ok(
-    agent.indexOf("const result = await agent.generate(attemptArgs)") <
-      agent.indexOf("verifyArtifacts(task, { agentReturned: true })"),
-    "the in-agent call may claim the agent returned only because it runs after `agent.generate` resolved"
-  );
-
-  // The census and the verifier must never be able to disagree about whether a lane ran, because the
-  // census is what the report quotes and the verifier is what the artifacts attest. Same probe,
-  // spelled the same way, against the same output.
-  assert.match(
-    source,
-    /recordGoalSearchCoverage\(\s*taskSpecs,\s*\(nodeId\) => ctx\.outputMaybe\(outputs\.task, \{ nodeId \}\) !== undefined,\s*\(nodeId\) => ctx\.outputMaybe\(outputs\.verification, \{ nodeId \}\) !== undefined\s*\);/u
-  );
-
-  // Ordering inside the verifier, which the behavioural test proves and this pins in the source so a
-  // reordering reads as a deliberate edit: clear the stale marker, refuse, and only then touch the
-  // filesystem or publish anything.
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-  assert.ok(verifierStart >= 0 && workflowStart > verifierStart, source);
-  const verifier = source.slice(verifierStart, workflowStart);
-  assert.match(verifier, /because its agent produced no output row/u);
-  assert.ok(
-    verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("evidence.agentReturned !== true")
-  );
-  assert.ok(
-    verifier.indexOf("evidence.agentReturned !== true") <
-      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)")
-  );
-  assert.ok(
-    verifier.indexOf("evidence.agentReturned !== true") <
-      verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications)")
-  );
-});
-
-/**
- * The census-to-report path, end to end, with the runtime writing the census and the renderer reading
- * it (#677).
- *
- * The pieces are each tested in isolation elsewhere: `recordGoalSearchCoverage` against handcrafted
- * output rows, `appendGoalSearchCoverage` against handcrafted censuses. Neither catches the failure
- * that matters most here, which is the two halves disagreeing. They are written in different files by
- * different edits and connected only by field names and status spellings, so a renamed status or a
- * renamed file makes a run that measured its coverage perfectly report that coverage as unknown --
- * silently, and in the direction of looking cleaner than it is. So this drives the real recorder into
- * a real file, stamps the bytes it wrote into a report the way the runtime does, and renders it.
- *
- * The scenario is the measured one: of 77 targeted class-goal lanes, 3 returned and verified and 74
- * were killed at their timeout, plus one untargeted roaming lane that was also killed. A report built
- * on that evidence describes roughly 4% of its plan, and every one of the 74 silent lanes is holding a
- * contract-valid empty findings array.
- */
-test("the runtime's own goal-search census renders as partial coverage in report.md", () => {
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-census-report-"));
-  try {
-    // The file name and the schema version are the join between the runtime that writes the census and
-    // the CLI and renderer that read it, and `workflow.tsx` declares its own copies of both because a
-    // generated template cannot import a value it renders before the package is built. A divergence
-    // renders as "coverage unknown" on a run that measured coverage exactly, so the copies are pinned
-    // to the exported constants rather than to each other.
-    const template = fs.readFileSync(workflowTemplatePath, "utf8");
-    assert.match(
-      template,
-      new RegExp(`const GOAL_SEARCH_COVERAGE_FILE = ${JSON.stringify(GOAL_SEARCH_COVERAGE_FILE)};`, "u")
-    );
-    assert.match(
-      template,
-      new RegExp(
-        `const GOAL_SEARCH_COVERAGE_SCHEMA_VERSION = ${JSON.stringify(GOAL_SEARCH_COVERAGE_SCHEMA_VERSION)};`,
-        "u"
-      )
-    );
-
-    // The same join reaches the two review prompts, which tell the report and dedupe agents where the
-    // census is and what its schema version is. `packages/prompts` cannot import from
-    // `@ultrafuzz/runtime` (the dependency runs the other way), so the comparison against the exported
-    // constants has to happen here. A rename that updated the runtime and the CLI but not the prompts
-    // would leave both agents looking for a file that no longer exists.
-    for (const relativePath of ["review/final-report.md", "review/dedupe-findings.md"]) {
-      const promptBody = fs.readFileSync(path.join(repositoryRoot, ".ultrafuzz", "prompts", relativePath), "utf8");
-      assert.ok(promptBody.includes(GOAL_SEARCH_COVERAGE_FILE), `${relativePath} must name the census file`);
-      assert.ok(
-        promptBody.includes(GOAL_SEARCH_COVERAGE_SCHEMA_VERSION),
-        `${relativePath} must name the census schema version`
-      );
-    }
-
-    const coveragePath = path.join(runRoot, GOAL_SEARCH_COVERAGE_FILE);
-    const searched = new Set(["lane-00", "lane-01", "lane-02"]);
-    const record = loadGoalSearchCoverageRecorder(
-      () => coveragePath,
-      (task) => (searched.has(task.attemptId) ? 0 : undefined)
-    );
-    const lanes = Array.from({ length: 77 }, (_unused, index) => {
-      const attemptId = `lane-${String(index).padStart(2, "0")}`;
-      return {
-        id: `task:${attemptId}`,
-        verifierId: `verify:${attemptId}`,
-        attemptId,
-        runRoot,
-        metadata: {
-          node: { group: "goals", concreteNodeId: `dynamic:class:${attemptId}`, logicalNodeId: "class-goals" }
-        }
-      };
-    });
-    // The roaming pass shares the `goals` group, so it is in the census, but it is not a targeted goal
-    // and must not be able to move the targeted numerator or denominator in either direction.
-    const roaming = {
-      id: "task:goal-roaming",
-      verifierId: "verify:goal-roaming",
-      attemptId: "goal-roaming",
-      runRoot,
-      metadata: { node: { group: "goals", concreteNodeId: "goal-roaming", logicalNodeId: "goal-roaming" } }
-    };
-    record(
-      [...lanes, roaming],
-      (nodeId) => searched.has(nodeId.replace(/^task:/u, "")),
-      (nodeId) => searched.has(nodeId.replace(/^verify:/u, ""))
-    );
-
-    const census = JSON.parse(fs.readFileSync(coveragePath, "utf8")) as {
-      schema_version: string;
-      totals: Record<string, number>;
-    };
-    assert.equal(census.schema_version, GOAL_SEARCH_COVERAGE_SCHEMA_VERSION);
-    assert.equal(census.totals.stopped_early, 75);
-
-    // Stamped exactly as the runtime stamps it: the field is runtime-owned, so whatever the report
-    // agent claimed about its own coverage is discarded rather than merged.
-    const stamp = loadReportGoalSearchCoverageReplacer();
-    const stamped = stamp(
-      `${JSON.stringify(
-        {
-          schema_version: "1.0",
-          run_metadata: { run_id: "census-to-report" },
-          issues: [],
-          non_production_outcomes: [],
-          property_provenance: [],
-          goal_search_coverage: "every goal search completed"
-        },
-        null,
-        2
-      )}\n`,
-      census
-    );
-    assert.ok(stamped);
-    const markdown = projectCanonicalFinalReport(JSON.parse(stamped)).markdown;
-
-    // The section exists, leads with the shortfall in bold, and states the numbers the census records
-    // rather than any number the agent authored.
-    assert.match(markdown, /\n## Goal search coverage\n/u);
-    assert.match(markdown, /\*\*Partial goal search coverage: only 3 of 77 targeted goal searches completed\.\*\*/u);
-    assert.match(markdown, /- Targeted goal search lanes: `77`\n/u);
-    assert.match(markdown, /- Completed with a verified result: `3`\n/u);
-    assert.match(markdown, /- Stopped early without returning: `74`\n/u);
-    // 74 targeted lanes were killed, and the 75th `stopped-early` entry is the roaming pass. It is
-    // reported on its own line, so it neither pads the targeted denominator nor dilutes the shortfall.
-    assert.match(markdown, /- Untargeted roaming passes, counted separately: `0` of `1` completed\n/u);
-    assert.doesNotMatch(markdown, /of 78 targeted goal searches/u);
-
-    // An empty issue list under partial coverage is not a result, and the sentence that would otherwise
-    // read as one carries the numbers and a link instead.
-    assert.match(
-      markdown,
-      /No issues were reported, but only 3 of 77 targeted goal searches completed, so this is not a result\. See \[Goal search coverage\]\(#goal-search-coverage\)\./u
-    );
-    assert.doesNotMatch(markdown, /\nNo issues reported\.\n/u);
-    // A killed lane is never described as a searched one, whatever its seeded artifacts look like.
-    assert.doesNotMatch(markdown, /all 77 targeted goal searches completed/iu);
-
-    // The other half of item 4: an unreadable census must SAY unknown. Rendering nothing is the failure
-    // mode that matters, because a report with no coverage section reads exactly like a report whose
-    // coverage was complete, and that is the inversion this whole section exists to prevent.
-    for (const [label, value] of [
-      ["the CLI's explicit sentinel", "unavailable"],
-      ["a census from a future schema", { ...census, schema_version: "ultrafuzz.goal-search-coverage.v2" }],
-      ["a census with no lanes", { ...census, goals: [], totals: { ...census.totals, planned: 0 } }]
-    ] as const) {
-      const unknown = projectCanonicalFinalReport({
-        schema_version: "1.0",
-        run_metadata: { run_id: "census-to-report" },
-        issues: [],
-        non_production_outcomes: [],
-        property_provenance: [],
-        goal_search_coverage: value
-      }).markdown;
-      assert.match(unknown, /\n## Goal search coverage\n/u, label);
-      assert.match(unknown, /\*\*Goal search coverage is unknown\.\*\*/u, label);
-      assert.match(unknown, /Unknown coverage is not full coverage\./u, label);
-      // No count bullets at all, so an unknown census can never be misread as a run of zeros or as a
-      // run that completed everything.
-      assert.doesNotMatch(unknown, /- Targeted goal search lanes: /u, label);
-      assert.doesNotMatch(unknown, /- Stopped early without returning: /u, label);
-    }
-
-    // A report with no `goal_search_coverage` field at all is the same case, and it is the one a
-    // relocated cloud worker and every pre-#677 historical report produce.
-    const absent = projectCanonicalFinalReport({
-      schema_version: "1.0",
-      run_metadata: { run_id: "census-to-report" },
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: []
-    }).markdown;
-    assert.match(absent, /\*\*Goal search coverage is unknown\.\*\*/u);
-  } finally {
-    fs.rmSync(runRoot, { recursive: true, force: true });
-  }
 });
 
 function findRuntimePackageRoot(start: string): string {

@@ -426,10 +426,20 @@ export function currentRunExpansion(overrides: Partial<EvalRunExpansion> = {}): 
     timed_out_node_count: 0,
     timed_out_node_ids: [],
     concurrency: { requested: 1, effective: 0, ready_queue_depth: 0, active_work: 0 },
+    plan: null,
+    expected_vs_actual: {
+      expected_child_count: null,
+      actual_dynamic_node_count: 0,
+      delta: null,
+      matches: null
+    },
+    goal_lanes: null,
     truncated: false,
     nodes: { status: "complete", reason: null },
     lineage: { status: "complete", reason: null },
     concurrency_evidence: { status: "complete", reason: null },
+    plan_evidence: { status: "unavailable", reason: "goal-plan-unavailable" },
+    lane_cost_evidence: { status: "unavailable", reason: "goal-plan-unavailable" },
     ...overrides
   };
 }

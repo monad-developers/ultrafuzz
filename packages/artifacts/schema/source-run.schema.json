@@ -6,10 +6,19 @@
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "source_run_id", "created_at"],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.source-run.v2" },
-    "run_id": { "$ref": "#/$defs/safeId" },
-    "source_run_id": { "$ref": "#/$defs/safeId" },
-    "created_at": { "type": "string", "format": "date-time" }
+    "schema_version": {
+      "const": "ultrafuzz.source-run.v2"
+    },
+    "run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "source_run_id": {
+      "$ref": "#/$defs/safeId"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
   },
   "$defs": {
     "safeId": {
