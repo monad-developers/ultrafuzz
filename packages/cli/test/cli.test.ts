@@ -49,14 +49,22 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function fakeStatusEnvelope(verdict = "running-healthy"): Record<string, unknown> {
+function fakeStatusEnvelope(
+  verdict = "running-healthy",
+  quota: { parkedCount: number; parkedNodeIds: string[]; resetAtMs: number | null } | null = null
+): Record<string, unknown> {
   const running = verdict === "running-healthy";
   return {
     ok: true,
     data: {
       status: verdict === "done" || verdict === "degraded" ? "finished" : "running",
       verdict,
-      reason: verdict === "degraded" ? "review loop exhausted" : "1 running, 2 finished in last 10m",
+      reason:
+        verdict === "degraded"
+          ? "review loop exhausted"
+          : verdict === "waiting-quota"
+            ? "2 task(s) quota-parked"
+            : "1 running, 2 finished in last 10m",
       counts: {
         finished: 2,
         inProgress: running ? 1 : 0,
@@ -75,7 +83,7 @@ function fakeStatusEnvelope(verdict = "running-healthy"): Record<string, unknown
         ? [{ nodeId: "project-discovery", iteration: 0, state: "in-progress", detail: "running 1m" }]
         : [],
       bottleneckOmitted: 0,
-      quota: null,
+      quota,
       generatedAtMs: 2_000
     },
     meta: { command: "status", duration: "1ms" }
@@ -1616,6 +1624,63 @@ test("status --watch stops immediately on a degraded verdict even while product 
   assert.equal(lines.length, 1);
   const body = JSON.parse(lines[0]!) as { data?: { verdict?: string } };
   assert.equal(body.data?.verdict, "degraded");
+});
+
+test("status surfaces quota parking with preserved attempts and the resume remediation", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const runId = "status-quota-parked";
+  const run = await cli(project, ["run", "--run-id", runId, "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+
+  // A 402 park has no provider reset time (#677): status must say the run is
+  // holding attempts and how the operator un-parks it.
+  setFakeSmithersStatus(
+    project,
+    fakeStatusEnvelope("waiting-quota", {
+      parkedCount: 4,
+      parkedNodeIds: [
+        "node:erc20-invariants",
+        "node:vault-invariants",
+        "node:oracle-invariants",
+        "node:pool-invariants"
+      ],
+      resetAtMs: null
+    })
+  );
+  const parked = await cli(project, ["status", runId], env);
+  assert.equal(parked.code, 0, `${parked.stderr}\n${parked.stdout}`);
+  assert.match(parked.stdout, /^Status: waiting-quota \(running\)$/mu);
+  assert.match(parked.stdout, /^Reason: 2 task\(s\) quota-parked$/mu);
+  assert.match(
+    parked.stdout,
+    /^Quota: 4 node\(s\) parked \(attempts preserved\) — node:erc20-invariants, node:vault-invariants, node:oracle-invariants, \+1 more; no provider reset time — provider credit exhausted; restore credit, then run `ultrafuzz resume status-quota-parked`$/mu
+  );
+
+  // A rate-limit park carries the provider's reset time instead.
+  setFakeSmithersStatus(
+    project,
+    fakeStatusEnvelope("waiting-quota", {
+      parkedCount: 1,
+      parkedNodeIds: ["node:erc20-invariants"],
+      resetAtMs: 1_800_000_000_000
+    })
+  );
+  const scheduled = await cli(project, ["status", runId], env);
+  assert.equal(scheduled.code, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
+  assert.match(
+    scheduled.stdout,
+    /^Quota: 1 node\(s\) parked \(attempts preserved\) — node:erc20-invariants; earliest provider reset 2027-01-15T08:00:00\.000Z$/mu
+  );
+  assert.doesNotMatch(scheduled.stdout, /restore credit/u);
+
+  // A run with nothing parked renders no Quota line at all.
+  setFakeSmithersStatus(project, fakeStatusEnvelope());
+  const healthy = await cli(project, ["status", runId], env);
+  assert.equal(healthy.code, 0, `${healthy.stderr}\n${healthy.stdout}`);
+  assert.doesNotMatch(healthy.stdout, /^Quota:/mu);
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {
