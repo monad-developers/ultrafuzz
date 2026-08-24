@@ -6,6 +6,7 @@ import {
   appendEvent,
   assertRunPlanDocument,
   assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   NODE_PROVENANCE_FAILURE_CATEGORIES,
   assertNoSymlinkComponents,
@@ -968,7 +969,7 @@ function sealedTasksRequireTrustedCli(contents: Buffer): boolean {
 }
 
 function parseSealedTaskManifest(contents: Readonly<{ graph: Buffer; tasks: Buffer }>): SmithersTaskManifestDocument {
-  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(contents.graph));
   const manifest = parseSmithersTaskManifestBytes(contents.tasks);
   assertSmithersTaskManifestMatchesPlannedGraph(manifest, graph);
   return manifest;

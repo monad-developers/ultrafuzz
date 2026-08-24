@@ -384,8 +384,28 @@ export function assertPlannedGraph(value: unknown): PlannedGraphDocument {
   return graph;
 }
 
+/**
+ * Parse a graph whose exact bytes are already authenticated by workflow-control
+ * evidence. A controller-only upgrade may change the digest of the complete
+ * schema bundle without changing this graph's contract schema. Keep every
+ * contract-specific binding strict and admit only that historical bundle ID.
+ */
+export function assertSealedPlannedGraph(value: unknown): PlannedGraphDocument {
+  const shape = validatePlannedGraph(value);
+  if (!shape.ok) {
+    throw new Error(
+      `planned graph is schema-invalid: ${shape.issues
+        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
+        .join("; ")}`
+    );
+  }
+  const graph = value as PlannedGraphDocument;
+  assertPlannedGraphSemantics(graph, { allowHistoricalSchemaBundle: true });
+  return graph;
+}
+
 export function readPlannedGraphDocument(filePath: string): PlannedGraphDocument {
-  return assertPlannedGraph(
+  return assertSealedPlannedGraph(
     parseStrictJsonBytes(readRegularFileSnapshot(filePath, 64 * 1024 * 1024), {
       maxBytes: 64 * 1024 * 1024,
       maxDepth: 128,
@@ -395,7 +415,10 @@ export function readPlannedGraphDocument(filePath: string): PlannedGraphDocument
   );
 }
 
-export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
+export function assertPlannedGraphSemantics(
+  graph: PlannedGraphDocument,
+  options: { allowHistoricalSchemaBundle?: boolean } = {}
+): void {
   const nodes = new Map<string, PlannedGraphNodeDocument>();
   const workflowTaskIds = new Set<string>();
   for (const node of graph.nodes) {
@@ -441,7 +464,8 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
           (output.schema_file !== binding.schema_file ||
             output.schema_id !== binding.schema_id ||
             output.schema_sha256 !== binding.schema_sha256 ||
-            output.schema_bundle_sha256 !== binding.schema_bundle_sha256 ||
+            (options.allowHistoricalSchemaBundle !== true &&
+              output.schema_bundle_sha256 !== binding.schema_bundle_sha256) ||
             output.validator_build !== binding.validator_build))
       ) {
         throw new Error(`planned graph output schema binding changed for ${JSON.stringify(output.path)}`);

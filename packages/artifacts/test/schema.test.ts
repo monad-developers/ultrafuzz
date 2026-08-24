@@ -43,9 +43,12 @@ import {
   analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistryFromDirectory,
   createInitialRunState,
   assertGeneratedTestManifestSchema,
   assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertPlannedGraphSemantics,
   derivePropertyImplementationCoverage,
   findingNoteAssignmentIssue,
@@ -89,6 +92,7 @@ import {
   validatePropertyReferences,
   validateRunStateSchema,
   validateUsageLedgerEntry,
+  schemaRegistryBundleDigest,
   materializePromptSchemas,
   ARTIFACT_CONTRACT_SCHEMA_FILES,
   artifactContractSchemaFile,
@@ -147,6 +151,30 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
       fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
     }
     fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas"), 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loads only a complete physical sealed schema bundle", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-sealed-schema-bundle-"));
+  const destination = path.join(root, "schemas");
+  try {
+    materializePromptSchemas(destination);
+    assert.equal(
+      schemaRegistryBundleDigest(artifactSchemaRegistryFromDirectory(destination)),
+      artifactSchemaBundleDigest()
+    );
+
+    const linked = path.join(root, "linked-schemas");
+    fs.symlinkSync(destination, linked, "dir");
+    assert.throws(() => artifactSchemaRegistryFromDirectory(linked), /snapshot directory is unsafe/u);
+
+    fs.chmodSync(destination, 0o700);
+    fs.writeFileSync(path.join(destination, "foreign.schema.json"), "{}\n", "utf8");
+    assert.throws(() => artifactSchemaRegistryFromDirectory(destination), /registry mismatch/u);
+  } finally {
+    fs.chmodSync(destination, 0o700);
+    for (const file of readdirSync(destination)) fs.chmodSync(path.join(destination, file), 0o600);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2099,6 +2127,18 @@ test("planned graph v4 validates whole documents and executes every registered d
     ...artifactContractSchemaBinding("ultrafuzz/findings@2"),
     primary: true
   };
+  const historicalBundle = structuredClone(graph);
+  historicalBundle.nodes = [
+    {
+      ...node,
+      outputs: [{ ...findingsOutput, schema_bundle_sha256: "f".repeat(64) }]
+    }
+  ];
+  assert.throws(() => assertPlannedGraph(historicalBundle), /schema binding changed/u);
+  assert.deepEqual(assertSealedPlannedGraph(historicalBundle), historicalBundle);
+  const historicalSchemaDrift = structuredClone(historicalBundle);
+  historicalSchemaDrift.nodes[0]!.outputs[0]!.schema_sha256 = "e".repeat(64);
+  assert.throws(() => assertSealedPlannedGraph(historicalSchemaDrift), /schema binding changed/u);
 
   const documentGateFailures: Array<{ name: string; graph: PlannedGraphDocument; message: RegExp }> = [
     {

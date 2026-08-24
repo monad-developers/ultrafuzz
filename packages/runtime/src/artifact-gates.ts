@@ -9,9 +9,10 @@ import {
   artifactContractSchemaBinding,
   artifactSchemaDirectory,
   artifactSchemaRegistry,
+  artifactSchemaRegistryFromDirectory,
   assertArtifactVerificationMarkerSemantics,
   assertNoSymlinkComponents,
-  assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertRegularFileInside,
   checkInvariantSourcePinned,
   derivePropertyImplementationCoverage,
@@ -987,7 +988,8 @@ function resolveStateDeclaredPropertyLens(
     output.schema_file === binding.schema_file &&
     output.schema_id === binding.schema_id &&
     output.schema_sha256 === binding.schema_sha256 &&
-    output.schema_bundle_sha256 === binding.schema_bundle_sha256 &&
+    typeof output.schema_bundle_sha256 === "string" &&
+    /^[0-9a-f]{64}$/u.test(output.schema_bundle_sha256) &&
     output.validator_build === binding.validator_build;
   if (!bindingMatches) {
     return {
@@ -1099,7 +1101,7 @@ function sealedDirectArtifactDependencies(
   authority: ArtifactGateAttemptAuthority
 ): DirectArtifactDependency[] {
   assertRegularFileInside(layout.root, layout.graphPath, "sealed direct artifact dependency authority");
-  const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  const graph = assertSealedPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
   semanticAttemptDeclarations(consumer, authority);
   assertExactSealedAttemptAuthority(layout, graph, consumer, authority);
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
@@ -1974,7 +1976,7 @@ function verifyRequiredArtifactShape(
         )
       : readCurrentArtifactSnapshot(artifactDir, absolutePath, authenticated);
   if (artifactBytes === undefined) throw new Error(`required artifact snapshot is unavailable: ${output.path}`);
-  const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(absolutePath, output, artifactBytes);
+  const schemaDiagnostics = verifyRequiredArtifactSchemaBinding(layout, absolutePath, output, artifactBytes);
   if (schemaDiagnostics.some((diagnostic) => diagnostic.severity === "error")) return schemaDiagnostics;
   const binding = artifactContractSchemaBinding(output.contract);
   const contract =
@@ -2456,7 +2458,9 @@ function authenticatedSemanticAttempt(
     throw new Error(`${label} artifact directory does not match its sealed attempt declaration`);
   }
   assertRegularFileInside(input.layout.root, input.layout.graphPath, `${label} planned graph authority`);
-  const graph = assertPlannedGraph(readStrictRegisteredDocument(input.layout.graphPath, "planned-graph.schema.json"));
+  const graph = assertSealedPlannedGraph(
+    readStrictRegisteredDocument(input.layout.graphPath, "planned-graph.schema.json")
+  );
   assertExactSealedAttemptAuthority(input.layout, graph, input.node, input.attemptAuthority);
   return { current, authority: input.attemptAuthority };
 }
@@ -3000,7 +3004,7 @@ function plannedContractProducerStatus(
   if (attemptAuthority !== undefined) {
     const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
     assertRegularFileInside(layout.root, layout.graphPath, "planned contract producer authority");
-    const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+    const graph = assertSealedPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
     assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
     const bindings = declaredAncestorOutputsByContract(current, declarations, contract);
     if (bindings.length === 0) return "absent";
@@ -3018,10 +3022,10 @@ function plannedContractProducerStatus(
       : "present";
   }
   if (!fs.existsSync(layout.graphPath)) return "unknown";
-  let graph: ReturnType<typeof assertPlannedGraph>;
+  let graph: ReturnType<typeof assertSealedPlannedGraph>;
   try {
     assertRegularFileInside(layout.root, layout.graphPath, "planned graph semantic context");
-    graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+    graph = assertSealedPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
   } catch {
     return "unknown";
   }
@@ -3197,7 +3201,7 @@ function assertExactSealedAttemptAuthority(
 }
 
 function plannedAncestorIds(
-  graph: ReturnType<typeof assertPlannedGraph>,
+  graph: ReturnType<typeof assertSealedPlannedGraph>,
   consumer: PlannedGraphNode
 ): ReadonlySet<string> {
   const byId = new Map(graph.nodes.map((node) => [node.id, node] as const));
@@ -3224,7 +3228,7 @@ function plannedAncestorIds(
 
 function plannedDirectDependencyNodes(layout: RunLayout, consumer: PlannedGraphNode): readonly PlannedGraphNode[] {
   assertRegularFileInside(layout.root, layout.graphPath, "planned direct dependency authority");
-  const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  const graph = assertSealedPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
   const plannedConsumers = graph.nodes.filter((node) => node.id === consumer.id);
   if (plannedConsumers.length !== 1) {
     throw new Error(`planned graph does not bind exact consumer ${JSON.stringify(consumer.id)}`);
@@ -3251,7 +3255,7 @@ function finalizedDeclaredContractProducers(
   options: FinalizedDeclaredProducerOptions = {}
 ): FinalizedDeclaredProducer[] {
   assertRegularFileInside(layout.root, layout.graphPath, "planned graph finalized artifact authority");
-  const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+  const graph = assertSealedPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
   let current: SemanticArtifactTaskDeclaration;
   let declarations: SemanticArtifactTaskDeclaration[];
   const concreteNodeIdByAttempt = new Map<string, string>();
@@ -3353,7 +3357,7 @@ function finalizedDeclaredContractProducers(
 }
 
 function optionalDeclaredProducerWasNotAdmitted(
-  graph: ReturnType<typeof assertPlannedGraph>,
+  graph: ReturnType<typeof assertSealedPlannedGraph>,
   node: PlannedGraphNode,
   attemptId: string,
   sealedProducer: SmithersTaskManifestTask | undefined,
@@ -3600,11 +3604,12 @@ function readStrictRegisteredDocument(artifactPath: string, schemaFilename: Arti
 }
 
 function verifyRequiredArtifactSchemaBinding(
+  layout: RunLayout,
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
   artifactBytes: Uint8Array
 ): RuntimeDiagnostic[] {
-  const expected = artifactContractSchemaBinding(output.contract);
+  const current = artifactContractSchemaBinding(output.contract);
   const actual = {
     schema_file: output.schema_file,
     schema_id: output.schema_id,
@@ -3612,29 +3617,54 @@ function verifyRequiredArtifactSchemaBinding(
     schema_bundle_sha256: output.schema_bundle_sha256,
     validator_build: output.validator_build
   };
+  if (current === undefined) {
+    if (Object.values(actual).every((value) => value === undefined)) return [];
+    return [schemaBindingMismatchDiagnostic(absolutePath, output, null, actual)];
+  }
   if (
-    expected?.schema_file !== actual.schema_file ||
-    expected?.schema_id !== actual.schema_id ||
-    expected?.schema_sha256 !== actual.schema_sha256 ||
-    expected?.schema_bundle_sha256 !== actual.schema_bundle_sha256 ||
-    expected?.validator_build !== actual.validator_build
+    current.schema_file !== actual.schema_file ||
+    current.schema_id !== actual.schema_id ||
+    current.schema_sha256 !== actual.schema_sha256 ||
+    current.validator_build !== actual.validator_build ||
+    typeof actual.schema_bundle_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(actual.schema_bundle_sha256)
   ) {
+    return [schemaBindingMismatchDiagnostic(absolutePath, output, current, actual)];
+  }
+
+  const expected = {
+    schema_file: actual.schema_file,
+    schema_id: actual.schema_id,
+    schema_sha256: actual.schema_sha256,
+    schema_bundle_sha256: actual.schema_bundle_sha256,
+    validator_build: actual.validator_build
+  } as const;
+  let schemaPath: string;
+  let schemaRegistry: ReturnType<typeof artifactSchemaRegistryFromDirectory> | undefined;
+  try {
+    if (current.schema_bundle_sha256 === expected.schema_bundle_sha256) {
+      schemaPath = path.join(artifactSchemaDirectory(), current.schema_file);
+    } else {
+      schemaPath = sealedArtifactSchemaPath(layout, current.schema_file);
+      schemaRegistry = artifactSchemaRegistryFromDirectory(path.dirname(schemaPath));
+    }
+  } catch (error) {
     return [
       {
-        code: "ARTIFACT_SCHEMA_BINDING_MISMATCH",
-        message: `Planned schema identity for ${output.path} does not match validator build ${expected?.validator_build ?? "unbound"}`,
+        code: "ARTIFACT_SEALED_SCHEMA_AUTHORITY_INVALID",
+        message: error instanceof Error ? error.message : String(error),
         severity: "error",
         source: "artifact-schema",
         path: absolutePath,
-        details: { contract: output.contract, expected: expected ?? null, actual }
+        details: { contract: output.contract }
       }
     ];
   }
-  if (expected === undefined) return [];
 
   const validation = validateRegisteredJsonBytesSync({
-    schemaPath: path.join(artifactSchemaDirectory(), expected.schema_file),
-    instanceBytes: artifactBytes
+    schemaPath,
+    instanceBytes: artifactBytes,
+    ...(schemaRegistry === undefined ? {} : { schemaRegistry })
   });
   if (
     validation.schema?.id !== expected.schema_id ||
@@ -3670,6 +3700,36 @@ function verifyRequiredArtifactSchemaBinding(
       ...(diagnostic.keyword === undefined ? {} : { keyword: diagnostic.keyword })
     }
   }));
+}
+
+function schemaBindingMismatchDiagnostic(
+  absolutePath: string,
+  output: PlannedGraphNode["outputs"][number],
+  expected: ReturnType<typeof artifactContractSchemaBinding> | null,
+  actual: Readonly<Record<string, unknown>>
+): RuntimeDiagnostic {
+  return {
+    code: "ARTIFACT_SCHEMA_BINDING_MISMATCH",
+    message: `Planned schema identity for ${output.path} does not match validator build ${expected?.validator_build ?? "unbound"}`,
+    severity: "error",
+    source: "artifact-schema",
+    path: absolutePath,
+    details: { contract: output.contract, expected, actual }
+  };
+}
+
+function sealedArtifactSchemaPath(layout: RunLayout, schemaFile: string): string {
+  const workflow = readRunState(layout).provenance?.workflow;
+  const snapshot = workflow?.controllerExecutionSnapshot ?? workflow?.executionSnapshot;
+  if (snapshot === undefined) throw new Error("run state is missing sealed workflow schema authority");
+  const snapshotRoot = safeResolveInside(layout.root, snapshot, "sealed workflow execution snapshot");
+  const schemaPath = safeResolveInside(
+    snapshotRoot,
+    path.posix.join("modules/@ultrafuzz/artifacts/schema", schemaFile),
+    "sealed artifact schema"
+  );
+  assertRegularFileInside(snapshotRoot, schemaPath, "sealed artifact schema");
+  return schemaPath;
 }
 
 function verifySeverityMatrixArtifacts(
@@ -6098,7 +6158,9 @@ function verifyLensReferenceExpectationAuthority(
   } else {
     try {
       assertRegularFileInside(layout.root, layout.graphPath, "current property lens attempt authority");
-      const graph = assertPlannedGraph(readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json"));
+      const graph = assertSealedPlannedGraph(
+        readStrictRegisteredDocument(layout.graphPath, "planned-graph.schema.json")
+      );
       assertExactSealedAttemptAuthority(layout, graph, node, attemptAuthority);
     } catch (error) {
       return [diagnosticFromError(error, "property-provenance", "PROPERTY_LENS_AUTHORITY_INVALID")];

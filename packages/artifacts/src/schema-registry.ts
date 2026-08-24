@@ -73,7 +73,21 @@ export function artifactValidatorSmokeFixturePath(): string {
 
 export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[] {
   if (cachedRegistry !== undefined) return cachedRegistry;
-  const directory = artifactSchemaDirectory();
+  cachedRegistry = buildArtifactSchemaRegistry(artifactSchemaDirectory());
+  return cachedRegistry;
+}
+
+/** Load a complete, physical schema bundle from an authenticated snapshot directory. */
+export function artifactSchemaRegistryFromDirectory(directory: string): readonly ArtifactSchemaRegistryEntry[] {
+  const resolved = path.resolve(directory);
+  const lexical = fs.lstatSync(resolved);
+  if (!lexical.isDirectory() || lexical.isSymbolicLink() || fs.realpathSync(resolved) !== resolved) {
+    throw new Error(`artifact schema snapshot directory is unsafe: ${resolved}`);
+  }
+  return buildArtifactSchemaRegistry(resolved);
+}
+
+function buildArtifactSchemaRegistry(directory: string): readonly ArtifactSchemaRegistryEntry[] {
   const filenames = fs
     .readdirSync(directory)
     .filter((filename) => filename.endsWith(".schema.json"))
@@ -89,7 +103,7 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
   const ids = new Set<string>();
   let bundleBytes = 0;
   let bundlePatterns = 0;
-  cachedRegistry = Object.freeze(
+  return Object.freeze(
     filenames.map((filename): ArtifactSchemaRegistryEntry => {
       const metadata = metadataByFilename[filename]!;
       const snapshot = readRegularFileSnapshot(path.join(directory, filename), MAX_REGISTERED_SCHEMA_BYTES);
@@ -136,7 +150,6 @@ export function artifactSchemaRegistry(): readonly ArtifactSchemaRegistryEntry[]
       });
     })
   );
-  return cachedRegistry;
 }
 
 export function artifactSchemaBundleDigest(): string {

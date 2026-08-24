@@ -22,7 +22,7 @@ import {
   INVARIANT_PINNED_SOURCE_REF,
   layoutForRunRoot,
   assertArtifactVerificationMarkerSemantics,
-  assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   isCloudExecutionGeneration,
   materializePromptSchemas,
@@ -2673,7 +2673,7 @@ function readSealedModalTaskAuthority(
   assertExpectedBytes(graphBytes, graphExpected, "sealed planned graph");
   let graph: PlannedGraphDocument;
   try {
-    graph = assertPlannedGraph(
+    graph = assertSealedPlannedGraph(
       parseStrictJsonBytes(graphBytes, {
         maxBytes: 64 * 1024 * 1024,
         maxDepth: 128,

@@ -10,7 +10,7 @@ import {
   assertArtifactVerificationMarkerSemantics,
   assertTerminalDispositionDocument,
   assertRunMetadataDocument,
-  assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -4934,7 +4934,7 @@ function loadSynchronizationInputs(
         path: "graph.json#$.schema_version"
       });
     } else {
-      graph = assertPlannedGraph(parsed);
+      graph = assertSealedPlannedGraph(parsed);
     }
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));

@@ -10,8 +10,6 @@ import {
   assertGeneratedTestManifestSemantics,
   assertNoSymlinkComponents,
   assertPathInside,
-  artifactContractDefinition,
-  artifactContractSchemaBinding,
   parseStrictJsonBytes,
   readPlannedGraphDocument,
   readSinglyLinkedRegularFileSnapshotInside,
@@ -295,19 +293,18 @@ function authenticatedProducerAuthority(
   }
   for (const output of producer.outputs) {
     const artifact = markerArtifacts.get(output.path);
-    const expectedBinding = artifactContractSchemaBinding(output.contract);
     const expected = {
       path: output.path,
       contract: output.contract,
-      contract_digest: artifactContractDefinition(output.contract).digest,
-      ...(expectedBinding === undefined
+      contract_digest: output.contract_digest,
+      ...(output.schema_file === undefined
         ? {}
         : {
-            schema_file: expectedBinding.schema_file,
-            schema_id: expectedBinding.schema_id,
-            schema_sha256: expectedBinding.schema_sha256,
-            schema_bundle_sha256: expectedBinding.schema_bundle_sha256,
-            validator_build: expectedBinding.validator_build
+            schema_file: output.schema_file,
+            schema_id: output.schema_id,
+            schema_sha256: output.schema_sha256,
+            schema_bundle_sha256: output.schema_bundle_sha256,
+            validator_build: output.validator_build
           }),
       primary: output.primary
     };
