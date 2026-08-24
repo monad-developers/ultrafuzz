@@ -997,7 +997,7 @@ function decodeSpawnCaptures(error: unknown): void {
 
 /** Byte-exact git output, for path lists that may not be valid UTF-8. */
 function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Buffer {
-  const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
+  const env = { ...process.env, ...(index === undefined ? {} : { GIT_INDEX_FILE: index }) };
   try {
     return execFileSync("git", args, { cwd: workspaceRoot, env, maxBuffer: MAX_GIT_CAPTURE_BYTES });
   } catch (error) {

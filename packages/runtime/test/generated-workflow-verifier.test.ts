@@ -5334,7 +5334,10 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /function assertDependencyArtifactAdmissionCurrent/u);
   assert.match(optional, /task\.dependencyArtifactDirs\.filter/u);
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
-  assert.match(source, /preflightJsonValidator\(schemaDirectory\);\s*assertTaskInputs\(task, workspaceRoot\)/u);
+  assert.match(
+    source,
+    /preflightJsonValidator\(schemaDirectory\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot\)/u
+  );
   assert.match(
     source,
     /materializeWorkspacePatchDependencies[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\)/u
@@ -6439,7 +6442,10 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /git\("HEAD\^\{commit\}"\)/u);
   assert.match(source, /head !== task\.sourceRevision \|\| sourceRef !== task\.sourceRevision/u);
   assert.match(source, /if \(firstGenerationForAttempt\) \{\s*assertWorkspaceSourceRevision\(task\)/u);
-  assert.match(source, /replayWorkspacePatches !== false\) assertWorkspaceSourceRevision\(task\)/u);
+  assert.match(
+    source,
+    /replayWorkspacePatches !== false\) \{\s*preparationStep\(task\.attemptId, "assert-workspace-source-revision", \(\) => assertWorkspaceSourceRevision\(task\)\)/u
+  );
   assert.match(source, /if \(!usesPinnedSource\) return/u);
   assert.match(source, /preservePinnedSourceProof\(task\)/u);
   assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
@@ -8652,6 +8658,62 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
     source.slice(finalizerStart, verifierStart),
     /prepareArtifactMirror\(task, \{[\s\S]*?replayWorkspacePatches: false,[\s\S]*?evidenceMode: "require",[\s\S]*?pinnedSubmodules: "verify"[\s\S]*?\}\);/u
   );
+});
+
+test("generated Smithers preparation names its failing step and carries a retry budget", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function preparationStep");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const preparationEnd = source.indexOf("\n\nfunction assertTaskOutputSchemaBindings", preparationStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(preparationStart > helperStart, source);
+  assert.ok(preparationEnd > preparationStart, source);
+
+  // #672: Bun erases the user frames of an error thrown inside a task body, so every one of the
+  // 53 prepare:* failures in the measured run arrived with a stack of only
+  // `at run (node:async_hooks:68:37)`. The wrapper must rebuild the fact the stack cannot carry
+  // -- which step threw -- and keep the original error reachable as `cause`.
+  const helper = source.slice(helperStart, preparationStart);
+  assert.match(helper, /`prepare:\$\{attemptId\} failed at step \$\{step\}: \$\{[\s\S]*?\}`/u);
+  assert.match(helper, /\{ cause: error \}/u);
+
+  const preparation = source.slice(preparationStart, preparationEnd);
+  const steps = [
+    "resolve-workspace-root",
+    "assert-workspace-source-revision",
+    "verify-pinned-submodules",
+    "hydrate-pinned-submodules",
+    "preserve-pinned-source-proof",
+    "materialize-prompt-schemas",
+    "assert-task-output-schema-bindings",
+    "preflight-json-validator",
+    "assert-task-inputs",
+    "materialize-workspace-patch-dependencies",
+    "require-invariant-suite-snapshot",
+    "restore-invariant-suite-snapshot",
+    "materialize-invariant-suite",
+    "capture-invariant-suite-snapshot",
+    "require-invariant-suite-dependency-handoff",
+    "create-artifact-mirror",
+    "resolve-artifact-mirror",
+    "capture-invariant-suite-baseline",
+    "verify-invariant-suite-baseline",
+    "prepare-output-paths"
+  ];
+  for (const step of steps) {
+    assert.match(preparation, new RegExp(`preparationStep\\(task\\.attemptId, "${step}", \\(\\) =>`, "u"), step);
+  }
+
+  // #672: a preparation failure was terminal because the preparation Task hardcoded retries={0},
+  // out of reach of the topology's max_attempts. The compiled budget must never drop below one
+  // retry and never reduce an inherited budget. The verifier Task's retries={0} model-replay seal
+  // is pinned separately and must stay at zero.
+  const preparationTaskStart = source.indexOf("id={task.preparationId}");
+  assert.ok(preparationTaskStart >= 0, source);
+  const preparationTask = source.slice(preparationTaskStart, source.indexOf(">", preparationTaskStart));
+  assert.match(preparationTask, /retries=\{Math\.max\(task\.retries, 1\)\}/u);
+  assert.doesNotMatch(preparationTask, /retries=\{0\}/u);
 });
 
 function findRuntimePackageRoot(start: string): string {

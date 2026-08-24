@@ -3411,6 +3411,32 @@ function materializeGoalPlanDatabaseArtifacts(task: (typeof taskSpecs)[number]):
   }
 }
 
+/**
+ * Name the preparation step that threw, because the stack cannot.
+ *
+ * Bun discards the user frames of an error raised inside a Smithers task body. Every one of
+ * the 53 `prepare:*` failures in issue #672 arrived as a bare
+ * `TypeError: undefined is not an object (evaluating 'get')` whose entire stack was
+ * `at run (node:async_hooks:68:37)` and `at processTicksAndRejections (native:7:39)` -- no
+ * file, no line, nothing to bisect, across 26% of every node failure in an 18-hour run.
+ *
+ * Preparation is synchronous, so the throw site is still on the stack when we catch it here.
+ * Recording which named step failed turns "somewhere in preparation" into one step, and
+ * `cause` keeps the original error and its stack intact for anything that inspects it. The
+ * converse also holds: a preparation failure WITHOUT a step name did not come from this body
+ * at all -- it came from the engine boundary that invokes it.
+ */
+function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw new Error(
+      `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
 function prepareArtifactMirror(
   task: (typeof taskSpecs)[number],
   options: {
@@ -3420,70 +3446,94 @@ function prepareArtifactMirror(
   } = {}
 ): z.infer<typeof preparationOutput> {
   const evidenceMode = options.evidenceMode ?? "create";
-  const workspaceRoot = realpathSync(task.workspacePath);
-  if (options.replayWorkspacePatches !== false) assertWorkspaceSourceRevision(task);
+  const workspaceRoot = preparationStep(task.attemptId, "resolve-workspace-root", () =>
+    realpathSync(task.workspacePath)
+  );
+  if (options.replayWorkspacePatches !== false) {
+    preparationStep(task.attemptId, "assert-workspace-source-revision", () => assertWorkspaceSourceRevision(task));
+  }
   if (options.pinnedSubmodules === "verify") {
-    verifyPinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: task.executionSnapshotRoot,
-      workspaceRoot,
-      expectation: task.pinnedSubmodules ?? undefined
-    });
+    preparationStep(task.attemptId, "verify-pinned-submodules", () =>
+      verifyPinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: task.executionSnapshotRoot,
+        workspaceRoot,
+        expectation: task.pinnedSubmodules ?? undefined
+      })
+    );
   } else {
-    hydratePinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: task.executionSnapshotRoot,
-      workspaceRoot,
-      expectation: task.pinnedSubmodules ?? undefined
-    });
+    preparationStep(task.attemptId, "hydrate-pinned-submodules", () =>
+      hydratePinnedSubmodulesFromExecutionSnapshot({
+        executionSnapshotRoot: task.executionSnapshotRoot,
+        workspaceRoot,
+        expectation: task.pinnedSubmodules ?? undefined
+      })
+    );
   }
-  preservePinnedSourceProof(task);
+  preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  materializePromptSchemas(schemaDirectory);
-  assertTaskOutputSchemaBindings(task);
-  preflightJsonValidator(schemaDirectory);
-  assertTaskInputs(task, workspaceRoot);
-  materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode);
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () => materializePromptSchemas(schemaDirectory));
+  preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
+  preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
+  preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
+    materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
+  );
   if (evidenceMode === "require") {
-    requireInvariantSuiteWorkspaceSnapshot(task);
+    preparationStep(task.attemptId, "require-invariant-suite-snapshot", () =>
+      requireInvariantSuiteWorkspaceSnapshot(task)
+    );
   }
-  restoreInvariantSuiteWorkspaceSnapshot(task, {
-    // On the post-agent pass, preserve source files authored in this attempt
-    // until materializeWorkspacePatch captures them. Initial preparation and
-    // retry reset calls use the default and remove stale sources.
-    preserveCurrentSources: options.replayWorkspacePatches === false
-  });
+  preparationStep(task.attemptId, "restore-invariant-suite-snapshot", () =>
+    restoreInvariantSuiteWorkspaceSnapshot(task, {
+      // On the post-agent pass, preserve source files authored in this attempt
+      // until materializeWorkspacePatch captures them. Initial preparation and
+      // retry reset calls use the default and remove stale sources.
+      preserveCurrentSources: options.replayWorkspacePatches === false
+    })
+  );
   if (evidenceMode === "create") {
-    materializeInvariantSuiteFromDependencies(task, workspaceRoot);
-    captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot);
+    preparationStep(task.attemptId, "materialize-invariant-suite", () =>
+      materializeInvariantSuiteFromDependencies(task, workspaceRoot)
+    );
+    preparationStep(task.attemptId, "capture-invariant-suite-snapshot", () =>
+      captureInvariantSuiteWorkspaceSnapshot(task, workspaceRoot)
+    );
   } else {
-    requireInvariantSuiteDependencyHandoff(task);
+    preparationStep(task.attemptId, "require-invariant-suite-dependency-handoff", () =>
+      requireInvariantSuiteDependencyHandoff(task)
+    );
   }
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
-  mkdirSync(candidate, { recursive: true });
-  const mirrorRoot = realpathSync(candidate);
+  preparationStep(task.attemptId, "create-artifact-mirror", () => mkdirSync(candidate, { recursive: true }));
+  const mirrorRoot = preparationStep(task.attemptId, "resolve-artifact-mirror", () => realpathSync(candidate));
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
   if (evidenceMode === "create") {
-    captureInvariantSuiteBaseline(task, workspaceRoot);
+    preparationStep(task.attemptId, "capture-invariant-suite-baseline", () =>
+      captureInvariantSuiteBaseline(task, workspaceRoot)
+    );
   } else {
-    verifyInvariantSuiteBaseline(task);
+    preparationStep(task.attemptId, "verify-invariant-suite-baseline", () => verifyInvariantSuiteBaseline(task));
   }
 
-  for (const output of task.outputs) {
-    const artifactPath = path.resolve(mirrorRoot, output.path);
-    if (!isStrictlyInsideDirectory(mirrorRoot, artifactPath)) {
-      throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+  preparationStep(task.attemptId, "prepare-output-paths", () => {
+    for (const output of task.outputs) {
+      const artifactPath = path.resolve(mirrorRoot, output.path);
+      if (!isStrictlyInsideDirectory(mirrorRoot, artifactPath)) {
+        throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+      }
+      const parentPath = path.dirname(artifactPath);
+      mkdirSync(parentPath, { recursive: true });
+      const resolvedParent = realpathSync(parentPath);
+      if (resolvedParent !== mirrorRoot && !isStrictlyInsideDirectory(mirrorRoot, resolvedParent)) {
+        throw new Error(`artifact-contract failure: unsafe output parent ${output.path}`);
+      }
     }
-    const parentPath = path.dirname(artifactPath);
-    mkdirSync(parentPath, { recursive: true });
-    const resolvedParent = realpathSync(parentPath);
-    if (resolvedParent !== mirrorRoot && !isStrictlyInsideDirectory(mirrorRoot, resolvedParent)) {
-      throw new Error(`artifact-contract failure: unsafe output parent ${output.path}`);
-    }
-  }
+  });
   return { prepared: true };
 }
 
@@ -9024,7 +9074,7 @@ export default smithers((ctx) => {
                 output={outputs.preparation}
                 dependsOn={cloudWorker ? [] : task.dependsOn}
                 continueOnFail={task.continueOnFail}
-                retries={0}
+                retries={Math.max(task.retries, 1)}
                 metadata={{
                   category: "artifact-preparation",
                   agentTaskId: task.id,

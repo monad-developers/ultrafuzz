@@ -5,6 +5,7 @@ import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileS
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { rethrowOversizedGitOutput } from "../src/git-capture-diagnostics.js";
 import {
@@ -1485,3 +1486,31 @@ test("keeps new authored source under a generated-prefix lookalike", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// #672: `runGitBuffer` built its environment as `index === undefined ? undefined : {...}`, so the
+// index and non-index paths saw different environment semantics (live inheritance versus a
+// snapshot spread). `runGit` was aligned by #689; this pins both helpers to the same form.
+test("git helpers spread the parent environment on both the index and non-index paths", () => {
+  const source = readFileSync(path.join(runtimeSourceRoot(), "workspace-handoff.ts"), "utf8");
+  const expectedEnv = "const env = { ...process.env, ...(index === undefined ? {} : { GIT_INDEX_FILE: index }) };";
+  for (const helper of ["function runGit(", "function runGitBuffer("]) {
+    const start = source.indexOf(helper);
+    assert.ok(start >= 0, `${helper} not found`);
+    const body = source.slice(start, source.indexOf("\n}", start));
+    assert.ok(body.includes(expectedEnv), `${helper} must spread process.env whether or not an index is supplied`);
+  }
+  assert.ok(!source.includes("index === undefined ? undefined"), "no git helper may drop the spread env form");
+});
+
+function runtimeSourceRoot(): string {
+  let current = path.dirname(fileURLToPath(import.meta.url));
+  while (current !== path.dirname(current)) {
+    const packagePath = path.join(current, "package.json");
+    if (fs.existsSync(packagePath)) {
+      const value = JSON.parse(readFileSync(packagePath, "utf8")) as { name?: string };
+      if (value.name === "@ultrafuzz/runtime") return path.join(current, "src");
+    }
+    current = path.dirname(current);
+  }
+  throw new Error("runtime package root not found");
+}
