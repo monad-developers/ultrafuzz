@@ -133,6 +133,8 @@ const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
+const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
+const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
 interface OperatorControllerProject {
   npm: OperatorNpmProvision;
@@ -1246,9 +1248,17 @@ export function refreshedSmithersControllerSnapshot(input: {
   config: ResolvedConfig;
 }): RefreshedSmithersControllerSnapshot {
   const projectRoot = path.resolve(input.projectRoot);
-  const taskDocument = parseSealedTaskDocument(input.original.contents.tasks);
-  if (taskDocument.run_id !== input.layout.runId) {
+  const currentTaskDocument = parseSealedTaskDocument(input.original.contents.tasks);
+  if (currentTaskDocument.run_id !== input.layout.runId) {
     throw new Error("controller refresh task manifest does not match the run ID");
+  }
+  const dynamicBaseTasks = input.original.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_TASKS_SNAPSHOT_PATH
+  );
+  const taskDocument =
+    dynamicBaseTasks === undefined ? currentTaskDocument : parseSealedTaskDocument(dynamicBaseTasks.contents);
+  if (taskDocument.run_id !== input.layout.runId) {
+    throw new Error("controller refresh base task manifest does not match the run ID");
   }
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(input.original.contents.expanded_graph));
   const nonBlockingAttemptIds = taskDocument.tasks
@@ -1540,9 +1550,23 @@ function assertSameControllerPathSet(
 }
 
 function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  const dynamicBaseGraph = snapshot.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH
+  );
+  const dynamicBaseTasks = snapshot.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_TASKS_SNAPSHOT_PATH
+  );
+  if ((dynamicBaseGraph === undefined) !== (dynamicBaseTasks === undefined)) {
+    throw new Error("controller refresh has an incomplete dynamic control base");
+  }
   const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
   for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
-    const bytes = snapshot.contents[key];
+    const bytes =
+      key === "graph" && dynamicBaseGraph !== undefined
+        ? dynamicBaseGraph.contents
+        : key === "tasks" && dynamicBaseTasks !== undefined
+          ? dynamicBaseTasks.contents
+          : snapshot.contents[key];
     hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
   }
   for (const file of snapshot.executionFiles
