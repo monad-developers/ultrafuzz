@@ -28,6 +28,25 @@ test("sensitive environment names cover the provider credential vocabulary", () 
   assert.equal(isSensitiveEnvironmentName("FOUNDRY_PROFILE"), false);
 });
 
+test("the ak-/as- key pattern does not match kebab-case English", () => {
+  // `as-` and `ak-` are ordinary fragments of hyphenated prose. Permitting `-`
+  // in the suffix made every slug of the form "...-as-<16+ chars>" look like a
+  // credential and failed artifact publication on clean output.
+  for (const prose of [
+    "policy.record-treated-as-private-to-the-service",
+    "classified-as-internal-only-configuration-value",
+    "resources-marked-ak-restricted-to-the-owner-role"
+  ]) {
+    assert.equal(containsSensitiveSecrets(prose), false, prose);
+    assert.equal(redactSecretsInText(prose), prose, prose);
+  }
+
+  // Opaque tokens in the same family stay detected, including underscores.
+  for (const key of ["ak-AbCdEf1234567890XyZwVuTs", "as-9f2b7c1d4e6a8b0c3d5e7f90", "ak-AbCdEf_1234567890_XyZwVu"]) {
+    assert.equal(containsSensitiveSecrets(key), true, key);
+  }
+});
+
 test("redaction recognizes maintained key, token, mnemonic, URL, and entropy patterns", () => {
   const fixtures = [
     `private key 0x${"1a".repeat(32)}`,

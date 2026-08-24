@@ -21,7 +21,11 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
   /\bAIza[A-Za-z0-9_-]{20,}\b/gu,
   /\bnpm_[A-Za-z0-9]{20,}\b/gu,
-  /\b(?:ak|as)-[A-Za-z0-9_-]{16,}\b/gu,
+  // No `-` in the suffix: credentials in this family are opaque tokens, while
+  // `as-` and `ak-` are ordinary fragments of kebab-case English. With hyphens
+  // permitted this matched slugs like "record-treated-as-private-to-the-service"
+  // and failed artifact publication on clean output.
+  /\b(?:ak|as)-[A-Za-z0-9_]{16,}\b/gu,
   /\bya29\.[A-Za-z0-9._-]{20,}\b/gu,
   /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
   /\b(?:https?|wss?):\/\/[^\s"'`]*(?:alchemy\.com\/v2\/|infura\.io\/v3\/)[A-Za-z0-9_-]{16,}\b/giu
