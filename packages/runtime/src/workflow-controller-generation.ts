@@ -29,7 +29,8 @@ import {
 import { verifyWorkflowRunLinkHistory } from "./workflow-run-link.js";
 
 const JOURNAL_VERSION = "ultrafuzz.workflow-controller-generation-journal.v1";
-const MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
+const LEGACY_MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
+const MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v2";
 const JOURNAL_FILE = "controller-generation-journal.json";
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -45,10 +46,11 @@ interface ControllerGenerationFile {
 }
 
 interface ControllerGenerationManifest {
-  schema_version: typeof MANIFEST_VERSION;
+  schema_version: typeof LEGACY_MANIFEST_VERSION | typeof MANIFEST_VERSION;
   run_id: string;
   control_generation: string;
   controller_generation: string;
+  previous_controller_generation?: string;
   controller_source_digest: string;
   semantic_fingerprint: string;
   workflow_path: string;
@@ -118,25 +120,55 @@ export function prepareControllerGeneration(
   assertOriginalGeneration(layout, original);
   const journal = readJournal(layout, original.generation);
   verifyControllerGenerationJournalEvents(layout, journal);
-  const manifest = controllerGenerationManifest(layout, original, refreshed);
+  const current = committedHead(journal);
+  const pending = journal.entries.find((entry) => entry.phase === "prepared");
+  const manifest = controllerGenerationManifest(
+    layout,
+    original,
+    refreshed,
+    pending?.controller_generation ?? current?.controller_generation ?? original.generation
+  );
   const manifestBytes = manifestBytesFor(manifest);
   const manifestPath = manifestRelativePath(manifest.controller_generation);
-  const current = committedHead(journal);
-  if (current?.controller_generation === manifest.controller_generation) {
+  if (pending === undefined && current !== undefined) {
     const retained = readManifest(layout, current);
-    if (!manifestBytes.equals(manifestBytesFor(retained))) {
-      throw new Error("controller generation identity collides with different manifest bytes");
+    if (sameControllerGenerationContents(retained, manifest)) {
+      return {
+        snapshot: snapshotFromManifest(layout, original, retained),
+        controllerGeneration: retained.controller_generation,
+        authorizedGenerations: authorizedGenerations(journal, original.generation),
+        noChange: true
+      };
     }
-    return {
-      snapshot: snapshotFromManifest(layout, original, retained),
-      controllerGeneration: retained.controller_generation,
-      authorizedGenerations: authorizedGenerations(journal, original.generation),
-      noChange: true
-    };
   }
 
-  const pending = journal.entries.find((entry) => entry.phase === "prepared");
   if (pending !== undefined) {
+    const retained = readManifest(layout, pending);
+    const publishedPending = publishedPreparedSnapshotRoot(layout, pending);
+    if (sameControllerGenerationContents(retained, manifest)) {
+      return {
+        snapshot:
+          publishedPending === undefined
+            ? { ...refreshed.snapshot, generation: retained.controller_generation }
+            : snapshotFromManifest(layout, original, retained),
+        controllerGeneration: retained.controller_generation,
+        authorizedGenerations: [
+          ...new Set([...authorizedGenerations(journal, original.generation), retained.controller_generation])
+        ].sort(compareStrings),
+        noChange: false
+      };
+    }
+    if (publishedPending !== undefined) {
+      return transitionPublishedPreparationToSuccessor(
+        layout,
+        original,
+        journal,
+        pending,
+        retained,
+        refreshed,
+        authority
+      );
+    }
     if (
       pending.controller_generation !== manifest.controller_generation ||
       pending.manifest_path !== manifestPath ||
@@ -236,6 +268,71 @@ export function commitPublishedPreparedControllerGeneration(
   return commitControllerGeneration(layout, original, pending.controller_generation);
 }
 
+/**
+ * Preserve an already-published preparation as ancestry while durably requiring
+ * the current controller generation before any ordinary lifecycle action can
+ * select the recovered legacy head. The single journal replacement moves the
+ * published entry to committed and appends its successor as prepared, so every
+ * crash boundary has a pending refresh marker on at least one side.
+ */
+function transitionPublishedPreparationToSuccessor(
+  layout: RunLayout,
+  original: VerifiedWorkflowControlSnapshot,
+  journal: ControllerGenerationJournal,
+  pending: ControllerGenerationEntry,
+  pendingManifest: ControllerGenerationManifest,
+  refreshed: RefreshedSmithersControllerSnapshot,
+  authority: { workflowRunId: string; workflowLinkId: string }
+): PreparedControllerGeneration {
+  snapshotFromManifest(layout, original, pendingManifest);
+  const successor = controllerGenerationManifest(layout, original, refreshed, pending.controller_generation);
+  const successorBytes = manifestBytesFor(successor);
+  const successorPath = manifestRelativePath(successor.controller_generation);
+  const manifestRoot = ensureControllerGenerationDirectory(layout);
+  publishFileDurableExclusive(manifestRoot, `${successor.controller_generation}.json`, successorBytes);
+
+  const expectedPayload = controllerGenerationEventPayload(journal, pending, pendingManifest);
+  const recordedEvent = controllerGenerationEvent(layout, pending);
+  if (recordedEvent !== undefined && JSON.stringify(recordedEvent.payload) !== JSON.stringify(expectedPayload)) {
+    throw new Error("controller generation event does not authenticate its prepared journal entry");
+  }
+  const event =
+    recordedEvent ??
+    appendEvent(layout, {
+      eventType: "workflow-controller-generation-recorded",
+      status: readRunState(layout).status,
+      payload: expectedPayload
+    });
+  const now = new Date().toISOString();
+  pending.phase = "committed";
+  pending.updated_at = now;
+  pending.committed_at = now;
+  pending.event_id = event.event_id;
+  pending.event_at = event.timestamp;
+  journal.entries.push({
+    sequence: journal.entries.length + 1,
+    controller_generation: successor.controller_generation,
+    previous_controller_generation: pending.controller_generation,
+    manifest_path: successorPath,
+    manifest_sha256: sha256(successorBytes),
+    workflow_run_id: authority.workflowRunId,
+    workflow_link_id: authority.workflowLinkId,
+    phase: "prepared",
+    prepared_at: now,
+    updated_at: now
+  });
+  writeJournal(layout, journal);
+  reconcileControllerGenerationProjection(layout, journal, pending);
+  return {
+    snapshot: { ...refreshed.snapshot, generation: successor.controller_generation },
+    controllerGeneration: successor.controller_generation,
+    authorizedGenerations: [
+      ...new Set([...authorizedGenerations(journal, original.generation), successor.controller_generation])
+    ].sort(compareStrings),
+    noChange: false
+  };
+}
+
 function publishedPreparedSnapshotRoot(layout: RunLayout, pending: ControllerGenerationEntry): string | undefined {
   const snapshotRoot = safeResolveInside(
     layout.root,
@@ -328,14 +425,7 @@ export function verifyCommittedControllerGenerationAuthority(
   if (manifest.control_generation !== controlGeneration) {
     throw new Error("controller generation is not rooted in the workflow control seal");
   }
-  const expectedGeneration = controllerGenerationDigest({
-    runId: manifest.run_id,
-    controlGeneration: manifest.control_generation,
-    controllerSourceDigest: manifest.controller_source_digest,
-    semanticFingerprint: manifest.semantic_fingerprint,
-    workflowPath: manifest.workflow_path,
-    files: manifest.files
-  });
+  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
   if (manifest.controller_generation !== expectedGeneration) {
     throw new Error("controller generation manifest identity is invalid");
   }
@@ -368,7 +458,8 @@ export function verifyCommittedControllerGenerationAuthority(
 function controllerGenerationManifest(
   layout: RunLayout,
   original: VerifiedWorkflowControlSnapshot,
-  refreshed: RefreshedSmithersControllerSnapshot
+  refreshed: RefreshedSmithersControllerSnapshot,
+  previousControllerGeneration: string
 ): ControllerGenerationManifest {
   const workflowPath = path.posix.join(".smithers/workflows", path.basename(original.paths.workflowPath));
   const files: ControllerGenerationFile[] = [
@@ -381,9 +472,10 @@ function controllerGenerationManifest(
   if (refreshed.semanticFingerprint !== semanticFingerprint(original)) {
     throw new Error("controller refresh changed sealed campaign semantics");
   }
-  const generation = controllerGenerationDigest({
+  const generation = controllerGenerationDigestV2({
     runId: layout.runId,
     controlGeneration: original.generation,
+    previousControllerGeneration,
     controllerSourceDigest: refreshed.controllerSourceDigest,
     semanticFingerprint: refreshed.semanticFingerprint,
     workflowPath,
@@ -394,6 +486,7 @@ function controllerGenerationManifest(
     run_id: layout.runId,
     control_generation: original.generation,
     controller_generation: generation,
+    previous_controller_generation: previousControllerGeneration,
     controller_source_digest: refreshed.controllerSourceDigest,
     semantic_fingerprint: refreshed.semanticFingerprint,
     workflow_path: workflowPath,
@@ -413,14 +506,7 @@ function snapshotFromManifest(
   ) {
     throw new Error("controller generation is not rooted in the sealed campaign semantics");
   }
-  const expectedGeneration = controllerGenerationDigest({
-    runId: manifest.run_id,
-    controlGeneration: manifest.control_generation,
-    controllerSourceDigest: manifest.controller_source_digest,
-    semanticFingerprint: manifest.semantic_fingerprint,
-    workflowPath: manifest.workflow_path,
-    files: manifest.files
-  });
+  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
   if (manifest.controller_generation !== expectedGeneration) {
     throw new Error("controller generation manifest identity is invalid");
   }
@@ -623,14 +709,7 @@ function verifyControllerGenerationManifestIdentity(
   entry: ControllerGenerationEntry,
   manifest: ControllerGenerationManifest
 ): void {
-  const expectedGeneration = controllerGenerationDigest({
-    runId: manifest.run_id,
-    controlGeneration: manifest.control_generation,
-    controllerSourceDigest: manifest.controller_source_digest,
-    semanticFingerprint: manifest.semantic_fingerprint,
-    workflowPath: manifest.workflow_path,
-    files: manifest.files
-  });
+  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
   if (
     manifest.control_generation !== journal.control_generation ||
     manifest.controller_generation !== entry.controller_generation ||
@@ -790,25 +869,29 @@ function readManifest(layout: RunLayout, entry: ControllerGenerationEntry): Cont
   const bytes = readRegularFileSnapshot(manifestPath, MAX_DOCUMENT_BYTES);
   if (sha256(bytes) !== entry.manifest_sha256) throw new Error("controller generation manifest changed");
   const value = parseStrictJsonBytes(bytes);
+  if (!isRecord(value) || !Array.isArray(value.files)) {
+    throw new Error("controller generation manifest is invalid");
+  }
+  const baseKeys = [
+    "schema_version",
+    "run_id",
+    "control_generation",
+    "controller_generation",
+    "controller_source_digest",
+    "semantic_fingerprint",
+    "workflow_path",
+    "files"
+  ];
   if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      "schema_version",
-      "run_id",
-      "control_generation",
-      "controller_generation",
-      "controller_source_digest",
-      "semantic_fingerprint",
-      "workflow_path",
-      "files"
-    ]) ||
-    !Array.isArray(value.files)
+    (value.schema_version === LEGACY_MANIFEST_VERSION && !hasExactKeys(value, baseKeys)) ||
+    (value.schema_version === MANIFEST_VERSION &&
+      !hasExactKeys(value, [...baseKeys, "previous_controller_generation"])) ||
+    (value.schema_version !== LEGACY_MANIFEST_VERSION && value.schema_version !== MANIFEST_VERSION)
   ) {
     throw new Error("controller generation manifest is invalid");
   }
   const manifest = value as unknown as ControllerGenerationManifest;
   if (
-    manifest.schema_version !== MANIFEST_VERSION ||
     typeof manifest.run_id !== "string" ||
     manifest.run_id !== layout.runId ||
     typeof manifest.control_generation !== "string" ||
@@ -817,6 +900,10 @@ function readManifest(layout: RunLayout, entry: ControllerGenerationEntry): Cont
     !SHA256.test(manifest.control_generation) ||
     typeof manifest.controller_source_digest !== "string" ||
     !SHA256.test(manifest.controller_source_digest) ||
+    (manifest.schema_version === MANIFEST_VERSION &&
+      (typeof manifest.previous_controller_generation !== "string" ||
+        manifest.previous_controller_generation !== entry.previous_controller_generation ||
+        !SHA256.test(manifest.previous_controller_generation))) ||
     typeof manifest.semantic_fingerprint !== "string" ||
     !SHA256.test(manifest.semantic_fingerprint) ||
     typeof manifest.workflow_path !== "string" ||
@@ -879,7 +966,7 @@ function manifestBytesFor(manifest: ControllerGenerationManifest): Buffer {
   return Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
-function controllerGenerationDigest(input: {
+function controllerGenerationDigestV1(input: {
   runId: string;
   controlGeneration: string;
   controllerSourceDigest: string;
@@ -901,6 +988,62 @@ function controllerGenerationDigest(input: {
     hash.update(`${file.kind}\0${file.path}\0${file.size_bytes}\0${file.sha256}\0`);
   }
   return hash.digest("hex");
+}
+
+function controllerGenerationDigestV2(input: {
+  runId: string;
+  controlGeneration: string;
+  previousControllerGeneration: string;
+  controllerSourceDigest: string;
+  semanticFingerprint: string;
+  workflowPath: string;
+  files: readonly ControllerGenerationFile[];
+}): string {
+  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-generation-v2\0");
+  for (const value of [
+    input.runId,
+    input.controlGeneration,
+    input.previousControllerGeneration,
+    input.controllerSourceDigest,
+    input.semanticFingerprint,
+    input.workflowPath
+  ]) {
+    hash.update(`${Buffer.byteLength(value)}\0${value}\0`);
+  }
+  for (const file of input.files) {
+    hash.update(`${file.kind}\0${file.path}\0${file.size_bytes}\0${file.sha256}\0`);
+  }
+  return hash.digest("hex");
+}
+
+function controllerGenerationDigestForManifest(manifest: ControllerGenerationManifest): string {
+  const common = {
+    runId: manifest.run_id,
+    controlGeneration: manifest.control_generation,
+    controllerSourceDigest: manifest.controller_source_digest,
+    semanticFingerprint: manifest.semantic_fingerprint,
+    workflowPath: manifest.workflow_path,
+    files: manifest.files
+  };
+  return manifest.schema_version === LEGACY_MANIFEST_VERSION
+    ? controllerGenerationDigestV1(common)
+    : controllerGenerationDigestV2({
+        ...common,
+        previousControllerGeneration: manifest.previous_controller_generation!
+      });
+}
+
+function sameControllerGenerationContents(
+  left: ControllerGenerationManifest,
+  right: ControllerGenerationManifest
+): boolean {
+  return (
+    left.control_generation === right.control_generation &&
+    left.controller_source_digest === right.controller_source_digest &&
+    left.semantic_fingerprint === right.semantic_fingerprint &&
+    left.workflow_path === right.workflow_path &&
+    JSON.stringify(left.files) === JSON.stringify(right.files)
+  );
 }
 
 function semanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
