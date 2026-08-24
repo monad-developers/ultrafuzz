@@ -17,9 +17,13 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
-import { initProject, materializeDynamicRuntime, startRun, syncRun } from "../src/index.js";
+import { initProject, materializeDynamicRuntime, readLinkedWorkflowEvidence, startRun, syncRun } from "../src/index.js";
 import { effectiveRouteEnvironment } from "../src/data-governance.js";
-import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "../src/smithers.js";
+import {
+  refreshedSmithersControllerSnapshot,
+  type CompiledSmithersDynamicGroup,
+  type CompiledSmithersTask
+} from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
@@ -564,6 +568,47 @@ function readLedger(fixture: DynamicFixture): Array<Record<string, unknown>> {
   const text = fs.readFileSync(ledgerPath, "utf8").trim();
   return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 }
+
+test("controller refresh preserves the sealed dynamic base after runtime materialization", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-controller-refresh" });
+  const generated = fixture.generatedTasks[0]!;
+  assert.ok(generated.renderedPromptPath);
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const baseTasks = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/runtime-base-tasks.json"
+  );
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(baseTasks);
+  assert.ok(resolvedConfig);
+  const baseDocument = JSON.parse(baseTasks.contents.toString("utf8")) as { tasks: CompiledSmithersTask[] };
+  const currentDocument = JSON.parse(evidence.verifiedControl.contents.tasks.toString("utf8")) as {
+    tasks: CompiledSmithersTask[];
+  };
+  assert.equal(
+    baseDocument.tasks.some((task) => task.attemptId === generated.attemptId),
+    false
+  );
+  assert.equal(
+    currentDocument.tasks.some((task) => task.attemptId === generated.attemptId),
+    true
+  );
+
+  const refreshed = refreshedSmithersControllerSnapshot({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    original: evidence.verifiedControl,
+    config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+  });
+
+  const workflow = refreshed.snapshot.contents.workflow.toString("utf8");
+  assert.equal(workflow.includes(JSON.stringify(generated.attemptId)), false);
+  assert.equal(workflow.includes(JSON.stringify(generated.renderedPromptPath)), false);
+  assert.deepEqual(refreshed.snapshot.contents.tasks, evidence.verifiedControl.contents.tasks);
+});
 
 test("dynamic child success is resumable, idempotent, provenance-safe, and opens its strict join", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-success" });

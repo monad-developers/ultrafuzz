@@ -133,6 +133,7 @@ const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
+const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
 const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
 interface OperatorControllerProject {
   npm: OperatorNpmProvision;
@@ -1246,9 +1247,17 @@ export function refreshedSmithersControllerSnapshot(input: {
   config: ResolvedConfig;
 }): RefreshedSmithersControllerSnapshot {
   const projectRoot = path.resolve(input.projectRoot);
-  const taskDocument = parseSealedTaskDocument(input.original.contents.tasks);
-  if (taskDocument.run_id !== input.layout.runId) {
+  const currentTaskDocument = parseSealedTaskDocument(input.original.contents.tasks);
+  if (currentTaskDocument.run_id !== input.layout.runId) {
     throw new Error("controller refresh task manifest does not match the run ID");
+  }
+  const dynamicBaseTasks = input.original.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_TASKS_SNAPSHOT_PATH
+  );
+  const taskDocument =
+    dynamicBaseTasks === undefined ? currentTaskDocument : parseSealedTaskDocument(dynamicBaseTasks.contents);
+  if (taskDocument.run_id !== input.layout.runId) {
+    throw new Error("controller refresh base task manifest does not match the run ID");
   }
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(input.original.contents.expanded_graph));
   const nonBlockingAttemptIds = taskDocument.tasks
