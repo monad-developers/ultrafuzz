@@ -1117,14 +1117,18 @@ function generatedDependencyTaskSpecs(
   executionGeneration: string
 ): typeof taskSpecs {
   const compiledAttemptIds = new Set(serializedTaskSpecs.map((task) => task.attemptId));
+  const declaredDependencyAttemptIds = new Set(selected.metadata.dependencies.attemptIds);
   const declaredVerifierIds = new Set(selected.metadata.dependencies.smithersNodeIds);
   const referenceArtifactDirs = new Set(selected.referenceArtifactDirs);
   const reconstructed: typeof taskSpecs = [];
   for (const dependencyArtifactDir of selected.dependencyArtifactDirs) {
+    const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
+    // The artifact closure can carry transitive baseline inputs that are not direct task
+    // dependencies. Only an exact declared dependency attempt can be a runtime-generated task.
+    if (!declaredDependencyAttemptIds.has(dependencyAttemptId)) continue;
     // Static references participate in artifact ancestry but are not executable attempts, so they
     // have neither a serialized task spec nor a verifier to reconstruct on the worker.
     if (referenceArtifactDirs.has(dependencyArtifactDir)) continue;
-    const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
     if (compiledAttemptIds.has(dependencyAttemptId)) continue;
     if (!declaredVerifierIds.has(`verify:${dependencyAttemptId}`)) {
       throw new Error(`cloud worker selected_task dependency ${dependencyAttemptId} is missing its verifier`);
