@@ -1336,6 +1336,12 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
       "Write {{artifact_path}}/goal-plan.json."
     ].join("\n")
   );
+  writePrompt(
+    project,
+    "setup/goal-roaming-fixture.md",
+    "goal-roaming-fixture",
+    "Read {{artifact_path:threat-model}}/THREAT_MODEL.md and write {{artifact_path}}/roaming.md."
+  );
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), DATABASE_TOPOLOGY, "utf8");
 
   const xdgCacheHome = path.join(project, "xdg-cache");
@@ -1387,6 +1393,10 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
       logicalNodeId
     );
   }
+  const roamingTask = compiled.tasks.find((candidate) => candidate.metadata.node.logicalNodeId === "goal-roaming");
+  assert.ok(roamingTask, "goal-roaming must compile");
+  assert.deepEqual([...(roamingTask.referenceArtifactDirs ?? [])], []);
+  assert.ok(roamingTask.dependencyArtifactDirs.includes(referenceAttemptDir));
 
   const rendered = await renderGeneratedWorkflow({
     workflowPath: compiled.workflowPath,
@@ -1448,6 +1458,34 @@ test("compiled threat-model and goal-plan cloud tasks hand off and relocate the 
       fs.rmSync(worker, { recursive: true, force: true });
     }
   }
+  const roamingSandbox = rendered.find(
+    (task) =>
+      task.component === "Sandbox" &&
+      (task.props.meta as { node?: { logicalNodeId?: string } } | undefined)?.node?.logicalNodeId === "goal-roaming"
+  );
+  assert.ok(roamingSandbox, "goal-roaming must dispatch a cloud sandbox");
+  const roamingInput = roamingSandbox.props.input as Record<string, unknown>;
+  assert.deepEqual(roamingInput.reference_artifact_dirs, []);
+  assert.ok((roamingInput.dependency_artifact_dirs as string[]).includes(expectedReferenceDir));
+  const roamingSelected = roamingInput.selected_task as {
+    metadata: { dependencies: { attemptIds: string[] } };
+  };
+  assert.ok(!roamingSelected.metadata.dependencies.attemptIds.includes("reference-vulnerability-database"));
+  await assert.doesNotReject(() =>
+    renderGeneratedWorkflow({
+      workflowPath: compiled.workflowPath,
+      cwd: project,
+      forbidDynamicMaterialization: true,
+      workflowInput: {
+        cloud_worker: true,
+        task_id: roamingInput.task_id,
+        attempt_id: roamingInput.attempt_id,
+        execution_generation: roamingInput.execution_generation,
+        selected_task: roamingInput.selected_task,
+        tasks: []
+      }
+    })
+  );
   fs.rmSync(project, { recursive: true, force: true });
 });
 
@@ -1502,8 +1540,16 @@ nodes:
       - path: goal-plan.json
         contract: ultrafuzz/goal-plan@1
         primary: true
+  - id: goal-roaming
+    kind: agentic
+    prompt: setup/goal-roaming-fixture.md
+    depends_on: [threat-model]
+    outputs:
+      - path: roaming.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
   - id: __finish__
     kind: meta
     role: finish
-    depends_on: [goal-plan]
+    depends_on: [goal-plan, goal-roaming]
 `;
