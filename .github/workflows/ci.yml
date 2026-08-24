@@ -230,6 +230,7 @@ jobs:
       # benchmark:check. The built CLI is all that is needed for the remaining
       # byte-for-byte history/chart check, so do not run the long suites twice.
       - name: Validate benchmark history charts
+        if: github.event_name != 'pull_request'
         run: pnpm -w benchmark:history:check
 
       - name: Upload release validation report
