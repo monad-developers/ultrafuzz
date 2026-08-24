@@ -13085,6 +13085,76 @@ if (phase === "engine" || phase === "supervisor") {
 );
 
 testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
+  "sealed module confinement canonicalizes valid descriptor aliases and rejects outside or reused descriptors",
+  async () => {
+    // Descriptor aliases are resolved and checked before loading. Owning an
+    // outside descriptor, or reusing a formerly valid number, grants nothing.
+    const root = tempProject();
+    const controls = path.join(root, "controls");
+    fs.mkdirSync(controls, { recursive: true });
+    fs.writeFileSync(path.join(controls, "bunfig.toml"), "\n", "utf8");
+    fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n", "utf8");
+    fs.writeFileSync(path.join(controls, "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
+    fs.writeFileSync(path.join(root, "sealed-helper.mjs"), 'export const value = "sealed";\n', "utf8");
+    fs.writeFileSync(
+      path.join(root, "sealed.tsx"),
+      'import { value } from "./sealed-helper.mjs"; const typed: string = value; export default typed;\n',
+      "utf8"
+    );
+
+    const outsideRoot = tempProject();
+    const ambientPath = path.join(outsideRoot, "ambient.mjs");
+    fs.writeFileSync(ambientPath, 'export default "ambient";\n', "utf8");
+
+    const scriptPath = path.join(root, "second-descriptor-probe.mjs");
+    fs.writeFileSync(
+      scriptPath,
+      `import { closeSync, openSync } from "node:fs";
+const sealedDescriptor = openSync(${JSON.stringify(root)}, "r");
+const sealed = await import("/proc/" + process.pid + "/fd/" + sealedDescriptor + "/sealed.tsx");
+const ambientDescriptor = openSync(${JSON.stringify(outsideRoot)}, "r");
+let ambientRejected = false;
+try {
+  await import("/proc/" + process.pid + "/fd/" + ambientDescriptor + "/ambient.mjs");
+} catch {
+  ambientRejected = true;
+}
+closeSync(sealedDescriptor);
+const reusedDescriptor = openSync(${JSON.stringify(outsideRoot)}, "r");
+if (reusedDescriptor !== sealedDescriptor) throw new Error("fixture did not reuse the descriptor");
+let reusedRejected = false;
+try {
+  await import("/proc/" + process.pid + "/fd/" + reusedDescriptor + "/ambient.mjs?reused");
+} catch {
+  reusedRejected = true;
+}
+process.stdout.write(JSON.stringify({ sealed: sealed.default, ambientRejected, reusedRejected }));
+`,
+      "utf8"
+    );
+
+    const probe = spawnSync(
+      "bun",
+      [
+        `--config=${path.join(controls, "bunfig.toml")}`,
+        `--env-file=${path.join(controls, "bun-empty.env")}`,
+        "--no-env-file",
+        "--no-install",
+        "--no-addons",
+        "--preserve-symlinks",
+        "--preserve-symlinks-main",
+        `--preload=${path.join(controls, "bun-module-confinement.js")}`,
+        scriptPath
+      ],
+      { encoding: "utf8", cwd: root }
+    );
+
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.deepEqual(JSON.parse(probe.stdout), { sealed: "sealed", ambientRejected: true, reusedRejected: true });
+  }
+);
+
+testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
   "fixed fd transfer survives parent exit and fd reuse across Bun engine, supervisor, and resume",
   async () => {
     const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
