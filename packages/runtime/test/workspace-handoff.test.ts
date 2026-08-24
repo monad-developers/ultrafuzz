@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { rethrowOversizedGitOutput } from "../src/git-capture-diagnostics.js";
+import { formatWorkspacePatchOverflow, rethrowOversizedGitOutput } from "../src/git-capture-diagnostics.js";
 import {
   applyWorkspacePatch,
   captureWorkspacePatch,
@@ -208,6 +208,90 @@ test("captures an edit to tracked content living under a generated corpus root",
     );
     const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
     assert.equal(staged.split("\n").includes("recon-corpus/build-snapshot/0b7f82b3.json"), false, staged);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #670's primary fix. A Foundry target with a Hardhat-layout `.gitignore` covers `/artifacts` and
+// `/cache` but NOT `out/`, so `--exclude-standard` reports every `forge build` output file as untracked
+// and one capture staged ~35 MB of it — including a 20,345,068-byte `out/build-info/<id>.json`. Worse
+// than the size: the staged copy made `out/**` TRACKED in every downstream baseline, where a rebuild
+// diffs it as modifications that #368's untracked-only recovery may never exclude. The exclusion has to
+// come from the stager, by name, exactly like the corpus roots above.
+test("captures a Foundry workspace without staging out/ when the target does not gitignore it", () => {
+  const root = fixture();
+  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-foundry-out-"));
+  const downstream = path.join(downstreamParent, "checkout");
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n/artifacts\n/cache\n");
+    git(root, ["add", ".gitignore"]);
+    git(root, ["commit", "--quiet", "-m", "hardhat-layout ignores"]);
+    git(downstreamParent, ["clone", "--quiet", root, downstream]);
+    const baseline = captureWorkspaceTree(root);
+
+    // Small files: the name exclusion is size-independent, and the poisoning mechanism it prevents does
+    // not need bulk to reproduce.
+    mkdirSync(path.join(root, "out", "build-info"), { recursive: true });
+    mkdirSync(path.join(root, "out", "Contract.sol"), { recursive: true });
+    writeFileSync(path.join(root, "out", "build-info", "0b7f82b3.json"), '{"buildInfo":true}\n');
+    writeFileSync(path.join(root, "out", "Contract.sol", "Contract.json"), '{"abi":[]}\n');
+    writeFileSync(path.join(root, "UltrafuzzHandlers.t.sol"), "contract UltrafuzzHandlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzHandlers.t.sol"]
+    );
+    // Excluded by NAME in the untracked listing, not recovered by measurement after the fact.
+    assert.equal(captured.manifest.excluded_files, undefined);
+    const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
+    assert.equal(
+      staged.split("\n").some((entry) => entry === "out" || entry.startsWith("out/")),
+      false,
+      `out/ leaked into the captured tree: ${staged}`
+    );
+    assert.doesNotMatch(captured.patch, /\bout\//u);
+
+    // The downstream baseline is what the incident poisoned: applying the capture must not track out/.
+    applyWorkspacePatch(downstream, captured, ["contracts", "src"]);
+    assert.equal(fs.existsSync(path.join(downstream, "out")), false);
+    assert.equal(
+      readFileSync(path.join(downstream, "UltrafuzzHandlers.t.sol"), "utf8"),
+      "contract UltrafuzzHandlers {}\n"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(downstreamParent, { recursive: true, force: true });
+  }
+});
+
+// The flip side of the exclusion, mirroring the corpus-root test above: `out` joins the UNTRACKED
+// listing's exclusions only. A target that commits content under out/ keeps its tracked edits, or the
+// new name would be exactly the silent data loss the two-listing design exists to prevent.
+test("captures an edit to tracked content living under Foundry's out/", () => {
+  const root = fixture();
+  try {
+    mkdirSync(path.join(root, "out"), { recursive: true });
+    writeFileSync(path.join(root, "out", "kept.json"), "committed build output\n");
+    writeFileSync(path.join(root, ".gitignore"), "node_modules\n");
+    git(root, ["add", ".gitignore", "out/kept.json"]);
+    git(root, ["commit", "--quiet", "-m", "committed content under out"]);
+    const baseline = captureWorkspaceTree(root);
+
+    // The agent edits the committed file; a rebuild drops an untracked blob beside it. The edit must
+    // survive; the untracked blob must not.
+    writeFileSync(path.join(root, "out", "kept.json"), "edited by the agent\n");
+    writeFileSync(path.join(root, "out", "fresh.json"), '{"generated":true}\n');
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["out/kept.json"]
+    );
+    const staged = git(root, ["ls-tree", "-r", "--name-only", captured.manifest.result_tree]);
+    assert.equal(staged.split("\n").includes("out/fresh.json"), false, staged);
+    assert.equal(git(root, ["show", `${captured.manifest.result_tree}:out/kept.json`]), "edited by the agent\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -632,6 +716,119 @@ test("rejects exclusion metadata that cannot account for a real patch overflow",
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// The validation-time site shared the capture-time sites' bare string (issue #670). No measured diff
+// spans exist here and the oversized capture itself is in the caller's hands, so the message reports the
+// received size instead of a contributor ranking — deliberately distinct from every capture-time text.
+test("distinguishes an oversized received patch at capture validation", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "Authored.sol"), "contract Authored {}\n");
+    const captured = captureWorkspacePatch(root, baseline);
+
+    // The size check runs before the digest check, so a replaced patch body reaches it directly.
+    assert.throws(
+      () =>
+        validateWorkspacePatchCapture(root, { ...captured, patch: "x".repeat(16 * 1024 * 1024 + 1) }, [
+          "contracts",
+          "src"
+        ]),
+      /workspace patch exceeds 16777216 bytes: received patch is 16777217 bytes at capture validation/u
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #670: three throw sites emitted the bare string `workspace patch exceeds 16777216 bytes`, so the run
+// record could not say whether recovery had no eligible candidate, exhausted its attempt budget, or
+// converged only for the UTF-8 re-measurement to push the published string back over the ceiling — it
+// took a full out-of-band replay of the staging to tell. The attempt-budget branch is pinned here at the
+// unit level because reaching it end-to-end costs 64 recovery rounds over >32 MB diffs each.
+test("formats each terminal patch-overflow condition distinctly, with tracked-marked contributors", () => {
+  const attribution = {
+    largest: [
+      { path: "out/build-info/0b7f82b3.json", bytes: 20_345_068, trackedInBaseline: true },
+      { path: "scratch/huge.bin", bytes: 9_000_000, trackedInBaseline: false }
+    ],
+    trackedBytes: 20_345_068,
+    trackedFiles: 1,
+    untrackedBytes: 9_000_000,
+    untrackedFiles: 1
+  };
+  const noCandidate = formatWorkspacePatchOverflow({
+    reason: "no-untracked-candidate",
+    measuredBytes: 29_345_068,
+    attribution
+  });
+  const budget = formatWorkspacePatchOverflow({
+    reason: "attempt-budget-exhausted",
+    measuredBytes: 29_345_068,
+    attemptBudget: 64,
+    attribution
+  });
+  const expansion = formatWorkspacePatchOverflow({
+    reason: "utf8-expansion",
+    measuredBytes: 6_291_456,
+    encodedBytes: 18_874_368,
+    attribution
+  });
+  for (const message of [noCandidate, budget, expansion]) {
+    // The shared prefix survives so operator-side greps for the historical string still hit.
+    assert.match(message, /^workspace patch exceeds 16777216 bytes: /u, message);
+    // Contributors match the ENOBUFS path's shape, with exact bytes and a tracked/untracked marker.
+    assert.match(message, /out\/build-info\/0b7f82b3\.json \(20345068 diff bytes, tracked in baseline\)/u, message);
+    assert.match(message, /scratch\/huge\.bin \(9000000 diff bytes, untracked\)/u, message);
+    assert.ok(message.indexOf("out/build-info") < message.indexOf("scratch/huge.bin"), message);
+  }
+  assert.match(noCandidate, /no untracked file remains for overflow recovery to exclude/u, noCandidate);
+  // The maintainer's secondary hardening: a tracked-dominated overflow says so, with totals, and states
+  // the rule that makes it terminal.
+  assert.match(
+    noCandidate,
+    /20345068 diff bytes across 1 changed path is tracked in the baseline, which recovery must never exclude/u,
+    noCandidate
+  );
+  assert.match(budget, /still measured 29345068 diff bytes after the 64-attempt recovery budget/u, budget);
+  assert.match(expansion, /measured 6291456 raw diff bytes but re-encodes to 18874368 bytes as UTF-8/u, expansion);
+  assert.match(expansion, /not valid UTF-8/u, expansion);
+  // Mutually distinct: no two conditions may ever collapse back into one string.
+  const conditions = [noCandidate, budget, expansion].map((message) => message.slice(0, message.indexOf(" Largest")));
+  assert.equal(new Set(conditions).size, 3, conditions.join("\n"));
+});
+
+test("caps the terminal-overflow contributor list at five, largest first", () => {
+  // Handed ASCENDING and unsorted-by-rank, so a formatter that trusts input order or size fails.
+  const message = formatWorkspacePatchOverflow({
+    reason: "attempt-budget-exhausted",
+    measuredBytes: 36_000_000,
+    attemptBudget: 64,
+    attribution: {
+      largest: Array.from({ length: 8 }, (_, index) => ({
+        path: `c${index + 1}/f.txt`,
+        bytes: (index + 1) * 1000,
+        trackedInBaseline: index % 2 === 0
+      })),
+      trackedBytes: 20_000,
+      trackedFiles: 4,
+      untrackedBytes: 16_000,
+      untrackedFiles: 4
+    }
+  });
+  const ranked = [...message.matchAll(/\bc(\d)\/f\.txt \(\d+ diff bytes, (tracked in baseline|untracked)\)/gu)];
+  assert.equal(ranked.length, 5, message);
+  assert.deepEqual(
+    ranked.map((match) => match[1]),
+    ["8", "7", "6", "5", "4"],
+    message
+  );
+  assert.deepEqual(
+    ranked.map((match) => match[2]),
+    ["untracked", "tracked in baseline", "untracked", "tracked in baseline", "untracked"],
+    message
+  );
 });
 
 /**
@@ -1275,7 +1472,23 @@ test("does not use invalid-UTF-8 decode expansion to authorize an exclusion", ()
     // not measured Git-diff evidence, so it must retain the old loud ceiling failure.
     writeFileSync(path.join(root, "latin.txt"), Buffer.alloc(6 * 1024 * 1024, 0xe9));
 
-    assert.throws(() => captureWorkspacePatch(root, baseline), /workspace patch exceeds 16777216 bytes/u);
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        // The CONDITION, not just the ceiling: #670 showed the bare shared string cannot be triaged
+        // from the run record, and this site's failure is a decode artifact, not a real diff size.
+        assert.match(
+          message,
+          /^workspace patch exceeds 16777216 bytes: the patch measured \d+ raw diff bytes but re-encodes to \d+ bytes as UTF-8/u,
+          message
+        );
+        assert.match(message, /not valid UTF-8/u, message);
+        // And the contributor that fed it, with its measured raw bytes and untracked marker.
+        assert.match(message, /latin\.txt \(\d+ diff bytes, untracked\)/u, message);
+        return true;
+      }
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1481,6 +1694,108 @@ test("keeps new authored source under a generated-prefix lookalike", () => {
 
     assert.deepEqual(paths, ["Keep.t.sol", "echidna-config/NewAuthored.sol", "echidna-config/base.yaml"]);
     assert.equal(captured.manifest.excluded_files, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** NUL-free text of roughly `bytes` bytes, in 64-byte lines that all carry `stamp`. */
+function stampedTextLines(stamp: string, bytes: number): string {
+  const line = `${stamp} `.padEnd(63, "x") + "\n";
+  return line.repeat(Math.ceil(bytes / line.length));
+}
+
+// The #670 terminal shape. An upstream capture had staged Foundry's out/, so the failing node's BASELINE
+// tracked the build output, a rebuild diffed it as modifications, and #368's untracked-only recovery was
+// structurally unable to shed it: round 1 excluded the untracked bulk, round 2 had no candidate. The
+// throw was indistinguishable from the recoverable case and took an out-of-band replay of the staging to
+// diagnose. This pins the condition-specific message with tracked-marked contributors.
+test("names tracked-in-baseline contributors when recovery has no candidate", () => {
+  const root = fixture();
+  try {
+    git(root, ["config", "core.bigFileThreshold", "512m"]);
+    // Untouched tracked bulk: contributes zero diff bytes, must not be named.
+    mkdirSync(path.join(root, "lib"), { recursive: true });
+    writeFileSync(path.join(root, "lib", "pinned.txt"), stampedTextLines("pinned dependency", 64 * 1024));
+    // ~9.5 MB tracked in the baseline; rewritten below with no line in common, so it diffs as a full
+    // -all/+all rewrite of ~19 MB — inside the 16-32 MB window where no ENOBUFS fires and the terminal
+    // throw comes from the recovery loop itself, exactly where the incident landed.
+    mkdirSync(path.join(root, "vendored"), { recursive: true });
+    writeFileSync(path.join(root, "vendored", "rewritten.txt"), stampedTextLines("before rebuild", 9_500_000));
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "baseline with tracked bulk"]);
+    const baseline = captureWorkspaceTree(root);
+
+    writeFileSync(path.join(root, "vendored", "rewritten.txt"), stampedTextLines("after a rebuild", 9_500_000));
+    // One untracked big drives one ENOBUFS recovery round first, exactly the incident's sequence; once
+    // it is excluded, everything left is tracked and the loop must end with the no-candidate condition.
+    mkdirSync(path.join(root, "scratch"), { recursive: true });
+    writeFileSync(path.join(root, "scratch", "huge.txt"), stampedTextLines("agent scratch", 18_000_000));
+
+    assert.throws(
+      () => captureWorkspacePatch(root, baseline),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(
+          message,
+          /^workspace patch exceeds 16777216 bytes: measured \d+ diff bytes; no untracked file remains for overflow recovery to exclude/u,
+          message
+        );
+        // The maintainer's secondary hardening: a tracked-dominated overflow says so, with totals.
+        assert.match(
+          message,
+          /\d+ diff bytes across 1 changed path is tracked in the baseline, which recovery must never exclude/u,
+          message
+        );
+        const tracked = /vendored\/rewritten\.txt \((\d+) diff bytes, tracked in baseline\)/u.exec(message);
+        assert.ok(tracked !== null, message);
+        // Exact bytes, not a floor: this branch only fires on a complete diff, and the rewrite alone is
+        // over the whole patch ceiling.
+        assert.ok(Number(tracked?.[1] ?? 0) > 16 * 1024 * 1024, message);
+        // The untracked big was recovered on the previous round, so it no longer contributes...
+        assert.doesNotMatch(message, /scratch\/huge\.txt/u, message);
+        // ...and untouched tracked bulk fed no diff bytes, so it must not be named either.
+        assert.doesNotMatch(message, /lib\//u, message);
+        return true;
+      }
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// #670's fourth acceptance criterion: ~35 MB of untracked, individually large TEXT files must converge
+// through measured recovery rather than throwing. The randomBytes fixtures above cover binary payloads;
+// the incident's recoverable half was text, which `diff --binary` carries raw instead of deflating.
+test("recovers a ~35 MB untracked overflow of individually large text files", () => {
+  const root = fixture();
+  try {
+    git(root, ["config", "core.bigFileThreshold", "512m"]);
+    const baseline = captureWorkspaceTree(root);
+    // Agent-chosen names, deliberately outside every generated root.
+    for (let bucket = 0; bucket < 5; bucket += 1) {
+      mkdirSync(path.join(root, `fuzz-scratch-${bucket}`), { recursive: true });
+      writeFileSync(
+        path.join(root, `fuzz-scratch-${bucket}`, "trace.txt"),
+        stampedTextLines(`bucket ${bucket}`, 7 * 1024 * 1024)
+      );
+    }
+    writeFileSync(path.join(root, "AuthoredHandlers.t.sol"), "contract AuthoredHandlers {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    const excluded = captured.manifest.excluded_files ?? [];
+
+    assert.ok(
+      captured.manifest.files.some((entry) => entry.path === "AuthoredHandlers.t.sol"),
+      JSON.stringify(captured.manifest.files)
+    );
+    assert.ok(excluded.length >= 1 && excluded.length < 5, JSON.stringify(excluded));
+    assert.ok(
+      excluded.every((entry) => /^fuzz-scratch-\d\/trace\.txt$/u.test(entry.path)),
+      JSON.stringify(excluded)
+    );
+    assert.ok(excluded.every((entry) => entry.reason === "git-diff-overflow"));
+    assert.ok(Buffer.byteLength(captured.patch, "utf8") <= 16 * 1024 * 1024);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
