@@ -292,3 +292,93 @@ export function rethrowOversizedGitOutput(args: readonly string[], error: unknow
     { cause: error }
   );
 }
+
+/**
+ * One measured span in a terminal patch-cap overflow. The path is decoded LOSSILY, for the error
+ * message only: it never names a manifest entry, so it deliberately bypasses the manifest's
+ * `normalizeWorkspacePatchPath`/sensitive-path filter — filtering here would drop the very paths the
+ * message exists to name, and the ENOBUFS diagnostic above already prints raw header roots the same way.
+ */
+export interface WorkspacePatchOverflowContributor {
+  path: string;
+  bytes: number;
+  trackedInBaseline: boolean;
+}
+
+/**
+ * What fed a diff that ended over the patch ceiling, measured across ALL changed paths — tracked and
+ * untracked alike. This is deliberately wider than the overflow-recovery candidate set, which admits
+ * untracked paths only: the #670 failure was dominated by paths tracked in the baseline, which recovery
+ * must never exclude, so an attribution limited to eligible candidates would have named nothing at all.
+ */
+export interface WorkspacePatchOverflowAttribution {
+  /** The largest measured spans, at most five, largest first. */
+  largest: WorkspacePatchOverflowContributor[];
+  trackedBytes: number;
+  trackedFiles: number;
+  untrackedBytes: number;
+  untrackedFiles: number;
+}
+
+/** Matches `rethrowOversizedGitOutput`'s `slice(0, 5)`, so both overflow shapes rank alike. */
+export const MAX_PATCH_OVERFLOW_CONTRIBUTORS = 5;
+
+/**
+ * The three ways `captureWorkspacePatch` can end terminally over the patch ceiling. They used to share
+ * one bare string, which made the #670 incident indistinguishable from the recoverable case and took a
+ * full out-of-band reproduction to diagnose (issue #670).
+ */
+export type WorkspacePatchOverflowInput =
+  | {
+      /** Overflow recovery found nothing it may exclude: every remaining contributor is ineligible. */
+      reason: "no-untracked-candidate";
+      measuredBytes: number;
+      attribution: WorkspacePatchOverflowAttribution;
+    }
+  | {
+      /** Recovery kept finding candidates but ran out of attempts before the diff fit. */
+      reason: "attempt-budget-exhausted";
+      measuredBytes: number;
+      attemptBudget: number;
+      attribution: WorkspacePatchOverflowAttribution;
+    }
+  | {
+      /** The raw diff fit, but decoding invalid UTF-8 to replacement characters re-encoded it over the ceiling. */
+      reason: "utf8-expansion";
+      measuredBytes: number;
+      encodedBytes: number;
+      attribution: WorkspacePatchOverflowAttribution;
+    };
+
+/**
+ * Build the message for a terminal patch-cap overflow: which condition fired, and what fed the diff.
+ *
+ * Every message keeps the historical `workspace patch exceeds <cap> bytes` prefix so operator-side greps
+ * for the old string still hit, then states the condition and ranks contributors the way the ENOBUFS
+ * diagnostic does. Unlike that diagnostic's figures, the byte counts here are EXACT rather than floors:
+ * every caller reaches this only with a complete diff in hand — the truncated ENOBUFS case is delegated
+ * to `rethrowOversizedGitOutput` before this can run.
+ *
+ * @internal Exported for `workspace-handoff.ts` and its tests; the attempt-budget branch in particular
+ * is unreachable end-to-end at affordable cost (64 recovery rounds over >32 MB diffs each), so its
+ * message is pinned at this unit instead.
+ */
+export function formatWorkspacePatchOverflow(input: WorkspacePatchOverflowInput): string {
+  const condition =
+    input.reason === "no-untracked-candidate"
+      ? `measured ${input.measuredBytes} diff bytes; no untracked file remains for overflow recovery to exclude (${input.attribution.trackedBytes} diff bytes across ${input.attribution.trackedFiles} changed ${input.attribution.trackedFiles === 1 ? "path is" : "paths are"} tracked in the baseline, which recovery must never exclude).`
+      : input.reason === "attempt-budget-exhausted"
+        ? `still measured ${input.measuredBytes} diff bytes after the ${input.attemptBudget}-attempt recovery budget was exhausted.`
+        : `the patch measured ${input.measuredBytes} raw diff bytes but re-encodes to ${input.encodedBytes} bytes as UTF-8 (the diff contains bytes that are not valid UTF-8).`;
+  // The producer already bounds what it collects, but the message must stay bounded for ANY caller, so
+  // rank and cap here as well rather than trusting the input's order or size.
+  const ranked = [...input.attribution.largest]
+    .sort((left, right) => right.bytes - left.bytes || left.path.localeCompare(right.path))
+    .slice(0, MAX_PATCH_OVERFLOW_CONTRIBUTORS)
+    .map(
+      (entry) =>
+        `${entry.path} (${entry.bytes} diff bytes, ${entry.trackedInBaseline ? "tracked in baseline" : "untracked"})`
+    )
+    .join(", ");
+  return `workspace patch exceeds ${MAX_PATCH_BYTES} bytes: ${condition}${ranked === "" ? "" : ` Largest measured contributors: ${ranked}`}`;
+}

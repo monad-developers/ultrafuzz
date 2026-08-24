@@ -6,7 +6,15 @@ import path from "node:path";
 
 import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 
-import { MAX_GIT_CAPTURE_BYTES, MAX_PATCH_BYTES, rethrowOversizedGitOutput } from "./git-capture-diagnostics.js";
+import {
+  MAX_GIT_CAPTURE_BYTES,
+  MAX_PATCH_BYTES,
+  MAX_PATCH_OVERFLOW_CONTRIBUTORS,
+  formatWorkspacePatchOverflow,
+  rethrowOversizedGitOutput,
+  type WorkspacePatchOverflowAttribution,
+  type WorkspacePatchOverflowContributor
+} from "./git-capture-diagnostics.js";
 
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
@@ -24,18 +32,28 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
 /**
  * Harness-generated fuzzing output, which must never be staged into a workspace patch.
  *
- * The names come from the commands the invariant prompts actually run, not from guesses about what a
+ * The names come from the commands the pipeline actually runs, not from guesses about what a
  * fuzzer might emit. Every invariant stage issues
  * `recon fuzz . --corpus-dir echidna --recon-corpus-dir recon-corpus`, and `coverage.md` additionally
  * writes `recon-coverage.json` into `magic/` and runs `covg-eval magic/ echidna/`. An earlier draft of
  * this list said `corpus` and `coverage`, which this pipeline never produces, while omitting `echidna/`,
- * which it produces on every single invariant node.
+ * which it produces on every single invariant node. `out/` is what `forge build` writes,
+ * deterministically, on every Foundry node — held to the same evidentiary standard as the other three.
  *
  * Measured on Aave v4 run R46 while `stateful-invariant-setup` was running: a 575 MB workspace whose
  * largest entries were `recon-corpus/build-snapshot/<hash>.json` at 155 MB and 33 MB — byte-for-byte
- * duplicates of Foundry's `out/build-info/` — plus several 5 MB coverage HTML files. Foundry's copies are
- * safe because targets gitignore `out/`; `recon-corpus/` is not gitignored by this target, so
- * `--exclude-standard` kept it and staging enumerated all of it (issue #304).
+ * duplicates of Foundry's `out/build-info/` — plus several 5 MB coverage HTML files. An earlier version
+ * of this comment claimed Foundry's copies were safe because targets gitignore `out/`. That premise is
+ * FALSE for a Hardhat-layout `.gitignore`, which covers `/artifacts` and `/cache` but not `out/`: on
+ * such a target `--exclude-standard` keeps every `out/**` file and staging enumerates all of it, exactly
+ * as it did for the un-ignored `recon-corpus/` here (issue #304). Issue #670 measured the consequence on
+ * a real Foundry target: a 20,345,068-byte `out/build-info/<id>.json` plus 54 contract JSONs entered one
+ * capture, so from the first handoff onward `out/**` was TRACKED content in every downstream baseline,
+ * and every later `forge build` diffed it as modifications. Measured overflow recovery (issue #368)
+ * cannot substitute for the name: its candidates are untracked paths only — excluding a tracked path is
+ * silent data loss, per below — so a tracked-in-baseline overflow ends in a terminal throw. Excluding
+ * `out` here is the only place the poisoning can be stopped: exclusions apply to the untracked listing,
+ * so `out/**` never gets staged, never enters a result tree, and never becomes tracked downstream.
  *
  * This exclusion is NOT hygiene. It is the fix for the six sandboxes that died at this node across three
  * Aave v4 runs with an empty `last_error`. From R47's workflow log:
@@ -74,7 +92,7 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * guessed here. `captureWorkspacePatch` handles those only after a real diff crosses the patch ceiling,
  * then excludes measured untracked contributors at exact-file granularity (issue #368).
  */
-const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic"] as const;
+const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic", "out"] as const;
 
 export interface WorkspacePatchFile {
   path: string;
@@ -190,18 +208,31 @@ export function captureWorkspacePatch(
       const measuredBytes = diff.bytes.length;
 
       if (diff.overflowError !== undefined || measuredBytes > MAX_PATCH_BYTES) {
-        const candidates = selectOverflowExclusions(
-          measuredDiffFileContributions(
-            diff.bytes,
-            changedPaths,
-            staged.untrackedPaths,
-            diff.overflowError !== undefined
-          ),
-          measuredBytes
+        const measured = measuredDiffFileContributions(
+          diff.bytes,
+          changedPaths,
+          staged.untrackedPaths,
+          diff.overflowError !== undefined
         );
+        const candidates = selectOverflowExclusions(measured.candidates, measuredBytes);
         if (candidates.length === 0 || attempt >= WORKSPACE_DIFF_EXCLUSION_ATTEMPTS - 1) {
           if (diff.overflowError !== undefined) rethrowOversizedGitOutput(diffArgs, diff.overflowError);
-          throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+          // Past the ENOBUFS delegation the diff is COMPLETE, so the attributed byte counts are exact.
+          // No-candidate takes precedence over the attempt budget: both can hold on the same pass, and
+          // "nothing recovery may exclude" is the condition an operator can act on, while an exhausted
+          // budget with candidates still in hand is a different problem (issue #670).
+          throw new Error(
+            formatWorkspacePatchOverflow(
+              candidates.length === 0
+                ? { reason: "no-untracked-candidate", measuredBytes, attribution: measured.attribution }
+                : {
+                    reason: "attempt-budget-exhausted",
+                    measuredBytes,
+                    attemptBudget: WORKSPACE_DIFF_EXCLUSION_ATTEMPTS,
+                    attribution: measured.attribution
+                  }
+            )
+          );
         }
         for (const candidate of candidates) {
           excluded.set(candidate.key, {
@@ -222,8 +253,19 @@ export function captureWorkspacePatch(
       // Preserve the pre-recovery ceiling on the string that is actually published. Invalid UTF-8 can
       // expand when decoded to replacement characters and re-encoded; that is not a real Git-diff byte
       // measurement, so it must fail loudly rather than authorise another exclusion pass.
-      if (Buffer.byteLength(patch, "utf8") > MAX_PATCH_BYTES) {
-        throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+      const encodedBytes = Buffer.byteLength(patch, "utf8");
+      if (encodedBytes > MAX_PATCH_BYTES) {
+        // Attribution is recomputed here so its cost is paid only when the capture is already terminal.
+        // This branch is unreachable under ENOBUFS, so the diff is complete and the counts are exact.
+        throw new Error(
+          formatWorkspacePatchOverflow({
+            reason: "utf8-expansion",
+            measuredBytes,
+            encodedBytes,
+            attribution: measuredDiffFileContributions(diff.bytes, changedPaths, staged.untrackedPaths, false)
+              .attribution
+          })
+        );
       }
       const files = changedFiles;
       const excludedFiles = [...excluded.values()].sort((left, right) => left.path.localeCompare(right.path));
@@ -331,7 +373,11 @@ export function validateWorkspacePatchCapture(
   validateManifest(capture.manifest, expectedProductionSourceRoots);
   const patchBytes = Buffer.byteLength(capture.patch, "utf8");
   if (patchBytes > MAX_PATCH_BYTES) {
-    throw new Error(`workspace patch exceeds ${MAX_PATCH_BYTES} bytes`);
+    // Deliberately no contributor ranking: no measured diff spans exist at validation time, and the
+    // oversized capture itself is in the caller's hands, so the received size is the whole story here.
+    throw new Error(
+      `workspace patch exceeds ${MAX_PATCH_BYTES} bytes: received patch is ${patchBytes} bytes at capture validation`
+    );
   }
   if (capture.manifest.excluded_files !== undefined) {
     const excludedBytes = capture.manifest.excluded_files.reduce((sum, entry) => sum + entry.diff_bytes_at_least, 0);
@@ -581,6 +627,12 @@ interface MeasuredDiffFileContribution {
   bytes: number;
 }
 
+/** The exclusion candidates recovery may act on, plus the wider attribution a terminal throw reports. */
+interface MeasuredDiffContributions {
+  candidates: MeasuredDiffFileContribution[];
+  attribution: WorkspacePatchOverflowAttribution;
+}
+
 const DIFF_FILE_HEADER_PREFIX = "diff --git ";
 
 /**
@@ -590,21 +642,44 @@ const DIFF_FILE_HEADER_PREFIX = "diff --git ";
  * the NUL list keeps arbitrary path bytes unambiguous. Patch bodies cannot masquerade as a header: text
  * lines carry a `+`, `-` or space prefix, and Git's binary-patch encoding contains no spaces. The final
  * span may be truncated by ENOBUFS, which is why the manifest calls every measurement a lower bound.
+ *
+ * Two consumers with different eligibility rules read the same measurements. The exclusion CANDIDATES
+ * admit untracked, manifest-nameable paths only — that gate is the anti-silent-data-loss authority and
+ * must not widen. The ATTRIBUTION spans every changed path, tracked or not, so a terminal overflow can
+ * name what recovery was structurally unable to shed (issue #670); its memory stays O(1) via a bounded
+ * top-N insertion plus four aggregate counters.
  */
 function measuredDiffFileContributions(
   diff: Buffer,
   changedPaths: readonly Buffer[],
   untrackedPaths: ReadonlyMap<string, Buffer>,
   truncated: boolean
-): MeasuredDiffFileContribution[] {
+): MeasuredDiffContributions {
   const view = diff.toString("latin1");
   const header = /^diff --git /gmu;
   const contributions: MeasuredDiffFileContribution[] = [];
+  const attribution: WorkspacePatchOverflowAttribution = {
+    largest: [],
+    trackedBytes: 0,
+    trackedFiles: 0,
+    untrackedBytes: 0,
+    untrackedFiles: 0
+  };
   const record = (position: number, start: number, end: number): void => {
     const rawPath = changedPaths[position];
-    if (rawPath === undefined) return;
+    if (rawPath === undefined || end <= start) return;
     const key = workspacePathKey(rawPath);
     const stagedUntrackedPath = untrackedPaths.get(key);
+    recordOverflowContributor(attribution, {
+      // Decoded lossily for the error MESSAGE only — never a manifest path — so it deliberately skips
+      // the normalize/sensitive-path filter below: filtering the attribution would drop the very paths
+      // a terminal overflow exists to name.
+      path: rawPath.toString("utf8"),
+      bytes: end - start,
+      trackedInBaseline: stagedUntrackedPath === undefined
+    });
+    // Only untracked paths are eligible EXCLUSION candidates; excluding a tracked path would be silent
+    // data loss (see `stageableWorkspacePaths`).
     if (stagedUntrackedPath === undefined) return;
     const manifestPath = rawPath.toString("utf8");
     try {
@@ -615,7 +690,6 @@ function measuredDiffFileContributions(
       // than omit content that no artifact consumer could audit.
       return;
     }
-    if (end <= start) return;
     retainMeasuredExclusionCandidate(contributions, {
       key,
       rawPath: stagedUntrackedPath,
@@ -639,7 +713,39 @@ function measuredDiffFileContributions(
       : diff.length;
     record(pending.position, pending.start, end);
   }
-  return contributions;
+  return { candidates: contributions, attribution };
+}
+
+/**
+ * Fold one measured span into the terminal-overflow attribution: aggregate totals per tracked/untracked
+ * class, plus a bounded largest-first list. At most `MAX_PATCH_OVERFLOW_CONTRIBUTORS` entries are ever
+ * live, because this runs on diffs that can hold hundreds of thousands of spans, sometimes right after
+ * Node has refused an allocation — the same discipline as the exclusion-candidate heap above.
+ */
+function recordOverflowContributor(
+  attribution: WorkspacePatchOverflowAttribution,
+  entry: WorkspacePatchOverflowContributor
+): void {
+  if (entry.trackedInBaseline) {
+    attribution.trackedBytes += entry.bytes;
+    attribution.trackedFiles += 1;
+  } else {
+    attribution.untrackedBytes += entry.bytes;
+    attribution.untrackedFiles += 1;
+  }
+  const largest = attribution.largest;
+  if (largest.length === MAX_PATCH_OVERFLOW_CONTRIBUTORS) {
+    const smallest = largest[largest.length - 1];
+    if (smallest === undefined || entry.bytes <= smallest.bytes) return;
+    largest.pop();
+  }
+  let at = largest.length;
+  while (at > 0) {
+    const preceding = largest[at - 1];
+    if (preceding === undefined || preceding.bytes >= entry.bytes) break;
+    at -= 1;
+  }
+  largest.splice(at, 0, entry);
 }
 
 /**
