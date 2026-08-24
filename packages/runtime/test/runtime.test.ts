@@ -17780,6 +17780,76 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
   assert.equal(stillPrepared.entries?.at(-1)?.phase, "prepared");
 });
 
+test("controller generation reloads authenticated dependency filenames outside artifact output grammar", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-portable-dependency-path";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+  const refreshed = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: evidence.verifiedControl,
+    config
+  });
+  const declarationPath = "modules/synthetic-package/dist/$command.d.ts";
+  const declarationContents = Buffer.from("export interface Command {}\n", "utf8");
+  const refreshedWithDeclaration = {
+    ...refreshed,
+    snapshot: {
+      ...refreshed.snapshot,
+      executionFiles: [
+        ...refreshed.snapshot.executionFiles,
+        {
+          sourcePath: path.join(project, "synthetic-package", "dist", "$command.d.ts"),
+          snapshotPath: declarationPath,
+          contents: declarationContents
+        }
+      ]
+    }
+  };
+  const prepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, refreshedWithDeclaration, {
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId
+  });
+  materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: prepared.snapshot,
+    authorizedGenerations: prepared.authorizedGenerations
+  });
+
+  const committed = commitControllerGeneration(
+    evidence.layout,
+    evidence.verifiedControl,
+    prepared.controllerGeneration
+  );
+
+  const declaration = committed.snapshot.executionFiles.find((file) => file.snapshotPath === declarationPath);
+  assert.deepEqual(declaration?.contents, declarationContents);
+  assert.equal(
+    declaration?.sourcePath,
+    path.join(
+      evidence.layout.root,
+      "smithers",
+      "execution-snapshots",
+      prepared.controllerGeneration,
+      ...declarationPath.split("/")
+    )
+  );
+  assert.equal(fs.lstatSync(declaration!.sourcePath).isFile(), true);
+});
+
 test("controller refresh resolves a synthetic sealed module from its authenticated package context", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
