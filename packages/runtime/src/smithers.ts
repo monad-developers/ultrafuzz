@@ -3082,10 +3082,12 @@ export async function runSmithersLifecycleCommand(input: {
       });
     } catch (error) {
       if (error instanceof Error && resetMarkerPath !== undefined) {
-        error.message =
-          `${error.message} ` +
-          `(node reset for ${input.resetNode} already completed; ` +
-          `rerun the same resume command to continue the reset run without repeating the reset)`;
+        Object.defineProperty(error, workflowLifecycleDiagnosticContext, {
+          value:
+            "node reset already completed; " +
+            "rerun the same resume command to continue the reset run without repeating the reset",
+          configurable: true
+        });
       }
       throw error;
     }
@@ -3878,10 +3880,23 @@ export function smithersDiagnostic(error: unknown, code: string): RuntimeDiagnos
           stderr?: unknown;
         })
       : {};
-  const stdout = typeof record.stdout === "string" ? record.stdout : "";
-  const stderr = typeof record.stderr === "string" ? record.stderr : "";
+  const stdout = capturedProcessText(record.stdout);
+  const stderr = capturedProcessText(record.stderr);
+  const processFailure =
+    Object.hasOwn(record, "stdout") ||
+    Object.hasOwn(record, "stderr") ||
+    Object.hasOwn(record, "signal") ||
+    Object.hasOwn(record, "killed") ||
+    typeof record.code === "number";
+  const lifecycleContext =
+    error &&
+    typeof error === "object" &&
+    typeof (error as ProcessDiagnosticContext)[workflowLifecycleDiagnosticContext] === "string"
+      ? (error as ProcessDiagnosticContext)[workflowLifecycleDiagnosticContext]
+      : "";
   const message = [
-    error instanceof Error ? error.message : String(error),
+    processFailure ? processFailureSummary(record) : error instanceof Error ? error.message : String(error),
+    lifecycleContext,
     stdout.trim().length > 0 ? `stdout: ${stdout.trim()}` : "",
     stderr.trim().length > 0 ? `stderr: ${stderr.trim()}` : ""
   ]
@@ -3902,8 +3917,37 @@ export function smithersDiagnostic(error: unknown, code: string): RuntimeDiagnos
   };
 }
 
+const workflowLifecycleDiagnosticContext = Symbol("workflowLifecycleDiagnosticContext");
+
+type ProcessDiagnosticContext = {
+  [workflowLifecycleDiagnosticContext]?: string;
+};
+
 function sanitizedDiagnosticText(value: string): string {
-  return truncateDiagnosticText(scrubWorkflowRunnerText(redactSecretsInText(value)));
+  return truncateDiagnosticText(scrubWorkflowRunnerText(redactProcessPayloadArguments(redactSecretsInText(value))));
+}
+
+function capturedProcessText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Uint8Array) return Buffer.from(value).toString("utf8");
+  return "";
+}
+
+function processFailureSummary(record: { code?: unknown; signal?: unknown; killed?: unknown }): string {
+  const disposition = [
+    typeof record.code === "string" || typeof record.code === "number" ? `exit ${String(record.code)}` : "",
+    typeof record.signal === "string" ? `signal ${record.signal}` : "",
+    record.killed === true ? "killed" : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return `workflow runner command failed${disposition.length > 0 ? ` (${disposition})` : ""}`;
+}
+
+function redactProcessPayloadArguments(value: string): string {
+  return value
+    .replace(/((?:^|\s)--input\s+)[\s\S]*(\s--format\s+(?:json|ndjson)\b)/giu, "$1<redacted-input>$2")
+    .replace(/((?:^|\s)--input\s+)(?!<redacted-input>)[^\r\n]*/giu, "$1<redacted-input>");
 }
 
 function redactedEvidenceText(value: string): string {
