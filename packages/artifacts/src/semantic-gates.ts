@@ -6674,16 +6674,16 @@ function propertyCampaignContextJoinIssues(document: unknown, context: SemanticG
     artifactSet.campaignPlanPath,
     "Campaign summary plan reference does not match the authenticated plan"
   );
-  if (
-    !sameStringSet(
-      stringArray(at(summary, ["implemented_property_suite_refs"])),
-      artifactSet.implementedPropertiesPath === undefined ? [] : [artifactSet.implementedPropertiesPath]
-    )
-  ) {
+  const implementedSuiteRefs = stringArray(at(summary, ["implemented_property_suite_refs"]));
+  const expectedImplementedSuiteRefs =
+    artifactSet.implementedPropertiesPath === undefined ? [] : [artifactSet.implementedPropertiesPath];
+  if (!sameStringSet(implementedSuiteRefs, expectedImplementedSuiteRefs)) {
     issues.push(
       issue(
         "$.campaign_summary_ref#implemented_property_suite_refs",
-        "Campaign summary implementation references do not match the authenticated handoff"
+        `Campaign summary implementation references do not match the authenticated handoff (expected ${describeGateValue(
+          [...expectedImplementedSuiteRefs].sort()
+        )}, actual ${describeGateValue([...implementedSuiteRefs].sort())})`
       )
     );
   }

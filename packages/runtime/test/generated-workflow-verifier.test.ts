@@ -3095,7 +3095,7 @@ test("generated Smithers diagnoses the node-dir campaign path base across all fi
         );
         assert.match(
           error.message,
-          /Campaign summary implementation references do not match the authenticated handoff at \$\.campaign_summary_ref#implemented_property_suite_refs/u
+          /Campaign summary implementation references do not match the authenticated handoff \(expected \["implemented-properties\.json"\], actual \["stateful-invariant-campaign\/implemented-properties\.json"\]\) at \$\.campaign_summary_ref#implemented_property_suite_refs/u
         );
         assert.match(
           error.message,
