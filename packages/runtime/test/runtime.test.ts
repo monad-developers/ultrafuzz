@@ -2043,12 +2043,19 @@ function workflowInspect(input: {
   };
 }
 
-function missingSmithersInspect(databasePath: string): Record<string, unknown> {
+function missingSmithersInspect(
+  databasePath: string,
+  kind: "history" | "database" = "history"
+): Record<string, unknown> {
+  // Captured from the pinned runner's `inspect --format json --full-output`
+  // contract. Incur appends the stable error-reference suffix to the store
+  // error emitted by Smithers.
+  const missingState = kind === "history" ? "Smithers run history" : "smithers.db";
   return {
     ok: false,
     error: {
       code: "INSPECT_FAILED",
-      message: `No Smithers run history found at ${databasePath}. Run 'smithers up <workflow>' to start a run first.`
+      message: `No ${missingState} found at ${databasePath}. Run 'smithers up <workflow>' to start a run first. See https://smithers.sh/reference/errors`
     },
     meta: { command: "inspect", duration: "1ms" }
   };
@@ -17982,6 +17989,14 @@ test("controller refresh admits only the exact current missing-history inspect e
   await assert.doesNotReject(() =>
     assertSmithersControllerRefreshable({ smithersRunId: `ultrafuzz-${runId}`, projectRoot: project, env })
   );
+  fs.writeFileSync(
+    inspectPath,
+    `${JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db"), "database"))}\n`,
+    "utf8"
+  );
+  await assert.doesNotReject(() =>
+    assertSmithersControllerRefreshable({ smithersRunId: `ultrafuzz-${runId}`, projectRoot: project, env })
+  );
 
   const rejected = [
     {
@@ -17996,6 +18011,16 @@ test("controller refresh admits only the exact current missing-history inspect e
     {
       ...missingSmithersInspect(path.join(project, "smithers.db")),
       meta: { command: "status", duration: "1ms" }
+    },
+    {
+      ...missingSmithersInspect(path.join(project, "smithers.db")),
+      error: {
+        code: "INSPECT_FAILED",
+        message: `No Smithers run history found at ${path.join(
+          project,
+          "smithers.db"
+        )}. Run 'smithers up <workflow>' to start a run first.`
+      }
     }
   ];
   for (const envelope of rejected) {

@@ -3272,7 +3272,7 @@ function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): b
     return false;
   }
   const match =
-    /^No Smithers run history found at (.+[\\/]smithers\.db)\. Run 'smithers up <workflow>' to start a run first\.$/u.exec(
+    /^No (?:Smithers run history|smithers\.db) found at (.+[\\/]smithers\.db)\. Run 'smithers up <workflow>' to start a run first\. See https:\/\/smithers\.sh\/reference\/errors$/u.exec(
       envelope.error.message
     );
   return match !== null && path.isAbsolute(match[1]!);
