@@ -8009,7 +8009,7 @@ test("generated Smithers invariant discovery bounds every git enumeration it cap
     assert.ok(start >= 0, enumeration);
     const body = source.slice(start, source.indexOf("\n}\n", start));
     assert.match(body, /invariantSuiteGitPaths\(/u, enumeration);
-    assert.doesNotMatch(body, /execFileSync\("git", \["ls-files"/u, enumeration);
+    assert.doesNotMatch(body, /execFileSync\(\s*"git",\s*\["ls-files"/u, enumeration);
   }
   // The stale-file cleanup (#691) captures nothing outside the bounded helper -- not even its ls-tree.
   const staleCleanupStart = source.indexOf("function removeStaleWorkspaceFiles(");
@@ -8022,14 +8022,13 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
   // `removeStaleWorkspaceFiles`, whose `--ignored` listing overflows Node's 1 MB default on any
   // workspace with a populated node_modules. This scan is the exhaustive version of that criterion:
   // every `execFileSync("git", ...)` call in the template must state a bound, so a future bare site
-  // fails here instead of dying in production as an anonymous `spawnSync git ENOBUFS`.
+  // fails here instead of dying in production as an anonymous `spawnSync git ENOBUFS`. Discovery is
+  // whitespace-tolerant: prettier renders long-argument calls as `execFileSync(\n  "git", ...)` --
+  // this template already carries that shape at its smithers and ultrafuzz sites -- so anchoring on
+  // the single-line `execFileSync("git"` literal would skip exactly the sites it exists to catch.
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const gitCallSpans: string[] = [];
-  for (
-    let from = source.indexOf('execFileSync("git"');
-    from >= 0;
-    from = source.indexOf('execFileSync("git"', from + 1)
-  ) {
+  const callSpans: string[] = [];
+  for (let from = source.indexOf("execFileSync("); from >= 0; from = source.indexOf("execFileSync(", from + 1)) {
     let depth = 0;
     for (let index = source.indexOf("(", from); index < source.length; index += 1) {
       const character = source[index];
@@ -8043,12 +8042,16 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
       if (character === ")") {
         depth -= 1;
         if (depth === 0) {
-          gitCallSpans.push(source.slice(from, index + 1));
+          callSpans.push(source.slice(from, index + 1));
           break;
         }
       }
     }
   }
+  // Every occurrence must parse to one balanced span: a site the scanner cannot delimit fails here
+  // instead of silently dropping out of the criterion.
+  assert.equal(callSpans.length, source.split("execFileSync(").length - 1);
+  const gitCallSpans = callSpans.filter((span) => /^execFileSync\(\s*"git"/u.test(span));
   // The template invokes git from several fixed sites plus the one bounded helper; if this floor is no
   // longer met the scanner itself has broken, which must fail rather than vacuously pass.
   assert.ok(gitCallSpans.length >= 8, `${gitCallSpans.length}`);
