@@ -105,10 +105,15 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     operator_input: { tickets: [1, true, null, "three"] }
   };
   assert.equal(inputSchema.safeParse(local).success, true);
-  assert.equal(
-    inputSchema.safeParse({ cloud_worker: true, task_id: "node:one", operator_prompt: "focus" }).success,
-    true
-  );
+  const cloud = {
+    cloud_worker: true,
+    task_id: "node:one",
+    attempt_id: "one",
+    execution_generation: "base",
+    selected_task: {},
+    operator_prompt: "focus"
+  };
+  assert.equal(inputSchema.safeParse(cloud).success, true);
 
   for (const invalid of [
     { ...local, unexpected: true },
@@ -117,7 +122,8 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     { ...local, run_id: local.ultrafuzz_run_id },
     { schema_version: local.schema_version, ultrafuzz_run_id: local.ultrafuzz_run_id },
     { ...local, tasks: [{ ...local.tasks[0], extra: true }] },
-    { cloud_worker: true, task_id: "node:one", tasks: [] },
+    { ...cloud, tasks: [{ id: "smuggled" }] },
+    { ...cloud, selected_task: undefined },
     { cloud_worker: false, task_id: "node:one" }
   ]) {
     assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
@@ -5296,7 +5302,7 @@ test("Smithers rerenders a cloud Sandbox only after its required verifier output
 
 test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const taskProjectionStart = source.indexOf("const taskSpecs = serializedTaskSpecs.map");
+  const taskProjectionStart = source.indexOf("function hydrateTaskSpec");
   const taskProjectionEnd = source.indexOf("\n\ntype AuthenticatedAggregationSourceEntry", taskProjectionStart);
   const baseAgentStart = source.indexOf("function baseAgentForProfile");
   const baseAgentEnd = source.indexOf("\n\nfunction agentForTask", baseAgentStart);
@@ -7661,7 +7667,8 @@ test("generated Smithers verifier treats the final-report projector only as a no
 
   assert.match(verifier, /authoritativeFinalReportCoverage\(task\)/u);
   assert.match(verifier, /authoritativeFinalReportRunMetadata\(task\)/u);
-  assert.match(verifier, /projectCanonicalFinalReport\(report\.value\)/u);
+  assert.match(verifier, /projectCanonicalFinalReport\(report\.value,\s*\{/u);
+  assert.match(verifier, /goalSearchCoverage: readGoalSearchCoverage\(task\.runRoot\)/u);
   assert.match(verifier, /isDeepStrictEqual\(projection\.report, report\.value\)/u);
   assert.match(verifier, /markdown\.file\.bytes\.equals\(Buffer\.from\(projection\.markdown, "utf8"\)\)/u);
   assert.match(verifier, /agent-owned bytes were left unchanged/u);
@@ -7714,6 +7721,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     "projectCanonicalFinalReport",
     "authoritativeFinalReportAgentExecution",
     "authoritativeFinalReportRunMetadata",
+    "readGoalSearchCoverage",
     "Buffer",
     `${emitted}; return verifyFinalReportCanonicalProjection;`
   )(
@@ -7722,6 +7730,7 @@ function loadFinalReportCanonicalProjectionHarness(): (
     (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
     () => FINAL_REPORT_AGENT_EXECUTION_FIXTURE,
     () => FINAL_REPORT_RUN_METADATA_FIXTURE,
+    () => undefined,
     Buffer
   ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
 }

@@ -275,7 +275,9 @@ function requiredDestinations(config: ResolvedConfig, graph: PlannedGraph, env: 
     openRouterModels = new Set<string>();
   const add = (agent: string, model?: string) => {
     source.add(modelDestination(agent, config, env));
-    if (agent === "OpenRouterAgent" && model !== undefined) openRouterModels.add(model);
+    if (["OpenCodeAgent", "OpenRouterAgent", "PiAgent"].includes(agent) && model !== undefined) {
+      openRouterModels.add(model);
+    }
   };
   for (const node of graph.nodes)
     for (const model of node.model_fanout) {
@@ -304,7 +306,9 @@ export function modelDestination(agent: string, config: ResolvedConfig, env: Nod
       ClaudeAgent: "anthropic",
       KimiAgent: "moonshot",
       DeepSeekAgent: "deepseek",
-      OpenRouterAgent: "openrouter"
+      OpenCodeAgent: "openrouter",
+      OpenRouterAgent: "openrouter",
+      PiAgent: "openrouter"
     },
     route = effectiveRoute(agent, config, env);
   if (route !== undefined) return `model:${agent.toLowerCase().replace("agent", "")}-route-${route}`;

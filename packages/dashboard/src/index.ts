@@ -21,6 +21,7 @@ import {
   replayEvents,
   safeResolveInside,
   sha256Bytes,
+  validateNodeReference,
   validateSafeId,
   writeFileDurable,
   type ArtifactContractId,
@@ -28,6 +29,7 @@ import {
   type NodeState,
   type PlannedGraphOutput,
   type PlannedGraphDocument,
+  type PlannedGraphNodeDocument,
   type RunStatus,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -58,6 +60,7 @@ import {
   loadResolvedProject,
   modelProfilesForTopology,
   isVerifiedOutputAuthorityUnavailable,
+  loadGoalSearchCoverageSnapshot,
   loadVerifiedFinalReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
@@ -137,6 +140,8 @@ type DashboardCommand =
   | "clean";
 type CommandJobStatus = "running" | "succeeded" | "failed";
 type JsonObject = Record<string, unknown>;
+type PlannedGraph = PlannedGraphDocument;
+type PlannedGraphNode = PlannedGraphNodeDocument;
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type DashboardSseEventType = "ultrafuzz-event" | "ultrafuzz-error" | "ultrafuzz-command-jobs";
 
@@ -577,12 +582,34 @@ class DashboardApp {
     const captured = await this.captureRunAuthorityContext();
     const { context, state, authorityProjection } = captured;
     const run = await this.runOverviewFrom(topology, expanded, captured);
+    const runtimeGraph = this.optionalRuntimeGraph(context);
+    const runtimeNodeById = new Map(runtimeGraph?.nodes.map((node) => [node.id, node]) ?? []);
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
-    const nodes = topology.nodes.map((node, index) =>
+    const staticNodes = topology.nodes.map((node, index) =>
       this.flowNode(node, index, attemptsByLogicalId.get(node.id) ?? [], state, context.runRoot, authorityProjection)
     );
-    const edges = topology.nodes.flatMap((node) =>
-      (node.depends_on ?? []).map((dependency) => {
+    const generatedNodes = (runtimeGraph?.nodes ?? [])
+      .filter((node) => node.dynamic_generated !== undefined)
+      .map((node, index) =>
+        this.dynamicFlowNode(node, staticNodes.length + index, state, context.runRoot, topology, authorityProjection)
+      );
+    const nodes = [...staticNodes, ...generatedNodes];
+    const dependencyIds = (logicalNode: TopologyNode): string[] => {
+      const runtimeNodes = (runtimeGraph?.nodes ?? []).filter(
+        (node) => node.logical_id === logicalNode.id && node.dynamic_generated === undefined
+      );
+      if (runtimeNodes.length === 0) return [...(logicalNode.depends_on ?? [])];
+      return uniqueStrings(
+        runtimeNodes.flatMap((node) =>
+          node.depends_on.map((dependency) => {
+            const producer = runtimeNodeById.get(dependency);
+            return producer?.dynamic_generated === undefined ? (producer?.logical_id ?? dependency) : dependency;
+          })
+        )
+      );
+    };
+    const staticEdges = topology.nodes.flatMap((node) =>
+      dependencyIds(node).map((dependency) => {
         const status = aggregateLogicalStatus(attemptsByLogicalId.get(node.id) ?? [], state);
         return {
           id: `${dependency}->${node.id}`,
@@ -595,6 +622,25 @@ class DashboardApp {
         };
       })
     );
+    const generatedEdges = (runtimeGraph?.nodes ?? [])
+      .filter((node) => node.dynamic_generated !== undefined)
+      .flatMap((node) =>
+        node.depends_on.map((dependency) => {
+          const producer = runtimeNodeById.get(dependency);
+          const source = producer?.dynamic_generated === undefined ? (producer?.logical_id ?? dependency) : dependency;
+          const status = dynamicNodeStatus(node, state);
+          return {
+            id: `${source}->${node.id}`,
+            source,
+            target: node.id,
+            animated: status === "running" || status === "ready" || status === "runnable",
+            data: { status },
+            style: { stroke: edgeColorForStatus(status), strokeWidth: 2 },
+            zIndex: 1
+          };
+        })
+      );
+    const edges = uniqueEdges([...staticEdges, ...generatedEdges]);
     const strategies = nodes.flatMap((node) => {
       const data = node.data;
       if (!isRecord(data)) throw new Error(`flow node ${String(node.id)} has invalid data`);
@@ -610,6 +656,74 @@ class DashboardApp {
     });
     await this.assertCapturedRunAuthorityRemainedCurrent(captured);
     return document;
+  }
+
+  dynamicFlowNode(
+    node: PlannedGraphNode,
+    index: number,
+    state: RunState | undefined,
+    runRoot: string,
+    topology: ProjectTopology,
+    authorityProjection?: DashboardFlowAuthorityProjection
+  ): JsonObject {
+    const attempts = plannedDynamicAttempts(node);
+    const status = dynamicNodeStatus(node, state);
+    const group = topology.nodes.find((candidate) => candidate.id === node.logical_id)?.group;
+    const groupInfo = group ? topology.groups?.[group] : undefined;
+    const artifactDirs = attempts.map((attempt) => attempt.artifactDir);
+    return {
+      id: node.id,
+      type: "agentAttempt",
+      position: { x: index * 310, y: 0 },
+      data: {
+        label: node.display_name,
+        kind: "Dynamic agent",
+        status,
+        strategy: {
+          id: node.id,
+          display_name: node.display_name,
+          category: group ?? "dynamic",
+          models: uniqueStrings(node.model_fanout.map((model) => model.model_profile_id)),
+          loops: 1,
+          attempts: Math.max(1, attempts.length)
+        },
+        model: undefined,
+        modelIndex: node.model_fanout[0]?.model_index,
+        loopIndex: node.loop.index,
+        dependencies: [...node.depends_on],
+        artifactDir: artifactDirs[0] ?? node.artifact_dir,
+        artifactDirs,
+        artifacts: this.artifactAvailability(attempts, runRoot, authorityProjection),
+        promptAvailable: true,
+        promptEditable: false,
+        topologyConnectable: false,
+        findingCount: authorityProjection?.findingsByLogicalId.get(node.logical_id)?.length ?? 0,
+        propertySummary: null,
+        latestError: state?.nodes[node.dynamic_generated!.storage_id]?.last_error ?? null,
+        logicalNodeId: node.id,
+        producerNodeId: node.id,
+        storageId: node.dynamic_generated!.storage_id,
+        dynamic: node.dynamic_generated,
+        attemptIndex: node.loop.attempt_index,
+        loopCount: 1,
+        loopBadgeCount: Math.max(1, attempts.length),
+        loopMode: node.loop.mode,
+        promptPath: node.prompt_path,
+        group,
+        groupLabel: groupInfo?.label ?? (group ? titleFromId(group) : "Dynamic"),
+        groupColor: groupInfo?.color,
+        requiredArtifacts: node.outputs.map((output) => output.path),
+        topologyEditable: false,
+        expandedAttempts: attempts.map((attempt) => ({
+          id: attempt.id,
+          logicalId: node.id,
+          dependsOn: attempt.dependsOn,
+          artifactDir: attempt.artifactDir,
+          loop: attempt.loop,
+          modelFanout: attempt.modelFanout
+        }))
+      }
+    };
   }
 
   flowNode(
@@ -711,6 +825,7 @@ class DashboardApp {
     const { context, state, authorityProjection } = captured;
     const events = await this.events(context);
     const findings = authorityProjection?.allFindings ?? [];
+    const runtimeGraph = this.optionalRuntimeGraph(context);
     const attemptsByLogicalId = groupExpandedNodes(expanded.nodes);
     const nodeCounts: Record<string, number> = {};
     const activeNodes: string[] = [];
@@ -720,6 +835,11 @@ class DashboardApp {
       if (status === "running" || status === "ready" || status === "runnable") {
         activeNodes.push(node.id);
       }
+    }
+    for (const node of runtimeGraph?.nodes.filter((candidate) => candidate.dynamic_generated !== undefined) ?? []) {
+      const status = dynamicNodeStatus(node, state);
+      nodeCounts[status] = (nodeCounts[status] ?? 0) + 1;
+      if (status === "running" || status === "ready" || status === "runnable") activeNodes.push(node.id);
     }
     const report = await this.report(context);
     return dashboardHttpDocument("run-overview", {
@@ -731,8 +851,8 @@ class DashboardApp {
       started_at: state?.started_at,
       finished_at: state?.finished_at,
       elapsed_seconds: elapsedSeconds(state),
-      graph_nodes: topology.nodes.length,
-      expanded_nodes: expanded.nodes.length,
+      graph_nodes: topology.nodes.length + (runtimeGraph?.nodes.filter((node) => node.dynamic_generated).length ?? 0),
+      expanded_nodes: runtimeGraph?.nodes.length ?? expanded.nodes.length,
       node_counts: nodeCounts,
       active_nodes: activeNodes,
       findings_count: findings.length,
@@ -750,21 +870,60 @@ class DashboardApp {
   async graphDetail(): Promise<JsonObject> {
     const topology = this.loadTopologyForDisplay();
     const expanded = await this.expandCurrentTopology(topology);
+    const context = await this.runContext();
+    const runtimeGraph = this.optionalRuntimeGraph(context);
     return dashboardHttpDocument("graph", {
       topology,
       expandedGraph: expanded,
+      runtimeGraph,
       logicalNodes: topology.nodes.length,
-      expandedNodes: expanded.nodes.length
+      expandedNodes: runtimeGraph?.nodes.length ?? expanded.nodes.length,
+      generatedNodes: runtimeGraph?.nodes.filter((node) => node.dynamic_generated !== undefined).length ?? 0
     });
   }
 
   async nodeDetail(nodeId: string): Promise<JsonObject> {
-    const safeNodeId = validateSafeId(nodeId, "node ID");
     const topology = this.loadTopologyForDisplay();
-    const node = topology.nodes.find((candidate) => candidate.id === safeNodeId);
+    const node = topology.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) {
-      throw new HttpError(404, `node ${safeNodeId} not found`);
+      const humanNodeId = validateNodeReference(nodeId, "node ID");
+      const captured = await this.captureRunAuthorityContext();
+      const { context, state, authorityProjection } = captured;
+      const generated = this.optionalRuntimeGraph(context)?.nodes.find(
+        (candidate) => candidate.id === humanNodeId && candidate.dynamic_generated !== undefined
+      );
+      if (generated === undefined) throw new HttpError(404, `node ${humanNodeId} not found`);
+      const attempts = plannedDynamicAttempts(generated);
+      const attemptArtifacts = await this.artifactEntriesForAttempts(attempts, context);
+      const primary = attemptArtifacts[0];
+      const document = dashboardHttpDocument("node-detail", {
+        run_id: context.runId,
+        node: {
+          id: generated.id,
+          label: generated.display_name,
+          kind: "Dynamic agent",
+          kind_detail: "agentic",
+          status: dynamicNodeStatus(generated, state),
+          depends_on: generated.depends_on,
+          artifact_dir: generated.artifact_dir,
+          attempt_index: generated.loop.attempt_index,
+          loop_index: generated.loop.index,
+          producer_node_id: generated.id,
+          storage_id: generated.dynamic_generated!.storage_id
+        },
+        state: state?.nodes[generated.dynamic_generated!.storage_id],
+        artifacts: attemptArtifacts.flatMap((attempt) => attempt.artifacts),
+        artifactReferences: { outputs: [], referencedPrevious: generated.depends_on },
+        stdout: primary?.stdout,
+        stderr: primary?.stderr,
+        rendered_prompt: primary?.renderedPrompt,
+        findings: authorityProjection?.findingsByLogicalId.get(generated.logical_id) ?? [],
+        metadata: { dynamic: generated.dynamic_generated, expandedAttempts: attempts }
+      });
+      await this.assertCapturedRunAuthorityRemainedCurrent(captured);
+      return document;
     }
+    const safeNodeId = node.id;
     const expanded = await this.expandCurrentTopology(topology);
     const attempts = expanded.nodes.filter((attempt) => attempt.logicalId === safeNodeId);
     const captured = await this.captureRunAuthorityContext();
@@ -1517,6 +1676,14 @@ class DashboardApp {
     return readRunState(layout);
   }
 
+  optionalRuntimeGraph(context: { runRoot: string; persisted: boolean }): PlannedGraph | undefined {
+    if (!context.persisted) return undefined;
+    const graphPath = path.join(context.runRoot, "graph.json");
+    if (!fs.existsSync(graphPath)) return undefined;
+    assertRegularFileInside(context.runRoot, graphPath, "runtime graph");
+    return readPlannedGraphDocument(graphPath);
+  }
+
   async expandCurrentTopology(topology: ProjectTopology): Promise<ExpandedGraph> {
     const resolved = await this.resolvedConfig();
     return expandTopology(topology, {
@@ -1922,6 +2089,57 @@ function groupExpandedNodes(nodes: ExpandedNode[]): Map<string, ExpandedNode[]> 
     grouped.set(node.logicalId, entries);
   }
   return grouped;
+}
+
+function plannedDynamicAttempts(node: PlannedGraphNode): ExpandedNode[] {
+  const artifactDirs = node.artifact_dirs ?? [node.artifact_dir];
+  return artifactDirs.map((artifactDir, _index) => ({
+    id: path.posix.basename(artifactDir),
+    logicalId: node.logical_id,
+    label: node.display_name,
+    kind: "agentic",
+    ...(node.prompt_path.length === 0 ? {} : { promptPath: node.prompt_path.replace(/^\.ultrafuzz\/prompts\//u, "") }),
+    dependsOn: [...node.depends_on],
+    artifactDir,
+    retryPolicy: { maxAttempts: 1 },
+    loop: {
+      index: node.loop.index,
+      count: node.loop.count,
+      mode: node.loop.mode === "series" ? "series" : "parallel",
+      attemptIndex: node.loop.attempt_index
+    },
+    outputs: node.outputs.map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contractDigest: output.contract_digest,
+      primary: output.primary
+    })),
+    modelFanout: node.model_fanout.map((model) => ({
+      modelProfileId: model.model_profile_id,
+      agentRef: model.agent_ref,
+      ...(model.model_name === undefined ? {} : { modelName: model.model_name }),
+      ...(model.reasoning_effort === undefined ? {} : { reasoningEffort: model.reasoning_effort }),
+      modelIndex: model.model_index,
+      loopIndex: model.loop_index,
+      attemptIndex: model.attempt_index
+    }))
+  }));
+}
+
+function dynamicNodeStatus(node: PlannedGraphNode, state: RunState | undefined): Status {
+  const storageId = node.dynamic_generated?.storage_id;
+  if (storageId !== undefined && state?.nodes[storageId] !== undefined) {
+    return state.nodes[storageId]!.status;
+  }
+  return aggregateLogicalStatus(plannedDynamicAttempts(node), state);
+}
+
+function uniqueEdges(edges: JsonObject[]): JsonObject[] {
+  const byId = new Map<string, JsonObject>();
+  for (const edge of edges) {
+    if (typeof edge.id === "string") byId.set(edge.id, edge);
+  }
+  return [...byId.values()];
 }
 
 function aggregateLogicalStatus(attempts: ExpandedNode[], state: RunState | undefined): Status {
@@ -2338,7 +2556,9 @@ function readVerifiedFindingsDeclaration(
     if (markdown.length !== 1) {
       throw new Error("dashboard report findings declaration does not have one exact Markdown companion");
     }
-    const projection = projectCanonicalFinalReport(report.value);
+    const projection = projectCanonicalFinalReport(report.value, {
+      goalSearchCoverage: loadGoalSearchCoverageSnapshot(authority.run_root)
+    });
     if (!isDeepStrictEqual(projection.report, report.value)) {
       throw new Error("dashboard verified report JSON is not its canonical final-report projection");
     }

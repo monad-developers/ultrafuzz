@@ -17,6 +17,7 @@ import {
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
+  assertUsageLedgerEntry,
   createRunLayout,
   getNodeArtifactDir,
   normalizeSafeRelativePath,
@@ -147,6 +148,31 @@ test("validated usage events append idempotently with exact Smithers identities"
 
   appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
   assert.throws(() => replayUsageEvents(layout), /invalid strict JSON/u);
+});
+
+test("usage entries carry their required node_id and immutable source authority", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-usage-node-id" });
+  const base = {
+    workflowRunId: "workflow-run-usage",
+    controlGeneration: "d".repeat(64),
+    sourceEventSequence: 1,
+    observedTimestampMs: Date.parse("2026-07-18T00:00:00.000Z"),
+    nodeId: "node:dynamic-fanout-1",
+    iteration: 0,
+    attempt: 1,
+    usage: { input_tokens: 12, output_tokens: 3, model: "model", agent: "agent" }
+  };
+
+  const written = appendUsageEvents(layout, [base]);
+  assert.equal(written.entries[0]?.node_id, "node:dynamic-fanout-1");
+  assert.equal(assertUsageLedgerEntry(JSON.parse(JSON.stringify(written.entries[0]))).node_id, base.nodeId);
+  const resumed = appendUsageEvents(layout, [base]);
+  assert.equal(resumed.appended, 0);
+  assert.equal(replayUsageEvents(layout).entries.length, 1);
+  assert.throws(
+    () => appendUsageEvents(layout, [{ ...base, sourceEventSequence: 2, nodeId: "../escape" }]),
+    /Invalid string/u
+  );
 });
 
 test("usage ledger replay rejects entries copied from another run", () => {
@@ -669,6 +695,18 @@ test("artifact manifest reads reject v2 and generic metadata without conversion"
     assert.throws(() => readArtifactManifest(layout, "node-a"), /artifact manifest is schema-invalid/u);
     assert.equal(fs.readFileSync(manifestPath, "utf8"), bytes);
   }
+});
+
+test("artifact provenance keeps uppercase-compatible historical static node IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-uppercase-producer" });
+  writeArtifact(layout, "StrategyA", "result.md", "historical static strategy\n");
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "StrategyA",
+    provenance: { producer_node_id: "StrategyA" }
+  });
+
+  assert.equal(manifest.files[0]!.provenance.producer_node_id, "StrategyA");
 });
 
 test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {

@@ -13,8 +13,83 @@ import {
   type ProjectTopology
 } from "@ultrafuzz/topology";
 
-import { promptTextsForCatalog, toPlannedGraph, transformPromptCatalogForRun } from "../src/plan-run.js";
-import { transformTopologyForRun } from "../src/topology-transform.js";
+import { toPlannedGraph } from "../src/plan-run.js";
+import {
+  promptTextsForCatalog,
+  transformPromptCatalogForRun,
+  transformTopologyForRun
+} from "../src/topology-transform.js";
+
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+/**
+ * The production topology minus the threat-model workstream. Pinned so that any
+ * topology addition fails the completeness assertion below and forces a
+ * deliberate decision about curated lanes, instead of silently widening them.
+ */
+const EXPECTED_NODES_AFTER_THREAT_MODEL_PRUNE = [
+  "__finish__",
+  "__start__",
+  "actors-flows",
+  "admin-config-boundaries",
+  "aggregate-test-files",
+  "amm-boundary-liquidity",
+  "base-test-setup",
+  "batch-atomicity-unsupported-actions",
+  "boundary-tests",
+  "dedupe-findings",
+  "differential-lane-author",
+  "differential-library-tests",
+  "differential-oracle-planner",
+  "differential-red-triage",
+  "differential-repair-and-report-review",
+  "dynamic-strategy-generator",
+  "encode-decode",
+  "expand-coverage",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "final-report",
+  "lifecycle-view-boundaries",
+  "market-exhaustion-boundaries",
+  "order-replacement-collateral",
+  "packed-action-parity",
+  "payable-fallback-accounting",
+  "project-discovery",
+  "property-specification-0kn0t",
+  "property-specification-a16z",
+  "property-specification-aviggiano",
+  "property-specification-certora",
+  "property-specification-crytic",
+  "property-specification-fanin",
+  "property-specification-josselin-feist",
+  "property-specification-recon",
+  "property-specification-runtime-verification",
+  "reference-and-lane-auditor",
+  "reference-harness-author",
+  "reference-properties-0kn0t",
+  "reference-properties-a16z-erc4626",
+  "reference-properties-aviggiano",
+  "reference-properties-certora-sanity",
+  "reference-properties-certora-thinking",
+  "reference-properties-crytic",
+  "reference-properties-montyly-rounding",
+  "reference-properties-recon",
+  "reference-properties-runtime-verification",
+  "round-trip",
+  "rounding-direction-audit",
+  "router-exact-accounting",
+  "setup-foundry",
+  "severity-classification",
+  "state-machine-boundaries",
+  "stateful-invariant-campaign",
+  "stateful-invariant-coverage",
+  "stateful-invariant-handlers",
+  "stateful-invariant-implement-properties",
+  "stateful-invariant-setup",
+  "time-warp-sequences",
+  "triage",
+  "workflow-property-based-tests"
+];
 
 function topology(): ProjectTopology {
   return {
@@ -115,7 +190,7 @@ test("planned prompt binding never falls back from the declared path to a matchi
 });
 
 test("the exact smoke exclusions produce a valid filtered production topology", () => {
-  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const repositoryRoot = REPOSITORY_ROOT;
   const smokeExcludedNodeIds = [
     "stateful-invariant-setup",
     "stateful-invariant-handlers",
@@ -129,7 +204,13 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
     "differential-lane-author",
     "differential-red-triage",
     "differential-repair-and-report-review",
-    "dynamic-strategy-generator"
+    "dynamic-strategy-generator",
+    // Dynamic goal fanout, plus the goal-plan that feeds it. Dropping the
+    // fanout alone would leave goal-plan terminal and strand the report
+    // prompt's `artifact_path` citation of it.
+    "threat-goals",
+    "class-goals",
+    "goal-plan"
   ];
   const transformed = transformTopologyForRun(
     loadTopology(repositoryRoot, { topologyPath: packagedTopology("full").path, requirePromptFiles: true }),
@@ -153,6 +234,62 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
   assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
 });
 
+test("pruning the threat-model workstream leaves a valid, dependency-free production topology", () => {
+  // @ultrafuzz/evals owns THREAT_MODEL_GOAL_FANOUT_NODE_IDS and every curated
+  // private lane prunes exactly this set, but evals depends on runtime, so it
+  // cannot push the set through the real topology itself. Re-declare it here and
+  // prove the pruned graph still plans.
+  const threatModelWorkstream = [
+    "reference-vulnerability-database",
+    "threat-model",
+    "goal-roaming",
+    "threat-goals",
+    "class-goals",
+    "goal-plan"
+  ];
+  const transform = { strategyLoops: 1, excludedNodeIds: threatModelWorkstream };
+  const transformed = transformTopologyForRun(
+    loadTopology(REPOSITORY_ROOT, {
+      topologyPath: packagedTopology("full").path,
+      requirePromptFiles: true
+    }),
+    transform
+  );
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }), transform);
+  validateTopology(transformed, {
+    projectRoot: REPOSITORY_ROOT,
+    requirePromptFiles: true,
+    promptTexts: promptTextsForCatalog(prompts)
+  });
+
+  // Completeness. The three shape checks below cannot see a default-on node
+  // added to a pre-existing group such as `setup`, which is exactly where
+  // threat-model and goal-plan live, so pin the surviving node set instead. Any
+  // topology addition fails this and forces a deliberate answer to "should
+  // curated lanes prune this too?" rather than silently widening every one.
+  const remaining = transformed.nodes;
+  assert.deepEqual(
+    remaining.map((node) => node.id).sort(),
+    EXPECTED_NODES_AFTER_THREAT_MODEL_PRUNE,
+    "topology changed: decide whether the new node belongs in THREAT_MODEL_GOAL_FANOUT_NODE_IDS, then update this list"
+  );
+  assert.deepEqual(
+    remaining.filter((node) => node.dynamic !== undefined).map((node) => node.id),
+    [],
+    "no dynamic expansion may survive the prune"
+  );
+  assert.deepEqual(
+    remaining.filter((node) => node.group === "goals").map((node) => node.id),
+    [],
+    "the goals group must be empty after the prune"
+  );
+  assert.deepEqual(
+    remaining.filter((node) => node.kind === "reference" && node.reference?.startsWith("vulnerability-database")),
+    [],
+    "no vulnerability-database reference node may survive the prune"
+  );
+});
+
 test("the invariant-only exclusions retain the whole stateful-invariant chain", () => {
   // The inverse of the smoke exclusions: invariant-only campaigns drop every
   // strategy except the stateful-invariant chain, so the retained chain still
@@ -172,9 +309,9 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
     .map((node) => node.id);
   const transform = { strategyLoops: 1, excludedNodeIds: invariantOnlyExcludedNodeIds };
   const transformed = transformTopologyForRun(source, transform);
-  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), transform);
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }), transform);
   const validation = validateTopology(transformed, {
-    projectRoot: repositoryRoot,
+    projectRoot: REPOSITORY_ROOT,
     requirePromptFiles: true,
     promptTexts: promptTextsForCatalog(prompts)
   });

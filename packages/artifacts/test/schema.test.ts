@@ -18,6 +18,7 @@ import {
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_FINDING_STRING_CODE_POINTS,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
+  NODE_REFERENCE_PATTERN,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
   PROPERTIES_SCHEMA_VERSION,
@@ -53,6 +54,10 @@ import {
   findingJsonSchema,
   findingSchema,
   generatedTestsJsonSchema,
+  goalPlanJsonSchema,
+  threatModelJsonSchema,
+  GOAL_PLAN_JSON_SCHEMA_ID,
+  THREAT_MODEL_JSON_SCHEMA_ID,
   invariantLedgerJsonSchema,
   invariantSourceProofJsonSchema,
   lensPropertiesJsonSchema,
@@ -3018,6 +3023,8 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const trustedCliSnapshot = readSchemaSnapshot("trusted-cli.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
+  const threatModelSnapshot = readSchemaSnapshot("threat-model.schema.json");
+  const goalPlanSnapshot = readSchemaSnapshot("goal-plan.schema.json");
   const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
 
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
@@ -3059,8 +3066,128 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(referenceExpectationsSnapshot, referenceExpectationsJsonSchema);
   assert.deepEqual(trustedCliSnapshot, trustedCliMetadataJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
+  // The threat-model and goal-plan prompts point agents at these canonical documents, so the
+  // snapshots must stay generated from the one runtime contract.
+  assert.deepEqual(threatModelSnapshot, threatModelJsonSchema);
+  assert.deepEqual(goalPlanSnapshot, goalPlanJsonSchema);
+  assert.equal(threatModelSnapshot.$id, THREAT_MODEL_JSON_SCHEMA_ID);
+  assert.equal(goalPlanSnapshot.$id, GOAL_PLAN_JSON_SCHEMA_ID);
   assert.deepEqual(workspacePatchSnapshot, workspacePatchJsonSchema);
 });
+
+test("checked-in artifact schema snapshots contain no duplicate keys", () => {
+  const snapshots = readdirSync(path.join(packageRoot, "schema"))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  assert.ok(snapshots.includes("finding.schema.json"));
+  for (const name of snapshots) {
+    assert.deepEqual(
+      duplicateJsonKeys(readFileSync(path.join(packageRoot, "schema", name), "utf8")),
+      [],
+      `${name} must not define the same key twice; ordinary JSON parsing silently keeps the last one`
+    );
+  }
+});
+
+test("finding schema snapshot node-reference patterns and the runtime validator agree in both directions", () => {
+  const snapshot = readSchemaSnapshot("finding.schema.json") as {
+    properties: Record<string, { pattern?: string; items?: { pattern?: string } }>;
+  };
+  const patterns = {
+    producer_node_id: snapshot.properties.producer_node_id?.pattern,
+    source_node_id: snapshot.properties.source_node_id?.pattern,
+    source_nodes: snapshot.properties.source_nodes?.items?.pattern
+  };
+  for (const [field, pattern] of Object.entries(patterns)) {
+    assert.equal(pattern, NODE_REFERENCE_PATTERN.source, `${field} must reuse the runtime node-reference pattern`);
+  }
+  const base = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "finding-1",
+    title: "Unbounded input",
+    status: "needs-review",
+    severity_guess: "High",
+    confidence: "medium",
+    summary: "Input length reaches an expensive path."
+  };
+  const candidates = [
+    // Historical uppercase node IDs the runtime accepts must not fail the snapshot.
+    { nodeId: "StrategyA", ok: true },
+    { nodeId: "dynamic:threat:liquidation:overdue", ok: true },
+    // Traversal-shaped node IDs the runtime rejects must not pass the snapshot either.
+    { nodeId: "../evil", ok: false },
+    { nodeId: "./evil", ok: false },
+    { nodeId: "evil/../escape", ok: false }
+  ];
+  for (const candidate of candidates) {
+    for (const [field, pattern] of Object.entries(patterns)) {
+      assert.equal(
+        new RegExp(pattern!, "u").test(candidate.nodeId),
+        candidate.ok,
+        `${field} snapshot pattern disagrees for ${candidate.nodeId}`
+      );
+    }
+    const finding = {
+      ...base,
+      producer_node_id: candidate.nodeId,
+      source_node_id: candidate.nodeId,
+      source_nodes: [candidate.nodeId]
+    };
+    assert.equal(validateFindingSchema(finding).ok, candidate.ok, candidate.nodeId);
+  }
+});
+
+/** Detects repeated object keys before ordinary JSON parsing collapses them to the last value. */
+function duplicateJsonKeys(text: string): string[] {
+  const duplicates: string[] = [];
+  const stack: Array<Set<string>> = [];
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character === "{" || character === "[") {
+      stack.push(new Set());
+      index += 1;
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      stack.pop();
+      index += 1;
+      continue;
+    }
+    if (character === '"') {
+      const parsed = readJsonString(text, index);
+      index = parsed.end;
+      while (index < text.length && /\s/u.test(text[index]!)) index += 1;
+      if (text[index] === ":") {
+        const scope = stack[stack.length - 1];
+        if (scope !== undefined) {
+          if (scope.has(parsed.value)) duplicates.push(parsed.value);
+          scope.add(parsed.value);
+        }
+      }
+      continue;
+    }
+    index += 1;
+  }
+  return duplicates;
+}
+
+function readJsonString(text: string, start: number): { value: string; end: number } {
+  let index = start + 1;
+  let value = "";
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character === "\\") {
+      value += text.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+    if (character === '"') return { value, end: index + 1 };
+    value += character;
+    index += 1;
+  }
+  throw new Error("unterminated JSON string in schema snapshot");
+}
 
 function readSchemaSnapshot(name: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as Record<string, unknown>;

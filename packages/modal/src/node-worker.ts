@@ -20,6 +20,7 @@ import {
 import {
   modalNodeContinuationIdentity,
   modalAttemptVerificationMarkerName,
+  modalNodeDispatchFingerprint,
   parseModalNodeWorkerInput,
   readModalExecutionDependencyClosure,
   verifyModalExecutionSnapshotClosure
@@ -122,6 +123,7 @@ async function main(): Promise<void> {
       artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
       artifact_sha256: digest,
       storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`,
+      logical_dispatch_fingerprint: completedCheckpoint.logical_dispatch_fingerprint,
       durable_checkpoint: path.posix.join(
         dataRoot,
         DURABLE_CHECKPOINT_DIRECTORY,
@@ -634,6 +636,8 @@ export async function runDurableWorkflow(
       smithers
     ];
     const workflowPath = regularSnapshotFile(snapshotAccessRoot, workflowRelativePath, "sealed cloud workflow");
+    const selectedTask = input.selected_task;
+    if (selectedTask === undefined) throw new Error("cloud worker selected task handoff is required");
     const environment = {
       PATH: ["/usr/local/bin", process.env.PATH ?? ""].filter((entry) => entry.length > 0).join(path.delimiter),
       ULTRAFUZZ_CLOUD_WORKER: "1",
@@ -657,14 +661,32 @@ export async function runDurableWorkflow(
         environment
       );
     } catch (error) {
-      if (!isMissingWorkflowRun(error)) throw error;
-      await runChecked(
-        "run-workflow",
-        bun,
-        [...bunArguments, ...workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false)],
-        projectRoot,
-        environment
-      );
+      if (isMissingWorkflowRun(error)) {
+        await runChecked(
+          "run-workflow",
+          bun,
+          [...bunArguments, ...workflowCommandArguments(workflowPath, projectRoot, localRunId, input, false)],
+          projectRoot,
+          environment
+        );
+      } else {
+        const retryTaskId = await selectedInnerRetriesExhaustedTaskId(
+          bun,
+          bunArguments,
+          projectRoot,
+          localRunId,
+          [selectedTask.id, selectedTask.preparationId, selectedTask.verifierId],
+          environment
+        );
+        if (retryTaskId === undefined) throw error;
+        await runChecked(
+          "retry-workflow-task",
+          bun,
+          [...bunArguments, ...workflowRetryTaskCommandArguments(workflowPath, localRunId, retryTaskId)],
+          projectRoot,
+          { ...environment, ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: undefined }
+        );
+      }
     }
     verifyOpenedExecutionSnapshot(openedSnapshotRoot, snapshotAccessRoot, projectRoot, input);
   } finally {
@@ -707,8 +729,28 @@ export function workflowCommandArguments(
     JSON.stringify({
       cloud_worker: true,
       task_id: input.task_id,
+      attempt_id: input.attempt_id,
+      execution_generation: input.execution_generation,
+      selected_task: input.selected_task,
       ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
     }),
+    "--format",
+    "json"
+  ];
+}
+
+export function workflowRetryTaskCommandArguments(workflowPath: string, localRunId: string, taskId: string): string[] {
+  return [
+    "retry-task",
+    workflowPath,
+    "--run-id",
+    localRunId,
+    "--node-id",
+    taskId,
+    "--iteration",
+    "0",
+    "--force",
+    "--accept-workflow-change",
     "--format",
     "json"
   ];
@@ -719,6 +761,47 @@ function isMissingWorkflowRun(error: unknown): boolean {
     error instanceof CloudWorkerCommandError &&
     /\bRUN_NOT_FOUND\b|\bRun not found\b/u.test(`${error.stdout}\n${error.stderr}`)
   );
+}
+
+async function selectedInnerRetriesExhaustedTaskId(
+  bun: string,
+  bunArguments: readonly string[],
+  projectRoot: string,
+  localRunId: string,
+  taskIds: readonly string[],
+  environment: Record<string, string>
+): Promise<string | undefined> {
+  try {
+    const diagnosis = await runChecked(
+      "diagnose-resume-workflow",
+      bun,
+      [...bunArguments, "why", localRunId, "--format", "json"],
+      projectRoot,
+      environment,
+      64 * 1024
+    );
+    const parsed = parseStrictJsonBytes(Buffer.from(diagnosis.stdout, "utf8"));
+    const envelope = recordValue(parsed);
+    const data =
+      envelope !== undefined && recordValue(envelope.data) !== undefined ? recordValue(envelope.data) : envelope;
+    if (data === undefined || !Array.isArray(data.blockers)) return undefined;
+    const eligibleTaskIds = new Set(taskIds);
+    for (const blockerValue of data.blockers) {
+      const blocker = recordValue(blockerValue);
+      if (blocker === undefined || blocker.kind !== "retries-exhausted") continue;
+      const blockedTaskId = typeof blocker.nodeId === "string" ? blocker.nodeId : blocker.node_id;
+      if (typeof blockedTaskId === "string" && eligibleTaskIds.has(blockedTaskId)) return blockedTaskId;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 export async function initializeDurableNodeWorkspace(
@@ -741,6 +824,7 @@ export async function initializeDurableNodeWorkspace(
   assertDurableDirectory(checkpointsDirectory, "durable checkpoints directory");
   const projectArchiveSha256 = input.project_archive_sha256;
   const storageLineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  const logicalDispatchFingerprint = modalNodeDispatchFingerprint(input);
 
   const hadDurableWorkspace = fs.existsSync(projectRoot);
   if (hadDurableWorkspace) {
@@ -763,15 +847,15 @@ export async function initializeDurableNodeWorkspace(
   sealCloudExecutionSnapshot(projectRoot, input);
   verifyModalExecutionSnapshotClosure(projectRoot, input, { requireSealedPermissions: true });
 
-  let index = loadDurableCheckpointIndex(
-    checkpointIndex,
+  let index = loadDurableCheckpointIndex(checkpointIndex, {
     storageLineage,
+    logicalDispatchFingerprint,
     projectRoot,
-    input.run_root,
-    input.execution_snapshot_root,
+    runRoot: input.run_root,
+    executionSnapshotRoot: input.execution_snapshot_root,
     handoffArchive,
-    projectArchiveSha256
-  );
+    archiveSha256: projectArchiveSha256
+  });
   const restoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
   let restoredFrom = readRestoreMarker(restoreMarker, root, input);
   if (restoredFrom === undefined) {
@@ -805,6 +889,7 @@ export async function initializeDurableNodeWorkspace(
         stage,
         created_at: createdAt,
         storage_lineage: storageLineage,
+        logical_dispatch_fingerprint: logicalDispatchFingerprint,
         workspace_path: projectRoot,
         run_root: input.run_root,
         execution_snapshot_root: input.execution_snapshot_root,
@@ -964,10 +1049,17 @@ function sameResumableNodeInput(
     left.artifact_dir === right.artifact_dir &&
     left.workspace_dir === right.workspace_dir &&
     sameStrings(left.dependency_artifact_dirs, right.dependency_artifact_dirs) &&
+    sameStrings(left.reference_artifact_dirs ?? [], right.reference_artifact_dirs ?? []) &&
+    isDeepStrictEqual(left.vulnerability_database, right.vulnerability_database) &&
     sameStrings(left.optional_dependency_artifact_dirs ?? [], right.optional_dependency_artifact_dirs ?? []) &&
     sameDependencyVerificationAuthorities(
       left.dependency_verification_authorities,
       right.dependency_verification_authorities
+    ) &&
+    left.project_content_sha256 === right.project_content_sha256 &&
+    isDeepStrictEqual(
+      normalizedSelectedTaskForComparison(left.selected_task, ignoreExecutionGeneration),
+      normalizedSelectedTaskForComparison(right.selected_task, ignoreExecutionGeneration)
     ) &&
     left.resources.cpu === right.resources.cpu &&
     left.resources.memory_mib === right.resources.memory_mib &&
@@ -975,6 +1067,14 @@ function sameResumableNodeInput(
     sameStrings(left.agent_credential_env, right.agent_credential_env) &&
     left.operator_prompt === right.operator_prompt
   );
+}
+
+function normalizedSelectedTaskForComparison(
+  selectedTask: StrictModalNodeInputDocument["selected_task"],
+  ignoreExecutionGeneration: boolean
+): StrictModalNodeInputDocument["selected_task"] {
+  if (!ignoreExecutionGeneration || selectedTask === undefined) return selectedTask;
+  return { ...selectedTask, execution: { ...selectedTask.execution, generation: "<logical>" } };
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
@@ -1124,15 +1224,15 @@ function compatiblePriorAttempt(
     throw new Error("durable restore marker references a generation without a checkpoint index");
   }
   assertDurableDirectory(checkpointDirectory, "prior generation checkpoints directory");
-  const index = loadDurableCheckpointIndex(
-    checkpointIndex,
-    `${persisted.run_id}/${persisted.attempt_id}/${persisted.execution_generation}`,
-    path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY),
-    persisted.run_root,
-    persisted.execution_snapshot_root,
+  const index = loadDurableCheckpointIndex(checkpointIndex, {
+    storageLineage: `${persisted.run_id}/${persisted.attempt_id}/${persisted.execution_generation}`,
+    logicalDispatchFingerprint: modalNodeDispatchFingerprint(persisted),
+    projectRoot: path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY),
+    runRoot: persisted.run_root,
+    executionSnapshotRoot: persisted.execution_snapshot_root,
     handoffArchive,
-    persisted.project_archive_sha256
-  );
+    archiveSha256: persisted.project_archive_sha256
+  });
   if (index.checkpoints.length === 0 || !priorAttemptHasEvidence(candidateRoot, persisted)) {
     if (allowMissingOrUnrelated) return undefined;
     throw new Error("durable restore marker references a generation without recoverable evidence");
@@ -1226,12 +1326,15 @@ function assertDurableRegularFile(filePath: string, label: string): void {
 
 function loadDurableCheckpointIndex(
   checkpointIndex: string,
-  storageLineage: string,
-  projectRoot: string,
-  runRoot: string,
-  executionSnapshotRoot: string,
-  handoffArchive: string,
-  archiveSha256: string
+  identity: {
+    storageLineage: string;
+    logicalDispatchFingerprint: string;
+    projectRoot: string;
+    runRoot: string;
+    executionSnapshotRoot: string;
+    handoffArchive: string;
+    archiveSha256: string;
+  }
 ): DurableCheckpointIndex {
   if (lstatWorkerPath(checkpointIndex) === undefined) {
     const checkpointDirectory = path.dirname(checkpointIndex);
@@ -1243,12 +1346,13 @@ function loadDurableCheckpointIndex(
     }
     return {
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
-      storage_lineage: storageLineage,
-      workspace_path: projectRoot,
-      run_root: runRoot,
-      execution_snapshot_root: executionSnapshotRoot,
-      handoff_archive: handoffArchive,
-      project_archive_sha256: archiveSha256,
+      storage_lineage: identity.storageLineage,
+      logical_dispatch_fingerprint: identity.logicalDispatchFingerprint,
+      workspace_path: identity.projectRoot,
+      run_root: identity.runRoot,
+      execution_snapshot_root: identity.executionSnapshotRoot,
+      handoff_archive: identity.handoffArchive,
+      project_archive_sha256: identity.archiveSha256,
       checkpoints: []
     };
   }
@@ -1260,12 +1364,13 @@ function loadDurableCheckpointIndex(
     throw new Error("durable checkpoint index is invalid", { cause: error });
   }
   if (
-    parsed.storage_lineage !== storageLineage ||
-    parsed.workspace_path !== projectRoot ||
-    parsed.run_root !== runRoot ||
-    parsed.execution_snapshot_root !== executionSnapshotRoot ||
-    parsed.handoff_archive !== handoffArchive ||
-    parsed.project_archive_sha256 !== archiveSha256
+    parsed.storage_lineage !== identity.storageLineage ||
+    parsed.logical_dispatch_fingerprint !== identity.logicalDispatchFingerprint ||
+    parsed.workspace_path !== identity.projectRoot ||
+    parsed.run_root !== identity.runRoot ||
+    parsed.execution_snapshot_root !== identity.executionSnapshotRoot ||
+    parsed.handoff_archive !== identity.handoffArchive ||
+    parsed.project_archive_sha256 !== identity.archiveSha256
   ) {
     throw new Error("durable checkpoint index is invalid");
   }
@@ -1319,6 +1424,7 @@ function assertDurableCheckpointManifestBijection(
       checkpoint.stage !== entry.stage ||
       checkpoint.created_at !== entry.created_at ||
       checkpoint.storage_lineage !== index.storage_lineage ||
+      checkpoint.logical_dispatch_fingerprint !== index.logical_dispatch_fingerprint ||
       checkpoint.workspace_path !== index.workspace_path ||
       checkpoint.run_root !== index.run_root ||
       checkpoint.execution_snapshot_root !== index.execution_snapshot_root ||
@@ -1386,8 +1492,9 @@ async function runChecked(
   command: string,
   args: string[],
   cwd: string,
-  env: Record<string, string> = {}
-): Promise<void> {
+  env: Record<string, string | undefined> = {},
+  outputLimit = 4_096
+): Promise<{ stdout: string; stderr: string }> {
   const childEnvironment = { ...process.env, ...env };
   for (const name of ["BUN_INSPECT_PRELOAD", "BUN_OPTIONS", "NODE_OPTIONS", "NODE_PATH"]) delete childEnvironment[name];
   const child = spawn(command, args, {
@@ -1395,8 +1502,8 @@ async function runChecked(
     env: childEnvironment,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const stdout = readBoundedText(child.stdout);
-  const stderr = readBoundedText(child.stderr);
+  const stdout = readBoundedText(child.stdout, outputLimit);
+  const stderr = readBoundedText(child.stderr, outputLimit);
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code ?? 1));
@@ -1405,6 +1512,7 @@ async function runChecked(
   if (exitCode !== 0) {
     throw new CloudWorkerCommandError(phase, path.basename(command), exitCode, stdoutText, stderrText);
   }
+  return { stdout: stdoutText, stderr: stderrText };
 }
 
 class CloudWorkerCommandError extends Error {

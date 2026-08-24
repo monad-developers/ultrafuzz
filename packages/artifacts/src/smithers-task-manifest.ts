@@ -23,7 +23,7 @@ export const MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_SMITHERS_TASKS = 100_000;
 const SAFE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
-const EXPANDED_NODE_ID_PATTERN = "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$";
+const EXPANDED_NODE_ID_PATTERN = "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$";
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
 const VALIDATOR_BUILD_PATTERN = "^ultrafuzz-json-validator\\.v1:[0-9a-f]{64}$";
@@ -346,13 +346,37 @@ const smithersTaskMetadataJsonSchema = {
       additionalProperties: false,
       required: ["concreteNodeId", "logicalNodeId", "attemptId", "label", "kind"],
       properties: {
-        concreteNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
+        concreteNodeId: { type: "string", pattern: EXPANDED_NODE_ID_PATTERN },
         logicalNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
         attemptId: { type: "string", pattern: SAFE_ID_PATTERN },
         label: nonEmptyStringJsonSchema,
         kind: { const: "agentic" },
         promptPath: nonEmptyStringJsonSchema,
-        group: { type: "string", pattern: SAFE_ID_PATTERN }
+        group: { type: "string", pattern: SAFE_ID_PATTERN },
+        producerNodeId: { type: "string", pattern: EXPANDED_NODE_ID_PATTERN },
+        storageId: { type: "string", pattern: SAFE_ID_PATTERN },
+        dynamic: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "groupNodeId",
+            "sourceNodeId",
+            "sourceAttemptId",
+            "sourceDigest",
+            "expansionKey",
+            "itemDigest",
+            "manifestPath"
+          ],
+          properties: {
+            groupNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
+            sourceNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
+            sourceAttemptId: { type: "string", pattern: SAFE_ID_PATTERN },
+            sourceDigest: sha256JsonSchemaRef,
+            expansionKey: nonEmptyStringJsonSchema,
+            itemDigest: sha256JsonSchemaRef,
+            manifestPath: safePathValueJsonSchema
+          }
+        }
       }
     },
     dependencies: {
@@ -454,6 +478,118 @@ const smithersTaskMetadataJsonSchema = {
   }
 } as const;
 
+const dynamicPromptRuntimeContextJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["projectRoot", "repoPath", "artifactsDir", "runMetadataPath", "resolvedConfig"],
+  properties: {
+    projectRoot: safePathValueJsonSchema,
+    repoPath: safePathValueJsonSchema,
+    artifactsDir: safePathValueJsonSchema,
+    runMetadataPath: safePathValueJsonSchema,
+    resolvedConfig: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "triage",
+        "dynamicStrategiesEnumerator",
+        "invariantPropertyPriorityThreshold",
+        "invariantPropertyPriorityFilter",
+        "invariantPropertyPriorities",
+        "invariantTestingFuzzerTimeout"
+      ],
+      dependentRequired: {
+        vulnerabilityDatabaseRelativePath: ["vulnerabilityDatabaseSha256"],
+        vulnerabilityDatabaseSha256: ["vulnerabilityDatabaseRelativePath"]
+      },
+      properties: {
+        triage: {
+          type: "object",
+          additionalProperties: false,
+          required: ["quorum", "panelSize"],
+          properties: {
+            quorum: { type: "integer", minimum: 1 },
+            panelSize: { type: "integer", minimum: 1 }
+          }
+        },
+        dynamicStrategiesEnumerator: {
+          anyOf: [{ type: "integer", minimum: 1 }, { const: "unlimited" }]
+        },
+        invariantPropertyPriorityThreshold: nonEmptyStringJsonSchema,
+        invariantPropertyPriorityFilter: nonEmptyStringJsonSchema,
+        invariantPropertyPriorities: {
+          type: "array",
+          uniqueItems: true,
+          items: nonEmptyStringJsonSchema
+        },
+        invariantTestingFuzzerTimeout: { type: "integer", minimum: 1 },
+        vulnerabilityDatabaseRelativePath: safePathValueJsonSchema,
+        vulnerabilityDatabaseSha256: sha256JsonSchemaRef
+      }
+    }
+  }
+} as const;
+
+const smithersDynamicGroupJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "groupNodeId",
+    "logicalNodeId",
+    "source",
+    "sourcePath",
+    "keyPath",
+    "nodeIdTemplate",
+    "templatePath",
+    "templateDigest",
+    "templateFingerprint",
+    "continueOnFail",
+    "maxDynamicNodes",
+    "reservedNodeIds",
+    "taskTemplates",
+    "promptContext"
+  ],
+  properties: {
+    groupNodeId: safeIdJsonSchemaRef,
+    logicalNodeId: safeIdJsonSchemaRef,
+    source: {
+      type: "object",
+      additionalProperties: false,
+      required: ["concreteNodeId", "attemptId", "artifactPath"],
+      properties: {
+        concreteNodeId: safeIdJsonSchemaRef,
+        attemptId: safeIdJsonSchemaRef,
+        verifierSmithersNodeId: {
+          type: "string",
+          pattern: "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        artifactPath: canonicalArtifactRelativePathJsonSchemaRef
+      }
+    },
+    sourcePath: nonEmptyStringJsonSchema,
+    keyPath: nonEmptyStringJsonSchema,
+    nodeIdTemplate: nonEmptyStringJsonSchema,
+    templatePath: safePathValueJsonSchema,
+    templateDigest: sha256JsonSchemaRef,
+    templateFingerprint: sha256JsonSchemaRef,
+    continueOnFail: { type: "boolean" },
+    maxDynamicNodes: { type: "integer", minimum: 1, maximum: MAX_SMITHERS_TASKS },
+    reservedNodeIds: {
+      type: "array",
+      maxItems: MAX_SMITHERS_TASKS,
+      uniqueItems: true,
+      items: { type: "string", pattern: EXPANDED_NODE_ID_PATTERN }
+    },
+    taskTemplates: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_SMITHERS_TASKS,
+      items: { $ref: "#/properties/tasks/items" }
+    },
+    promptContext: dynamicPromptRuntimeContextJsonSchema
+  }
+} as const;
+
 export const smithersTaskManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: SMITHERS_TASK_MANIFEST_JSON_SCHEMA_ID,
@@ -475,6 +611,11 @@ export const smithersTaskManifestJsonSchema = {
     source_revision: sourceIdentityValueJsonSchema,
     source_ref: sourceIdentityValueJsonSchema,
     pinned_submodules: { anyOf: [{ type: "null" }, pinnedSubmoduleExpectationJsonSchema] },
+    dynamic_groups: {
+      type: "array",
+      maxItems: MAX_SMITHERS_TASKS,
+      items: smithersDynamicGroupJsonSchema
+    },
     tasks: {
       type: "array",
       maxItems: MAX_SMITHERS_TASKS,
@@ -504,7 +645,7 @@ export const smithersTaskManifestJsonSchema = {
         ],
         properties: {
           attemptId: safeIdJsonSchemaRef,
-          concreteNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
+          concreteNodeId: { type: "string", pattern: EXPANDED_NODE_ID_PATTERN },
           logicalNodeId: { type: "string", pattern: SAFE_ID_PATTERN },
           preparationSmithersNodeId: {
             type: "string",
@@ -555,6 +696,20 @@ export const smithersTaskManifestJsonSchema = {
             uniqueItems: true,
             items: boundedNonNulPathJsonSchemaRef
           },
+          referenceArtifactDirs: {
+            type: "array",
+            uniqueItems: true,
+            items: boundedNonNulPathJsonSchemaRef
+          },
+          vulnerabilityDatabaseCatalog: {
+            type: "object",
+            additionalProperties: false,
+            required: ["path", "sha256"],
+            properties: {
+              path: boundedNonNulPathJsonSchemaRef,
+              sha256: sha256JsonSchemaRef
+            }
+          },
           referenceArtifactManifestAuthorities: {
             type: "array",
             minItems: 1,
@@ -575,6 +730,24 @@ export const smithersTaskManifestJsonSchema = {
             items: promptArtifactAuthoritySelectorJsonSchema
           },
           renderedPromptPath: safePathValueJsonSchema,
+          promptTemplatePath: safePathValueJsonSchema,
+          dynamicDependencies: {
+            type: "array",
+            uniqueItems: true,
+            items: safeIdJsonSchemaRef
+          },
+          deferredPromptGroups: {
+            type: "array",
+            uniqueItems: true,
+            items: safeIdJsonSchemaRef
+          },
+          dynamicVariables: {
+            type: "object",
+            propertyNames: nonEmptyStringJsonSchema,
+            additionalProperties: {
+              anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
+            }
+          },
           execution: taskExecutionJsonSchema,
           metadata: smithersTaskMetadataJsonSchema
         }
@@ -630,6 +803,17 @@ export interface SmithersTaskManifestMetadata {
     kind: "agentic";
     promptPath?: string;
     group?: string;
+    producerNodeId?: string;
+    storageId?: string;
+    dynamic?: {
+      groupNodeId: string;
+      sourceNodeId: string;
+      sourceAttemptId: string;
+      sourceDigest: string;
+      expansionKey: string;
+      itemDigest: string;
+      manifestPath: string;
+    };
   };
   dependencies: {
     concreteNodeIds: string[];
@@ -724,6 +908,8 @@ export interface SmithersTaskManifestTask {
   workspacePath: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
+  referenceArtifactDirs?: string[];
+  vulnerabilityDatabaseCatalog?: { path: string; sha256: string };
   /** Stable byte authorities for every transitive reference ancestor's outer artifact manifest. */
   referenceArtifactManifestAuthorities?: SmithersTaskManifestReferenceArtifactManifestAuthority[];
   /** Exact subset whose producer group uses failure_policy=continue. */
@@ -731,6 +917,10 @@ export interface SmithersTaskManifestTask {
   /** Canonical union of compact ancestor-output selectors used by the rendered prompt. */
   promptArtifactAuthoritySelectors?: SmithersTaskManifestPromptArtifactAuthoritySelector[];
   renderedPromptPath?: string;
+  promptTemplatePath?: string;
+  dynamicDependencies?: string[];
+  deferredPromptGroups?: string[];
+  dynamicVariables?: Record<string, string | number | boolean>;
   execution: SmithersTaskManifestExecution;
   metadata: SmithersTaskManifestMetadata;
 }
@@ -756,6 +946,46 @@ export interface SmithersTaskManifestDocument {
   source_ref?: string;
   pinned_submodules: SmithersPinnedSubmoduleExpectation | null;
   tasks: SmithersTaskManifestTask[];
+  dynamic_groups?: readonly SmithersTaskManifestDynamicGroup[];
+}
+
+export interface SmithersTaskManifestDynamicPromptRuntimeContext {
+  projectRoot: string;
+  repoPath: string;
+  artifactsDir: string;
+  runMetadataPath: string;
+  resolvedConfig: {
+    triage: { quorum: number; panelSize: number };
+    dynamicStrategiesEnumerator: number | "unlimited";
+    invariantPropertyPriorityThreshold: string;
+    invariantPropertyPriorityFilter: string;
+    invariantPropertyPriorities: string[];
+    invariantTestingFuzzerTimeout: number;
+    vulnerabilityDatabaseRelativePath?: string;
+    vulnerabilityDatabaseSha256?: string;
+  };
+}
+
+export interface SmithersTaskManifestDynamicGroup {
+  groupNodeId: string;
+  logicalNodeId: string;
+  source: {
+    concreteNodeId: string;
+    attemptId: string;
+    verifierSmithersNodeId?: string;
+    artifactPath: string;
+  };
+  sourcePath: string;
+  keyPath: string;
+  nodeIdTemplate: string;
+  templatePath: string;
+  templateDigest: string;
+  templateFingerprint: string;
+  continueOnFail: boolean;
+  maxDynamicNodes: number;
+  reservedNodeIds: readonly string[];
+  taskTemplates: readonly SmithersTaskManifestTask[];
+  promptContext: SmithersTaskManifestDynamicPromptRuntimeContext;
 }
 
 export function validateSmithersTaskManifest(value: unknown): JsonSchemaValidationResult {
@@ -1150,6 +1380,12 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
       }
       continue;
     }
+    if (node.dynamic !== null && node.dynamic !== undefined) {
+      if (tasks.length !== 0 || node.workflow !== undefined) {
+        throw new Error(`dynamic planned-graph group ${JSON.stringify(node.id)} must not have static Smithers tasks`);
+      }
+      continue;
+    }
     const expectedAttemptIds = plannedAttemptIds(node);
     assertSameStringSet(
       tasks.map((task) => task.attemptId),
@@ -1284,6 +1520,13 @@ function assertTaskMatchesPlannedNode(
     const dependency = graphNodes.get(dependencyId);
     if (dependency === undefined)
       throw new Error(`planned-graph dependency ${JSON.stringify(dependencyId)} is missing`);
+    if (
+      dependency.dynamic !== null &&
+      dependency.dynamic !== undefined &&
+      node.dynamic_dependencies?.includes(dependencyId)
+    ) {
+      return [];
+    }
     return plannedAttemptIds(dependency);
   });
   assertSameStringSet(
@@ -1298,6 +1541,13 @@ function assertTaskMatchesPlannedNode(
   );
   const expectedWorkflowDependencies = node.depends_on.flatMap((dependencyId) => {
     const dependency = graphNodes.get(dependencyId)!;
+    if (
+      dependency.dynamic !== null &&
+      dependency.dynamic !== undefined &&
+      node.dynamic_dependencies?.includes(dependencyId)
+    ) {
+      return [];
+    }
     return dependency.kind === "agentic" ? plannedAttemptIds(dependency).map((attemptId) => `verify:${attemptId}`) : [];
   });
   assertSameStringSet(

@@ -14,6 +14,7 @@ export const PLANNED_GRAPH_SCHEMA_VERSION = "ultrafuzz.planned-graph.v4" as cons
 export const PLANNED_GRAPH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:planned-graph:4" as const;
 
 const SAFE_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$";
+const NODE_REFERENCE_PATTERN = "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$";
 const SAFE_PATH_PATTERN = CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN;
 const SHA256_PATTERN = "^[0-9a-f]{64}$";
 const SCHEMA_FILE_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*\\.schema\\.json$";
@@ -92,12 +93,12 @@ export const plannedGraphJsonSchema = {
           "model_fanout"
         ],
         properties: {
-          id: { $ref: "#/$defs/safeId" },
+          id: { $ref: "#/$defs/nodeReference" },
           logical_id: { $ref: "#/$defs/safeId" },
           display_name: { type: "string", minLength: 1 },
           kind: { enum: ["agentic", "reference"] },
           group: { $ref: "#/$defs/safeId" },
-          depends_on: { type: "array", uniqueItems: true, items: { $ref: "#/$defs/safeId" } },
+          depends_on: { type: "array", uniqueItems: true, items: { $ref: "#/$defs/nodeReference" } },
           artifact_dir: { type: "string", pattern: "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
           timeout_seconds: { type: "integer", minimum: 1 },
           outputs: { type: "array", minItems: 1, items: plannedOutputJsonSchema },
@@ -109,10 +110,74 @@ export const plannedGraphJsonSchema = {
             additionalProperties: false,
             required: ["provider", "repo", "commit", "paths"],
             properties: {
+              kind: { enum: ["document", "vulnerability-database"] },
               provider: { const: "github" },
               repo: { type: "string", pattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
               commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
               paths: { type: "array", minItems: 1, uniqueItems: true, items: { $ref: "#/$defs/safePath" } }
+            }
+          },
+          artifact_dirs: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", pattern: "^artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+          },
+          dynamic: {
+            type: "object",
+            additionalProperties: false,
+            required: ["from", "key", "node_id"],
+            properties: {
+              from: {
+                type: "object",
+                additionalProperties: false,
+                required: ["node", "path"],
+                properties: {
+                  node: { $ref: "#/$defs/safeId" },
+                  path: { type: "string", minLength: 1 }
+                }
+              },
+              key: { type: "string", minLength: 1 },
+              node_id: { type: "string", minLength: 1 },
+              template_digest: { $ref: "#/$defs/sha256" },
+              status: { enum: ["pending", "expanded"] },
+              generated_node_ids: {
+                type: "array",
+                uniqueItems: true,
+                items: { $ref: "#/$defs/nodeReference" }
+              }
+            }
+          },
+          dynamic_dependencies: {
+            type: "array",
+            uniqueItems: true,
+            items: { $ref: "#/$defs/safeId" }
+          },
+          declared_depends_on: {
+            type: "array",
+            uniqueItems: true,
+            items: { $ref: "#/$defs/safeId" }
+          },
+          dynamic_generated: {
+            type: "object",
+            additionalProperties: false,
+            required: [
+              "group_node_id",
+              "source_node_id",
+              "source_attempt_id",
+              "expansion_key",
+              "item_sha256",
+              "storage_id",
+              "manifest_path"
+            ],
+            properties: {
+              group_node_id: { $ref: "#/$defs/safeId" },
+              source_node_id: { $ref: "#/$defs/safeId" },
+              source_attempt_id: { $ref: "#/$defs/safeId" },
+              expansion_key: { type: "string", minLength: 1 },
+              item_sha256: { $ref: "#/$defs/sha256" },
+              storage_id: { $ref: "#/$defs/safeId" },
+              manifest_path: { $ref: "#/$defs/safePath" }
             }
           },
           loop: {
@@ -188,6 +253,7 @@ export const plannedGraphJsonSchema = {
   },
   $defs: {
     safeId: { type: "string", pattern: SAFE_ID_PATTERN },
+    nodeReference: { type: "string", pattern: NODE_REFERENCE_PATTERN },
     workflowTaskId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$" },
     safePath: { type: "string", pattern: SAFE_PATH_PATTERN },
     sha256: { type: "string", pattern: SHA256_PATTERN },
@@ -245,12 +311,19 @@ export interface PlannedGraphNodeDocument {
   group?: string;
   depends_on: string[];
   artifact_dir: string;
+  artifact_dirs?: string[];
   timeout_seconds?: number;
   outputs: PlannedGraphOutput[];
   prompt_id: string;
   prompt_path: string;
   reference?: string;
-  reference_revision?: { provider: "github"; repo: string; commit: string; paths: string[] };
+  reference_revision?: {
+    kind?: "document" | "vulnerability-database";
+    provider: "github";
+    repo: string;
+    commit: string;
+    paths: string[];
+  };
   loop: { index: number; count: number; mode: "parallel" | "series"; attempt_index: number };
   model_fanout: Array<{
     attempt_id?: string;
@@ -263,6 +336,25 @@ export interface PlannedGraphNodeDocument {
     loop_index: number;
     attempt_index: number;
   }>;
+  dynamic?: {
+    from: { node: string; path: string };
+    key: string;
+    node_id: string;
+    template_digest?: string;
+    status?: "pending" | "expanded";
+    generated_node_ids?: string[];
+  };
+  dynamic_dependencies?: string[];
+  declared_depends_on?: string[];
+  dynamic_generated?: {
+    group_node_id: string;
+    source_node_id: string;
+    source_attempt_id: string;
+    expansion_key: string;
+    item_sha256: string;
+    storage_id: string;
+    manifest_path: string;
+  };
   workflow?: { node_id: string; task_node_ids: string[] };
 }
 
@@ -309,8 +401,20 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
   for (const node of graph.nodes) {
     if (nodes.has(node.id)) throw new Error(`planned graph repeats node ID ${JSON.stringify(node.id)}`);
     nodes.set(node.id, node);
-    if (node.artifact_dir !== `artifacts/${node.id}`) {
+    const artifactIdentity = node.dynamic_generated?.storage_id ?? node.id;
+    const expectedArtifactDirs = node.model_fanout.map((model) => `artifacts/${model.attempt_id ?? artifactIdentity}`);
+    const expectedPrimaryArtifactDir =
+      node.dynamic_generated === undefined
+        ? `artifacts/${node.id}`
+        : (expectedArtifactDirs[0] ?? `artifacts/${artifactIdentity}`);
+    if (node.artifact_dir !== expectedPrimaryArtifactDir) {
       throw new Error(`planned graph artifact_dir does not match node ID ${JSON.stringify(node.id)}`);
+    }
+    if (
+      node.dynamic_generated !== undefined &&
+      JSON.stringify(node.artifact_dirs ?? []) !== JSON.stringify(expectedArtifactDirs)
+    ) {
+      throw new Error(`planned graph dynamic artifact directories do not match its generated attempts`);
     }
     if (node.loop.index >= node.loop.count || node.loop.attempt_index !== node.loop.index) {
       throw new Error(`planned graph node ${JSON.stringify(node.id)} has inconsistent loop coordinates`);
@@ -360,8 +464,8 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
       }
       const expectedAttemptId =
         node.model_fanout.length <= 1
-          ? node.id
-          : `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`;
+          ? artifactIdentity
+          : `${artifactIdentity}__model_${model.model_index}__attempt_${model.attempt_index}`;
       if (model.attempt_id !== undefined && model.attempt_id !== expectedAttemptId) {
         throw new Error(`planned graph node ${JSON.stringify(node.id)} has an inconsistent model attempt ID`);
       }

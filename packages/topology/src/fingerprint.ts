@@ -50,6 +50,7 @@ function fingerprintNode(node: ExpandedNode): FingerprintNodePayload {
     retryPolicy: node.retryPolicy,
     loop: node.loop,
     outputs: [...node.outputs].sort((left, right) => left.path.localeCompare(right.path)),
+    ...(node.dynamic ? { dynamic: node.dynamic } : {}),
     modelFanout: [...node.modelFanout].sort((left, right) => {
       if (left.loopIndex !== right.loopIndex) {
         return left.loopIndex - right.loopIndex;

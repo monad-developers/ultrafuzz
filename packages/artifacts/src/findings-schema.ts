@@ -24,6 +24,7 @@ import {
 } from "./finding-note-vocabulary.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
+import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
@@ -52,6 +53,15 @@ const findingPath = z
   .meta({ maxLength: MAX_FINDING_PATH_CODE_POINTS });
 const nonNegativeInteger = z.number().int().nonnegative().max(MAX_FINDING_COUNT);
 const positiveSafeInteger = z.number().int().positive().max(MAX_FINDING_COUNT);
+const findingNodeReference = z.string().regex(NODE_REFERENCE_PATTERN);
+const findingSourceNodes = z
+  .array(findingNodeReference)
+  .min(1)
+  .max(MAX_FINDING_NESTED_ITEMS)
+  .meta({ uniqueItems: true })
+  .refine((values) => new Set(values).size === values.length, {
+    message: "Finding source node IDs must be unique"
+  });
 const supportedNoteKeyPattern = `(?:${FINDING_NOTE_KEYS.join("|")})`;
 const assignmentKeyPattern = FINDING_REPORT_ASSIGNMENT_KEY_PATTERN;
 const assignmentBoundaryPattern = "(?:^|[^\\p{L}\\p{N}\\p{M}_%\\-])";
@@ -886,7 +896,10 @@ export const findingSchema = z
     confidence: z.enum(FINDING_CONFIDENCE_LEVELS),
     summary: nonEmptyString,
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
-    source_node_id: nonEmptyString.optional(),
+    producer_node_id: findingNodeReference.optional(),
+    producer_attempt_id: findingNodeReference.optional(),
+    source_node_id: findingNodeReference.optional(),
+    source_nodes: findingSourceNodes.optional(),
     strategy: nonEmptyString.optional(),
     dynamic_strategy_id: nonEmptyString.optional(),
     enumerator_id: nonEmptyString.optional(),

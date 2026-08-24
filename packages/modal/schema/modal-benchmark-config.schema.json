@@ -177,7 +177,8 @@
           "maxItems": 512,
           "uniqueItems": true,
           "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" }
-        }
+        },
+        "include_threat_model_goal_fanout": { "type": "boolean" }
       }
     },
     "privateEvalReporting": {
@@ -225,7 +226,7 @@
       ],
       "properties": {
         "benchmark": { "enum": ["evmbench", "ultrafuzz-bench"] },
-        "lane": { "enum": ["smoke", "full"] },
+        "lane": { "enum": ["smoke", "threat-model", "full"] },
         "runner_model_profile": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
         "candidate_repository": { "$ref": "#/$defs/httpsUrl" },
         "candidate_commit": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/gitObjectId" },

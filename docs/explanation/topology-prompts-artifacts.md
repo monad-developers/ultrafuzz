@@ -48,10 +48,12 @@ safe relative paths. Normal runs use the local digest-checked cache. Fetching or
 updating references is explicit through the reference commands, not a hidden
 side effect of `run`.
 
-When a reference node runs, Ultrafuzz writes normalized Markdown plus a
-`references/manifest.json` under that node's artifact directory. Missing cache
-entries, digest mismatches, unsafe paths, unknown reference IDs, or missing
-required reference artifacts fail before dependent agentic nodes run.
+When a document reference node runs, Ultrafuzz writes normalized Markdown plus a
+`references/manifest.json` under that node's artifact directory. A
+`kind: vulnerability-database` reference instead materializes the exact upstream
+files below `vulnerability-db/`, alongside the same run reference manifest.
+Missing cache entries, digest mismatches, unsafe paths, unknown reference IDs, or
+missing required reference artifacts fail before dependent agentic nodes run.
 
 ## Artifacts Own Handoffs
 

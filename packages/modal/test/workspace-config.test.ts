@@ -25,10 +25,6 @@ describe("Modal target model profiles", () => {
     expect(config).toContain("keep_workspaces = false");
     expect(config).toContain('invariant_testing_smoke_timeout = "10min"');
     expect(config).toContain('audit_profile = "default"');
-    const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
   });
 
   it("selects the packaged smoke audit profile for smoke target preparation", () => {

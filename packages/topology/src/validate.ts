@@ -78,10 +78,12 @@ export function validateTopology(
 
   validateRequiredMetaNodes(nodeById);
   validateDependencies(topology.nodes, ids);
+  validateDynamicContracts(topology.nodes, nodeById);
   validateNoCycles(nodeById);
   validateEntryExit(topology.nodes);
 
   const effectiveLoopCounts = resolveEffectiveLoopCounts(topology, options, limits);
+  validateDynamicSourceCardinality(topology, nodeById, effectiveLoopCounts);
   validateExpandedSize(effectiveLoopCounts, limits);
   validateConcreteIdCollisions(topology.nodes, effectiveLoopCounts);
   validatePromptArtifacts(topology, options);
@@ -235,6 +237,7 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       "max_attempts",
       "outputs",
       "model_profiles",
+      "dynamic",
       "required_commands"
     ],
     `topology node \`${input.id}\``
@@ -244,6 +247,7 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
   const prompt = normalizeOptionalString(input.prompt, "prompt", `Node \`${input.id}\``);
   const reference = normalizeOptionalString(input.reference, "reference", `Node \`${input.id}\``);
   const group = normalizeOptionalString(input.group, "group", `Node \`${input.id}\``);
+  const dynamic = normalizeDynamicNode(input.dynamic, input.id);
   return {
     id: input.id,
     kind,
@@ -263,7 +267,40 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", input.id) }),
     outputs: normalizeOutputs(input.outputs, input.id),
     model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", input.id, false),
+    ...(dynamic === undefined ? {} : { dynamic }),
     required_commands: normalizeRequiredCommands(input.required_commands, input.id)
+  };
+}
+
+function normalizeDynamicNode(input: unknown, nodeId: string): NormalizedTopologyNode["dynamic"] {
+  if (input === undefined) {
+    return undefined;
+  }
+  if (!isRecord(input)) {
+    throw topologyError("INVALID_DYNAMIC_NODE", `Node \`${nodeId}\` dynamic must be a mapping`, { nodeId });
+  }
+  assertOnlyKeys(input, ["from", "key", "node_id"], `topology node \`${nodeId}\` dynamic`);
+  if (!isRecord(input.from)) {
+    throw topologyError("INVALID_DYNAMIC_SOURCE", `Node \`${nodeId}\` dynamic.from must be a mapping`, { nodeId });
+  }
+  assertOnlyKeys(input.from, ["node", "path"], `topology node \`${nodeId}\` dynamic.from`);
+  if (typeof input.from.node !== "string" || typeof input.from.path !== "string") {
+    throw topologyError("INVALID_DYNAMIC_SOURCE", `Node \`${nodeId}\` dynamic.from requires node and path`, {
+      nodeId
+    });
+  }
+  if (typeof input.key !== "string") {
+    throw topologyError("INVALID_DYNAMIC_KEY", `Node \`${nodeId}\` dynamic.key must be a string`, { nodeId });
+  }
+  if (typeof input.node_id !== "string") {
+    throw topologyError("INVALID_DYNAMIC_NODE_ID_TEMPLATE", `Node \`${nodeId}\` dynamic.node_id must be a string`, {
+      nodeId
+    });
+  }
+  return {
+    from: { node: input.from.node, path: input.from.path },
+    key: input.key,
+    node_id: input.node_id
   };
 }
 
@@ -405,6 +442,11 @@ function validateNodeShape(
     validateReferenceNode(node);
   } else {
     validateAgenticNode(node, options);
+  }
+  if (node.dynamic !== undefined && node.kind !== "agentic") {
+    throw topologyError("INVALID_DYNAMIC_NODE", `Node \`${node.id}\` dynamic expansion requires kind: agentic`, {
+      nodeId: node.id
+    });
   }
 }
 
@@ -684,6 +726,143 @@ function validateDependencies(nodes: NormalizedTopologyNode[], ids: Set<string>)
   }
 }
 
+function validateDynamicContracts(
+  nodes: NormalizedTopologyNode[],
+  nodeById: Map<string, NormalizedTopologyNode>
+): void {
+  for (const node of nodes) {
+    const dynamic = node.dynamic;
+    if (dynamic === undefined) continue;
+    if (node.loops !== 1 || node.loop_mode !== "parallel") {
+      throw topologyError("INVALID_DYNAMIC_NODE", `Dynamic node \`${node.id}\` must use one parallel template`, {
+        nodeId: node.id
+      });
+    }
+    if (!node.depends_on.includes(dynamic.from.node)) {
+      throw topologyError(
+        "INVALID_DYNAMIC_SOURCE",
+        `Dynamic node \`${node.id}\` source \`${dynamic.from.node}\` must be a direct dependency`,
+        { nodeId: node.id, dependency: dynamic.from.node }
+      );
+    }
+    const source = nodeById.get(dynamic.from.node);
+    if (source === undefined) {
+      throw topologyError("INVALID_DYNAMIC_SOURCE", `Dynamic node \`${node.id}\` source is unknown`, {
+        nodeId: node.id,
+        dependency: dynamic.from.node
+      });
+    }
+    if (source.dynamic !== undefined || node.depends_on.some((id) => nodeById.get(id)?.dynamic !== undefined)) {
+      throw topologyError("NESTED_DYNAMIC_NODE", `Dynamic node \`${node.id}\` cannot depend on another dynamic node`, {
+        nodeId: node.id
+      });
+    }
+    const primary = source.outputs.find((output) => output.primary);
+    if (primary === undefined || primary.contract !== "ultrafuzz/goal-plan@1") {
+      throw topologyError(
+        "INVALID_DYNAMIC_SOURCE",
+        `Dynamic node \`${node.id}\` source must declare a primary JSON output`,
+        { nodeId: node.id, dependency: dynamic.from.node }
+      );
+    }
+    if (!/^\$(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(dynamic.from.path)) {
+      throw topologyError("INVALID_DYNAMIC_PATH", `Dynamic node \`${node.id}\` has invalid JSONPath`, {
+        nodeId: node.id,
+        path: dynamic.from.path
+      });
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(dynamic.key)) {
+      throw topologyError("INVALID_DYNAMIC_KEY", `Dynamic node \`${node.id}\` has invalid key path`, {
+        nodeId: node.id,
+        key: dynamic.key
+      });
+    }
+    validateDynamicNodeIdTemplate(node.id, dynamic.node_id, dynamic.key);
+  }
+}
+
+/**
+ * A dynamic group reads exactly one concrete source attempt, so the source must resolve to exactly
+ * one dependency attempt after loop and model fanout. Rejecting this during validation gives a
+ * targeted diagnostic instead of deferring the identical constraint to workflow compilation, which
+ * only fails once the run is already planned.
+ */
+function validateDynamicSourceCardinality(
+  topology: NormalizedProjectTopology,
+  nodeById: Map<string, NormalizedTopologyNode>,
+  effectiveLoopCounts: Record<string, number>
+): void {
+  for (const node of topology.nodes) {
+    if (node.dynamic === undefined) continue;
+    const source = nodeById.get(node.dynamic.from.node);
+    if (source === undefined) continue;
+    const loops = effectiveLoopCounts[source.id] ?? source.loops;
+    // Series loops lower to their last concrete attempt; parallel loops lower to every attempt.
+    const dependencyAttempts = source.loop_mode === "series" && loops > 1 ? 1 : loops;
+    const models = declaredModelProfileCount(source, topology);
+    const concreteAttempts = dependencyAttempts * models;
+    if (concreteAttempts !== 1) {
+      throw topologyError(
+        "INVALID_DYNAMIC_SOURCE",
+        `Dynamic node \`${node.id}\` source \`${source.id}\` must resolve to exactly one concrete attempt; it resolves to ${concreteAttempts}`,
+        {
+          nodeId: node.id,
+          dependency: source.id,
+          loops: dependencyAttempts,
+          modelProfiles: models,
+          concreteAttempts
+        }
+      );
+    }
+  }
+}
+
+function declaredModelProfileCount(node: NormalizedTopologyNode, topology: NormalizedProjectTopology): number {
+  if (node.kind !== "agentic") return 1;
+  if (node.model_profiles.length > 0) return node.model_profiles.length;
+  const groupProfiles = node.group === undefined ? undefined : topology.groups[node.group]?.defaults?.model_profiles;
+  return groupProfiles !== undefined && groupProfiles.length > 0 ? groupProfiles.length : 1;
+}
+
+function validateDynamicNodeIdTemplate(nodeId: string, template: string, key: string): void {
+  if (template.length === 0 || template.length > 256 || template.includes("/") || template.includes("\\")) {
+    throw topologyError("INVALID_DYNAMIC_NODE_ID_TEMPLATE", `Dynamic node \`${nodeId}\` has unsafe node_id`, {
+      nodeId,
+      template
+    });
+  }
+  const placeholders = [...template.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/gu)].map((match) => match[1]!.trim());
+  if (placeholders.length === 0 || template.replace(/\{\{\s*[^{}]+?\s*\}\}/gu, "").includes("{{")) {
+    throw topologyError("INVALID_DYNAMIC_NODE_ID_TEMPLATE", `Dynamic node \`${nodeId}\` node_id needs item fields`, {
+      nodeId,
+      template
+    });
+  }
+  for (const placeholder of placeholders) {
+    if (!/^item\.[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(placeholder)) {
+      throw topologyError(
+        "INVALID_DYNAMIC_NODE_ID_TEMPLATE",
+        `Dynamic node \`${nodeId}\` node_id contains invalid placeholder \`${placeholder}\``,
+        { nodeId, template, placeholder }
+      );
+    }
+  }
+  if (!placeholders.includes(`item.${key}`)) {
+    throw topologyError(
+      "INVALID_DYNAMIC_NODE_ID_TEMPLATE",
+      `Dynamic node \`${nodeId}\` node_id must include its key as \`{{ item.${key} }}\``,
+      { nodeId, template, key }
+    );
+  }
+  const literal = template.replace(/\{\{\s*[^{}]+?\s*\}\}/gu, "");
+  if (!/^[a-z0-9:_-]*$/u.test(literal)) {
+    throw topologyError("INVALID_DYNAMIC_NODE_ID_TEMPLATE", `Dynamic node \`${nodeId}\` node_id has invalid literals`, {
+      nodeId,
+      template
+    });
+  }
+}
+
 function validateNoCycles(nodeById: Map<string, NormalizedTopologyNode>): void {
   const state = new Map<string, "visiting" | "done">();
   const stack: string[] = [];
@@ -764,6 +943,10 @@ function resolveEffectiveLoopCounts(
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const node of topology.nodes) {
+    if (node.dynamic !== undefined) {
+      counts[node.id] = 1;
+      continue;
+    }
     let loops = node.loops;
     if (!node.explicit_loops) {
       loops =

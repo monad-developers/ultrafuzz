@@ -16,7 +16,10 @@ const MAX_REGISTERED_SCHEMA_BYTES = 4 * 1024 * 1024;
 const MAX_REGISTERED_BUNDLE_BYTES = 16 * 1024 * 1024;
 const MAX_DEPENDENCY_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_REGISTERED_PATTERNS = 256;
-const MAX_REGISTERED_BUNDLE_PATTERNS = 512;
+// The v0.1 contract set includes the canonical goal-plan and threat-model
+// schemas in addition to the strict producer-visible bundle. Keep the bundle
+// bounded while leaving headroom for their audited patterns.
+const MAX_REGISTERED_BUNDLE_PATTERNS = 1_024;
 const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
 
 export interface SchemaRegistryEntry {

@@ -10,8 +10,19 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
+import { builtInPromptRoot } from "./assets.js";
 
 export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
+
+const AGENT_PREAMBLE_TEMPLATE_FILES = {
+  "agent-prompt": "agent-prompt.mdx",
+  "authorized-defensive-security-context": "authorized-defensive-security-context.mdx",
+  "retry-failure": "retry-failure.mdx",
+  "topology-runtime-context": "topology-runtime-context.mdx",
+  "untrusted-content-boundary": "untrusted-content-boundary.mdx"
+} as const;
+
+export type AgentPreambleTemplateName = keyof typeof AGENT_PREAMBLE_TEMPLATE_FILES;
 
 export const SUPPORTED_TEMPLATE_VARIABLES = [
   "repo_path",
@@ -22,6 +33,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "ancestor_contract_artifact_authority",
   "ancestor_artifact_path_authority",
   "run_metadata_path",
+  "goal_search_coverage_path",
   "output_findings_path",
   "output_patch_path",
   "output_stage_findings_path",
@@ -39,6 +51,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
+  "vulnerability_database_path",
+  "artifact_schema_dir",
   "finding_reachability_vocabulary",
   "finding_note_key_vocabulary",
   "coverage_evidence_markdown_projection"
@@ -99,6 +113,13 @@ export interface PromptModelProvenance {
 export interface PromptRenderInput {
   prompt: string | { body: string; id?: string; displayName?: string; source?: string };
   variables?: Record<string, string | number | boolean>;
+  /**
+   * Runtime-discovered values scoped to one dynamic topology item. These are
+   * deliberately separate from the closed set of built-in variable overrides:
+   * a planner may supply `item.foo` values or namespaced keys such as
+   * `liquidation:overdue`, but it cannot redefine trusted runtime variables.
+   */
+  dynamicVariables?: Record<string, string | number | boolean>;
   graph: {
     logicalNodes: PromptGraphNode[];
     concreteNodes?: PromptConcreteNode[];
@@ -137,6 +158,8 @@ export interface PromptRenderInput {
     invariantPropertyPriorities?: string[];
     invariantTestingSmokeTimeout?: string | number;
     invariantTestingFuzzerTimeout?: string | number;
+    vulnerabilityDatabasePath?: string;
+    artifactSchemaDir?: string;
   };
 }
 
@@ -170,11 +193,21 @@ export type PromptArtifactReference =
 type ArtifactProducer =
   { kind: "current" } | { kind: "logical"; logicalId: string } | { kind: "handoff"; logicalId: string };
 
-interface TemplateOccurrence {
+export interface TemplateOccurrence {
   name: string;
   rawName: string;
   start: number;
   end: number;
+}
+
+/**
+ * The single source of truth for which `{{...}}` occurrences a rendered prompt will actually bind.
+ * Escaped `\{{...}}` occurrences are deliberately skipped here and unescaped verbatim at render
+ * time, so every contract that promises "this placeholder is bound" must use this parser instead
+ * of its own regex.
+ */
+export function promptTemplateOccurrences(template: string): TemplateOccurrence[] {
+  return findTemplateOccurrences(template);
 }
 
 export interface PromptVariableReference {
@@ -182,13 +215,37 @@ export interface PromptVariableReference {
   name: string;
   argument?: string;
   path?: string;
+  scope?: "dynamic-item";
+}
+
+export interface PromptVariableParseOptions {
+  allowDynamicItemVariables?: boolean;
 }
 
 export function isSupportedTemplateVariable(name: string): name is SupportedTemplateVariable {
   return (SUPPORTED_TEMPLATE_VARIABLES as readonly string[]).includes(name);
 }
 
-export function parsePromptVariableReference(rawName: string): PromptVariableReference {
+export function isDynamicItemTemplateVariable(name: string): boolean {
+  return (
+    /^item\.[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(name) ||
+    isNamespacedDynamicReplacementKey(name)
+  );
+}
+
+/**
+ * The exact key shape a dynamic fanout consumer accepts for planner-supplied replacements. Every
+ * layer that accepts or produces `replacements` keys must use this predicate so a contract-valid
+ * artifact can never carry a key the renderer refuses to bind.
+ */
+export function isNamespacedDynamicReplacementKey(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_.-]*(?::[a-z0-9][a-z0-9_.-]*)+$/u.test(name);
+}
+
+export function parsePromptVariableReference(
+  rawName: string,
+  options: PromptVariableParseOptions = {}
+): PromptVariableReference {
   const raw = rawName.trim();
   if (raw === "") {
     throw new PromptError("empty-template-variable", "template variable name cannot be empty");
@@ -229,6 +286,10 @@ export function parsePromptVariableReference(rawName: string): PromptVariableRef
     );
   }
 
+  if (options.allowDynamicItemVariables === true && isDynamicItemTemplateVariable(raw)) {
+    return { raw, name: raw, scope: "dynamic-item" };
+  }
+
   if (!isSupportedTemplateVariable(raw)) {
     throw new PromptError("missing-template-variable", `unknown prompt template variable: ${raw}`, { variable: raw });
   }
@@ -236,22 +297,29 @@ export function parsePromptVariableReference(rawName: string): PromptVariableRef
   return { raw, name: raw };
 }
 
-export function extractPromptVariables(promptText: string): PromptVariableReference[] {
+export function extractPromptVariables(
+  promptText: string,
+  options: PromptVariableParseOptions = {}
+): PromptVariableReference[] {
   const references: PromptVariableReference[] = [];
   for (const occurrence of findTemplateOccurrences(promptText)) {
-    references.push(validatePromptVariableOccurrence(occurrence, promptText));
+    references.push(validatePromptVariableOccurrence(occurrence, promptText, options));
   }
   return references;
 }
 
-export function validatePromptVariables(template: string): void {
+export function validatePromptVariables(template: string, options: PromptVariableParseOptions = {}): void {
   for (const occurrence of findTemplateOccurrences(template)) {
-    validatePromptVariableOccurrence(occurrence, template);
+    validatePromptVariableOccurrence(occurrence, template, options);
   }
 }
 
-function validatePromptVariableOccurrence(occurrence: TemplateOccurrence, template: string): PromptVariableReference {
-  const reference = parsePromptVariableReference(occurrence.name);
+function validatePromptVariableOccurrence(
+  occurrence: TemplateOccurrence,
+  template: string,
+  options: PromptVariableParseOptions
+): PromptVariableReference {
+  const reference = parsePromptVariableReference(occurrence.name, options);
   const producer = parseArtifactProducer(occurrence.name);
   if (producer) {
     const suffix = parseArtifactSuffix(producer, template.slice(occurrence.end));
@@ -270,9 +338,10 @@ function validatePromptVariableOccurrence(occurrence: TemplateOccurrence, templa
 
 export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
   const body = typeof input.prompt === "string" ? parsePromptFrontmatter(input.prompt).body : input.prompt.body;
-  validatePromptVariables(body);
+  validatePromptVariables(body, { allowDynamicItemVariables: input.dynamicVariables !== undefined });
   validateRenderInputPaths(input);
   validateVariableOverrides(input.variables);
+  validateDynamicVariables(input.dynamicVariables);
   const modelProvenance = resolveModelProvenance(input);
 
   const graph = buildGraphIndex(input);
@@ -283,7 +352,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
   let consumed = 0;
 
   for (const occurrence of findTemplateOccurrences(body)) {
-    rendered += body.slice(consumed, occurrence.start);
+    rendered += unescapePromptTemplateLiterals(body.slice(consumed, occurrence.start));
     variablesUsed.push(occurrence.name);
 
     const producer = parseArtifactProducer(occurrence.name);
@@ -335,24 +404,30 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       continue;
     }
 
-    const value = variables[occurrence.name];
-    if (value === undefined) {
-      throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
+    if (isDynamicItemTemplateVariable(occurrence.name)) {
+      const resolved = resolveDynamicVariable(occurrence.name, input.dynamicVariables ?? {});
+      rendered += resolved.value;
+      variablesUsed.push(...resolved.variablesUsed);
+    } else {
+      const value = variables[occurrence.name];
+      if (value === undefined) {
+        throw new PromptError("missing-template-variable", `missing prompt template variable: ${occurrence.name}`);
+      }
+      if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
+        const contractDescription =
+          occurrence.name === "output_findings_path"
+            ? "findings@2"
+            : "findings, triaged-findings, or severity-classified-findings";
+        throw new PromptError(
+          "invalid-artifact-reference",
+          `${occurrence.name} requires exactly one declared ${contractDescription} output`
+        );
+      }
+      rendered += value;
     }
-    if (isTopologyDerivedFindingsVariable(occurrence.name) && value === "") {
-      const contractDescription =
-        occurrence.name === "output_findings_path"
-          ? "findings@2"
-          : "findings, triaged-findings, or severity-classified-findings";
-      throw new PromptError(
-        "invalid-artifact-reference",
-        `${occurrence.name} requires exactly one declared ${contractDescription} output`
-      );
-    }
-    rendered += value;
     consumed = occurrence.end;
   }
-  rendered += body.slice(consumed);
+  rendered += unescapePromptTemplateLiterals(body.slice(consumed));
   rendered = appendOutputContract(rendered, input, graph.current);
 
   return {
@@ -382,7 +457,10 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
   // dependency handoff, but must not be presented as files for the agent to
   // author (an agent can only see a partial pre-capture patch).
   const outputs = artifactOutputsFor(current).filter(
-    (output) => output.path !== "workspace.patch" && output.path !== "workspace-patch.json"
+    (output) =>
+      output.path !== "workspace.patch" &&
+      output.path !== "workspace-patch.json" &&
+      output.path !== "vulnerability-db-manifest.json"
   );
   if (outputs.length === 0) {
     return rendered;
@@ -531,6 +609,45 @@ function outputContractTemplateRoot(): string {
   return found;
 }
 
+const agentPreambleTemplateCache = new Map<AgentPreambleTemplateName, string>();
+
+/** Load one trusted global-agent prompt fragment from the packaged MDX assets. */
+export function loadAgentPreambleTemplate(name: AgentPreambleTemplateName): string {
+  const cached = agentPreambleTemplateCache.get(name);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const template = readFileSync(
+    path.join(builtInPromptRoot(), "_templates", "agent-preamble", AGENT_PREAMBLE_TEMPLATE_FILES[name]),
+    "utf8"
+  ).trimEnd();
+  agentPreambleTemplateCache.set(name, template);
+  return template;
+}
+
+/** Render a trusted global-agent MDX fragment without reinterpreting inserted values. */
+export function renderAgentPreambleTemplate(
+  name: AgentPreambleTemplateName,
+  variables: Readonly<Record<string, string>> = {}
+): string {
+  const unused = new Set(Object.keys(variables));
+  const rendered = loadAgentPreambleTemplate(name).replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/gu, (_, key: string) => {
+    const value = variables[key];
+    if (value === undefined) {
+      throw new PromptError("missing-template-variable", `missing agent preamble template variable: ${key}`);
+    }
+    unused.delete(key);
+    return value;
+  });
+  if (unused.size > 0) {
+    throw new PromptError(
+      "invalid-render-input",
+      `unknown agent preamble template variable: ${Array.from(unused).sort().join(", ")}`
+    );
+  }
+  return rendered;
+}
+
 export function writeRenderedPrompt(result: PromptRenderResult): string {
   mkdirSync(path.dirname(result.renderedPromptPath), { recursive: true });
   writeFileSync(result.renderedPromptPath, result.renderedMarkdown, "utf8");
@@ -600,6 +717,10 @@ function findTemplateOccurrences(template: string): TemplateOccurrence[] {
     if (start === -1) {
       return occurrences;
     }
+    if (template[start - 1] === "\\") {
+      offset = start + 2;
+      continue;
+    }
     const end = template.indexOf("}}", start + 2);
     if (end === -1) {
       throw new PromptError("unclosed-template-variable", "template variable is missing a closing delimiter");
@@ -617,6 +738,10 @@ function findTemplateOccurrences(template: string): TemplateOccurrence[] {
     });
     offset = end + 2;
   }
+}
+
+function unescapePromptTemplateLiterals(template: string): string {
+  return template.replaceAll("\\{{", "{{");
 }
 
 function parseArtifactProducer(name: string): ArtifactProducer | undefined {
@@ -1026,6 +1151,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
+    goal_search_coverage_path: path.join(path.dirname(input.run.metadataPath), "goal-search-coverage.json"),
     output_findings_path: (() => {
       const relativePath = findingsOutputRelativePath(input);
       return relativePath === "" ? "" : path.join(input.node.artifactDir, relativePath);
@@ -1049,6 +1175,8 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: strategyAttemptTestDirectory(input),
+    vulnerability_database_path: input.resolvedConfig?.vulnerabilityDatabasePath ?? "unavailable",
+    artifact_schema_dir: input.resolvedConfig?.artifactSchemaDir ?? "unavailable",
     finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
     finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
     coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
@@ -1100,6 +1228,58 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
       throw new PromptError("invalid-render-input", `invalid prompt render variable value for ${key}`);
     }
   }
+}
+
+function validateDynamicVariables(variables: PromptRenderInput["dynamicVariables"]): void {
+  if (!variables) return;
+  for (const [key, value] of Object.entries(variables)) {
+    if (!isDynamicItemTemplateVariable(key)) {
+      throw new PromptError("missing-template-variable", `invalid dynamic item template variable: ${key}`);
+    }
+    if (isSupportedTemplateVariable(key)) {
+      throw new PromptError("invalid-render-input", `dynamic item variable cannot override built-in variable: ${key}`);
+    }
+    if (!(
+      typeof value === "string" ||
+      typeof value === "boolean" ||
+      (typeof value === "number" && Number.isFinite(value))
+    )) {
+      throw new PromptError("invalid-render-input", `invalid dynamic item variable value for ${key}`);
+    }
+  }
+}
+
+function resolveDynamicVariable(
+  name: string,
+  variables: NonNullable<PromptRenderInput["dynamicVariables"]>,
+  stack: string[] = []
+): { value: string; variablesUsed: string[] } {
+  if (stack.includes(name) || stack.length >= 16) {
+    throw new PromptError("invalid-render-input", `cyclic or over-deep dynamic item template variable: ${name}`);
+  }
+  const candidate = variables[name];
+  if (candidate === undefined) {
+    throw new PromptError("missing-template-variable", `missing dynamic item template variable: ${name}`);
+  }
+  const value = String(candidate);
+  const variablesUsed = [name];
+  let rendered = "";
+  let consumed = 0;
+  for (const occurrence of findTemplateOccurrences(value)) {
+    if (!isDynamicItemTemplateVariable(occurrence.name)) {
+      throw new PromptError(
+        "missing-template-variable",
+        `dynamic item value ${name} references non-item variable: ${occurrence.name}`
+      );
+    }
+    const nested = resolveDynamicVariable(occurrence.name, variables, [...stack, name]);
+    rendered += value.slice(consumed, occurrence.start);
+    rendered += nested.value;
+    variablesUsed.push(...nested.variablesUsed);
+    consumed = occurrence.end;
+  }
+  rendered += value.slice(consumed);
+  return { value: rendered, variablesUsed };
 }
 
 function isTopologyDerivedFindingsVariable(value: string): boolean {

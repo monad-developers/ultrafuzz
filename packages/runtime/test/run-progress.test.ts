@@ -333,6 +333,30 @@ test("summarizeRunProgress picks the longest-running step and counts the rest", 
   assert.equal(summary.current_step.running_count, 3);
 });
 
+test("summarizeRunProgress displays the human producer ID for a generated node", () => {
+  const generated = {
+    ...runningNode({
+      nodeId: "dynamic-threat-safe-storage",
+      logicalNodeId: "threat-hunters",
+      startedAt: "2026-07-31T11:58:00.000Z"
+    }),
+    provenance: {
+      producer_node_id: "dynamic:threat:liquidation.overdue",
+      storage_id: "dynamic-threat-safe-storage"
+    }
+  };
+  const summary = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ in_progress: 1, total: 1 }),
+    throughput: throughput(),
+    state: runState({ "dynamic-threat-safe-storage": generated }),
+    nowMs: NOW_MS
+  });
+
+  assert.equal(summary.current_step.node_id, "dynamic:threat:liquidation.overdue");
+  assert.equal(summary.current_step.elapsed_seconds, 120);
+});
+
 test("summarizeRunProgress reports a running step with no recorded start", () => {
   const summary = summarizeRunProgress({
     runStatus: "running",

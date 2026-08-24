@@ -15,18 +15,39 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.event-query-facade.v1" },
-    "run_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "append_log": { "const": "events.jsonl" },
-    "index_root": { "const": "events.index" },
+    "schema_version": {
+      "const": "ultrafuzz.event-query-facade.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "append_log": {
+      "const": "events.jsonl"
+    },
+    "index_root": {
+      "const": "events.index"
+    },
     "indexes": {
       "type": "array",
       "prefixItems": [
-        { "const": "run" },
-        { "const": "node" },
-        { "const": "type" },
-        { "const": "status" },
-        { "const": "timestamp" }
+        {
+          "const": "run"
+        },
+        {
+          "const": "node"
+        },
+        {
+          "const": "type"
+        },
+        {
+          "const": "status"
+        },
+        {
+          "const": "timestamp"
+        }
       ],
       "minItems": 5,
       "maxItems": 5
@@ -36,11 +57,21 @@
       "required": ["run_id", "node_id", "event_type", "status", "timestamp"],
       "additionalProperties": false,
       "properties": {
-        "run_id": { "const": "events.index/run/<run-id>.jsonl" },
-        "node_id": { "const": "events.index/node/<node-id>.jsonl" },
-        "event_type": { "const": "events.index/type/<event-type>.jsonl" },
-        "status": { "const": "events.index/status/<status>.jsonl" },
-        "timestamp": { "const": "events.index/timestamp/<yyyy-mm-dd>.jsonl" }
+        "run_id": {
+          "const": "events.index/run/<run-id>.jsonl"
+        },
+        "node_id": {
+          "const": "events.index/node/<node-id>.jsonl"
+        },
+        "event_type": {
+          "const": "events.index/type/<event-type>.jsonl"
+        },
+        "status": {
+          "const": "events.index/status/<status>.jsonl"
+        },
+        "timestamp": {
+          "const": "events.index/timestamp/<yyyy-mm-dd>.jsonl"
+        }
       }
     },
     "long_filters": {
@@ -48,10 +79,18 @@
       "required": ["run_id", "node_id", "event_type", "status"],
       "additionalProperties": false,
       "properties": {
-        "run_id": { "const": "events.index/run/sha256/<sha256-hex(run-id)>.jsonl" },
-        "node_id": { "const": "events.index/node/sha256/<sha256-hex(node-id)>.jsonl" },
-        "event_type": { "const": "events.index/type/sha256/<sha256-hex(event-type)>.jsonl" },
-        "status": { "const": "events.index/status/sha256/<sha256-hex(status)>.jsonl" }
+        "run_id": {
+          "const": "events.index/run/sha256/<sha256-hex(run-id)>.jsonl"
+        },
+        "node_id": {
+          "const": "events.index/node/sha256/<sha256-hex(node-id)>.jsonl"
+        },
+        "event_type": {
+          "const": "events.index/type/sha256/<sha256-hex(event-type)>.jsonl"
+        },
+        "status": {
+          "const": "events.index/status/sha256/<sha256-hex(status)>.jsonl"
+        }
       }
     },
     "index_key_encoding": {
@@ -67,13 +106,27 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": "ultrafuzz.event-index-key.v1" },
-        "direct_max_id_length": { "const": 122 },
-        "direct_id_path": { "const": "<dimension>/<id>.jsonl" },
-        "long_id_path": { "const": "<dimension>/sha256/<sha256-hex(id)>.jsonl" },
-        "digest": { "const": "sha256" },
-        "hash_input_encoding": { "const": "utf8" },
-        "digest_encoding": { "const": "hex" }
+        "version": {
+          "const": "ultrafuzz.event-index-key.v1"
+        },
+        "direct_max_id_length": {
+          "const": 122
+        },
+        "direct_id_path": {
+          "const": "<dimension>/<id>.jsonl"
+        },
+        "long_id_path": {
+          "const": "<dimension>/sha256/<sha256-hex(id)>.jsonl"
+        },
+        "digest": {
+          "const": "sha256"
+        },
+        "hash_input_encoding": {
+          "const": "utf8"
+        },
+        "digest_encoding": {
+          "const": "hex"
+        }
       }
     }
   }

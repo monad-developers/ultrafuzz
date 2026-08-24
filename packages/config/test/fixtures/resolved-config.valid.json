@@ -41,6 +41,7 @@
     "outputDir": ".ultrafuzz/runs",
     "maxParallelAgents": 4,
     "maxParallelNodes": 8,
+    "maxDynamicNodes": 2048,
     "keepWorkspaces": false,
     "forgeGuardEnabled": true,
     "forgeVmemLimitKb": 12582912,
@@ -87,6 +88,11 @@
         "agent": "KimiAgent",
         "model": "kimi-k3",
         "reasoning": "max"
+      },
+      "pi": {
+        "id": "pi",
+        "agent": "PiAgent",
+        "model": "openai/gpt-mini-latest"
       }
     }
   },
@@ -109,7 +115,15 @@
     "KimiAgent": {
       "auth": "subscription"
     },
+    "OpenCodeAgent": {
+      "auth": "api-key",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
     "OpenRouterAgent": {
+      "auth": "api-key",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
+    "PiAgent": {
       "auth": "api-key",
       "apiKeyEnv": "OPENROUTER_API_KEY"
     }

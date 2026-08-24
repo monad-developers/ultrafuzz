@@ -7,6 +7,9 @@ import test from "node:test";
 
 import {
   CACHE_MANIFEST_FILE,
+  REFERENCE_GITHUB_REPOS_ENV,
+  REFERENCE_GITHUB_TOKEN_ENV,
+  REFERENCE_TOKEN_REDACTION,
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
   REFERENCE_CACHE_SCHEMA_VERSION,
   RUN_REFERENCE_MANIFEST_FILE,
@@ -20,9 +23,15 @@ import {
   readCacheManifest,
   serializeReferenceCacheManifest,
   statusReferenceCatalog,
-  syncReferenceCatalog
+  syncReferenceCatalog,
+  updateProjectReferencesLatest
 } from "../src/index.js";
 import type { ReferenceCacheManifest, ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
+import { fakeGitCommands, fakeGitIsolationEnv, installFakeGit, withProcessEnv } from "./fake-git.js";
+
+const PRIVATE_REFERENCE_TOKEN = "ghs_privatefilteredreferencetoken0123456789";
+const PRIVATE_REFERENCE_REPO = "example/private-reference";
+const PRIVATE_REFERENCE_COMMIT = "cccccccccccccccccccccccccccccccccccccccc";
 
 function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -170,7 +179,18 @@ test("cache manifest publisher validates the exact serialized bytes", () => {
 test("default catalog restores original pinned property references", () => {
   const catalog = parseReferenceCatalog(defaultReferenceCatalogYaml());
 
-  assert.equal(Object.keys(catalog.references).length, 9);
+  const ids = Object.keys(catalog.references).sort();
+  assert.equal(ids.filter((id) => id.startsWith("properties.")).length, 9);
+  assert.deepEqual(
+    ids.filter((id) => !id.startsWith("properties.")),
+    ["vulnerability-database.web3"]
+  );
+  const database = catalog.references["vulnerability-database.web3"];
+  assert.equal(database?.kind, "vulnerability-database");
+  assert.equal(database?.repo, "aviggiano/web3-vulnerability-database");
+  assert.equal(database?.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
+  assert.deepEqual(database?.paths, ["database.yml", "capabilities.yml", "catalog.json"]);
+  assert.equal(database?.resolved_at, "2026-08-09T01:15:37Z");
   assert.deepEqual(catalog.references["properties.certora-thinking"]?.paths, [
     "06.Lesson_ThinkingProperties/README.md",
     "06.Lesson_ThinkingProperties/AuctionDemonstration/README.md",
@@ -229,6 +249,127 @@ test("repository components cannot traverse the reference cache", () => {
   }
 
   assert.equal(fs.existsSync(cacheRoot), false);
+});
+
+test("private filtered references keep exact credentials for lazy blob reads and isolate ambient Git config", () => {
+  const root = tempDir("ufz-ref-private-filtered-");
+  const fixtureRoot = path.join(root, "fixture");
+  fs.mkdirSync(fixtureRoot);
+  fs.writeFileSync(path.join(fixtureRoot, "README.md"), "# Private reference\n", "utf8");
+  const fake = installFakeGit(root);
+  const basic = Buffer.from(`x-access-token:${PRIVATE_REFERENCE_TOKEN}`, "utf8").toString("base64");
+  const expectedHeader = `AUTHORIZATION: basic ${basic}`;
+  const ambientSentinel = "ambient-helper-and-header-must-not-run";
+  const catalog = fixtureCatalog({
+    provider: "github",
+    repo: PRIVATE_REFERENCE_REPO,
+    commit: PRIVATE_REFERENCE_COMMIT,
+    paths: ["README.md"],
+    resolved_at: "2026-08-11T00:00:00Z"
+  });
+
+  const report = withProcessEnv(
+    fakeGitIsolationEnv(fake, fixtureRoot, expectedHeader, ambientSentinel, {
+      [REFERENCE_GITHUB_TOKEN_ENV]: PRIVATE_REFERENCE_TOKEN,
+      [REFERENCE_GITHUB_REPOS_ENV]: PRIVATE_REFERENCE_REPO
+    }),
+    () => syncReferenceCatalog(catalog, { cacheRoot: path.join(root, "cache") })
+  );
+
+  assert.equal(report.synced[0]?.fetched, true);
+  assert.equal(fs.readFileSync(path.join(report.synced[0]!.cacheDir, "README.md"), "utf8"), "# Private reference\n");
+  assert.deepEqual(
+    fakeGitCommands(fake.logPath).map((args) => args[0]),
+    ["init", "remote", "fetch", "cat-file", "show"]
+  );
+});
+
+test("authenticated lazy-object failures redact raw and encoded credentials", () => {
+  const basic = Buffer.from(`x-access-token:${PRIVATE_REFERENCE_TOKEN}`, "utf8").toString("base64");
+  const failureText = `rejected token ${PRIVATE_REFERENCE_TOKEN} in AUTHORIZATION: basic ${basic}`;
+  for (const command of ["cat-file", "show"]) {
+    const root = tempDir(`ufz-ref-private-${command}-failure-`);
+    const fixtureRoot = path.join(root, "fixture");
+    fs.mkdirSync(fixtureRoot);
+    fs.writeFileSync(path.join(fixtureRoot, "README.md"), "# Private reference\n", "utf8");
+    const fake = installFakeGit(root);
+    let surfaced = "";
+    assert.throws(
+      () =>
+        withProcessEnv(
+          fakeGitIsolationEnv(fake, fixtureRoot, `AUTHORIZATION: basic ${basic}`, "ambient-sentinel", {
+            [REFERENCE_GITHUB_TOKEN_ENV]: PRIVATE_REFERENCE_TOKEN,
+            [REFERENCE_GITHUB_REPOS_ENV]: PRIVATE_REFERENCE_REPO,
+            UFZ_FAKE_GIT_FAIL_COMMAND: command,
+            UFZ_FAKE_GIT_FAILURE_TEXT: failureText
+          }),
+          () =>
+            syncReferenceCatalog(
+              fixtureCatalog({
+                provider: "github",
+                repo: PRIVATE_REFERENCE_REPO,
+                commit: PRIVATE_REFERENCE_COMMIT,
+                paths: ["README.md"],
+                resolved_at: "2026-08-11T00:00:00Z"
+              }),
+              { cacheRoot: path.join(root, "cache") }
+            )
+        ),
+      (error: unknown) => {
+        surfaced = error instanceof Error ? error.message : String(error);
+        return true;
+      }
+    );
+    assert.equal(surfaced.includes(PRIVATE_REFERENCE_TOKEN), false, command);
+    assert.equal(surfaced.includes(basic), false, command);
+    assert.match(
+      surfaced,
+      new RegExp(REFERENCE_TOKEN_REDACTION.replaceAll("[", "\\[").replaceAll("]", "\\]"), "u"),
+      command
+    );
+  }
+});
+
+test("update-latest ls-remote stays anonymous and isolated for an uncovered repository", () => {
+  const project = tempDir("ufz-ref-ls-remote-isolation-");
+  const fixtureRoot = path.join(project, "fixture");
+  fs.mkdirSync(fixtureRoot);
+  const fake = installFakeGit(project);
+  fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, ".git", "config"),
+    `[url "file:///tmp/attacker-selected-reference"]\n  insteadOf = https://github.com/example/public-reference.git\n[http "https://github.com/"]\n  extraHeader = AUTHORIZATION: basic ambient-local-header\n`,
+    "utf8"
+  );
+  fs.mkdirSync(path.join(project, ".ultrafuzz"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "references.yml"),
+    `version: 1\nreferences:\n  properties.example:\n    provider: github\n    repo: example/public-reference\n    commit: ${PRIVATE_REFERENCE_COMMIT}\n    paths:\n      - README.md\n    resolved_at: "2026-08-11T00:00:00Z"\n`,
+    "utf8"
+  );
+
+  const nextCommit = "dddddddddddddddddddddddddddddddddddddddd";
+  const previousCwd = process.cwd();
+  let updated: ReturnType<typeof updateProjectReferencesLatest>;
+  try {
+    process.chdir(project);
+    updated = withProcessEnv(
+      fakeGitIsolationEnv(fake, fixtureRoot, "", "ambient-ls-remote-credential", {
+        [REFERENCE_GITHUB_TOKEN_ENV]: PRIVATE_REFERENCE_TOKEN,
+        [REFERENCE_GITHUB_REPOS_ENV]: PRIVATE_REFERENCE_REPO,
+        UFZ_FAKE_GIT_HEAD: nextCommit,
+        UFZ_FAKE_GIT_CALLER_CWD: project
+      }),
+      () => updateProjectReferencesLatest(project)
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(updated.updated[0]?.newCommit, nextCommit);
+  assert.deepEqual(
+    fakeGitCommands(fake.logPath).map((args) => args[0]),
+    ["ls-remote"]
+  );
 });
 
 test("status and materialization use the pinned offline cache with digest manifests", () => {

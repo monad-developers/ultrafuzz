@@ -8,6 +8,7 @@ import {
   parseSmithersTaskManifestBytes,
   referenceArtifactManifestAuthorityForArtifactDir,
   type SmithersTaskManifestDocument,
+  type SmithersTaskManifestDynamicGroup,
   type SmithersTaskManifestTask
 } from "../src/smithers-task-manifest.js";
 import type { PlannedGraphDocument } from "../src/planned-graph.js";
@@ -177,11 +178,69 @@ function bytes(value: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
 }
 
+function dynamicGroup(): SmithersTaskManifestDynamicGroup {
+  return {
+    groupNodeId: "fanout",
+    logicalNodeId: "fanout",
+    source: {
+      concreteNodeId: "producer",
+      attemptId: "producer",
+      verifierSmithersNodeId: "verify:producer",
+      artifactPath: "plan.json"
+    },
+    sourcePath: "$.goals",
+    keyPath: "$.id",
+    nodeIdTemplate: "goal-{{id}}",
+    templatePath: "/runs/run-1/prompts/fanout.mdx",
+    templateDigest: SHA256,
+    templateFingerprint: SHA256,
+    continueOnFail: false,
+    maxDynamicNodes: 128,
+    reservedNodeIds: ["producer"],
+    taskTemplates: [task({ attemptId: "fanout-template", concreteNodeId: "fanout", logicalNodeId: "fanout" })],
+    promptContext: {
+      projectRoot: "/project",
+      repoPath: "/repo",
+      artifactsDir: "/runs/run-1/artifacts",
+      runMetadataPath: "/runs/run-1/run.json",
+      resolvedConfig: {
+        triage: { quorum: 2, panelSize: 3 },
+        dynamicStrategiesEnumerator: "unlimited",
+        invariantPropertyPriorityThreshold: "medium",
+        invariantPropertyPriorityFilter: "gte",
+        invariantPropertyPriorities: ["critical", "high", "medium"],
+        invariantTestingFuzzerTimeout: 3_600,
+        vulnerabilityDatabaseRelativePath: "vulnerability-db/catalog.json",
+        vulnerabilityDatabaseSha256: SHA256
+      }
+    }
+  };
+}
+
 test("strictly parses the current sealed Smithers task manifest and planned-graph join", () => {
   const parsed = parseSmithersTaskManifestBytes(bytes(manifest()));
   assert.equal(parsed.schema_version, SMITHERS_TASK_MANIFEST_SCHEMA_VERSION);
   assert.equal("promptArtifactAuthoritySelectors" in parsed.tasks[0]!, false);
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, graph()));
+});
+
+test("strictly validates retained dynamic group templates and prompt context", () => {
+  const current = { ...manifest(), dynamic_groups: [dynamicGroup()] };
+  const parsed = parseSmithersTaskManifestBytes(bytes(current));
+  assert.equal(parsed.dynamic_groups?.[0]?.groupNodeId, "fanout");
+  assert.equal(parsed.dynamic_groups?.[0]?.taskTemplates[0]?.attemptId, "fanout-template");
+
+  const withUnknownField = structuredClone(current) as unknown as {
+    dynamic_groups: Array<Record<string, unknown>>;
+  };
+  withUnknownField.dynamic_groups[0]!.legacy = true;
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(withUnknownField)), /registered schema/u);
+
+  const missingTemplateDigest = structuredClone(current) as unknown as {
+    dynamic_groups: Array<Record<string, unknown>>;
+  };
+  delete missingTemplateDigest.dynamic_groups[0]!.templateDigest;
+  assert.throws(() => parseSmithersTaskManifestBytes(bytes(missingTemplateDigest)), /registered schema/u);
 });
 
 test("accepts canonical prompt artifact authority selectors and rejects duplicate or unordered selectors", () => {

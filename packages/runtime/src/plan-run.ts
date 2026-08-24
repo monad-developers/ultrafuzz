@@ -65,8 +65,10 @@ const REFERENCE_EXPECTATIONS_CONTRACT = "ultrafuzz/reference-expectations@2" as 
 import { validateProject } from "./validate.js";
 import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
 import {
+  DEFERRED_PROMPT_TEMPLATE_DIR,
   diagnosticFromError,
   generateRunId,
+  sha256Text,
   hasRuntimeErrors,
   runtimeFailure,
   runtimeResult,
@@ -78,13 +80,19 @@ import { assertControllerSourceDigest, inspectControllerSource } from "./control
 import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import { projectArtifactSchemaDir } from "./init.js";
 import {
   assertLaunchCheckoutRevision,
   captureLaunchSourceRevision,
   deleteRunSourceRevision,
   publishRunSourceRevision
 } from "./source-revision.js";
-import { transformTopologyForRun } from "./topology-transform.js";
+import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
+import {
+  materializeVulnerabilityDatabasePlannerCatalog,
+  VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
+  type MaterializedVulnerabilityDatabaseCatalog
+} from "./vulnerability-database.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
@@ -386,6 +394,36 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
   }
 
+  let vulnerabilityDatabase: MaterializedVulnerabilityDatabaseCatalog | undefined;
+  const requiresVulnerabilityDatabase = graph.nodes.some(
+    (node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan"
+  );
+  if (requiresVulnerabilityDatabase) {
+    const referenceNode = graph.nodes.find(
+      (node) => node.logical_id === VULNERABILITY_DATABASE_REFERENCE_NODE_ID && node.kind === "reference"
+    );
+    if (referenceNode === undefined) {
+      return runtimeFailure<PlanRunValue>([
+        {
+          code: "VULNERABILITY_DATABASE_REFERENCE_REQUIRED",
+          message: `topology nodes threat-model/goal-plan require the ${VULNERABILITY_DATABASE_REFERENCE_NODE_ID} pinned reference node`,
+          severity: "error",
+          source: "vulnerability-database"
+        }
+      ]);
+    }
+    try {
+      vulnerabilityDatabase = materializeVulnerabilityDatabasePlannerCatalog(
+        layout.root,
+        getNodeArtifactDir(layout, referenceNode.id)
+      );
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "vulnerability-database", "VULNERABILITY_DATABASE_MATERIALIZE_FAILED")
+      ]);
+    }
+  }
+
   let renderedPrompts: RenderedPromptPlan[];
   try {
     renderedPrompts = renderPromptsForPlan({
@@ -394,13 +432,19 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       layout,
       projectRoot,
       resolvedConfig: resolved.config,
-      runId
+      runId,
+      vulnerabilityDatabasePath: vulnerabilityDatabase?.path ?? "unavailable"
     });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
   }
 
   const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+  try {
+    persistDeferredPromptTemplates(layout, catalog, expandedGraph);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);
+  }
   if (validation.value.topology === undefined) {
     throw new Error("validated run plan is missing its topology summary");
   }
@@ -487,7 +531,15 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       resolved_config: resolved.config,
       validation: validation.value,
       layout,
-      rendered_prompts: renderedPrompts
+      rendered_prompts: renderedPrompts,
+      ...(vulnerabilityDatabase === undefined
+        ? {}
+        : {
+            vulnerability_database: {
+              relative_path: path.relative(layout.root, vulnerabilityDatabase.path).split(path.sep).join("/"),
+              sha256: vulnerabilityDatabase.sha256
+            }
+          })
     },
     preMaterializeDiagnostics
   );
@@ -534,32 +586,40 @@ function persistRenderedPromptSnapshots(
   });
 }
 
-export function transformPromptCatalogForRun(
+/**
+ * Persist the exact transformed prompt bodies needed by runtime-generated and deferred nodes.
+ * Compilation must never reread mutable project prompt files after planning sealed their digests.
+ */
+function persistDeferredPromptTemplates(
+  layout: RunLayout,
   catalog: PromptCatalog,
-  transform: PlanRunInput["topologyTransform"]
-): PromptCatalog {
-  const excluded = transform?.excludedNodeIds ?? [];
-  if (excluded.length === 0) return catalog;
-  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
-  const entries = new Map(
-    [...catalog.entries].map(([id, entry]) => {
-      const body = entry.body
-        .split("\n")
-        .filter((line) => !tokens.some((token) => line.includes(token)))
-        .join("\n");
-      return [id, { ...entry, body }];
-    })
-  );
-  return { ...catalog, entries };
-}
-
-export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
-  return Object.fromEntries(
-    [...catalog.entries.values()].flatMap((entry) => [
-      [entry.id, entry.body],
-      [entry.relativePath, entry.body]
-    ])
-  );
+  graph: ExpandedGraph
+): Map<string, string> {
+  const digests = graph.fingerprintInputs?.promptDigests ?? {};
+  const persisted = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "agentic" || node.promptPath === undefined) continue;
+    const expected = digests[node.promptPath] ?? node.dynamic?.templateDigest;
+    if (expected === undefined) continue;
+    const body = promptEntryForPath(catalog, node.promptPath, node.logicalId).body;
+    const digest = sha256Text(body);
+    if (digest !== expected) {
+      throw new Error(`transformed prompt template digest does not match the plan for ${node.promptPath}`);
+    }
+    if (persisted.has(digest)) continue;
+    const relativePath = `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`;
+    const snapshotPath = safeResolveInside(layout.root, relativePath, "deferred prompt template snapshot");
+    if (fs.existsSync(snapshotPath)) {
+      assertRegularFileInside(layout.root, snapshotPath, "deferred prompt template snapshot");
+      if (sha256Text(fs.readFileSync(snapshotPath, "utf8")) !== digest) {
+        throw new Error(`immutable deferred prompt template snapshot digest collision for ${node.promptPath}`);
+      }
+    } else {
+      writeFileDurable(snapshotPath, body);
+    }
+    persisted.set(digest, snapshotPath);
+  }
+  return persisted;
 }
 
 interface ReferenceExpectationProvision {
@@ -814,6 +874,7 @@ function toPlannedGraphNode(
   catalog: PromptCatalog | undefined
 ): PlannedGraphNode {
   const promptEntry = node.promptPath ? promptEntryForNode(catalog, node) : undefined;
+  const dynamicDependencies = node.dependsOn.filter((dependency) => nodeById.get(dependency)?.dynamic !== undefined);
   return {
     id: node.id,
     logical_id: node.logicalId,
@@ -844,6 +905,7 @@ function toPlannedGraphNode(
     ...(node.referenceRevision
       ? {
           reference_revision: {
+            kind: node.referenceRevision.kind,
             provider: node.referenceRevision.provider,
             repo: node.referenceRevision.repo,
             commit: node.referenceRevision.commit,
@@ -868,7 +930,22 @@ function toPlannedGraphNode(
       model_index: model.modelIndex,
       loop_index: model.loopIndex,
       attempt_index: model.attemptIndex
-    }))
+    })),
+    ...(node.dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            from: { ...node.dynamic.from },
+            key: node.dynamic.key,
+            node_id: node.dynamic.nodeIdTemplate,
+            ...(node.dynamic.templateDigest === undefined ? {} : { template_digest: node.dynamic.templateDigest }),
+            status: "pending" as const,
+            generated_node_ids: []
+          }
+        }),
+    ...(dynamicDependencies.length === 0
+      ? {}
+      : { dynamic_dependencies: dynamicDependencies, declared_depends_on: [...node.dependsOn] })
   };
 }
 
@@ -879,6 +956,7 @@ function renderPromptsForPlan(input: {
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
+  vulnerabilityDatabasePath: string;
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
@@ -886,9 +964,10 @@ function renderPromptsForPlan(input: {
     input.resolvedConfig.invariants.propertyPriorityThreshold
   );
   const rendered: RenderedPromptPlan[] = [];
+  const deferredNodeIds = nodesWithDynamicAncestors(input.graph);
 
   for (const node of input.graph.nodes) {
-    if (!node.prompt_path) {
+    if (!node.prompt_path || deferredNodeIds.has(node.id)) {
       continue;
     }
     const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
@@ -937,7 +1016,9 @@ function renderPromptsForPlan(input: {
           invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
           invariantPropertyPriorities: invariantPrioritySelection.priorities,
           invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
-          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
+          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds,
+          vulnerabilityDatabasePath: input.vulnerabilityDatabasePath,
+          artifactSchemaDir: projectArtifactSchemaDir(input.projectRoot)
         }
       });
       writeRenderedPrompt(result);
@@ -956,6 +1037,28 @@ function renderPromptsForPlan(input: {
   }
 
   return rendered;
+}
+
+function nodesWithDynamicAncestors(graph: PlannedGraph): Set<string> {
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const dynamicIds = new Set(graph.nodes.filter((node) => node.dynamic !== undefined).map((node) => node.id));
+  const memo = new Map<string, boolean>();
+  const visiting = new Set<string>();
+  const includesDynamic = (nodeId: string): boolean => {
+    const cached = memo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (dynamicIds.has(nodeId)) {
+      memo.set(nodeId, true);
+      return true;
+    }
+    if (visiting.has(nodeId)) return false;
+    visiting.add(nodeId);
+    const result = (nodeById.get(nodeId)?.depends_on ?? []).some(includesDynamic);
+    visiting.delete(nodeId);
+    memo.set(nodeId, result);
+    return result;
+  };
+  return new Set(graph.nodes.filter((node) => includesDynamic(node.id)).map((node) => node.id));
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {

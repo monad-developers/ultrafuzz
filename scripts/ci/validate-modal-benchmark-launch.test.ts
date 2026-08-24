@@ -207,6 +207,7 @@ interface LaunchManifest {
 
 interface LaunchConfig {
   public_benchmark: { targets: LaunchTarget[] };
+  models: Array<Record<string, unknown>>;
 }
 
 function preparedSmokeFixture(env: Record<string, string> = {}) {

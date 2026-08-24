@@ -88,7 +88,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export { CLI_SCHEMA_VERSION };
 export type { CliIo };
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isDirectExecution(): boolean {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+  try {
+    return fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(entrypoint);
+  } catch {
+    return import.meta.url === pathToFileURL(entrypoint).href;
+  }
+}
+
+if (isDirectExecution()) {
   runCli().then((code) => {
     process.exitCode = code;
   });

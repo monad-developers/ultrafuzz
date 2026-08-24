@@ -1,6 +1,6 @@
 {
   "name": "@ultrafuzz/evmbench",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -12,6 +12,9 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "benchmark": "pnpm run build && node dist/cli.js",
     "build": "tsc -p tsconfig.build.json && rm -rf dist/schema && cp -R src/schema dist/schema",
@@ -23,5 +26,17 @@
     "@ultrafuzz/artifacts": "workspace:*",
     "yaml": "^2.8.0",
     "zod": "^4.4.3"
+  },
+  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monad-developers/ultrafuzz.git",
+    "directory": "packages/evmbench"
+  },
+  "bugs": {
+    "url": "https://github.com/monad-developers/ultrafuzz/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

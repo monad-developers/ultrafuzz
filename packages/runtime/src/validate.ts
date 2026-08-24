@@ -23,7 +23,7 @@ import type {
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
-import { transformTopologyForRun } from "./topology-transform.js";
+import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -251,6 +251,7 @@ function validateTopologySurface(
           : { excludedNodeIds: topologyTransform.excludedNodeIds })
       }
     );
+    const promptCatalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), topologyTransform);
     const executionDiagnostics =
       config === undefined
         ? []
@@ -263,6 +264,7 @@ function validateTopologySurface(
     const expanded = expandTopology(topology, {
       projectRoot,
       requirePromptFiles: true,
+      promptTexts: promptTextsForCatalog(promptCatalog),
       defaultTimeoutSeconds: config?.run.defaultTimeoutSeconds,
       defaultMaxAttempts: config?.retry.sameAgentAttempts,
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,

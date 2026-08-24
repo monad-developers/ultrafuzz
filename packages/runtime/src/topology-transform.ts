@@ -1,3 +1,4 @@
+import type { PromptCatalog } from "@ultrafuzz/prompts";
 import type { ProjectTopology } from "@ultrafuzz/topology";
 
 import type { TopologyTransform } from "./types.js";
@@ -46,4 +47,37 @@ export function transformTopologyForRun(
       .filter((node) => !excluded.has(node.id))
       .map((node) => ({ ...node, depends_on: node.depends_on.filter((dependency) => !excluded.has(dependency)) }))
   };
+}
+
+/**
+ * Remove whole prompt lines that hand off artifacts from nodes excluded by the
+ * same run-scoped topology transform. The transformed catalog must be used by
+ * validation and planning so they bind the same bytes.
+ */
+export function transformPromptCatalogForRun(
+  catalog: PromptCatalog,
+  transform: TopologyTransform | undefined
+): PromptCatalog {
+  const excluded = transform?.excludedNodeIds ?? [];
+  if (excluded.length === 0) return catalog;
+  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
+  const entries = new Map(
+    [...catalog.entries].map(([id, entry]) => {
+      const body = entry.body
+        .split("\n")
+        .filter((line) => !tokens.some((token) => line.includes(token)))
+        .join("\n");
+      return [id, { ...entry, body }];
+    })
+  );
+  return { ...catalog, entries };
+}
+
+export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
+  return Object.fromEntries(
+    [...catalog.entries.values()].flatMap((entry) => [
+      [entry.id, entry.body],
+      [entry.relativePath, entry.body]
+    ])
+  );
 }

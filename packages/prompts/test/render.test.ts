@@ -122,13 +122,14 @@ interface TopologyNode {
   prompt?: string;
   depends_on?: string[];
   outputs?: TopologyOutput[];
+  dynamic?: unknown;
 }
 
 interface TopologyDocument {
   nodes: TopologyNode[];
 }
 
-const runtimeOwnedOutputPaths = new Set(["workspace.patch", "workspace-patch.json"]);
+const runtimeOwnedOutputPaths = new Set(["workspace.patch", "workspace-patch.json", "vulnerability-db-manifest.json"]);
 const nonSchemaContracts = new Set(["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]);
 
 function occurrences(haystack: string, needle: string): number {
@@ -455,6 +456,14 @@ describe("prompt rendering", () => {
         const workspacePath = path.join(root, "workspaces", `${node.id}-attempt-0`);
         const rendered = renderPrompt({
           prompt: promptMarkdown!,
+          ...(node.dynamic === undefined
+            ? {}
+            : {
+                dynamicVariables: {
+                  "item.goal_prompt": "Investigate the selected fixture goal.",
+                  "item.node_id": `dynamic:${node.id}:fixture`
+                }
+              }),
           graph: { logicalNodes },
           node: {
             logicalId: node.id,
@@ -668,6 +677,7 @@ describe("prompt rendering", () => {
         prompt?: string;
         depends_on?: string[];
         outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+        dynamic?: unknown;
       }>;
     };
     const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
@@ -698,6 +708,14 @@ describe("prompt rendering", () => {
       const workspacePath = path.join(root, "workspaces", `${producer.id}-attempt-0`);
       const result = renderPrompt({
         prompt: promptMarkdown!,
+        ...(producer.dynamic === undefined
+          ? {}
+          : {
+              dynamicVariables: {
+                "item.goal_prompt": "Investigate the selected fixture goal.",
+                "item.node_id": `dynamic:${producer.id}:fixture`
+              }
+            }),
         graph: { logicalNodes },
         node: {
           logicalId: producer.id,

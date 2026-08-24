@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import {
   execFileSync,
+  spawn,
   spawnSync,
   type SpawnSyncOptionsWithStringEncoding,
   type SpawnSyncReturns
 } from "node:child_process";
 import fs from "node:fs";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,11 +25,15 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  GOAL_PLAN_JSON_SCHEMA_ID,
+  THREAT_MODEL_JSON_SCHEMA_ID,
   appendEvent,
   createEventRecord,
+  goalPlanJsonSchema,
   layoutForRunRoot,
   promptArtifactAuthorityPathSelectorId,
   replayEvents,
+  threatModelJsonSchema,
   VALIDATOR_BUILD_IDENTITY,
   type RunState,
   type SMITHERS_NODE_STATES,
@@ -42,7 +49,9 @@ import {
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
-  RUN_REFERENCE_MANIFEST_FILE
+  RUN_REFERENCE_MANIFEST_FILE,
+  loadReferenceCatalog,
+  parseReferenceCatalog
 } from "@ultrafuzz/references";
 
 import {
@@ -89,8 +98,14 @@ import { bindSmithersExecutableCapability } from "../src/smithers-executable-cap
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
+import {
+  shippedReferenceCatalog,
+  writeShippedDocumentReferenceCaches,
+  writeShippedVulnerabilityDatabaseCache
+} from "./reference-fixtures.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
@@ -98,6 +113,7 @@ const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_0
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
+  "SMITHERS_FAKE_CLOUD_SELECTOR_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
@@ -124,6 +140,40 @@ process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(),
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+}
+
+async function runSpawnedCommand(input: {
+  command: string;
+  args: readonly string[];
+  cwd: string;
+  env: Record<string, string | undefined>;
+  stdin?: string;
+  timeoutMs: number;
+}): Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(input.command, input.args, {
+      cwd: input.cwd,
+      env: input.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const timeout = setTimeout(() => child.kill("SIGKILL"), input.timeoutMs);
+    child.once("error", reject);
+    child.once("close", (status, signal) => {
+      clearTimeout(timeout);
+      resolve({ status, signal, stdout, stderr });
+    });
+    child.stdin.end(input.stdin);
+  });
 }
 
 function prefixTestNames(register: typeof test, prefix: string): typeof test {
@@ -366,9 +416,12 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
 
 async function loadGeneratedCodexAgent(project: string): Promise<{
   CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+    preflight(options?: { rootDir?: string }): Promise<void>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command: string;
       args: string[];
       env?: Record<string, string>;
+      stdin?: string;
       cleanup?: () => Promise<void>;
     }>;
   };
@@ -423,9 +476,12 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
     CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+      preflight(options?: { rootDir?: string }): Promise<void>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command: string;
         args: string[];
         env?: Record<string, string>;
+        stdin?: string;
         cleanup?: () => Promise<void>;
       }>;
     };
@@ -442,6 +498,117 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     CompatibleCodexAgent: codexModule.CompatibleCodexAgent,
     createCodexAgent: codexModule.createCodexAgent,
     workflowControlChildEnvironment: environmentModule.workflowControlChildEnvironment
+  };
+}
+
+async function loadGeneratedPiAgent(project: string): Promise<{
+  createPiAgent(options?: Record<string, unknown>): {
+    opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "pi-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const piSource = fs
+    .readFileSync(path.join(agentsDir, "pi.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  fs.writeFileSync(path.join(fixture, "pi.mjs"), transpile(piSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "strict-json.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "strict-json.ts"), "utf8")),
+    "utf8"
+  );
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
+  const piModule = (await import(pathToFileURL(path.join(fixture, "pi.mjs")).href)) as {
+    createPiAgent(options?: Record<string, unknown>): {
+      opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+      }>;
+    };
+  };
+  return { createPiAgent: piModule.createPiAgent };
+}
+
+async function loadGeneratedOpenCodeAgent(project: string): Promise<{
+  createOpenCodeAgent(options?: Record<string, unknown>): {
+    opts: { env: Record<string, string> };
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "opencode-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const openCodeSource = fs
+    .readFileSync(path.join(agentsDir, "opencode.ts"), "utf8")
+    .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"')
+    .replace('from "./environment"', 'from "./environment.mjs"');
+  fs.writeFileSync(path.join(fixture, "opencode.mjs"), transpile(openCodeSource), "utf8");
+  for (const name of ["environment", "toml", "strict-json"] as const) {
+    fs.writeFileSync(
+      path.join(fixture, `${name}.mjs`),
+      transpile(fs.readFileSync(path.join(agentsDir, `${name}.ts`), "utf8")),
+      "utf8"
+    );
+  }
+  fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
+  return (await import(pathToFileURL(path.join(fixture, "opencode.mjs")).href)) as {
+    createOpenCodeAgent(options?: Record<string, unknown>): {
+      opts: { env: Record<string, string> };
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command: string;
+        args: string[];
+        env?: Record<string, string>;
+      }>;
+    };
   };
 }
 
@@ -2658,10 +2825,14 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /const apiKey = requiredEnv/);
-  assert.match(codexAgentText, /return { apiKey, configDir, env: { CODEX_API_KEY: apiKey } }/);
+  assert.match(codexAgentText, /const credentialEnv = config\.api_key_env \?\? "OPENAI_API_KEY"/);
+  assert.match(codexAgentText, /\[credentialEnv\]: apiKey/);
+  assert.match(codexAgentText, /return { apiKey, \.\.\.\(configDir === undefined \? \{\} : \{ configDir \}\), env }/);
   assert.match(codexAgentText, /const env: Record<string, string> = { OPENAI_API_KEY: "", CODEX_API_KEY: "" };/);
-  assert.match(codexAgentText, /function codexProviderBaseUrl/);
-  assert.match(codexAgentText, /process\.env\.OPENAI_BASE_URL/);
+  assert.match(codexAgentText, /function addCodexProviderRoute/);
+  assert.match(codexAgentText, /function codexProviderRouting/);
+  assert.match(codexAgentText, /function validateOpenRouterCredential/);
+  assert.match(codexAgentText, /env\.OPENAI_BASE_URL = routing\.route\.baseUrl/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
@@ -2675,21 +2846,21 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
-  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/openrouter.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/pi.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
   assert.match(agentsIndexText, /export \{ createDeepSeekAgent \} from ".\/deepseek";/);
   assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
-  assert.match(agentsIndexText, /export \{ createOpenRouterAgent \} from ".\/openrouter";/);
+  assert.match(agentsIndexText, /export \{ createPiAgent \} from ".\/pi";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*DeepSeekAgent: createDeepSeekAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
-  assert.match(agentsIndexText, /agentFactories = \{[^}]*OpenRouterAgent: createOpenRouterAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*PiAgent: createPiAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi|OpenRouter)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi|Pi)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -2741,6 +2912,66 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(kimiAgentText, /--thinking/);
   assert.doesNotMatch(kimiAgentText, /--no-thinking/);
   assert.doesNotMatch(kimiAgentText, /final-message-only/);
+  const piAgentText = fs.readFileSync(path.join(project, ".smithers/agents/pi.ts"), "utf8");
+  assert.match(piAgentText, /PiAgent as SmithersPiAgent/);
+  assert.match(piAgentText, /createPiAgent/);
+  // The provider is the adapter's identity, not a configuration field.
+  assert.match(piAgentText, /PI_PROVIDER = "openrouter"/);
+  assert.match(piAgentText, /provider: PI_PROVIDER/);
+  assert.match(piAgentText, /OPENROUTER_API_KEY/);
+  assert.match(piAgentText, /PI_CODING_AGENT_DIR/);
+  assert.match(piAgentText, /sessionDir: auth\.sessionDir/);
+  assert.match(piAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  // `apiKey` is the only Smithers option that emits `--api-key`; the adapter
+  // must never set it, and must never assemble argv of its own.
+  assert.doesNotMatch(piAgentText, /apiKey:/);
+  assert.doesNotMatch(piAgentText, /"--api-key"/);
+  assert.doesNotMatch(piAgentText, /extraArgs/);
+  assert.doesNotMatch(piAgentText, /baseURL|baseUrl|OPENROUTER_BASE_URL/);
+  // pi owns the model catalogue; the profile supplies an opaque id.
+  assert.doesNotMatch(piAgentText, /model:\s*"[\w./-]+"/);
+  assert.doesNotMatch(piAgentText, /PI_CODING_AGENT_SESSION_DIR/);
+  assert.doesNotMatch(piAgentText, /=\s*createPiAgent\(\)/);
+  assert.doesNotMatch(piAgentText, /function readStringTable/);
+
+  const openCodeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/opencode.ts"), "utf8");
+  assert.match(openCodeAgentText, /OpenCodeAgent as SmithersOpenCodeAgent/);
+  assert.match(openCodeAgentText, /createOpenCodeAgent/);
+  assert.match(openCodeAgentText, /class CompatibleOpenCodeAgent extends SmithersOpenCodeAgent/);
+  assert.match(openCodeAgentText, /override async buildCommand/);
+  assert.match(openCodeAgentText, /extraArgs: \["--pure"\]/);
+  assert.match(openCodeAgentText, /yolo: true/);
+  assert.match(openCodeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  // Isolation is only real if every state root is named: an unnamed root is
+  // inherited and lands in the operator's home.
+  for (const name of [
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_DB",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_MODELS_PATH",
+    "OPENCODE_TUI_CONFIG",
+    "OPENCODE_PLUGIN_META_FILE",
+    "OPENCODE_DISABLE_AUTOUPDATE",
+    "OPENCODE_DISABLE_SHARE",
+    "OPENCODE_DISABLE_MODELS_FETCH",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+    "OPENCODE_DISABLE_PROJECT_CONFIG",
+    "OPENCODE_DISABLE_LSP_DOWNLOAD"
+  ]) {
+    assert.match(openCodeAgentText, new RegExp(`${name}:`, "u"), `${name} is not pinned by the OpenCode adapter`);
+  }
+  // The adapter stays tight: it delegates argv, prompt assembly, output
+  // interpretation, usage accounting, and session handling to Smithers.
+  assert.doesNotMatch(openCodeAgentText, /=\s*createOpenCodeAgent\(\)/);
+  assert.doesNotMatch(openCodeAgentText, /createOutputInterpreter|override async generate|override stream/);
+  assert.doesNotMatch(openCodeAgentText, /mkdirSync|writeFileSync|rmSync/);
+  assert.doesNotMatch(openCodeAgentText, /model:\s*"openrouter\//);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -2799,10 +3030,7 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(oldManifest, null, 2)}\n`, "utf8");
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const stock032Source = fs
-    .readFileSync(codexPath, "utf8")
-    .replaceAll("@smthrs/agents", "@smithers-orchestrator/agents")
-    .replaceAll('from "smthrs"', 'from "smithers-orchestrator"');
+  const stock032Source = fs.readFileSync(path.resolve("test/fixtures/smithers-0.32-codex.txt"), "utf8");
   assert.equal(
     crypto.createHash("sha256").update(stock032Source).digest("hex"),
     "7865f1be1715d36d016c7b2814081b70e70a9aca7e30d5b41f5d91bf2337f681"
@@ -3353,9 +3581,9 @@ bunAdapterTest(
       );
       assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
 
-      // An operator-supplied route always wins.
+      // The selected provider remains authoritative over an ambient route.
       process.env.OPENAI_BASE_URL = "https://operator.example/v1";
-      assert.equal(agentEnvironment().OPENAI_BASE_URL, undefined);
+      assert.equal(agentEnvironment().OPENAI_BASE_URL, "https://gateway.example/v1");
       delete process.env.OPENAI_BASE_URL;
 
       // Default provider, unknown provider, and a provider without base_url all
@@ -3381,6 +3609,304 @@ bunAdapterTest(
       else process.env.CODEX_HOME = previous.codexHome;
       if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
       else process.env.OPENAI_BASE_URL = previous.baseUrl;
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated CodexAgent API-key auth preflights the configured custom provider with its named credential",
+  { timeout: 30_000 },
+  async () => {
+    const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    const realCodexCliAvailable = codexVersion.status === 0 && codexVersion.stdout.includes("codex-cli");
+    let acceptCredential = true;
+    const requests: Array<{ authorization: string | undefined; method: string | undefined; url: string | undefined }> =
+      [];
+    const server = createServer((request, response) => {
+      requests.push({
+        authorization: request.headers.authorization,
+        method: request.method,
+        url: request.url
+      });
+      if (request.method === "POST" && request.url === "/v1/responses") {
+        const outputText = { type: "output_text", text: "fixture-ok", annotations: [], logprobs: [] };
+        const message = {
+          id: "msg_fixture",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [outputText]
+        };
+        const completed = {
+          id: "resp_fixture",
+          object: "response",
+          created_at: 1,
+          status: "completed",
+          model: "fixture-model",
+          output: [message],
+          parallel_tool_calls: true,
+          tool_choice: "auto",
+          tools: [],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 1,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 2
+          }
+        };
+        const events = [
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { ...message, status: "in_progress", content: [] }
+          },
+          {
+            type: "response.content_part.added",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            part: { ...outputText, text: "" }
+          },
+          {
+            type: "response.output_text.delta",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            delta: outputText.text,
+            logprobs: []
+          },
+          {
+            type: "response.output_text.done",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            text: outputText.text,
+            logprobs: []
+          },
+          {
+            type: "response.content_part.done",
+            item_id: message.id,
+            output_index: 0,
+            content_index: 0,
+            part: outputText
+          },
+          { type: "response.output_item.done", output_index: 0, item: message },
+          { type: "response.completed", response: completed }
+        ];
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(
+          `${events.map((event, sequence_number) => `data: ${JSON.stringify({ ...event, sequence_number })}`).join("\n\n")}\n\ndata: [DONE]\n\n`
+        );
+        return;
+      }
+      if (request.url === "/v1/key" && !acceptCredential) {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end('{"error":{"message":"invalid fixture key"}}');
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(request.url === "/v1/key" ? '{"data":{"label":"fixture"}}' : '{"data":[]}');
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    server.unref();
+
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const providerHomeRoot = path.join(project, "operator-provider-homes");
+    const codexHome = path.join(providerHomeRoot, "codex", "openrouter-codex");
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    const address = server.address() as AddressInfo;
+    const providerBaseUrl = `http://127.0.0.1:${address.port}/v1`;
+    const codexConfigPath = path.join(codexHome, "config.toml");
+    const openRouterCodexConfig = [
+      'model_provider = "openrouter"',
+      "",
+      "[model_providers.openrouter]",
+      'name = "OpenRouter fixture"',
+      `base_url = "${providerBaseUrl}"`,
+      'wire_api = "responses"',
+      'env_key = "OPENROUTER_API_KEY"'
+    ].join("\n");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          /\[agents\.CodexAgent\]\nauth = "api-key"\napi_key_env = "OPENAI_API_KEY"/u,
+          [
+            "[agents.CodexAgent]",
+            'auth = "api-key"',
+            'api_key_env = "OPENROUTER_API_KEY"',
+            'config_dir = "openrouter-codex"'
+          ].join("\n")
+        ),
+      "utf8"
+    );
+
+    const previous = {
+      baseUrl: process.env.OPENAI_BASE_URL,
+      codexHome: process.env.CODEX_HOME,
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouterKey: process.env.OPENROUTER_API_KEY,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "openrouter-test-key";
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    delete process.env.CODEX_HOME;
+    process.env.OPENAI_BASE_URL = "http://127.0.0.1:1/ambient-must-not-receive-key";
+    try {
+      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+      // A dedicated Codex home is not itself evidence of a custom provider.
+      // Keep normal OpenAI/ambient routing when config.toml is absent or only
+      // contains default-provider settings.
+      const noCodexConfigAgent = createCodexAgent() as {
+        opts: { configDir: string; env: Record<string, string> };
+      };
+      assert.equal(noCodexConfigAgent.opts.configDir, codexHome);
+      assert.equal(noCodexConfigAgent.opts.env.OPENAI_BASE_URL, undefined);
+      fs.writeFileSync(codexConfigPath, 'model = "gpt-5.5"\n', "utf8");
+      const defaultProviderAgent = createCodexAgent() as typeof noCodexConfigAgent;
+      assert.equal(defaultProviderAgent.opts.env.OPENAI_BASE_URL, undefined);
+
+      fs.writeFileSync(codexConfigPath, openRouterCodexConfig, "utf8");
+      const agent = createCodexAgent() as {
+        opts: {
+          apiKey: string;
+          configDir: string;
+          env: Record<string, string>;
+        };
+        preflight(options?: { rootDir?: string }): Promise<void>;
+        buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+          command: string;
+          args: string[];
+          env?: Record<string, string>;
+          stdin?: string;
+          cleanup?: () => Promise<void>;
+        }>;
+      };
+      assert.equal(agent.opts.apiKey, "openrouter-test-key");
+      assert.equal(agent.opts.configDir, codexHome);
+      assert.equal(agent.opts.env.OPENAI_BASE_URL, providerBaseUrl);
+      assert.equal(agent.opts.env.OPENROUTER_API_KEY, "openrouter-test-key");
+
+      if (!realCodexCliAvailable) {
+        return;
+      }
+      await agent.preflight({ rootDir: project });
+      assert.deepEqual(requests, [
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/models" },
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/models" },
+        { authorization: "Bearer openrouter-test-key", method: "GET", url: "/v1/key" }
+      ]);
+
+      const command = await agent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = await runSpawnedCommand({
+          command: command.command,
+          args: command.args,
+          cwd: project,
+          env: { ...process.env, ...agent.opts.env, ...command.env },
+          stdin: command.stdin,
+          timeoutMs: 20_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}\n${JSON.stringify(requests)}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+        assert.deepEqual(requests.at(-1), {
+          authorization: "Bearer openrouter-test-key",
+          method: "POST",
+          url: "/v1/responses"
+        });
+      } finally {
+        await command.cleanup?.();
+      }
+
+      acceptCredential = false;
+      await assert.rejects(
+        agent.preflight({ rootDir: project }),
+        /OpenRouter credential is invalid \(401 Unauthorized\)/u
+      );
+      assert.deepEqual(requests.at(-1), {
+        authorization: "Bearer openrouter-test-key",
+        method: "GET",
+        url: "/v1/key"
+      });
+
+      // Codex accepts literal strings and comments after table headers, while
+      // the generated adapters intentionally share a smaller TOML reader. If
+      // route discovery cannot decode otherwise valid Codex TOML, preflight
+      // must not send the provider key to an inherited/default endpoint. The
+      // real CLI remains the authoritative parser and still executes it.
+      acceptCredential = true;
+      requests.length = 0;
+      fs.writeFileSync(
+        path.join(codexHome, "config.toml"),
+        [
+          "model_provider = 'openrouter'",
+          "",
+          "[model_providers.openrouter] # valid TOML outside the shared reader's subset",
+          "name = 'OpenRouter fixture'",
+          `base_url = '${providerBaseUrl}'`,
+          "wire_api = 'responses'",
+          "env_key = 'OPENROUTER_API_KEY'"
+        ].join("\n"),
+        "utf8"
+      );
+      const alternateTomlAgent = createCodexAgent() as typeof agent;
+      assert.equal(alternateTomlAgent.opts.env.OPENAI_BASE_URL, "");
+      await alternateTomlAgent.preflight({ rootDir: project });
+      assert.deepEqual(requests, []);
+
+      const alternateTomlCommand = await alternateTomlAgent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = await runSpawnedCommand({
+          command: alternateTomlCommand.command,
+          args: alternateTomlCommand.args,
+          cwd: project,
+          env: { ...process.env, ...alternateTomlAgent.opts.env, ...alternateTomlCommand.env },
+          stdin: alternateTomlCommand.stdin,
+          timeoutMs: 20_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+        assert.deepEqual(requests, [
+          {
+            authorization: "Bearer openrouter-test-key",
+            method: "POST",
+            url: "/v1/responses"
+          }
+        ]);
+      } finally {
+        await alternateTomlCommand.cleanup?.();
+      }
+    } finally {
+      if (previous.baseUrl === undefined) delete process.env.OPENAI_BASE_URL;
+      else process.env.OPENAI_BASE_URL = previous.baseUrl;
+      if (previous.codexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previous.codexHome;
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouterKey;
+      if (previous.providerHomeRoot === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous.providerHomeRoot;
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
     }
   }
 );
@@ -5552,6 +6078,174 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated Pi adapter binds OpenRouter through env and keeps the credential out of argv",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { createPiAgent } = await loadGeneratedPiAgent(project);
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const stockConfig = fs.readFileSync(configPath, "utf8");
+    const credential = "sk-or-v1-not-a-real-openrouter-credential";
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouter: process.env.OPENROUTER_API_KEY,
+      named: process.env.PI_OPENROUTER_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = credential;
+    delete process.env.PI_OPENROUTER_KEY;
+    try {
+      const configDir = path.resolve(process.cwd(), ".ultrafuzz/pi-coding-agent");
+      const agent = createPiAgent({ model: "openai/gpt-mini-latest", addDir: ["/tmp/artifacts"] });
+      const command = await agent.buildCommand({ prompt: "find a bug", cwd: project, options: {} });
+
+      // The complete OpenRouter binding is `--provider openrouter` plus an
+      // opaque catalogue id; pi owns the endpoint, so there is no base URL.
+      assert.equal(command.command, "pi");
+      assert.deepEqual(command.args, [
+        "--print",
+        "--provider",
+        "openrouter",
+        "--model",
+        "openai/gpt-mini-latest",
+        "--session-dir",
+        path.join(configDir, "sessions"),
+        "find a bug"
+      ]);
+
+      // The acceptance criterion: no credential value anywhere in argv, and no
+      // `--api-key` flag, because the adapter never sets Smithers' `apiKey`.
+      assert.equal(command.args.includes("--api-key"), false);
+      assert.equal(
+        command.args.some((argument) => argument.includes(credential)),
+        false
+      );
+      assert.equal((agent.opts as { apiKey?: string }).apiKey, undefined);
+
+      // The credential reaches the child only through the environment, and that
+      // environment went through workflowControlChildEnvironment: every
+      // controller-only variable is blanked in both layers Smithers composes.
+      const childEnv = { ...process.env, ...agent.opts.env, ...command.env };
+      assert.equal(childEnv.OPENROUTER_API_KEY, credential);
+      assert.equal(agent.opts.env.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
+
+      // Isolation: pi's config directory and session storage stay off the
+      // operator's real home (~/.pi/agent), and install telemetry is off.
+      assert.equal(agent.opts.env.PI_CODING_AGENT_DIR, configDir);
+      assert.equal(agent.opts.sessionDir, path.join(configDir, "sessions"));
+      assert.equal(agent.opts.env.PI_TELEMETRY, "0");
+      assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
+
+      // Profile reasoning maps onto pi's existing --thinking level.
+      const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
+      const thinkingCommand = await thinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
+      const thinkingIndex = thinkingCommand.args.indexOf("--thinking");
+      assert.notEqual(thinkingIndex, -1);
+      assert.equal(thinkingCommand.args[thinkingIndex + 1], "high");
+      // The throw must name the file and the key, not just the range: this is the
+      // error an operator hits copying `reasoning = "max"` off another profile.
+      assert.throws(
+        () => createPiAgent({ reasoningEffort: "ludicrous" }),
+        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh/u
+      );
+
+      // api_key_env names only where ultrafuzz reads the operator's value from;
+      // pi always receives it as OPENROUTER_API_KEY, the name pi looks up.
+      fs.writeFileSync(
+        configPath,
+        stockConfig.replace(
+          /\[agents\.PiAgent\]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"/u,
+          '[agents.PiAgent]\nauth = "api-key"\napi_key_env = "PI_OPENROUTER_KEY"'
+        ),
+        "utf8"
+      );
+      process.env.PI_OPENROUTER_KEY = "sk-or-v1-named-variable-credential";
+      const namedAgent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      assert.equal(namedAgent.opts.env.OPENROUTER_API_KEY, "sk-or-v1-named-variable-credential");
+      assert.equal(namedAgent.opts.env.PI_OPENROUTER_KEY, undefined);
+
+      // A missing credential fails loudly, naming the variable it wanted.
+      delete process.env.PI_OPENROUTER_KEY;
+      assert.throws(
+        () => createPiAgent({ model: "openai/gpt-mini-latest" }),
+        /agents\.PiAgent in .*ultrafuzz\.toml uses api-key auth, but PI_OPENROUTER_KEY is not set/u
+      );
+
+      // Subscription auth has no meaning for this adapter and is rejected.
+      fs.writeFileSync(
+        configPath,
+        stockConfig.replace(
+          /\[agents\.PiAgent\]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"/u,
+          '[agents.PiAgent]\nauth = "subscription"'
+        ),
+        "utf8"
+      );
+      assert.throws(
+        () => createPiAgent({ model: "openai/gpt-mini-latest" }),
+        /agents\.PiAgent in .*ultrafuzz\.toml supports only api-key auth, not subscription/u
+      );
+    } finally {
+      fs.writeFileSync(configPath, stockConfig, "utf8");
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouter;
+      if (previous.named === undefined) delete process.env.PI_OPENROUTER_KEY;
+      else process.env.PI_OPENROUTER_KEY = previous.named;
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated OpenCode adapter preserves its isolated environment and keeps credentials out of argv",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+    const credential = "sk-or-v1-not-a-real-opencode-credential";
+    const artifactDir = path.join(project, ".ultrafuzz", "runs", "opencode-contract", "artifacts", "attempt");
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouter: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = credential;
+    try {
+      const agent = createOpenCodeAgent({
+        model: "openrouter/test-model",
+        reasoningEffort: "high",
+        addDir: [artifactDir]
+      });
+      const command = await agent.buildCommand({ prompt: "inspect", cwd: project, options: {} });
+      const childEnv = { ...process.env, ...agent.opts.env, ...command.env };
+      assert.equal(childEnv.OPENROUTER_API_KEY, credential);
+      assert.equal(command.args.includes("--pure"), true);
+      assert.equal(command.args.includes("--api-key"), false);
+      assert.equal(
+        command.args.some((argument) => argument.includes(credential)),
+        false
+      );
+      assert.equal(childEnv.OPENCODE_DISABLE_AUTOUPDATE, "1");
+      assert.equal(childEnv.OPENCODE_DISABLE_SHARE, "1");
+      assert.equal(childEnv.OPENCODE_PERMISSION, JSON.stringify({ "*": "allow" }));
+      assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(childEnv.XDG_CONFIG_HOME?.startsWith(path.join(project, ".ultrafuzz", "runs")), true);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouter;
+    }
+  }
+);
+
+bunAdapterTest(
   "generated Kimi adapter narrows the pinned Smithers command to Kimi Code 0.29.1",
   { timeout: 30_000 },
   async () => {
@@ -7194,10 +7888,11 @@ test("validate requires agentFactories entries for every configured model profil
   const unknownAgents = validate.diagnostics
     .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
     .map((diagnostic) => diagnostic.message);
-  assert.equal(unknownAgents.length, 3, JSON.stringify(validate.diagnostics));
+  assert.equal(unknownAgents.length, 4, JSON.stringify(validate.diagnostics));
   assert.match(unknownAgents.join("\n"), /ClaudeAgent/u);
   assert.match(unknownAgents.join("\n"), /DeepSeekAgent/u);
   assert.match(unknownAgents.join("\n"), /KimiAgent/u);
+  assert.match(unknownAgents.join("\n"), /PiAgent/u);
   assert.doesNotMatch(unknownAgents.join("\n"), /OpenRouterAgent/u);
 
   const kimiRun = await startRun({
@@ -7242,7 +7937,9 @@ test("legacy projects do not require newly added opt-in agent factories", async 
   const configPath = path.join(project, "ultrafuzz.toml");
   fs.writeFileSync(
     configPath,
-    fs.readFileSync(configPath, "utf8").replace(/\n\[agents\.OpenRouterAgent\][\s\S]*?(?=\n\[permissions\])/u, ""),
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(/\n\[agents\.OpenRouterAgent\][\s\S]*?(?=\n\[(?:agents\.|permissions\]))/u, ""),
     "utf8"
   );
   const registryPath = path.join(project, ".smithers", "agents", "index.ts");
@@ -7250,7 +7947,7 @@ test("legacy projects do not require newly added opt-in agent factories", async 
     .readFileSync(registryPath, "utf8")
     .replace('import { createOpenRouterAgent } from "./openrouter";\n', "")
     .replace('export { createOpenRouterAgent } from "./openrouter";\n', "")
-    .replace("  OpenRouterAgent: createOpenRouterAgent\n", "");
+    .replace("  OpenRouterAgent: createOpenRouterAgent,\n", "");
   assert.doesNotMatch(legacyRegistry, /OpenRouterAgent/u);
   fs.writeFileSync(registryPath, legacyRegistry, "utf8");
   fs.unlinkSync(path.join(project, ".smithers", "agents", "openrouter.ts"));
@@ -7281,7 +7978,9 @@ test("validate accepts a typed aliased registry composed from static spreads", a
       "const optIn = {\n" +
       '  "DeepSeekAgent": createAgent,\n' +
       "  KimiAgent: createAgent,\n" +
-      "  OpenRouterAgent: createAgent\n" +
+      "  OpenCodeAgent: createAgent,\n" +
+      "  OpenRouterAgent: createAgent,\n" +
+      "  PiAgent: createAgent\n" +
       "};\n" +
       "const registry: Record<string, Factory> = { ...core, ...optIn };\n" +
       "export { registry as agentFactories };\n",
@@ -7308,7 +8007,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   const factories =
     "const factory = () => ({ id: 'agent' });\n" +
-    "const core = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory };\n";
+    "const core = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory, PiAgent: factory };\n";
 
   fs.writeFileSync(
     registryPath,
@@ -7334,7 +8033,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   assert.equal(unknownOverride.ok, false);
   assert.equal(
     unknownOverride.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    5
+    6
   );
 
   fs.writeFileSync(
@@ -7386,7 +8085,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   writeSmallTopology(project);
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
-    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake, OpenRouterAgent: fake }";\n' +
+    'export const decoy = "export const agentFactories = { ClaudeAgent: fake, CodexAgent: fake, DeepSeekAgent: fake, KimiAgent: fake, OpenRouterAgent: fake, PiAgent: fake }";\n' +
       "const first = { ...second };\n" +
       "const second = { ...first };\n" +
       "export type { first as agentFactories };\n",
@@ -7400,7 +8099,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
     validate.diagnostics
       .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
       .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
-    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent"]
+    ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenRouterAgent", "PiAgent"]
   );
 
   fs.writeFileSync(
@@ -7412,13 +8111,13 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   assert.equal(cyclic.ok, false);
   assert.equal(
     cyclic.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    5,
+    6,
     JSON.stringify(cyclic.diagnostics)
   );
 
   fs.writeFileSync(
     path.join(project, ".smithers/agents/index.ts"),
-    "const registry = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory };\n" +
+    "const registry = { ClaudeAgent: factory, CodexAgent: factory, DeepSeekAgent: factory, KimiAgent: factory, OpenRouterAgent: factory, PiAgent: factory };\n" +
       "export { type registry as agentFactories };\n",
     "utf8"
   );
@@ -7426,7 +8125,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
   assert.equal(typeSpecifier.ok, false);
   assert.equal(
     typeSpecifier.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
-    5,
+    6,
     JSON.stringify(typeSpecifier.diagnostics)
   );
 });
@@ -7665,6 +8364,222 @@ test("plan uses an eval topology override without replacing the project topology
     ["project-discovery"]
   );
   assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
+});
+
+test("a clean scaffold pins the reviewed vulnerability database verbatim", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  // The scaffolded catalog is the shipped catalog, byte for byte: no test mutates it into passing.
+  const scaffoldedYaml = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.deepEqual(parseReferenceCatalog(scaffoldedYaml), shippedReferenceCatalog());
+
+  const pinned = loadReferenceCatalog(project).references["vulnerability-database.web3"];
+  assert.ok(pinned, "the shipped scaffold must define vulnerability-database.web3");
+  assert.equal(pinned.kind, "vulnerability-database");
+  assert.equal(pinned.provider, "github");
+  assert.equal(pinned.repo, "aviggiano/web3-vulnerability-database");
+  assert.equal(pinned.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
+  assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
+  assert.equal(pinned.resolved_at, "2026-08-09T01:15:37Z");
+});
+
+test("a clean scaffold publishes the canonical artifact schema files the prompts reference", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  for (const [relativePath, schema, id] of [
+    [".ultrafuzz/schema/threat-model.schema.json", threatModelJsonSchema, THREAT_MODEL_JSON_SCHEMA_ID],
+    [".ultrafuzz/schema/goal-plan.schema.json", goalPlanJsonSchema, GOAL_PLAN_JSON_SCHEMA_ID]
+  ] as const) {
+    const filePath = path.join(project, ...relativePath.split("/"));
+    assert.equal(fs.statSync(filePath).isFile(), true, `${relativePath} must exist in a clean scaffold`);
+    fs.accessSync(filePath, fs.constants.R_OK);
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    // Generated from the one runtime validator, so the file an agent reads and the gate it must
+    // pass can never disagree.
+    assert.deepEqual(parsed, schema);
+    assert.equal(parsed.$id, id);
+    // The published bytes are the digest-stable canonical form.
+    assert.equal(
+      crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
+      crypto.createHash("sha256").update(projectArtifactSchemaJson(schema)).digest("hex")
+    );
+  }
+
+  // Every prompt names its canonical schema through the rendered `artifact_schema_dir` variable,
+  // so the agent resolves an absolute path rather than a literal that only works from the project
+  // root. Each referenced file must be one the scaffold actually publishes.
+  const promptRoot = path.join(project, ".ultrafuzz", "prompts");
+  const referenced = new Set<string>();
+  for (const promptPath of listFilesRecursively(promptRoot)) {
+    const body = fs.readFileSync(promptPath, "utf8");
+    assert.equal(
+      /`\.ultrafuzz\/schema\//u.test(body),
+      false,
+      `${promptPath} must not hardcode a project-relative schema path`
+    );
+    for (const match of body.matchAll(/\{\{artifact_schema_dir\}\}\/([A-Za-z0-9._-]+\.schema\.json)/gu)) {
+      referenced.add(match[1]!);
+    }
+  }
+  assert.deepEqual([...referenced].sort(), ["goal-plan.schema.json", "threat-model.schema.json"]);
+  for (const fileName of referenced) {
+    const filePath = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(fs.statSync(filePath).isFile(), true, fileName);
+    fs.accessSync(filePath, fs.constants.R_OK);
+  }
+});
+
+test("a clean scaffold caps goal replacement values instead of only asking the planner to keep them short", () => {
+  // Regression guard for the measured #672/#677 cause. The goal-plan `goal_prompt` template is a
+  // ~161-character sentence whose namespaced MDX placeholders are substituted from `replacements`,
+  // and `goal-hunter.mdx` tells the hunter that sentence is its authoritative focused goal. In one
+  // 18-hour local default-profile run the planner inlined whole records there -- a full
+  // vulnerability-class record plus a full threat-model entry with its `attack_surfaces`, `assets`,
+  // `actors`, and every `evidence` array -- giving a per-goal replacement payload of min 3,751 /
+  // median 13,956 / max 42,483 characters across 88 goals. Every goal node therefore opened with a
+  // multi-thousand-token JSON wall, 9 nodes were killed at exactly their 7200000ms timeout, and only
+  // 3 of 77 class-goal nodes produced any output.
+  //
+  // The prompt that mandated the inlining has been rewritten, but a prompt is advice. This test
+  // asserts the MECHANICAL half of the fix, in the two artifacts the planner agent is actually
+  // handed by a clean scaffold: the canonical schema it is told to validate against, and the prompt
+  // it is told to follow. Prompt-only enforcement of a token-budget invariant is exactly what
+  // regressed here, so the cap has to be in the published contract bytes.
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  const schemaPath = path.join(projectArtifactSchemaDir(project), "goal-plan.schema.json");
+  const published = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as {
+    properties: Record<
+      string,
+      { items: { properties: { replacements: { additionalProperties: { anyOf: unknown[] } } } } }
+    >;
+  };
+  for (const goalKind of ["threat_goals", "class_goals"] as const) {
+    const branches = published.properties[goalKind]?.items.properties.replacements.additionalProperties.anyOf as
+      Array<{ type?: string; minLength?: number; maxLength?: number }> | undefined;
+    assert.ok(branches, `${goalKind} must publish a replacements value contract`);
+    const stringBranch = branches.find((branch) => branch.type === "string");
+    assert.ok(stringBranch, `${goalKind} replacements must accept a string label`);
+    // A short label, and bounded. The bound is the load-bearing part: without it the contract admits
+    // a record of any size, and the only thing standing between the planner and a JSON wall is prose.
+    assert.equal(stringBranch.minLength, 1, `${goalKind} replacements must reject an empty label`);
+    assert.equal(
+      typeof stringBranch.maxLength,
+      "number",
+      `${goalKind} replacements must cap the label length; an uncapped value is how a whole record reached the goal sentence`
+    );
+    assert.ok(
+      stringBranch.maxLength! <= 200,
+      `${goalKind} replacements cap is ${String(stringBranch.maxLength)}, which is wide enough to inline a record`
+    );
+    // The smallest replacement payload measured in the failing run was 3,751 characters, so the cap
+    // has to sit far below that rather than merely below the median.
+    assert.ok(
+      stringBranch.maxLength! < 3_751,
+      `${goalKind} replacements cap is ${String(stringBranch.maxLength)}, which still admits the smallest inlined record measured`
+    );
+  }
+
+  // And the prompt must no longer ask for the thing the contract now rejects, or every plan attempt
+  // burns a retry producing a document the gate refuses.
+  const planner = fs.readFileSync(path.join(project, ".ultrafuzz", "prompts", "setup", "goal-plan.md"), "utf8");
+  assert.match(planner, /short human-readable label/u);
+  assert.doesNotMatch(planner, /full contextual value/u);
+  assert.doesNotMatch(planner, /contains the full selected threat/u);
+  assert.doesNotMatch(planner, /focused hunter instructions and relevant examples/u);
+});
+
+function listFilesRecursively(root: string): string[] {
+  return fs
+    .readdirSync(root, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? listFilesRecursively(path.join(root, entry.name)) : [path.join(root, entry.name)]
+    );
+}
+
+test("the shipped default topology expands against the shipped reference catalog", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(shipped.ok, true, JSON.stringify(shipped.diagnostics));
+  assert.ok((shipped.value!.topology?.expanded_nodes ?? 0) > 0);
+});
+
+test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nodes", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  // Populate the normal reference cache with a valid local representation of every shipped pinned
+  // reference. The shipped catalog itself is untouched, so this only removes network dependence.
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  let plan;
+  try {
+    const validation = await validateProject({ projectRoot: project, env: {} });
+    assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
+    plan = await planRun({ projectRoot: project, runId: "clean-scaffold", env: {} });
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const logicalIds = new Set(plan.value!.graph.nodes.map((node) => node.logical_id));
+  for (const required of [
+    "reference-vulnerability-database",
+    "threat-model",
+    "goal-plan",
+    "goal-roaming",
+    "threat-goals",
+    "class-goals",
+    "dedupe-findings",
+    "final-report"
+  ]) {
+    assert.equal(logicalIds.has(required), true, `${required} must be planned by a clean scaffold`);
+  }
+  // The dynamic goal groups stay dynamic declarations rather than being silently flattened away.
+  const dynamicIds = plan
+    .value!.graph.nodes.filter((node) => node.dynamic !== undefined)
+    .map((node) => node.logical_id)
+    .sort();
+  assert.deepEqual(dynamicIds, ["class-goals", "threat-goals"]);
+
+  // The digest-bound planner catalog is materialized under the run root for the compiled tasks.
+  const catalogPath = path.join(plan.value!.run_root, "vulnerability-db", "catalog.json");
+  assert.equal(fs.existsSync(catalogPath), true);
+  assert.equal(plan.value!.vulnerability_database?.relative_path, "vulnerability-db/catalog.json");
+  assert.equal(
+    plan.value!.vulnerability_database?.sha256,
+    crypto.createHash("sha256").update(fs.readFileSync(catalogPath)).digest("hex")
+  );
+
+  // The threat-model and goal-plan prompts must render an absolute, readable canonical schema path
+  // rather than an unresolved placeholder or a literal that only resolves from the project root.
+  for (const [logicalId, fileName] of [
+    ["threat-model", "threat-model.schema.json"],
+    ["goal-plan", "goal-plan.schema.json"]
+  ] as const) {
+    const renderedPath: string[] = plan
+      .value!.rendered_prompts.filter((entry) => entry.logical_node_id === logicalId)
+      .map((entry) => entry.rendered_prompt_path);
+    assert.equal(renderedPath.length > 0, true, `${logicalId} must render a prompt`);
+    const body = fs.readFileSync(renderedPath[0]!, "utf8");
+    const expected = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(body.includes(expected), true, `${logicalId} must reference ${expected}`);
+    assert.equal(body.includes("{{artifact_schema_dir}}"), false);
+    assert.equal(body.includes("unavailable/"), false);
+    fs.accessSync(expected, fs.constants.R_OK);
+  }
 });
 
 test("project and runtime topology paths override a profile topology atomically", async () => {
@@ -8608,7 +9523,9 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
-  const project = tempProject();
+  const parent = tempProject();
+  const project = path.join(parent, 'checkout"quoted');
+  fs.mkdirSync(project);
   writeFanoutProject(project);
 
   const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
@@ -8618,7 +9535,7 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
   fs.mkdirSync(quotedProjectRoot);
   initProject({ projectRoot: quotedProjectRoot, force: true });
   const compiled = compileSmithersWorkflow({
-    projectRoot: quotedProjectRoot,
+    projectRoot: project,
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
@@ -8708,21 +9625,32 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
+  // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
+  // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline
+  // visible here instead of only in a run that dies at its timeout with no artifacts. Every byte is
+  // also paid once per task, so the wording is deliberately terse; the reasoning lives in the JSDoc
+  // on `topologyRuntimeContextForTimeout`.
   const expectedRuntimeContext = [
     "## Topology Runtime Context",
     "",
     "- Timeout: 1200 seconds total.",
     "- Finalization reserve: 200 seconds.",
     "- Working budget before finalization: 1000 seconds.",
+    "- Clock: `date -u +%s` once at start = START; working deadline START+1000, hard deadline START+1200.",
+    "- Re-run `date -u +%s` before each expensive step; compare, never estimate.",
     "- Stop starting new delegated or tool work when the finalization reserve begins.",
-    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs."
+    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
+    "- Crossing the hard deadline kills this node with no output at all."
   ].join("\n");
   assert.equal(
     workflowSource.includes(`"runtimeContext": ${JSON.stringify(expectedRuntimeContext)}`),
     true,
     workflowSource
   );
-  assert.match(workflowSource, /\$\{task\.runtimeContext\}\\n\\n\$\{operatorPrompt\}/u);
+  assert.match(workflowSource, /const fullTaskPrompt = renderAgentPrompt/u);
+  assert.match(workflowSource, /runtimeContext: task\.runtimeContext/u);
+  assert.match(workflowSource, /operatorPrompt,/u);
 });
 
 test("compileSmithersWorkflow exhausts same-profile retries before ordered fallback", async () => {
@@ -8952,6 +9880,26 @@ test("topology runtime context keeps a bounded finalization reserve", async () =
     if (entry.timeoutSeconds > 1) {
       assert.ok(entry.workingSeconds > 0);
     }
+    // #672/#677: a relative budget is unactionable for a model with no clock, which is how nodes
+    // reached their timeout having written nothing. Both deadlines must be derivable arithmetic over
+    // a start epoch the agent observes itself, and the shell command that observes it must be named.
+    assert.match(
+      context,
+      new RegExp(
+        "- Clock: `date -u \\+%s` once at start = START; " +
+          `working deadline START\\+${entry.workingSeconds}, hard deadline START\\+${entry.timeoutSeconds}\\.`,
+        "u"
+      )
+    );
+    assert.match(context, /`date -u \+%s`/u);
+    // A resolved wall-clock timestamp here would be a hard break, not a style problem: this string is
+    // serialized into the generated workflow, the workflow file is hashed into the control seal, and
+    // `writePreparedWorkflowFile` throws when a re-render disagrees with the bytes already on disk.
+    // It would also be semantically wrong, because generation happens once and nodes start hours
+    // later. Hence a recipe, and hence this guard against anything date-shaped.
+    assert.doesNotMatch(context, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/u);
+    // The byte stability that seal and re-prepare both depend on.
+    assert.equal(topologyRuntimeContextForTimeout(entry.timeoutMs), context);
   }
 });
 
@@ -9054,8 +10002,8 @@ test("init reports an agent registry that does not export a generated agent", as
   initProject({ projectRoot: project, force: true });
 
   // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
-  // and OpenRouterAgent existed: the registry predates the adapters, and init
-  // preserves project-owned files.
+  // OpenCodeAgent, OpenRouterAgent, and PiAgent existed: the registry predates the adapters, and init preserves
+  // project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
@@ -9068,16 +10016,18 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 4, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 6, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
-  // A registry that names providers without registering their factories is
-  // still stale: nothing resolves them, since generated adapters export only
-  // factories.
+  // A registry that names Claude, DeepSeek, Kimi, OpenCode, OpenRouter, and Pi without registering
+  // their factories is still stale: nothing resolves it, since generated
+  // adapters export only factories.
   fs.writeFileSync(
     registryPath,
     'import { createCodexAgent } from "./codex";\n' +
@@ -9088,11 +10038,13 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 4, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 6, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /PiAgent/);
 
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });
@@ -9363,8 +10315,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /<Worktree/);
   assert.match(
     workflowSource,
-    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision/u
+    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision[\s\S]*?baseBranch: governedSource\.commit/u
   );
+  assert.match(workflowSource, /function readGovernedSource\(\): \{ commit: string; tree: string \} \| undefined/);
+  assert.doesNotMatch(workflowSource, /resolveLocalSourceCommit/u);
   assert.match(workflowSource, /function preservePinnedSourceProof/);
   assert.match(workflowSource, /"source-proofs"/);
   assert.doesNotMatch(workflowSource, /const layers =/);
@@ -10404,6 +11358,86 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
 });
 
+test("startRun forwards Modal credentials and SDK selectors through the workflow environment filter", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    `${fs
+      .readFileSync(configPath, "utf8")
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+`,
+    "utf8"
+  );
+  const cloudEnvironmentLog = path.join(project, "smithers-cloud-environment.log");
+  const cloudSelectorLog = path.join(project, "smithers-cloud-selectors.log");
+  const pinnedRunner = writeFakeInstalledSmithers(project);
+  const pinnedRunnerSource = [
+    "#!/bin/sh",
+    'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
+    '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+    "fi",
+    'if [ -n "$SMITHERS_FAKE_CLOUD_SELECTOR_LOG" ] && [ "$1" = "up" ]; then',
+    '  printf \'%s|%s|%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" "$MODAL_ENVIRONMENT" "$MODAL_PROFILE" > "$SMITHERS_FAKE_CLOUD_SELECTOR_LOG"',
+    "fi",
+    "printf '%s\\n' '{\"ok\":true}'",
+    ""
+  ].join("\n");
+  fs.writeFileSync(pinnedRunner.target, pinnedRunnerSource, "utf8");
+  fs.chmodSync(pinnedRunner.target, 0o755);
+  const controllerEnvironment = fakeSmithersEnv(project);
+  writeFakeNpmInstaller(project, { count: 0, stderr: [], runnerSource: pinnedRunnerSource });
+  const env = {
+    ...controllerEnvironment,
+    SMITHERS_BIN: undefined,
+    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
+    SMITHERS_FAKE_CLOUD_SELECTOR_LOG: cloudSelectorLog,
+    OPENAI_API_KEY: "configured-agent-key",
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "UFZ_PROVIDER_ONE,UFZ_PROVIDER_TWO",
+    UFZ_PROVIDER_ONE: "provider-one",
+    UFZ_PROVIDER_TWO: "provider-two",
+    MODAL_ENVIRONMENT: "selected-environment",
+    MODAL_PROFILE: "selected-profile",
+    MODAL_TOKEN_ID: "test-token-id",
+    MODAL_TOKEN_SECRET: "test-token-secret"
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "test-token-id|test-token-secret\n");
+  assert.equal(
+    fs.readFileSync(cloudSelectorLog, "utf8"),
+    "provider-one|provider-two|selected-environment|selected-profile\n"
+  );
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { execution_snapshot_path?: string };
+  };
+  const executionSnapshot = path.join(run.value!.run_root, metadata.workflow?.execution_snapshot_path ?? "");
+  const dependencyManifest = JSON.parse(
+    fs.readFileSync(path.join(executionSnapshot, "dependencies", "manifest.json"), "utf8")
+  ) as { smithers_bin?: unknown };
+  assert.equal(typeof dependencyManifest.smithers_bin, "string");
+  assert.notEqual(dependencyManifest.smithers_bin, "");
+  assert.notEqual(
+    path.resolve(executionSnapshot, String(dependencyManifest.smithers_bin)),
+    fs.realpathSync(controllerEnvironment.SMITHERS_BIN!),
+    "cloud execution must use the sealed pinned runner rather than a host-only controller override"
+  );
+  const sealedCloudRunner = path.join(executionSnapshot, ...String(dependencyManifest.smithers_bin).split("/"));
+  assert.equal(fs.statSync(sealedCloudRunner).isFile(), true);
+  assert.notEqual(fs.statSync(sealedCloudRunner).mode & 0o111, 0);
+  assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
+});
+
 test("startRun forwards Kimi-specific runtime environment without exposing unrelated secrets", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -11374,7 +12408,8 @@ ${`${marker} `.repeat(2000)}
 
   const smithersInput = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
-  ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  ) as { run_id?: unknown; tasks?: Array<{ prompt?: string; prompt_path?: string }> };
+  assert.equal(smithersInput.run_id, undefined);
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   const promptPath = smithersInput.tasks?.[0]?.prompt_path ?? "";
   assert.match(promptPath, /prompt\.rendered\.md$/);

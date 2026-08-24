@@ -48,6 +48,12 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   const state = structuredClone(input.state);
   const previous = input.previousState;
   const graphById = new Map(input.graph.nodes.map((node) => [node.id, node]));
+  const stateIdByGraphNodeId = new Map(
+    input.graph.nodes.map((node) => [node.id, node.dynamic_generated?.storage_id ?? node.id])
+  );
+  const graphNodeIdByStateId = new Map(
+    input.graph.nodes.map((node) => [node.dynamic_generated?.storage_id ?? node.id, node.id])
+  );
   const taskByAttempt = new Map(input.tasks.map((task) => [task.attemptId, task]));
   const taskIdsByConcrete = new Map<string, string[]>();
   for (const task of input.tasks) {
@@ -94,7 +100,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     }
 
     const task = taskByAttempt.get(nodeId);
-    const concreteNodeId = task?.concreteNodeId ?? nodeId;
+    const concreteNodeId = task?.concreteNodeId ?? graphNodeIdByStateId.get(nodeId) ?? nodeId;
     const taskIds = taskIdsByConcrete.get(concreteNodeId) ?? [];
     const directWorkflowState = input.workflowStates.get(nodeId);
     const relatedWorkflowStates = taskIds.map((id) => input.workflowStates.get(id));
@@ -117,11 +123,31 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
       continue;
     }
 
+    // Model fan-out has one synthetic aggregate state in addition to its real
+    // attempt states. It observes the attempts and must never enter the
+    // dispatch queue itself (dynamic aggregates use a separate safe state ID).
+    if (task === undefined && taskIds.length > 0) {
+      provisional.set(nodeId, waitState("dependency", "task-complete"));
+      continue;
+    }
+
     const graphNode = graphById.get(concreteNodeId);
+    // A dynamic declaration is a runtime join, not a dispatchable task. Its
+    // aggregate terminal state is projected by workflow synchronization after
+    // the generated children settle.
+    if (task === undefined && graphNode?.dynamic !== undefined) {
+      provisional.set(nodeId, waitState("dependency", "dependency-complete"));
+      continue;
+    }
     const dependencies = graphNode?.depends_on ?? [];
     if (
       dependencies.some(
-        (dependency) => !dependencySatisfied(state.nodes[dependency], graphById.get(dependency), input.graph.groups)
+        (dependency) =>
+          !dependencySatisfied(
+            state.nodes[stateIdByGraphNodeId.get(dependency) ?? dependency],
+            graphById.get(dependency),
+            input.graph.groups
+          )
       )
     ) {
       provisional.set(nodeId, waitState("dependency", "dependency-complete"));
@@ -267,7 +293,7 @@ function isDispatchableControlNode(
   nodes: Readonly<Record<string, NodeState>>
 ): boolean {
   const materializedTaskIds = taskIds.filter((id) => nodes[id] !== undefined);
-  return materializedTaskIds.length === 0 || materializedTaskIds.includes(nodeId) || nodeId !== concreteNodeId;
+  return taskIds.length === 0 || materializedTaskIds.includes(nodeId);
 }
 
 function dependencySatisfied(

@@ -1,16 +1,27 @@
+import fs from "node:fs";
 import path from "node:path";
 
 import {
   NODE_STATE_STATUSES,
+  assertGoalPlan,
   assertPlannedGraph,
+  parseUsageLedgerBytes,
+  readRunMetadataDocument,
+  type GoalPlan,
   type NodeState,
   type NodeStatus,
   type RunState
 } from "@ultrafuzz/artifacts";
+import { modelPricingFromSnapshot, projectNormalizedUsageAccounting } from "@ultrafuzz/runtime";
 
 import { readStrictJsonDocument } from "./eval-durable.js";
 import type {
   EvalDynamicNode,
+  EvalExpansionCompleteness,
+  EvalExpansionExpectation,
+  EvalExpansionPlan,
+  EvalExpansionReason,
+  EvalGoalLaneObservation,
   EvalNodeStatusCounts,
   EvalRunConcurrencyObservation,
   EvalRunExpansion
@@ -56,6 +67,10 @@ export function evalRunExpansion(input: { runRoot: string; state: RunState }): E
     .map((node) => node.node_id)
     .sort(compareIds);
   const dynamicNodes = dynamic.map(describeDynamicNode).sort((left, right) => compareIds(left.node_id, right.node_id));
+  const planDocument = readGoalPlan(input.runRoot);
+  const plan = planDocument.plan === undefined ? null : describePlan(planDocument.plan);
+  const usage = readUsageTotalsByNode(input.runRoot, input.state.run_id);
+  const lanes = planDocument.plan === undefined ? null : observeGoalLanes(planDocument.plan.goal_lanes, nodes, usage);
 
   return {
     node_count: nodes.length,
@@ -70,13 +85,44 @@ export function evalRunExpansion(input: { runRoot: string; state: RunState }): E
     timed_out_node_count: timedOutNodeIds.length,
     timed_out_node_ids: timedOutNodeIds.slice(0, MAX_EVAL_EXPANSION_NODE_IDS),
     concurrency: concurrencyObservation(input.state),
+    plan,
+    // Read against observed. The eval side never recomputes `threats + applicable classes`; a
+    // disagreement is reported with its sign and size instead of being resolved or discarded.
+    expected_vs_actual: compareExpectation(plan?.expected_child_count ?? null, dynamic?.length ?? null),
+    goal_lanes: lanes === null ? null : lanes.slice(0, MAX_EVAL_EXPANSION_NODE_IDS),
     truncated:
       failedNodeIds.length > MAX_EVAL_EXPANSION_NODE_IDS ||
       timedOutNodeIds.length > MAX_EVAL_EXPANSION_NODE_IDS ||
-      dynamicNodes.length > MAX_EVAL_EXPANSION_NODE_IDS,
+      dynamicNodes.length > MAX_EVAL_EXPANSION_NODE_IDS ||
+      (lanes?.length ?? 0) > MAX_EVAL_EXPANSION_NODE_IDS,
     nodes: complete(),
     lineage: complete(),
-    concurrency_evidence: complete()
+    concurrency_evidence: complete(),
+    plan_evidence: completeness(planDocument.reason),
+    lane_cost_evidence:
+      planDocument.plan === undefined ? completeness(planDocument.reason) : laneCostEvidence(lanes ?? [], usage)
+  };
+}
+
+function laneCostEvidence(
+  lanes: readonly EvalGoalLaneObservation[],
+  usage: UsageLedgerTotals
+): EvalExpansionCompleteness {
+  if (usage.reason !== undefined) return completeness(usage.reason);
+  const incomplete = lanes.filter((lane) => lane.cost_evidence.status !== "complete");
+  if (incomplete.length === 0) return complete();
+  const reason = incomplete[0]!.cost_evidence.reason ?? "usage-ledger-node-unmatched";
+  return incomplete.length === lanes.length && incomplete.every((lane) => lane.cost_evidence.status === "unavailable")
+    ? { status: "unavailable", reason }
+    : { status: "partial", reason };
+}
+
+function compareExpectation(expected: number | null, actual: number | null): EvalExpansionExpectation {
+  return {
+    expected_child_count: expected,
+    actual_dynamic_node_count: actual,
+    delta: expected === null || actual === null ? null : actual - expected,
+    matches: expected === null || actual === null ? null : actual === expected
   };
 }
 
@@ -92,6 +138,295 @@ function readStaticNodeIds(runRoot: string): Set<string> {
   const ids = new Set<string>();
   for (const node of graph.nodes) ids.add(node.id);
   return ids;
+}
+
+/** The planner artifact this reader consumes, and where a run retains it. */
+const GOAL_PLAN_FILE = "goal-plan.json";
+const GOAL_PLAN_CONTRACT = "ultrafuzz/goal-plan@1";
+const USAGE_LEDGER_FILE = "usage.jsonl";
+
+interface ReadGoalPlanFields {
+  expected_child_count: number;
+  threat_count: number;
+  applicable_class_count: number;
+  max_dynamic_nodes: number;
+  goal_lanes: Array<{ lane_id: string; kind: string; node_ids: string[] }>;
+}
+
+/**
+ * Read the planner's own numbers out of `goal-plan.json`.
+ *
+ * The current plan contract is validated before any fields are projected. A plan it cannot parse or
+ * validate surfaces as `goal-plan-unreadable` evidence rather than losing the rest of the eval
+ * record. Nothing here derives a number the planner did not write.
+ */
+function readGoalPlan(runRoot: string | undefined): {
+  plan?: ReadGoalPlanFields;
+  reason?: EvalExpansionReason;
+} {
+  if (runRoot === undefined) return { reason: "goal-plan-unavailable" };
+  const root = path.resolve(runRoot);
+  const planPath = locateGoalPlan(root);
+  if (planPath === undefined) return { reason: "goal-plan-unavailable" };
+  let plan: GoalPlan;
+  try {
+    plan = assertGoalPlan(readStrictJsonDocument(planPath));
+  } catch {
+    return { reason: "goal-plan-unreadable" };
+  }
+  return {
+    plan: {
+      expected_child_count: plan.expected_child_count,
+      threat_count: plan.threat_count,
+      applicable_class_count: plan.applicable_class_count,
+      max_dynamic_nodes: plan.max_dynamic_nodes,
+      goal_lanes: plan.goal_lanes.map((lane) => ({ ...lane, node_ids: [...lane.node_ids] }))
+    }
+  };
+}
+
+/**
+ * The goal plan's location comes only from the validated graph output contract. There is no
+ * conventional-directory fallback: an undeclared file is not planner authority.
+ */
+function locateGoalPlan(runRoot: string): string | undefined {
+  const candidates: string[] = [];
+  const graph = assertPlannedGraph(readStrictJsonDocument(path.join(runRoot, "graph.json")));
+  for (const node of graph.nodes) {
+    for (const output of node.outputs) {
+      if (output.contract === GOAL_PLAN_CONTRACT && output.path === GOAL_PLAN_FILE) {
+        candidates.push(path.join(runRoot, node.artifact_dir, output.path));
+      }
+    }
+  }
+  return candidates.find((candidate) => {
+    try {
+      return fs.statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+function describePlan(plan: ReadGoalPlanFields): EvalExpansionPlan {
+  return {
+    expected_child_count: plan.expected_child_count,
+    threat_count: plan.threat_count,
+    applicable_class_count: plan.applicable_class_count,
+    max_dynamic_nodes: plan.max_dynamic_nodes,
+    lane_count: plan.goal_lanes.length
+  };
+}
+
+interface LaneUsageTotals {
+  total_tokens: number | null;
+  cost_usd: number | null;
+  usage_complete: boolean;
+  pricing_complete: boolean;
+}
+
+interface UsageLedgerTotals {
+  /** Totals keyed by the ledger's `node_id`, the identity `state.json` keys a node under. */
+  totals: Map<string, LaneUsageTotals>;
+  /** Whether the current ledger carried at least one validated entry. */
+  joinable: boolean;
+  reason?: EvalExpansionReason;
+}
+
+/**
+ * Per-node token and cost totals replayed from the run's usage ledger.
+ *
+ * The join key is the ledger's required `node_id`, and only that. Cost is projected from the exact
+ * normalized usage the ledger stores and the pricing snapshot retained in current run metadata; the
+ * eval reader never accepts an invented ledger-side cost field.
+ */
+function readUsageTotalsByNode(runRoot: string | undefined, runId: string): UsageLedgerTotals {
+  if (runRoot === undefined) return { totals: new Map(), joinable: false, reason: "usage-ledger-unavailable" };
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(path.join(path.resolve(runRoot), USAGE_LEDGER_FILE));
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return { totals: new Map(), joinable: false, reason: "usage-ledger-unavailable" };
+    }
+    throw error;
+  }
+  const replay = parseUsageLedgerBytes(bytes, runId);
+  if (replay.entries.length === 0) {
+    return { totals: new Map(), joinable: false, reason: "usage-ledger-unavailable" };
+  }
+  const metadata = readRunMetadataDocument(path.join(path.resolve(runRoot), "run.json"), runId);
+  const modelPricing = modelPricingFromSnapshot(metadata.accounting?.pricing_catalog.model_prices);
+  const cacheReadRatio = metadata.accounting?.cumulative.cache_read_ratio_used;
+  const totals = new Map<string, LaneUsageTotals>();
+  for (const entry of replay.entries) {
+    const projected = projectNormalizedUsageAccounting({
+      usage: entry.usage,
+      modelPricing,
+      ...(cacheReadRatio === undefined ? {} : { cacheReadRatio })
+    });
+    const projectedCost =
+      projected.estimated_spend_usd ?? (projected.pricing_complete && projected.total_tokens === 0 ? 0 : null);
+    const previous = totals.get(entry.node_id) ?? {
+      total_tokens: null,
+      cost_usd: null,
+      usage_complete: true,
+      pricing_complete: true
+    };
+    totals.set(entry.node_id, {
+      total_tokens: addOptional(previous.total_tokens, projected.total_tokens),
+      cost_usd: addOptional(previous.cost_usd, projectedCost),
+      usage_complete: previous.usage_complete && projected.usage_complete,
+      pricing_complete: previous.pricing_complete && projected.pricing_complete
+    });
+  }
+  return { totals, joinable: true };
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function addOptional(accumulated: number | null, value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return accumulated;
+  return (accumulated ?? 0) + value;
+}
+
+/**
+ * Join the planner's lanes to the nodes the run actually ran for them.
+ *
+ * A lane names concrete node IDs such as `dynamic:threat:<id>`, while `state.json` keys a dynamic
+ * child under its filesystem-safe storage ID and records the concrete ID on
+ * `provenance.producer_node_id`. Matching on either identity is what lets a lane find its nodes
+ * without the planner having to know the runtime's storage naming.
+ */
+function observeGoalLanes(
+  lanes: ReadGoalPlanFields["goal_lanes"],
+  nodes: readonly NodeState[],
+  usage: UsageLedgerTotals
+): EvalGoalLaneObservation[] {
+  const byIdentity = new Map<string, NodeState[]>();
+  for (const node of nodes) {
+    for (const identity of nodeIdentities(node)) {
+      const existing = byIdentity.get(identity);
+      if (existing === undefined) byIdentity.set(identity, [node]);
+      else if (!existing.includes(node)) existing.push(node);
+    }
+  }
+  return lanes.map((lane) => {
+    const matched: NodeState[] = [];
+    const observedPlannedNodeIds: string[] = [];
+    for (const plannedId of lane.node_ids) {
+      const plannedMatches = byIdentity.get(plannedId) ?? [];
+      if (plannedMatches.length > 0) observedPlannedNodeIds.push(plannedId);
+      for (const node of plannedMatches) {
+        if (!matched.includes(node)) matched.push(node);
+      }
+    }
+    const laneUsage = laneUsageTotals(matched, usage);
+    return {
+      lane_id: lane.lane_id,
+      kind: lane.kind,
+      planned_node_ids: [...lane.node_ids],
+      observed_planned_node_ids: observedPlannedNodeIds.sort(compareIds),
+      observed_node_ids: matched.map((node) => node.node_id).sort(compareIds),
+      observed_node_count: matched.length,
+      status_counts: statusCounts(matched),
+      failed: matched.some((node) => node.status === "failed" || node.status === "timed-out"),
+      failed_node_ids: matched
+        .filter((node) => node.status === "failed")
+        .map((node) => node.node_id)
+        .sort(compareIds),
+      timed_out_node_ids: matched
+        .filter((node) => node.timed_out)
+        .map((node) => node.node_id)
+        .sort(compareIds),
+      retried_node_count: matched.filter((node) => node.retry_count > 0).length,
+      usage_matched_node_count: laneUsage.matched_node_count,
+      total_tokens: laneUsage.total_tokens,
+      cost_usd: laneUsage.cost_usd,
+      cost_evidence: laneUsage.evidence,
+      wall_time_seconds: laneWallTimeSeconds(matched)
+    };
+  });
+}
+
+/**
+ * Join one lane's nodes to the usage ledger, and say plainly whether the join was made.
+ *
+ * `total_tokens: null` is produced both by a lane that genuinely spent nothing and by a join that
+ * never landed, so the totals alone cannot be trusted; `evidence` is what separates the two, and it
+ * is `complete` only when every node this lane ran was found in the ledger.
+ */
+function laneUsageTotals(
+  matched: readonly NodeState[],
+  usage: UsageLedgerTotals
+): LaneUsageTotals & { matched_node_count: number; evidence: EvalExpansionCompleteness } {
+  const totals: LaneUsageTotals = {
+    total_tokens: null,
+    cost_usd: null,
+    usage_complete: true,
+    pricing_complete: true
+  };
+  const joinedKeys = new Set<string>();
+  for (const node of matched) {
+    for (const identity of nodeIdentities(node)) {
+      const entry = usage.totals.get(identity);
+      if (entry === undefined || joinedKeys.has(identity)) continue;
+      joinedKeys.add(identity);
+      totals.total_tokens = addOptional(totals.total_tokens, entry.total_tokens);
+      totals.cost_usd = addOptional(totals.cost_usd, entry.cost_usd);
+      totals.usage_complete &&= entry.usage_complete;
+      totals.pricing_complete &&= entry.pricing_complete;
+    }
+  }
+  const matchedNodes = matched.filter((node) => nodeIdentities(node).some((identity) => joinedKeys.has(identity)));
+  return {
+    ...totals,
+    matched_node_count: matchedNodes.length,
+    evidence:
+      usage.reason !== undefined
+        ? completeness(usage.reason)
+        : matched.length === 0
+          ? completeness("goal-lane-nodes-unobserved")
+          : matchedNodes.length === 0
+            ? completeness("usage-ledger-node-unmatched")
+            : matchedNodes.length < matched.length
+              ? { status: "partial", reason: "usage-ledger-node-unmatched" }
+              : !totals.usage_complete
+                ? { status: "partial", reason: "usage-incomplete" }
+                : !totals.pricing_complete
+                  ? { status: "partial", reason: "pricing-incomplete" }
+                  : completeness(undefined)
+  };
+}
+
+function nodeIdentities(node: NodeState): string[] {
+  const producer =
+    node.provenance !== undefined && "producer_node_id" in node.provenance
+      ? node.provenance.producer_node_id
+      : undefined;
+  const identities = [node.node_id];
+  if (typeof producer === "string" && producer.length > 0 && producer !== node.node_id) identities.push(producer);
+  return identities;
+}
+
+/**
+ * Elapsed wall-clock across a lane's nodes: the span from the earliest start to the latest finish,
+ * so parallel attempts in one lane are not double-counted as serial time.
+ */
+function laneWallTimeSeconds(nodes: readonly NodeState[]): number | null {
+  const starts = nodes.map((node) => epochMs(node.started_at)).filter((value): value is number => value !== null);
+  const finishes = nodes.map((node) => epochMs(node.finished_at)).filter((value): value is number => value !== null);
+  if (starts.length === 0 || finishes.length === 0) return null;
+  const elapsed = Math.max(...finishes) - Math.min(...starts);
+  return elapsed < 0 ? null : elapsed / 1_000;
+}
+
+function epochMs(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function describeDynamicNode(node: NodeState): EvalDynamicNode {
@@ -132,6 +467,10 @@ function concurrencyObservation(state: RunState): EvalRunConcurrencyObservation 
 
 function complete(): EvalRunExpansion["nodes"] {
   return { status: "complete", reason: null };
+}
+
+function completeness(reason: EvalExpansionReason | undefined): EvalExpansionCompleteness {
+  return reason === undefined ? complete() : { status: "unavailable", reason };
 }
 
 function compareIds(left: string, right: string): number {

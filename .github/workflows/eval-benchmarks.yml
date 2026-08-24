@@ -11,15 +11,23 @@ on:
   workflow_dispatch:
     inputs:
       benchmark_mode:
-        description: Lane to dispatch. smoke runs one runner over the three smoke targets; full runs the four-provider EVMBench matrix
+        description: >-
+          Which lane to dispatch. `smoke` runs one selected runner over the three smoke targets;
+          `full` is the EVMBench model matrix; `threat-model` is the v0.1.0 release gate from #183:
+          the pinned three-target Ultrafuzz-bench cohort through the PRODUCTION topology, so the
+          threat-model, goal-plan and dynamic goal-fanout nodes actually run. The threat-model lane
+          ignores every model input below and uses the checked-in benchmarks/ultrafuzzbench/lanes.json profile
+          (OpenAI gpt-5.6-luna / high), and it is never published to longitudinal history. It costs
+          real money: confirm an owner and a compute budget before dispatching.
         required: true
         default: full
         type: choice
         options:
-          - full
           - smoke
+          - full
+          - threat-model
       smoke_provider:
-        description: smoke mode only, runner provider
+        description: smoke lane only, runner provider
         required: true
         default: deepseek
         type: choice
@@ -30,12 +38,12 @@ on:
           - kimi
           - openrouter
       smoke_model:
-        description: smoke mode only, runner model
+        description: smoke lane only, runner model
         required: true
         default: deepseek-v4-flash
         type: string
       smoke_reasoning:
-        description: smoke mode only, runner reasoning effort
+        description: smoke lane only, runner reasoning effort
         required: true
         default: max
         type: string
@@ -81,7 +89,7 @@ on:
         type: string
 
 env:
-  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && (inputs.benchmark_mode || 'full') || 'smoke' }}
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
@@ -89,7 +97,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && (inputs.benchmark_mode || 'full') || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -109,6 +117,11 @@ jobs:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
+
+      # Keep the selected lane visible in the job metadata for operators. The
+      # publication qualifier independently derives it from exact-run artifacts.
+      - name: Benchmark lane ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_mode || 'smoke' }}
+        run: echo "Dispatching the $BENCHMARK_MODE benchmark lane"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -143,7 +156,7 @@ jobs:
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
             required+=(ANTHROPIC_API_KEY KIMI_API_KEY DEEPSEEK_API_KEY)
-          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+          elif [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             case "$BENCHMARK_SMOKE_PROVIDER" in
               anthropic) required+=(ANTHROPIC_API_KEY) ;;
               deepseek) required+=(DEEPSEEK_API_KEY) ;;
@@ -168,16 +181,20 @@ jobs:
           BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
           BENCHMARK_DEEPSEEK_MODEL: ${{ inputs.deepseek_model || 'deepseek-v4-pro' }}
           BENCHMARK_DEEPSEEK_REASONING: ${{ inputs.deepseek_reasoning || 'max' }}
-          BENCHMARK_SMOKE_PROVIDER: ${{ github.event_name == 'workflow_dispatch' && (inputs.smoke_provider || 'openai') || 'openai' }}
-          BENCHMARK_SMOKE_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_model || '' }}
-          BENCHMARK_SMOKE_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke_reasoning || '' }}
+          BENCHMARK_SMOKE_PROVIDER: ${{ inputs.benchmark_mode == 'smoke' && (inputs.smoke_provider || 'openai') || 'openai' }}
+          BENCHMARK_SMOKE_MODEL: ${{ inputs.benchmark_mode == 'smoke' && inputs.smoke_model || '' }}
+          BENCHMARK_SMOKE_REASONING: ${{ inputs.benchmark_mode == 'smoke' && inputs.smoke_reasoning || '' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
-          if [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            # Dispatched single-runner smoke lane. prepare-modal-benchmarks.mjs accepts a
-            # one-entry smoke matrix from any provider, so the runner is not pinned to the
-            # checked-in lane profile; the lane's targets, loops and judge are unchanged.
+          # The release gate has a fixed model identity (#183). Leaving the matrix
+          # unset makes prepare-modal-benchmarks.mjs fall back to the lane's own
+          # checked-in profile, so no dispatch-form value can retune the gate.
+          if [ "$BENCHMARK_MODE" = threat-model ]; then
+            unset BENCHMARK_MODELS_JSON
+          elif [ "$BENCHMARK_MODE" = smoke ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # A dispatched smoke run uses the requested single runner. Its targets,
+            # loops, topology transform, and judge remain pinned by the smoke lane.
             BENCHMARK_MODELS_JSON="$(jq -cn \
               --arg provider "$BENCHMARK_SMOKE_PROVIDER" \
               --arg model "$BENCHMARK_SMOKE_MODEL" \
@@ -254,6 +271,7 @@ jobs:
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
             launch_outcome=succeeded
+            launch_category=launched
             if ! timeout --signal=TERM --kill-after=30s 20m \
               node packages/modal/dist/cli.js launch \
               --config "$BENCHMARK_CONTROL/$config" \
@@ -261,13 +279,15 @@ jobs:
               --mode fresh \
               --repo-root .; then
               launch_outcome=failed
+              launch_category=initial-launch-failed
               echo "Initial detached launch failed for $pair; continuing with the remaining pairs" >&2
             fi
             jq -cn \
               --arg pair "$pair" \
               --arg state "$state" \
               --arg outcome "$launch_outcome" \
-              '{pair: $pair, state_path: $state, outcome: $outcome}' \
+              --arg category "$launch_category" \
+              '{pair: $pair, state_path: $state, outcome: $outcome, category: $category}' \
               >> "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
 
@@ -670,6 +690,13 @@ jobs:
           if-no-files-found: warn
           overwrite: true
           retention-days: 30
+
+      - name: Validate threat-model structural gate
+        if: always() && env.BENCHMARK_MODE == 'threat-model'
+        run: |
+          node scripts/ci/validate-threat-model-benchmark-gate.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_RESULTS"
 
       - name: Fail an incomplete matrix after preserving artifacts
         id: final_gate

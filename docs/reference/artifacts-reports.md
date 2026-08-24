@@ -82,6 +82,16 @@ fan-out provenance. Every JSON output also records its schema filename,
 fragment-free schema ID, schema SHA-256, schema-bundle SHA-256, and validator
 build identity. Partial bindings are invalid.
 
+For a dynamic topology, `graph.json` and the runtime task projection are
+atomically republished as groups expand. Generated graph entries retain the
+human `id`, their template group, source node/attempt and digest, expansion key
+and item digest, path-safe `storage_id`, and expansion-manifest path.
+
+`dynamic-expansions/<group-id>.json` is the immutable expansion decision. It
+records canonical ordered items, generated IDs, source and template digests,
+and the run-wide limit. Recovery validates and reuses it; incompatible or
+tampered manifests fail rather than causing replanning or duplicate attempts.
+
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 rendered prompt paths and digests, immutable prompt snapshot paths, and
 validation posture. Exact rendered prompt snapshots live under
@@ -151,6 +161,10 @@ into product artifacts.
 Node state can also record logical node ID, artifact directory, contracted
 outputs, attempt index, loop index, model profile ID, model name, model index,
 timestamps, last error, and provenance.
+
+For generated nodes, `producer_node_id` is the human runtime node ID while
+`storage_id` is the safe state/artifact identity. Reports and findings should
+display the producer ID; storage IDs are retained for exact operational lookup.
 
 ## Attempt Ledger
 
@@ -315,6 +329,13 @@ When present, `triage_classification` must be one of:
 Findings may also preserve source node, strategy, attempt index, model profile,
 model name, model index, loop index, affected files, affected functions,
 evidence, patch references, notes, dedupe metadata, and family metadata.
+`producer_node_id` is the runtime-controlled node that serialized the current
+record. `source_nodes` is the stable union of discovery nodes that found or
+corroborated the root cause; `source_node_id` remains its first-entry
+compatibility alias. Dynamic source IDs remain human-readable (for example,
+`dynamic:threat:liquidation:overdue`) even though filesystem storage uses a
+separate safe alias. Review stages preserve and union discovery sources rather
+than replacing them with the review node.
 `evidence` entries may be non-empty string references or objects. Object
 entries may include `kind`, `path`, and additional metadata; `kind` and `path`
 must be non-empty strings when present. Relative `path` values must stay inside
@@ -541,6 +562,12 @@ Repeat blocker and evidence rows in artifact order. Runtime publication compares
 this section with the typed handoff and rejects missing, duplicated, reordered,
 or bare coverage scores. Raw `covg-eval` output is for iteration only and
 defines neither published declaration-completeness view.
+
+Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
+`threat-model.json`, and `goal-plan.json`, plus source-node provenance for each
+production issue. Detailed threat analysis stays in the dedicated threat-model
+artifacts and is not duplicated into the report. `report.json` preserves the
+same `source_nodes` arrays.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and

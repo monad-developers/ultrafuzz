@@ -1046,6 +1046,11 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assertNoSmithersSurface(initBody);
   assert.equal((initBody.data as { preserved: string[] }).preserved.includes("ultrafuzz.toml"), true);
 
+  // A clean shipped scaffold validates with no fixture mutation whatsoever: the pinned
+  // vulnerability-database reference is part of the scaffolded catalog.
+  const shippedReferences = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.match(shippedReferences, /^ {2}vulnerability-database\.web3:$/mu);
+  assert.match(shippedReferences, /^ {4}commit: 74c2a5114b7adbd208eb49e47c137daa49b4a395$/mu);
   const validate = await cli(project, ["validate", "--json"]);
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
@@ -1056,6 +1061,20 @@ test("init and validate emit schema-versioned launch JSON", async () => {
     assert.equal(Boolean(posture[key]), true, `${key} posture missing`);
   }
   assert.equal("repository_mutation" in posture, false);
+
+  // Repointing the pinned reference at an unknown ID is a topology error, so the shipped catalog
+  // entry is load-bearing rather than decorative.
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace("reference: vulnerability-database.web3", "reference: absent.database"),
+    "utf8"
+  );
+  const tampered = await cli(project, ["validate", "--json"]);
+  assert.notEqual(tampered.code, 0);
+  assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
 test("plain init surfaces a customized stale agent adapter diagnostic", async () => {
@@ -1633,9 +1652,13 @@ test("references status is restored and reports offline cache state", async () =
     assert.equal(body.command, "references status");
     assert.equal(body.ok, false);
     const data = body.data as { references?: Array<{ id: string; ok: boolean }> };
-    assert.equal(data.references?.length, 9);
+    assert.equal(data.references?.length, 10);
     assert.equal(
       data.references?.some((reference) => reference.id === "properties.certora-thinking"),
+      true
+    );
+    assert.equal(
+      data.references?.some((reference) => reference.id === "vulnerability-database.web3"),
       true
     );
     assert.equal(
@@ -2208,6 +2231,17 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   fs.writeFileSync(path.join(artifactDir, supportPublicationPath), "authenticated discovery trace\n", "utf8");
   sealVerifiedNodeOutputs(runData.run_root, "project-discovery", [supportPublicationPath]);
   fs.writeFileSync(path.join(artifactDir, "bad\\name.txt"), "unsafe archive path\n", "utf8");
+  const goalPlanDir = path.join(runData.run_root, "artifacts", "goal-plan");
+  const selectedClassPath = "vulnerability-db/selected/liquidation/fixed-term-before-overdue.md";
+  fs.mkdirSync(path.dirname(path.join(goalPlanDir, selectedClassPath)), { recursive: true });
+  fs.writeFileSync(path.join(goalPlanDir, "goal-plan.json"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(goalPlanDir, "vulnerability-db-manifest.json"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(goalPlanDir, selectedClassPath), "# Fixed-term liquidation before overdue\n", "utf8");
+  writeArtifactManifest({
+    layout: layoutForRunRoot(runData.run_root, runData.run_id),
+    nodeId: "goal-plan",
+    include: ["goal-plan.json", "vulnerability-db-manifest.json", selectedClassPath]
+  });
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "123",
     estimatedSpend: "$0.46",
@@ -2309,6 +2343,13 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   assert.doesNotMatch(bundledMarkdown, /Placeholder/iu);
   assert.match(bundledMarkdown, /- Tokens used: `123`/u);
   assert.match(bundledMarkdown, /- Estimated spend: `\$0\.46`/u);
+  const goalPlanManifest = JSON.parse(zip.readAsText("artifacts/goal-plan/artifact-manifest.json")) as {
+    files: Array<{ path: string }>;
+  };
+  assert.equal(
+    goalPlanManifest.files.some((entry) => entry.path === selectedClassPath),
+    true
+  );
   const finalReportManifest = JSON.parse(zip.readAsText("artifacts/final-report/artifact-manifest.json")) as {
     files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };

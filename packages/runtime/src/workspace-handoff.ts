@@ -949,7 +949,7 @@ function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) 
 }
 
 function runGit(workspaceRoot: string, args: string[], index?: string, input?: string | Buffer): string {
-  const env = index === undefined ? undefined : { ...process.env, GIT_INDEX_FILE: index };
+  const env = { ...process.env, ...(index === undefined ? {} : { GIT_INDEX_FILE: index }) };
   try {
     // Decode HERE rather than passing `encoding: "utf8"`. The success path is identical either way --
     // this is the same decode Node would have done -- but the failure path is not. With `encoding` set,

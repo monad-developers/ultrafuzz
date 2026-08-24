@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertNoSymlinkComponents, parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import {
+  assertNoSymlinkComponents,
+  goalPlanJsonSchema,
+  parseStrictJsonBytes,
+  threatModelJsonSchema
+} from "@ultrafuzz/artifacts";
 import {
   packagedTopology,
   redactResolvedConfig,
@@ -41,21 +46,66 @@ const AGENT_TEMPLATES = [
     file: "deepseek.ts",
     template: "smithers/agents/deepseek.tsx",
     ref: "DeepSeekAgent",
-    stock032Sha256: ["1da0e8300e1b9f5c8311c14414acd3029b750fe70644c9d364c598ea460a08f2"]
+    stockSha256: new Set([
+      "c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35",
+      "65bf43f333cbced8ff0157e942d3c78267d8245d6c0041e053c8577a463e7407"
+    ])
   },
   {
     file: "kimi.ts",
     template: "smithers/agents/kimi.tsx",
     ref: "KimiAgent",
-    stock032Sha256: ["8e9c9fee048d2ac7a04669d8999647ba460c27855959bb77cd2b7eb0ea1ac940"]
+    stockSha256: new Set([
+      "fdbeaad6ea55122da50e9c9d86ac58a8b6377f419f8e78df23fb1fb401924e0b",
+      "6de5f4b00b54b533f8fc1aa0628f5a402dbb6521a4584852d83786ee59dcb2fd",
+      "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
+      "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f"
+    ])
+  },
+  {
+    file: "opencode.ts",
+    template: "smithers/agents/opencode.tsx",
+    ref: "OpenCodeAgent",
+    stockSha256: new Set<string>()
   },
   {
     file: "openrouter.ts",
     template: "smithers/agents/openrouter.tsx",
     ref: "OpenRouterAgent",
     stock032Sha256: []
+  },
+  {
+    file: "pi.ts",
+    template: "smithers/agents/pi.tsx",
+    ref: "PiAgent",
+    // No stock digest yet: this adapter has never shipped in a released
+    // scaffold, so any pi.ts already on disk is the operator's and is preserved.
+    stockSha256: new Set<string>()
   }
 ] as const;
+
+/**
+ * Canonical artifact JSON Schemas scaffolded into the project.
+ *
+ * The threat-model and goal-plan prompts point the agent at these files, so they must exist in
+ * every initialized project -- not only in this monorepo -- and they must be generated from the
+ * same runtime validators that gate the nodes. `schema/*.schema.json` in `@ultrafuzz/artifacts` is
+ * the parity-checked snapshot of the identical documents.
+ */
+const PROJECT_ARTIFACT_SCHEMA_DIR = ".ultrafuzz/schema";
+const PROJECT_ARTIFACT_SCHEMA_FILES = [
+  { relativePath: `${PROJECT_ARTIFACT_SCHEMA_DIR}/threat-model.schema.json`, schema: threatModelJsonSchema },
+  { relativePath: `${PROJECT_ARTIFACT_SCHEMA_DIR}/goal-plan.schema.json`, schema: goalPlanJsonSchema }
+] as const;
+
+/** The absolute scaffolded schema directory backing the `artifact_schema_dir` prompt variable. */
+export function projectArtifactSchemaDir(projectRoot: string): string {
+  return path.join(projectRoot, PROJECT_ARTIFACT_SCHEMA_DIR);
+}
+
+export function projectArtifactSchemaJson(schema: Record<string, unknown>): string {
+  return `${JSON.stringify(schema, null, 2)}\n`;
+}
 
 export function initProject(input: InitProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -83,6 +133,7 @@ export function initProject(input: InitProjectInput) {
     ".ultrafuzz/workspaces",
     ".ultrafuzz/cache",
     ".ultrafuzz/prompts",
+    PROJECT_ARTIFACT_SCHEMA_DIR,
     ".smithers",
     ".smithers/agents",
     ".smithers/workflows"
@@ -134,6 +185,17 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    for (const { relativePath, schema } of PROJECT_ARTIFACT_SCHEMA_FILES) {
+      writeProjectFile(
+        projectRoot,
+        relativePath,
+        projectArtifactSchemaJson(schema),
+        input.force === true,
+        created,
+        preserved,
+        overwritten
+      );
+    }
     writeProjectFile(
       projectRoot,
       ".smithers/package.json",
@@ -300,7 +362,9 @@ function upgradeStockSmithers032Adapters(
       continue;
     }
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (!(agent.stock032Sha256 as readonly string[]).includes(digest)) continue;
+    if (!("stock032Sha256" in agent)) continue;
+    const stock032Sha256 = agent.stock032Sha256 as readonly string[];
+    if (!stock032Sha256.includes(digest)) continue;
     writeProjectFile(
       projectRoot,
       relativePath,

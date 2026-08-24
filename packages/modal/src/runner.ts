@@ -23,6 +23,7 @@ import {
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_REPOS_ENV, REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
@@ -159,6 +160,7 @@ const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 // the image pin explicit so the runner and standalone Dockerfile cannot silently
 // drift back to it.
 export const CODEX_CLI_VERSION = "0.146.0";
+export const PI_CLI_VERSION = "0.84.2";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
@@ -2813,7 +2815,12 @@ export async function publicBenchmarkCollectionSecretValues(
       ? [requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider))]
       : await kimiSubscriptionAuthSecretValues(model.model, env);
   return [
-    ...new Set([...retainedSecretValues, ...runnerSecretValues, requiredEnv(env, config.braintrust.judge_api_key_env)])
+    ...new Set([
+      ...retainedSecretValues,
+      ...runnerSecretValues,
+      requiredEnv(env, config.braintrust.judge_api_key_env),
+      ...modalReferenceCredentialRedactionValues(env)
+    ])
   ];
 }
 
@@ -2939,7 +2946,7 @@ export function modalSecurityToolchainCommands(): string[] {
     "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils zstd && rm -rf /var/lib/apt/lists/*",
     "RUN command -v zstd && zstd --version",
     "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
-    `RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42`,
+    `RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@${CODEX_CLI_VERSION} @anthropic-ai/claude-code@2.1.207 @earendil-works/pi-coding-agent@${PI_CLI_VERSION} recon-generate@0.0.42`,
     "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
     "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
     "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
@@ -3061,7 +3068,41 @@ export function modalBenchmarkSecretValues(
   );
   const kimiBaseUrl = optionalKimiApiBaseUrl(model, env);
   if (kimiBaseUrl !== undefined) values.KIMI_BASE_URL = kimiBaseUrl;
-  return values;
+  return { ...values, ...modalReferenceCredentialSecretValues(env) };
+}
+
+/**
+ * Forwards the private-reference read credential into the sandbox secret, or nothing at all.
+ *
+ * If a benchmark declares a private pinned reference, the detached worker fetches it during the
+ * pre-model phase, so the credential has to be inside the sandbox rather than only on the runner. It
+ * travels as a Modal secret -- the same channel as the model API keys -- so it is never baked into
+ * the immutable image, written into the launch state, or included in the handoff archive.
+ *
+ * The allowlist is forwarded alongside the token deliberately. It is what stops the token from being
+ * attached to any remote other than the private repository it was minted for, so a sandbox that
+ * received the token without it would be strictly less safe than one that received neither.
+ *
+ * A declared allowlist with no token is a hard launch failure rather than a silent anonymous fetch:
+ * failing here costs nothing, whereas the same misconfiguration discovered inside the sandbox burns
+ * an image build and a launch and then reports itself as a pre-model dependency error.
+ */
+export function modalReferenceCredentialSecretValues(env: Record<string, string | undefined>): Record<string, string> {
+  const repos = env[REFERENCE_GITHUB_REPOS_ENV]?.trim();
+  if (repos === undefined || repos === "") return {};
+  const token = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  if (token === undefined || token === "") {
+    throw new Error(
+      `${REFERENCE_GITHUB_REPOS_ENV} declares private pinned references but ${REFERENCE_GITHUB_TOKEN_ENV} is empty`
+    );
+  }
+  return { [REFERENCE_GITHUB_TOKEN_ENV]: token, [REFERENCE_GITHUB_REPOS_ENV]: repos };
+}
+
+/** The reference token as a forbidden value, so it can never survive into a published artifact. */
+export function modalReferenceCredentialRedactionValues(env: Record<string, string | undefined>): string[] {
+  const token = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  return token === undefined || token === "" ? [] : [token];
 }
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {

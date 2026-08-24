@@ -248,6 +248,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
       "generated-test-file-integrity"
     ]
   ),
+  "goal-plan.schema.json": artifact("ultrafuzz/goal-plan@1", "goalPlanJsonSchema", "goalPlanSchema"),
   "harness-repairs.schema.json": artifact(
     "ultrafuzz/harness-repairs@1",
     "harnessRepairsJsonSchema",
@@ -430,6 +431,17 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     ]
   ),
   "trusted-cli.schema.json": runtime("trustedCliMetadataJsonSchema"),
+  "threat-model.schema.json": artifact("ultrafuzz/threat-model@1", "threatModelJsonSchema", "threatModelSchema"),
+  "vulnerability-database-planner-catalog.schema.json": artifact(
+    "ultrafuzz/vulnerability-database-planner-catalog@1",
+    "vulnerabilityDatabasePlannerCatalogJsonSchema",
+    undefined
+  ),
+  "vulnerability-database-snapshot.schema.json": artifact(
+    "ultrafuzz/vulnerability-database-snapshot@1",
+    "vulnerabilityDatabaseSnapshotJsonSchema",
+    undefined
+  ),
   "usage-ledger.schema.json": runtime("usageLedgerJsonSchema", "usageLedgerEntrySchema", [
     "usage-ledger-event-order",
     "usage-ledger-source-event-join"

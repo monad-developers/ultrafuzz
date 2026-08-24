@@ -57,7 +57,9 @@
     },
     "pinned_submodules": {
       "anyOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
@@ -73,10 +75,20 @@
             "total_file_bytes"
           ],
           "properties": {
-            "schema_version": { "const": "ultrafuzz.pinned-submodules-expectation.v1" },
-            "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-            "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-            "manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "schema_version": {
+              "const": "ultrafuzz.pinned-submodules-expectation.v1"
+            },
+            "source_commit": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "source_tree": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "manifest_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
             "top_level_roots": {
               "type": "array",
               "minItems": 1,
@@ -103,17 +115,252 @@
                     "maxLength": 4096,
                     "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.git(?:/|$))[^\\u0000-\\u001f\\u007f]+$"
                   },
-                  "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-                  "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+                  "commit": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "tree": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  }
                 }
               }
             },
-            "entry_count": { "type": "integer", "minimum": 1, "maximum": 100000 },
-            "file_count": { "type": "integer", "minimum": 0, "maximum": 100000 },
-            "total_file_bytes": { "type": "integer", "minimum": 0, "maximum": 2147483648 }
+            "entry_count": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "file_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "total_file_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483648
+            }
           }
         }
       ]
+    },
+    "dynamic_groups": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "groupNodeId",
+          "logicalNodeId",
+          "source",
+          "sourcePath",
+          "keyPath",
+          "nodeIdTemplate",
+          "templatePath",
+          "templateDigest",
+          "templateFingerprint",
+          "continueOnFail",
+          "maxDynamicNodes",
+          "reservedNodeIds",
+          "taskTemplates",
+          "promptContext"
+        ],
+        "properties": {
+          "groupNodeId": {
+            "$ref": "#/$defs/safeId"
+          },
+          "logicalNodeId": {
+            "$ref": "#/$defs/safeId"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["concreteNodeId", "attemptId", "artifactPath"],
+            "properties": {
+              "concreteNodeId": {
+                "$ref": "#/$defs/safeId"
+              },
+              "attemptId": {
+                "$ref": "#/$defs/safeId"
+              },
+              "verifierSmithersNodeId": {
+                "type": "string",
+                "pattern": "^verify:[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              },
+              "artifactPath": {
+                "$ref": "#/$defs/canonicalArtifactRelativePath"
+              }
+            }
+          },
+          "sourcePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "keyPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "nodeIdTemplate": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "templatePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "templateDigest": {
+            "$ref": "#/$defs/sha256"
+          },
+          "templateFingerprint": {
+            "$ref": "#/$defs/sha256"
+          },
+          "continueOnFail": {
+            "type": "boolean"
+          },
+          "maxDynamicNodes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "reservedNodeIds": {
+            "type": "array",
+            "maxItems": 100000,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
+            }
+          },
+          "taskTemplates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100000,
+            "items": {
+              "$ref": "#/properties/tasks/items"
+            }
+          },
+          "promptContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["projectRoot", "repoPath", "artifactsDir", "runMetadataPath", "resolvedConfig"],
+            "properties": {
+              "projectRoot": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              },
+              "repoPath": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              },
+              "artifactsDir": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              },
+              "runMetadataPath": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[^\\u0000]+$"
+              },
+              "resolvedConfig": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "triage",
+                  "dynamicStrategiesEnumerator",
+                  "invariantPropertyPriorityThreshold",
+                  "invariantPropertyPriorityFilter",
+                  "invariantPropertyPriorities",
+                  "invariantTestingFuzzerTimeout"
+                ],
+                "dependentRequired": {
+                  "vulnerabilityDatabaseRelativePath": ["vulnerabilityDatabaseSha256"],
+                  "vulnerabilityDatabaseSha256": ["vulnerabilityDatabaseRelativePath"]
+                },
+                "properties": {
+                  "triage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["quorum", "panelSize"],
+                    "properties": {
+                      "quorum": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "panelSize": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  "dynamicStrategiesEnumerator": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      {
+                        "const": "unlimited"
+                      }
+                    ]
+                  },
+                  "invariantPropertyPriorityThreshold": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "invariantPropertyPriorityFilter": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "invariantPropertyPriorities": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096,
+                      "pattern": "^[^\\u0000]+$"
+                    }
+                  },
+                  "invariantTestingFuzzerTimeout": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "vulnerabilityDatabaseRelativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "pattern": "^[^\\u0000]+$"
+                  },
+                  "vulnerabilityDatabaseSha256": {
+                    "$ref": "#/$defs/sha256"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "tasks": {
       "type": "array",
@@ -148,7 +395,7 @@
           },
           "concreteNodeId": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
           },
           "logicalNodeId": {
             "type": "string",
@@ -293,6 +540,26 @@
               "$ref": "#/$defs/boundedNonNulPath"
             }
           },
+          "referenceArtifactDirs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/boundedNonNulPath"
+            }
+          },
+          "vulnerabilityDatabaseCatalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/boundedNonNulPath"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
           "referenceArtifactManifestAuthorities": {
             "type": "array",
             "minItems": 1,
@@ -365,6 +632,7 @@
                         "ultrafuzz/finding-lifecycle-ledger@1",
                         "ultrafuzz/findings@2",
                         "ultrafuzz/generated-tests@3",
+                        "ultrafuzz/goal-plan@1",
                         "ultrafuzz/harness-repairs@1",
                         "ultrafuzz/implemented-properties@3",
                         "ultrafuzz/invariant-campaign-plan@2",
@@ -382,7 +650,10 @@
                         "ultrafuzz/severity-classified-findings@1",
                         "ultrafuzz/strategy-detections@1",
                         "ultrafuzz/text@1",
+                        "ultrafuzz/threat-model@1",
                         "ultrafuzz/triaged-findings@1",
+                        "ultrafuzz/vulnerability-database-planner-catalog@1",
+                        "ultrafuzz/vulnerability-database-snapshot@1",
                         "ultrafuzz/workspace-patch@1"
                       ]
                     }
@@ -419,6 +690,48 @@
             "minLength": 1,
             "maxLength": 4096,
             "pattern": "^[^\\u0000]+$"
+          },
+          "promptTemplatePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^[^\\u0000]+$"
+          },
+          "dynamicDependencies": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/safeId"
+            }
+          },
+          "deferredPromptGroups": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/safeId"
+            }
+          },
+          "dynamicVariables": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^[^\\u0000]+$"
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
           },
           "execution": {
             "type": "object",
@@ -583,7 +896,7 @@
                 "properties": {
                   "concreteNodeId": {
                     "type": "string",
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
                   },
                   "logicalNodeId": {
                     "type": "string",
@@ -611,6 +924,59 @@
                   "group": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "producerNodeId": {
+                    "type": "string",
+                    "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
+                  },
+                  "storageId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  },
+                  "dynamic": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "groupNodeId",
+                      "sourceNodeId",
+                      "sourceAttemptId",
+                      "sourceDigest",
+                      "expansionKey",
+                      "itemDigest",
+                      "manifestPath"
+                    ],
+                    "properties": {
+                      "groupNodeId": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                      },
+                      "sourceNodeId": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                      },
+                      "sourceAttemptId": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                      },
+                      "sourceDigest": {
+                        "$ref": "#/$defs/sha256"
+                      },
+                      "expansionKey": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^[^\\u0000]+$"
+                      },
+                      "itemDigest": {
+                        "$ref": "#/$defs/sha256"
+                      },
+                      "manifestPath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^[^\\u0000]+$"
+                      }
+                    }
                   }
                 }
               },
@@ -624,7 +990,7 @@
                     "uniqueItems": true,
                     "items": {
                       "type": "string",
-                      "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
+                      "pattern": "^(?:__(?:start|finish)__|[A-Za-z0-9][A-Za-z0-9:._-]{0,255})$"
                     }
                   },
                   "attemptIds": {
@@ -823,6 +1189,7 @@
                             "ultrafuzz/finding-lifecycle-ledger@1",
                             "ultrafuzz/findings@2",
                             "ultrafuzz/generated-tests@3",
+                            "ultrafuzz/goal-plan@1",
                             "ultrafuzz/harness-repairs@1",
                             "ultrafuzz/implemented-properties@3",
                             "ultrafuzz/invariant-campaign-plan@2",
@@ -840,7 +1207,10 @@
                             "ultrafuzz/severity-classified-findings@1",
                             "ultrafuzz/strategy-detections@1",
                             "ultrafuzz/text@1",
+                            "ultrafuzz/threat-model@1",
                             "ultrafuzz/triaged-findings@1",
+                            "ultrafuzz/vulnerability-database-planner-catalog@1",
+                            "ultrafuzz/vulnerability-database-snapshot@1",
                             "ultrafuzz/workspace-patch@1"
                           ]
                         },

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod/v4";
 import { MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES } from "@ultrafuzz/artifacts";
 
+import { BENCHMARK_LANE_NAMES } from "./benchmark-lane-names.js";
 import { EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
 import { boundedEvalId } from "./utils.js";
 
@@ -136,7 +137,11 @@ const summarySchema = z.strictObject({
 const diagnosticsShape = {
   stage: z.literal("post-eval-pre-score"),
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
+  // Every lane the benchmark plane can dispatch, not just the two longitudinal
+  // ones. The worker builds this document from `public_benchmark.lane` AFTER the
+  // whole eval run, so a lane missing here fails the post-eval-pre-score
+  // checkpoint with the model spend already gone (#183).
+  lane: z.enum(BENCHMARK_LANE_NAMES),
   model_slug: safeId,
   model: boundedCodePointString(256),
   reasoning: boundedCodePointString(64),

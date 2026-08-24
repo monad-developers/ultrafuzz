@@ -9,6 +9,7 @@ repo = "."
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
 max_parallel_nodes = 8
+max_dynamic_nodes = 2048
 keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
@@ -50,17 +51,30 @@ agent = "KimiAgent"
 model = "kimi-k3"
 reasoning = "max"
 
-# Opt-in DeepSeek V4 profile. DeepSeek's official coding-agent integration
-# runs Claude Code against its Anthropic-compatible API endpoint.
+# Opt-in DeepSeek V4 profile. This runs the Claude Code harness against
+# DeepSeek's Anthropic-compatible API endpoint: a compatibility pairing, not
+# DeepSeek's first-party coding agent.
 [models.deepseek]
 agent = "DeepSeekAgent"
 model = "deepseek-v4-pro"
 reasoning = "max"
 
-# Automatic agent retries are error-agnostic and resend the same effective task
-# prompt in a fresh session. The count includes the first primary attempt. The
-# shipped default is three attempts; audit profiles may select another budget.
-# Set `agents` to an ordered list of model profile IDs to opt into model fallback.
+# Opt-in Pi profile. Select it per node/group in .ultrafuzz/topology.yml
+# (model_profiles = ["pi"]), or for a one-off run with `--agent PiAgent`.
+# PiAgent always routes through OpenRouter, so `model` is an opaque OpenRouter
+# catalogue id resolved by the pi CLI itself.
+# `reasoning` is optional here. The levels supported today are off, minimal,
+# low, medium, high, and xhigh. Unlike [models.kimi] and [models.deepseek]
+# above, "max" is not accepted yet: the pi CLI understands it, but the
+# orchestrator's Pi thinking option stops at xhigh, so a profile asking for
+# "max" fails when the agent is constructed instead of stepping down a level.
+[models.pi]
+agent = "PiAgent"
+model = "openai/gpt-mini-latest"
+
+# Automatic retries resend the same effective task in a fresh session. The
+# count includes the first primary attempt; `agents` optionally selects an
+# ordered model-profile fallback chain.
 [retry]
 same_agent_attempts = 3
 agents = []
@@ -87,13 +101,39 @@ auth = "subscription"
 
 [agents.DeepSeekAgent]
 # DeepSeek V4 is API-key only. The generated adapter reads DEEPSEEK_API_KEY and
-# routes Claude Code to DeepSeek's official Anthropic-compatible endpoint.
+# routes the Claude Code harness to DeepSeek's Anthropic-compatible endpoint.
 auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 
+[agents.OpenCodeAgent]
+# The generated adapter runs the OpenCode CLI with `--pure` and points the
+# OpenCode state roots it names -- the XDG base directories, OPENCODE_CONFIG_DIR
+# and OPENCODE_DB, plus the npm and bun caches -- at a run-scoped directory, so
+# none of those roots resolves to a shared per-user location such as ~/.local/share
+# or ~/.npm. The roots are project-local, so they sit under the project directory
+# itself. That is the list the adapter names, not a guarantee that OpenCode has no
+# other state root; docs/config.md has the full list and the same caveat.
+# "api-key" reads OPENROUTER_API_KEY unless api_key_env names another variable,
+# and places it in the child environment only, never on the command line.
+# "subscription" is rejected: OpenCode reads auth.json from $XDG_DATA_HOME, which
+# the adapter always relocates into the run, so a login held in your home is
+# unreachable and the agent would run unauthenticated. config_dir relocates the
+# state root; it is the XDG parent, so pointing it at ~/.config/opencode or
+# ~/.local/share/opencode picks nothing up.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+
 [agents.OpenRouterAgent]
-# OpenRouter is API-key only. The generated Codex adapter reads this variable
-# through Codex's native provider env_key and routes to https://openrouter.ai/api/v1.
+# OpenRouter is API-key only. The generated Codex adapter routes through the
+# configured OpenRouter endpoint without exposing credentials on argv.
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+
+[agents.PiAgent]
+# The pi CLI is API-key only here: the generated adapter fixes the provider to
+# OpenRouter and reads OPENROUTER_API_KEY (unless api_key_env names another
+# variable), handing it to pi through the child environment so no credential
+# value ever reaches argv.
 auth = "api-key"
 api_key_env = "OPENROUTER_API_KEY"
 

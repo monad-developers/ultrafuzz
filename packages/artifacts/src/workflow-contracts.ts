@@ -333,6 +333,7 @@ export const referenceManifestSchema = withDocumentMetadata(
     repo: nonEmptyString,
     commit: gitCommit,
     resolved_at: timestamp,
+    kind: z.enum(["document", "vulnerability-database"]).optional(),
     source_files: z.array(referenceManifestFileSchema),
     artifacts: z.array(referenceManifestFileSchema).min(1)
   }),

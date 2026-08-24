@@ -6,7 +6,11 @@
   "required": ["schema_version", "kind"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.terminal-disposition.v1" },
-    "kind": { "const": "task-output-validation-failure" }
+    "schema_version": {
+      "const": "ultrafuzz.terminal-disposition.v1"
+    },
+    "kind": {
+      "const": "task-output-validation-failure"
+    }
   }
 }

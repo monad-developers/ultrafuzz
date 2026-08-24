@@ -165,6 +165,17 @@ The Run summary contains exactly these public fields when available: `Run ID`,
 digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
 Render each concrete value as Markdown inline code.
 
+Goal search coverage census: `{{goal_search_coverage_path}}`
+
+This runtime-owned `ultrafuzz.goal-search-coverage.v1` document is the only
+source of truth for coverage. `totals`
+carries `planned`, `completed`,
+`completed_with_findings`, `completed_no_findings`, `stopped_early`, and
+`unverified`; recompute each from the per-lane `goals` array. A `stopped-early`
+or `unverified` lane measured nothing; only the three `completed` statuses are
+searched goals. A lane whose `logical_node_id` is `goal-roaming` is the
+untargeted roaming pass, not a targeted goal.
+
 ## Finding Selection
 
 Read every issue surfaced by the upstream findings and severity classification
@@ -316,7 +327,24 @@ Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues belo
 - Tokens used: `<token usage, or unavailable>`
 - Estimated spend: `<cost estimate such as $123 or $123+ when pricing is partial, or unavailable>`
 - Strategy loops: `<configured loop summary, or unavailable>`
+
+## Audit context
+
+- Threat model: [THREAT_MODEL.md](<relative path to THREAT_MODEL.md>); [threat-model.json](<relative path to threat-model.json>)
+- Goal plan: [goal-plan.json](<relative path to goal-plan.json>)
 ```
+
+Render `## Audit context` with exactly this heading, bullet order, and link
+text, immediately after `## Run summary`. Use repository-relative or
+report-relative paths to the run's own `threat-model` and `goal-plan` artifacts;
+never absolute paths or external URLs. Omit an individual link whose artifact
+the run did not produce, omit the `Goal plan` bullet when there is no goal plan,
+and omit the whole section when the run produced none of them. Do not invent a
+different heading, ordering, or link text: `ultrafuzz report` regenerates this
+exact section deterministically from the run's own artifacts and overwrites
+anything else.
+Keep detailed threat content in those dedicated artifacts; do not duplicate it
+in `report.md`.
 
 Each production issue entry must use exactly this Markdown section order. The
 following example is structural only; replace the title, actor names, actions,
@@ -332,6 +360,7 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 
 - **Impact**: High: Locked claimable funds prevent affected depositors from recovering principal.
 - **Likelihood**: Medium: The withdrawal path is reachable through the public redeem flow after the recorded state transition.
+- **Source nodes**: `dynamic:threat:liquidation:overdue`, `stateful-invariant-campaign`
 
 ### Proof of Concept
 
@@ -443,11 +472,21 @@ Render the human-readable Strategy section as a Markdown table with columns
 without percentages. Keep loop-attempt provenance in `report.json`, not in the
 human-readable Strategy section. Do not call this metric Temperature.
 
+Render the `- **Source nodes**:` bullet exactly as shown in the issue template,
+as the last Severity bullet, listing the stable `source_nodes` union from the
+severity-classified finding as comma-separated backticked IDs in union order.
+Preserve that same array in the `report.json` issue and keep compatibility
+`source_node_id` equal to its first entry. Do not replace discovery sources with
+`final-report`.
+
 ## Additional Sections
 
-When `stateful-invariant-coverage` published `coverage-evidence.json`, copy it
-exactly into `report.json` as `coverage_evidence`. Use the canonical coverage
-projection rendered below.
+Add `## Property implementation coverage` after the production issue entries
+and before `## Goal search coverage`. Read the implementation handoff's
+`selection` object and property records. When
+the handoff is historical or lacks `selection`, render `unavailable` instead
+of guessing. In `report.json`, emit `property_implementation_coverage` with
+this exact shape:
 
 {{coverage_evidence_markdown_projection}}
 
@@ -524,7 +563,31 @@ accepted but not required, so a summary naming `_beforeTokenTransfer` may appear
 `- property-2: _beforeTokenTransfer reverts` or as
 `- property-2: \_beforeTokenTransfer reverts`.
 
-Add `## Property provenance` after the implementation coverage section. For every
+Add `## Goal search coverage` after `## Property implementation coverage` and
+before `## Property provenance`, in every report, including a report with no
+issues, computed from the census alone: how many targeted goal searches
+completed out of how many targeted lanes the census recorded, then the
+per-status counts as bullets, roaming counted separately.
+
+Never state or imply that no vulnerabilities were found without stating goal
+coverage in the same report. A no-findings goal counts as searched only when its
+census status is `completed-no-findings`; a `stopped-early` or `unverified` lane
+measured nothing. Do not call such a lane
+covered, searched, clean, or verified anywhere in `report.md` or `report.json`,
+and do not fold its lane count into a completed count.
+
+If the census is absent, unparsable, differently versioned, or empty of goal
+lanes, write that goal search coverage is unknown, that
+unknown coverage is not full coverage, and that any goal-derived result is an
+unquantified sample. Do not reconstruct coverage from the goal plan or from the
+seeded empty findings arrays: a planned goal is not a searched goal.
+
+Do not write the census path, or any other local path, into `report.md`.
+Do not author a `goal_search_coverage` value in `report.json` either; the
+runtime stamps the census there and discards yours. Never be more optimistic
+than the census.
+
+Add `## Property provenance` after the goal search coverage section. For every
 property-derived production or non-production finding, render one concise table
 row containing:
 
@@ -563,10 +626,18 @@ appendix short and do not include exploit-style PoC sections for these outcomes.
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
 production issue entries with their Strategy sections, Property implementation
-coverage, Property provenance, optional prior finding disposition section, and
-non-production actionable outcomes appendix. If there are no production issues
-and no appendix outcomes, skip the issue index table and write `No issues
-reported.` before the Property implementation coverage section.
+coverage, Goal search coverage, Property provenance, optional prior finding
+disposition section, and non-production actionable outcomes appendix. If there
+are no production issues and no appendix outcomes, skip the issue index table
+and write `No issues reported.` before the Property implementation coverage
+section.
+
+Never write that bare `No issues reported.` when the goal search coverage census
+records a targeted goal search that did not complete, or records no targeted
+goal lane at all. Carry the numbers, for example `No issues were reported, but
+only 3 of 77 targeted goal searches completed, so this is not a result. See
+[Goal search coverage](#goal-search-coverage).` An unreadable census does not
+amend this sentence.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
@@ -667,6 +738,8 @@ Before finishing, verify that:
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
 - Production issues include a `### Strategy` detection-rate table.
+- Production issues render the `- **Source nodes**:` Severity bullet with their
+  complete discovery union.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,
   Medium, or Low followed by a colon.
@@ -692,11 +765,17 @@ Before finishing, verify that:
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
+- `report.md` renders the fixed `## Audit context` section for every artifact
+  the run produced, without copying their detailed analysis.
 - `report.md` contains `## Property implementation coverage` with counts that
-  match the authoritative tracked value, or the exact runtime-supplied
-  not-planned rendering when the current topology has no implementation track.
-- `report.json` exactly preserves the runtime-supplied authoritative property
-  implementation coverage value.
+  match the implementation handoff, or the literal `unavailable` for
+  historical artifacts.
+- `report.md` contains `## Goal search coverage` with counts recomputed from the
+  census, or unknown coverage when none is readable, and states no absence of
+  findings without them.
+- `report.json` contains no agent-authored `goal_search_coverage` value.
+- `report.json.property_implementation_coverage` is either the exact
+  machine-readable coverage object or the string `unavailable`.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact values from the injected sanitized

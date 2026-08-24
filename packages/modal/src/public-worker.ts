@@ -8,6 +8,7 @@ import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneConcurrency,
+  benchmarkLaneSelectedTargetIds,
   BENCHMARK_FULL_MAX_PARALLEL_RUNS,
   BENCHMARK_FULL_MAX_PARALLEL_TARGETS,
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
@@ -21,9 +22,12 @@ import {
   readEvalRunRecords,
   readEvalRunSummary,
   type BenchmarkCohortManifest,
+  type BenchmarkLaneName,
   type EvalRunRecord,
-  type EvalSuiteSpec
+  type EvalSuiteSpec,
+  BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
 } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { loadVerifiedFinalReportSnapshot, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
@@ -84,6 +88,7 @@ export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
 // its 1,800-second attempts, so retain ten minutes beyond the four-hour
 // topology bound for workflow transitions and final synchronization.
 export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
+export const PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
 // A manual full row retains the packaged specialist timeouts, including the
 // 7,200-second invariant campaign. This is a bounded row execution budget, not
 // a guarantee that every topology node can consume its worst-case timeout.
@@ -138,12 +143,7 @@ const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
  * produced by more than one node stays attributable and can never collide with
  * the fixed set.
  */
-export const PUBLIC_OPTIONAL_ROW_ARTIFACTS = [
-  "THREAT_MODEL.md",
-  "goal-plan.json",
-  "threat-model.json",
-  "vulnerability-db-manifest.json"
-] as const;
+export const PUBLIC_OPTIONAL_ROW_ARTIFACTS = BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS;
 
 /**
  * Ceiling on optional artifacts published for one row. Four names across a
@@ -414,7 +414,7 @@ export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnost
 }
 
 export function publicBenchmarkMaxParallelEvalRows(
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): number {
   if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
@@ -422,15 +422,17 @@ export function publicBenchmarkMaxParallelEvalRows(
 }
 
 export function publicBenchmarkMaxParallelWorkflowNodes(
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): number {
   if (provider === "openrouter") return PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL;
   return benchmarkLaneConcurrency(lane).max_parallel_targets;
 }
 
-export function publicBenchmarkMaxRuntimeSeconds(lane: "smoke" | "full"): number {
-  return lane === "smoke" ? PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS : PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS;
+export function publicBenchmarkMaxRuntimeSeconds(lane: BenchmarkLaneName): number {
+  if (lane === "smoke") return PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS;
+  if (lane === "threat-model") return PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS;
+  return PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS;
 }
 
 export function publicEvalCommandTimeoutSeconds(input: {
@@ -713,7 +715,14 @@ export async function publicBenchmarkWorkerSecretValues(
           remoteAuthDir("kimi"),
           path.join(dataRoot, "kimi-code-auth")
         );
-  return [...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env, env)])];
+  const referenceToken = env[REFERENCE_GITHUB_TOKEN_ENV]?.trim();
+  return [
+    ...new Set([
+      ...runnerSecretValues,
+      requiredEnv(config.braintrust.judge_api_key_env, env),
+      ...(referenceToken === undefined || referenceToken === "" ? [] : [referenceToken])
+    ])
+  ];
 }
 
 async function preparePublicBenchmark(
@@ -757,6 +766,7 @@ async function preparePublicBenchmark(
     }
   });
   const suite = preparePublicEvalSuite(baseSuite, scope.lane, model.provider);
+  const auditProfile = scope.lane === "threat-model" ? "default" : scope.lane;
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");
@@ -776,7 +786,7 @@ async function preparePublicBenchmark(
     await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
       path.join(destination, "ultrafuzz.toml"),
-      modalTargetToml(model, config.node_timeout_seconds, scope.lane),
+      modalTargetToml(model, config.node_timeout_seconds, auditProfile),
       { mode: 0o600 }
     );
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
@@ -879,8 +889,7 @@ function publicBenchmarkConfiguredTargetIds(
 ): string[] | undefined {
   const configured = config.public_benchmark.targets;
   if (configured === undefined) return undefined;
-  const selectedIds =
-    config.public_benchmark.lane === "smoke" ? cohort.smoke_targets : cohort.targets.map((target) => target.id);
+  const selectedIds = benchmarkLaneSelectedTargetIds(config.public_benchmark.lane, cohort);
   const cohortTargets = new Map(cohort.targets.map((target) => [target.id, target]));
   const seen = new Set<string>();
   for (const target of configured) {
@@ -943,7 +952,7 @@ export async function materializeBakedCandidate(
 
 export function preparePublicEvalSuite(
   baseSuite: EvalSuiteSpec,
-  lane: "smoke" | "full",
+  lane: BenchmarkLaneName,
   provider?: ModalModelSpec["provider"]
 ): EvalSuiteSpec {
   return {

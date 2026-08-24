@@ -17,18 +17,22 @@ import {
 } from "modal";
 import {
   ARTIFACT_MANIFEST_FILE,
+  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
   INVARIANT_PINNED_SOURCE_BRANCH,
   INVARIANT_PINNED_SOURCE_REF,
   layoutForRunRoot,
   assertArtifactVerificationMarkerSemantics,
   assertPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
+  isCloudExecutionGeneration,
   materializePromptSchemas,
+  parseCloudSelectedTask,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   referenceArtifactManifestAuthorityForArtifactDir,
   publishFileDurableExclusive,
+  writeFileDurable,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
   type ArtifactManifest,
@@ -67,6 +71,9 @@ import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION = "ultrafuzz.modal.invariant-source-proof-publication.v1";
+const INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX = ".invariant.publication.json";
+const MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES = 16 * 1024;
 const REMOTE_PROJECT_ARCHIVE = "/tmp/ultrafuzz-node-project.tgz";
 const REMOTE_REQUEST = "/tmp/ultrafuzz-node-request.json";
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
@@ -302,6 +309,7 @@ async function runModalNodeSandbox(
   request: NodeSandboxProviderRequest
 ): Promise<NodeSandboxProviderResult> {
   const input = parseModalNodeSandboxInput(request.input);
+  assertSelectedTaskSourceProjectRoot(input, request.rootDir);
   const lifecycleTimeoutSeconds = modalNodeLifecycleTimeoutSeconds(input.resources.timeout_seconds);
   const lifecycleTimeoutMs = lifecycleTimeoutSeconds * 1000;
   const executionDeadline = Date.now() + lifecycleTimeoutMs;
@@ -310,7 +318,7 @@ async function runModalNodeSandbox(
   const tokenId = requiredCredential(env, tokenIdName);
   const tokenSecret = requiredCredential(env, tokenSecretName);
   const archive = await createModalNodeHandoffArchive(request.rootDir, input);
-  const workerInput = modalNodeWorkerInput(input, archive.sha256);
+  const workerInput = modalNodeWorkerInput(input, archive.sha256, archive.sha256);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
@@ -323,7 +331,12 @@ async function runModalNodeSandbox(
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     const app = await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
-    const tags = modalNodeTags(request.runId, request.sandboxId, input.execution_generation);
+    const tags = modalNodeTags(
+      request.runId,
+      request.sandboxId,
+      input.execution_generation,
+      modalNodeDispatchFingerprint(workerInput)
+    );
     const volume = await getOrCreateModalV2Volume(client, modalNodeVolumeName(request.runId), {
       createIfMissing: true
     });
@@ -476,10 +489,12 @@ export function parseModalNodeWorkerInput(value: unknown): ModalNodeWorkerInput 
 
 export function modalNodeWorkerInput(
   input: ModalNodeSandboxInput,
-  projectArchiveSha256?: string
+  projectArchiveSha256?: string,
+  projectContentSha256?: string
 ): ModalNodeWorkerInput {
   return parseModalNodeWorkerInput({
     ...input,
+    ...(projectContentSha256 === undefined ? {} : { project_content_sha256: projectContentSha256 }),
     ...(projectArchiveSha256 === undefined ? {} : { project_archive_sha256: projectArchiveSha256 })
   });
 }
@@ -562,10 +577,16 @@ export function modalNodeContinuationIdentity(
       dependency_artifact_dirs: input.dependency_artifact_dirs.map((value) =>
         normalizedContinuationPath(root, value, "dependency artifact directory")
       ),
+      reference_artifact_dirs: (input.reference_artifact_dirs ?? []).map((value) =>
+        normalizedContinuationPath(root, value, "reference artifact directory")
+      ),
+      vulnerability_database: input.vulnerability_database ?? null,
       optional_dependency_artifact_dirs: (input.optional_dependency_artifact_dirs ?? []).map((value) =>
         normalizedContinuationPath(root, value, "optional dependency artifact directory")
       ),
       dependency_verification_authorities: input.dependency_verification_authorities,
+      project_content_sha256: input.project_content_sha256 ?? null,
+      selected_task: continuationSelectedTask(input),
       resources: input.resources,
       agent_credential_env: input.agent_credential_env,
       operator_prompt: input.operator_prompt ?? null,
@@ -597,6 +618,24 @@ export function modalNodeContinuationIdentity(
       !optionalDependencies.has(value)
     );
   }
+  for (const [index, value] of (input.reference_artifact_dirs ?? []).entries()) {
+    fingerprintContinuationTree(
+      nonController,
+      `reference:${index}`,
+      checkedPath(root, value, "reference artifact directory"),
+      fingerprintContext,
+      true
+    );
+  }
+  if (input.vulnerability_database !== undefined) {
+    fingerprintContinuationTree(
+      nonController,
+      "vulnerability-database",
+      checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog"),
+      fingerprintContext,
+      true
+    );
+  }
   for (const [index, authority] of input.dependency_verification_authorities.entries()) {
     fingerprintContinuationTree(
       nonController,
@@ -617,10 +656,31 @@ export function modalNodeContinuationIdentity(
   };
 }
 
+function continuationSelectedTask(input: ModalNodeWorkerInput): NonNullable<ModalNodeWorkerInput["selected_task"]> {
+  const selected = input.selected_task!;
+  const snapshotPrefix = `${input.execution_snapshot_root}/`;
+  return {
+    ...selected,
+    workflowPath: ".ultrafuzz/controller/workflow.tsx",
+    promptPath: selected.promptPath.startsWith(snapshotPrefix)
+      ? ".ultrafuzz/controller/prompt.md"
+      : selected.promptPath,
+    execution: { ...selected.execution, generation: "<logical>" }
+  };
+}
+
 function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   try {
     assertModalDocumentValue(MODAL_NODE_INPUT_SCHEMA_ID, value as StrictModalNodeInputDocument);
     const input = value as StrictModalNodeInputDocument;
+    if (input.selected_task === undefined) throw new Error("selected task handoff is required");
+    const selected = parseCloudSelectedTask(input.selected_task, {
+      taskId: input.task_id,
+      attemptId: input.attempt_id,
+      executionGeneration: input.execution_generation,
+      ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION
+    });
+    assertSelectedTaskAgreesWithDispatch(selected, input);
     const dependencyArtifactDirs = new Set(input.dependency_artifact_dirs);
     if ((input.optional_dependency_artifact_dirs ?? []).some((directory) => !dependencyArtifactDirs.has(directory))) {
       throw new Error("optional dependency artifact directories must be an exact subset of dependencies");
@@ -638,12 +698,95 @@ function parseModalNodeInput(value: unknown): ModalNodeSandboxInput {
   return value as StrictModalNodeInputDocument;
 }
 
-export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
+export function modalNodeTags(
+  runId: string,
+  sandboxId: string,
+  executionGeneration = "base",
+  logicalDispatchFingerprint?: string
+): Record<string, string> {
   return {
     purpose: "ultrafuzz-node",
     run: boundedIdentity(runId),
-    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`)
+    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`),
+    ...(logicalDispatchFingerprint === undefined ? {} : { dispatch: logicalDispatchFingerprint.slice(0, 32) })
   };
+}
+
+function assertSelectedTaskAgreesWithDispatch(
+  selected: NonNullable<StrictModalNodeInputDocument["selected_task"]>,
+  input: StrictModalNodeInputDocument
+): void {
+  const agreements: Array<[string, unknown, unknown]> = [
+    ["runRoot", selected.runRoot, input.run_root],
+    ["workflowPath", selected.workflowPath, input.workflow_path],
+    ["artifactDir", selected.artifactDir, input.artifact_dir],
+    ["workspacePath", selected.workspacePath, input.workspace_dir],
+    ["promptPath", selected.promptPath, input.prompt_path],
+    ["metadata.run.ultrafuzzRunId", selected.metadata.run.ultrafuzzRunId, input.run_id],
+    ["dependencyArtifactDirs", selected.dependencyArtifactDirs, input.dependency_artifact_dirs],
+    ["referenceArtifactDirs", selected.referenceArtifactDirs, input.reference_artifact_dirs ?? []],
+    ["vulnerabilityDatabase", selected.vulnerabilityDatabase ?? null, input.vulnerability_database ?? null]
+  ];
+  for (const [label, left, right] of agreements) {
+    if (!isDeepStrictEqual(left, right)) {
+      throw new Error(`cloud node selected task handoff ${label} disagrees with the dispatched input`);
+    }
+  }
+}
+
+export function modalNodeDispatchFingerprint(inputValue: ModalNodeSandboxInput): string {
+  const input = parseModalNodeInput(inputValue);
+  const selectedTask = input.selected_task!;
+  return crypto
+    .createHash("sha256")
+    .update(
+      canonicalDispatchJson({
+        schema_version: input.schema_version,
+        run_id: input.run_id,
+        task_id: input.task_id,
+        attempt_id: input.attempt_id,
+        source_revision: input.source_revision ?? null,
+        source_ref: input.source_ref ?? null,
+        workflow_path: input.workflow_path,
+        prompt_path: input.prompt_path ?? null,
+        run_root: input.run_root,
+        artifact_dir: input.artifact_dir,
+        workspace_dir: input.workspace_dir,
+        dependency_artifact_dirs: input.dependency_artifact_dirs,
+        reference_artifact_dirs: input.reference_artifact_dirs ?? [],
+        vulnerability_database: input.vulnerability_database ?? null,
+        optional_dependency_artifact_dirs: input.optional_dependency_artifact_dirs ?? [],
+        dependency_verification_authorities: input.dependency_verification_authorities,
+        project_content_sha256: input.project_content_sha256 ?? null,
+        selected_task: {
+          ...selectedTask,
+          execution: { ...selectedTask.execution, generation: "<logical>" }
+        },
+        resources: input.resources,
+        agent_credential_env: input.agent_credential_env,
+        operator_prompt: input.operator_prompt ?? null
+      })
+    )
+    .digest("hex");
+}
+
+function canonicalDispatchJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalDispatchJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalDispatchJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function assertSelectedTaskSourceProjectRoot(input: ModalNodeSandboxInput, projectRoot: string): void {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  if (input.selected_task?.sourceProjectRoot !== root) {
+    throw new Error("selected task source project root does not match the archived project root");
+  }
 }
 
 export function modalNodeVolumeName(runId: string): string {
@@ -658,6 +801,7 @@ export async function createModalNodeHandoffArchive(
   projectRoot: string,
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
+  input = parseModalNodeSandboxInput(input);
   assertRecordedSourceInput(input);
   const root = fs.realpathSync(path.resolve(projectRoot));
   const gitExecutable = trustedGitExecutable(root);
@@ -670,6 +814,13 @@ export async function createModalNodeHandoffArchive(
   const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
     checkedPath(root, value, "dependency artifact directory", !optionalDependencyArtifactDirValues.has(value))
   );
+  const referenceArtifactDirs = (input.reference_artifact_dirs ?? []).map((value) =>
+    checkedPath(root, value, "reference artifact directory")
+  );
+  const vulnerabilityDatabaseCatalog =
+    input.vulnerability_database === undefined
+      ? undefined
+      : checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog");
   const optionalDependencyArtifactDirs = new Set(
     (input.optional_dependency_artifact_dirs ?? []).map((value) =>
       checkedPath(root, value, "optional dependency artifact directory", false)
@@ -685,24 +836,38 @@ export async function createModalNodeHandoffArchive(
     "cloud workflow path"
   );
   const governedSource = readGovernedSourceIdentity(root, runRoot, executionSnapshotRoot, workflowPath, gitExecutable);
-  if (promptPath !== undefined) assertChildPath(executionSnapshotRoot, promptPath, "rendered prompt path");
+  if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
   }
   for (const optionalDependencyArtifactDir of optionalDependencyArtifactDirs) {
     assertChildPath(runRoot, optionalDependencyArtifactDir, "optional dependency artifact directory");
   }
-  const taskAuthority = readSealedModalTaskAuthority(
-    input,
-    runRoot,
-    executionSnapshotRoot,
-    workflowPath,
-    promptPath,
-    artifactDir,
-    workspaceDir,
-    dependencyArtifactDirs,
-    optionalDependencyArtifactDirs
-  );
+  for (const referenceArtifactDir of referenceArtifactDirs) {
+    assertChildPath(runRoot, referenceArtifactDir, "reference artifact directory");
+  }
+  if (vulnerabilityDatabaseCatalog !== undefined) {
+    assertChildPath(runRoot, vulnerabilityDatabaseCatalog, "vulnerability database catalog");
+    const actual = crypto.createHash("sha256").update(fs.readFileSync(vulnerabilityDatabaseCatalog)).digest("hex");
+    if (actual !== input.vulnerability_database!.catalogSha256) {
+      throw new Error("vulnerability database catalog does not match its declared cloud-input digest");
+    }
+  }
+  const runtimeSelectedAuthority = selectedTaskRequiresRuntimeAuthority(input, executionSnapshotRoot);
+  const taskAuthority = runtimeSelectedAuthority
+    ? undefined
+    : readSealedModalTaskAuthority(
+        input,
+        runRoot,
+        executionSnapshotRoot,
+        workflowPath,
+        promptPath,
+        artifactDir,
+        workspaceDir,
+        dependencyArtifactDirs,
+        referenceArtifactDirs,
+        optionalDependencyArtifactDirs
+      );
   assertChildPath(runRoot, artifactDir, "artifact directory");
   assertChildPath(runRoot, workspaceDir, "workspace directory");
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
@@ -752,14 +917,28 @@ export async function createModalNodeHandoffArchive(
       workflowPath
     );
     copyWorkflowControlSealChecked(root, runRoot, executionSnapshotRoot, staging);
-    const dependencyCapture = stageAuthenticatedDependencies({
-      projectRoot: root,
-      runRoot,
-      staging,
-      dependencyArtifactDirs,
-      optionalDependencyArtifactDirs,
-      taskAuthority
-    });
+    const dependencyCapture =
+      taskAuthority === undefined
+        ? stageRuntimeSelectedInputs({
+            input,
+            projectRoot: root,
+            runRoot,
+            staging,
+            promptPath,
+            executionSnapshotRoot,
+            dependencyArtifactDirs,
+            referenceArtifactDirs,
+            vulnerabilityDatabaseCatalog,
+            optionalDependencyArtifactDirs
+          })
+        : stageAuthenticatedDependencies({
+            projectRoot: root,
+            runRoot,
+            staging,
+            dependencyArtifactDirs,
+            optionalDependencyArtifactDirs,
+            taskAuthority
+          });
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     assertSafeTree(staging);
     assertDependencyCaptureCurrent(dependencyCapture);
@@ -1264,6 +1443,15 @@ function removeHandoffTemporaryRoot(temporaryRoot: string): void {
 
 type ModalNodeResult = StrictModalNodeResultDocument;
 
+interface InvariantSourceProofPublication {
+  schema_version: typeof INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION;
+  attempt_id: string;
+  execution_generation: string;
+  storage_lineage: string;
+  logical_dispatch_fingerprint: string;
+  source_proof_sha256: string;
+}
+
 async function waitForModalNodeResult(
   sandbox: Sandbox,
   request: NodeSandboxProviderRequest,
@@ -1374,6 +1562,7 @@ async function validateDurableCheckpoint(
       artifactArchive: path.posix.join(attemptRoot, "artifacts.tgz"),
       checkpointIndex: path.posix.join(attemptRoot, "checkpoints", "index.json"),
       storageLineage: lineage,
+      logicalDispatchFingerprint: modalNodeDispatchFingerprint(input),
       workspacePath,
       runRoot: input.run_root,
       executionSnapshotRoot: input.execution_snapshot_root,
@@ -1425,9 +1614,11 @@ async function publishModalNodeResult(
     if (path.dirname(verificationDestination) !== verificationRoot) {
       throw new Error("cloud node result verification marker path is unsafe");
     }
-    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination);
+    const markerRefreshed = isRefreshedVerificationMarker(verificationMarker, verificationDestination, artifactDir);
+    assertPublishedFileReplacementAllowed(verificationMarker, verificationDestination, markerRefreshed);
     const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
-    const sourceProofs: Array<{ source: string; destination: string }> = [];
+    const sourceProofs: Array<{ source: string; destination: string; replacementAllowed: boolean }> = [];
+    let invariantProofPublication: { source: string; destination: string; replacementAllowed: boolean } | undefined;
     for (const suffix of [".json", ".invariant.json"] as const) {
       const sourceProof = path.join(extracted, "source-proofs", `${input.attempt_id}${suffix}`);
       if (!fs.existsSync(sourceProof)) continue;
@@ -1435,8 +1626,28 @@ async function publishModalNodeResult(
       if (path.dirname(destination) !== proofRoot) {
         throw new Error("cloud node result source proof path is unsafe");
       }
-      assertPublishedFileReplacementAllowed(sourceProof, destination);
-      sourceProofs.push({ source: sourceProof, destination });
+      let replacementAllowed = false;
+      if (suffix === ".invariant.json") {
+        const publication = prepareInvariantSourceProofPublication(
+          temporaryRoot,
+          sourceProof,
+          destination,
+          proofRoot,
+          input,
+          result
+        );
+        replacementAllowed = publication.proofReplacementAllowed;
+        invariantProofPublication = publication.provenance;
+      }
+      assertPublishedFileReplacementAllowed(sourceProof, destination, replacementAllowed);
+      sourceProofs.push({ source: sourceProof, destination, replacementAllowed });
+    }
+    if (invariantProofPublication !== undefined) {
+      assertPublishedFileReplacementAllowed(
+        invariantProofPublication.source,
+        invariantProofPublication.destination,
+        invariantProofPublication.replacementAllowed
+      );
     }
     const artifacts = path.join(extracted, "artifacts");
     assertPublishedDirectoryReplacementAllowed(artifacts, artifactDir);
@@ -1446,10 +1657,18 @@ async function publishModalNodeResult(
       replacePublishedDirectory(workspace, workspaceDir);
     }
     replacePublishedDirectory(artifacts, artifactDir);
-    for (const { source, destination } of sourceProofs) {
-      publishImmutableFileExclusive(root, source, destination);
+    for (const { source, destination, replacementAllowed } of sourceProofs) {
+      publishControlledFile(root, source, destination, replacementAllowed);
     }
-    publishImmutableFileExclusive(root, verificationMarker, verificationDestination);
+    if (invariantProofPublication !== undefined) {
+      publishControlledFile(
+        root,
+        invariantProofPublication.source,
+        invariantProofPublication.destination,
+        invariantProofPublication.replacementAllowed
+      );
+    }
+    publishControlledFile(root, verificationMarker, verificationDestination, markerRefreshed);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -2327,6 +2546,34 @@ interface SealedModalTaskAuthority {
   >;
 }
 
+function selectedTaskRequiresRuntimeAuthority(input: ModalNodeSandboxInput, executionSnapshotRoot: string): boolean {
+  const selected = input.selected_task!;
+  if (
+    selected.metadata.node.dynamic !== undefined ||
+    input.vulnerability_database !== undefined ||
+    (input.prompt_path !== undefined &&
+      !path.resolve(input.prompt_path).startsWith(`${path.resolve(input.execution_snapshot_root)}${path.sep}`))
+  ) {
+    return true;
+  }
+  const taskBytes = readStableSnapshotRelativeFile(
+    executionSnapshotRoot,
+    "controls/tasks.json",
+    64 * 1024 * 1024,
+    "sealed task manifest"
+  );
+  const manifest = parseSmithersTaskManifestBytes(taskBytes);
+  const task = manifest.tasks.find(
+    (candidate) => candidate.attemptId === input.attempt_id && candidate.smithersNodeId === input.task_id
+  );
+  return (
+    task === undefined ||
+    (task.dynamicDependencies?.length ?? 0) > 0 ||
+    (task.deferredPromptGroups?.length ?? 0) > 0 ||
+    !isDeepStrictEqual(selected.dependencyArtifactDirs, input.dependency_artifact_dirs)
+  );
+}
+
 interface StableDirectorySnapshot {
   path: string;
   stat: fs.BigIntStats;
@@ -2366,6 +2613,7 @@ function readSealedModalTaskAuthority(
   artifactDir: string,
   workspaceDir: string,
   dependencyArtifactDirs: readonly string[],
+  referenceArtifactDirs: readonly string[],
   optionalDependencyArtifactDirs: ReadonlySet<string>
 ): SealedModalTaskAuthority {
   const sealPath = path.join(runRoot, "smithers", "control-integrity.json");
@@ -2442,6 +2690,11 @@ function readSealedModalTaskAuthority(
     consumer.dependencyArtifactDirs,
     dependencyArtifactDirs,
     "cloud dependency artifact directories"
+  );
+  assertExactPathArray(
+    consumer.referenceArtifactDirs ?? [],
+    referenceArtifactDirs,
+    "cloud reference artifact directories"
   );
   assertExactPathArray(
     consumer.optionalDependencyArtifactDirs ?? [],
@@ -2684,6 +2937,188 @@ function plannedGraphAncestorIds(
     pending.push(...node.depends_on);
   }
   return ancestors;
+}
+
+function stageRuntimeSelectedInputs(input: {
+  input: ModalNodeSandboxInput;
+  projectRoot: string;
+  runRoot: string;
+  staging: string;
+  promptPath: string | undefined;
+  executionSnapshotRoot: string;
+  dependencyArtifactDirs: readonly string[];
+  referenceArtifactDirs: readonly string[];
+  vulnerabilityDatabaseCatalog: string | undefined;
+  optionalDependencyArtifactDirs: ReadonlySet<string>;
+}): DependencyHandoffCapture {
+  const capture: DependencyHandoffCapture = {
+    snapshots: [],
+    omittedOptionalMarkers: [],
+    entries: 0,
+    totalBytes: 0n
+  };
+  const authorities = new Map(
+    input.input.dependency_verification_authorities.map((authority) => [authority.attempt_id, authority] as const)
+  );
+  const usedAuthorities = new Set<string>();
+  for (const dependencyDir of input.dependencyArtifactDirs) {
+    stageRuntimeSelectedDependency(input, dependencyDir, authorities, usedAuthorities, capture);
+  }
+  if (usedAuthorities.size !== authorities.size) {
+    throw new Error("cloud dependency verifier marker authorities contain an extra producer attempt");
+  }
+  for (const referenceDir of input.referenceArtifactDirs) {
+    stageRuntimeSelectedReference(input, referenceDir, capture);
+  }
+  if (input.promptPath !== undefined && !input.promptPath.startsWith(`${input.executionSnapshotRoot}${path.sep}`)) {
+    stageRuntimeSelectedProjectFile(input, input.promptPath, "runtime rendered prompt", capture);
+  }
+  if (input.vulnerabilityDatabaseCatalog !== undefined) {
+    const snapshot = stageRuntimeSelectedProjectFile(
+      input,
+      input.vulnerabilityDatabaseCatalog,
+      "vulnerability database catalog",
+      capture
+    );
+    if (snapshot.sha256 !== input.input.vulnerability_database?.catalogSha256) {
+      throw new Error("vulnerability database catalog changed during cloud handoff capture");
+    }
+  }
+  return capture;
+}
+
+function stageRuntimeSelectedProjectFile(
+  input: { projectRoot: string; staging: string },
+  sourcePath: string,
+  label: string,
+  capture: DependencyHandoffCapture
+): StableRelativeFileSnapshot {
+  const relativePath = path.relative(input.projectRoot, sourcePath).split(path.sep).join("/");
+  const snapshot = readStableRelativeFileSnapshot(
+    input.projectRoot,
+    relativePath,
+    MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+    label
+  );
+  rememberDependencySnapshot(capture, snapshot);
+  stageCapturedFile(input.staging, relativePath, snapshot.bytes);
+  return snapshot;
+}
+
+function stageRuntimeSelectedDependency(
+  input: {
+    projectRoot: string;
+    runRoot: string;
+    staging: string;
+    optionalDependencyArtifactDirs: ReadonlySet<string>;
+  },
+  dependencyDir: string,
+  authorities: ReadonlyMap<string, StrictModalNodeInputDocument["dependency_verification_authorities"][number]>,
+  usedAuthorities: Set<string>,
+  capture: DependencyHandoffCapture
+): void {
+  const attemptId = path.basename(dependencyDir);
+  const authority = authorities.get(attemptId);
+  if (authority === undefined) {
+    if (!input.optionalDependencyArtifactDirs.has(dependencyDir)) {
+      throw new Error(`required cloud dependency has no verifier marker authority: ${attemptId}`);
+    }
+    capture.omittedOptionalMarkers.push(captureStableOptionalMarkerAbsence(input.runRoot, attemptId));
+    return;
+  }
+  if (usedAuthorities.has(attemptId)) {
+    throw new Error(`cloud dependency verifier marker authority is reused: ${attemptId}`);
+  }
+  usedAuthorities.add(attemptId);
+  const markerRelativePath = path.posix.join(ARTIFACT_VERIFICATION_DIRECTORY, `${attemptId}.json`);
+  const markerSnapshot = readStableRelativeFileSnapshot(
+    input.runRoot,
+    markerRelativePath,
+    MAX_HANDOFF_AUTHORITY_PROOF_BYTES,
+    `dependency verification marker ${attemptId}`
+  );
+  if (markerSnapshot.bytes.byteLength !== authority.size_bytes || markerSnapshot.sha256 !== authority.marker_sha256) {
+    throw new Error(`dependency verification marker does not match verifier authority: ${attemptId}`);
+  }
+  let markerValue: unknown;
+  try {
+    markerValue = parseStrictJsonBytes(markerSnapshot.bytes);
+  } catch (error) {
+    throw new Error(`dependency verification marker is not strict JSON: ${attemptId}`, { cause: error });
+  }
+  const validation = validateArtifactVerificationMarker(markerValue);
+  if (!validation.ok) throw new Error(`dependency verification marker is schema-invalid: ${attemptId}`);
+  const marker = markerValue as ArtifactVerificationMarker;
+  assertArtifactVerificationMarkerSemantics(marker);
+  if (marker.attempt_id !== attemptId) {
+    throw new Error(`dependency verification marker identity is invalid: ${attemptId}`);
+  }
+  rememberDependencySnapshot(capture, markerSnapshot);
+  const destinationRoot = path.join(input.staging, path.relative(input.projectRoot, dependencyDir));
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  for (const publication of marker.publications) {
+    const snapshot = readStableRelativeFileSnapshot(
+      dependencyDir,
+      publication.path,
+      MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+      `verified dependency publication ${attemptId}/${publication.path}`
+    );
+    if (snapshot.sha256 !== publication.sha256) {
+      throw new Error(`verified dependency publication digest changed: ${attemptId}/${publication.path}`);
+    }
+    rememberDependencySnapshot(capture, snapshot);
+    stageCapturedFile(destinationRoot, snapshot.relativePath, snapshot.bytes);
+  }
+  stageCapturedFile(
+    path.join(input.staging, path.relative(input.projectRoot, input.runRoot)),
+    markerRelativePath,
+    markerSnapshot.bytes
+  );
+}
+
+function stageRuntimeSelectedReference(
+  input: { input: ModalNodeSandboxInput; projectRoot: string; staging: string },
+  referenceDir: string,
+  capture: DependencyHandoffCapture
+): void {
+  const manifestSnapshot = readStableRelativeFileSnapshot(
+    referenceDir,
+    ARTIFACT_MANIFEST_FILE,
+    MAX_HANDOFF_AUTHORITY_PROOF_BYTES,
+    `reference artifact manifest ${path.basename(referenceDir)}`
+  );
+  let manifestValue: unknown;
+  try {
+    manifestValue = parseStrictJsonBytes(manifestSnapshot.bytes);
+  } catch (error) {
+    throw new Error("reference artifact manifest is not strict JSON", { cause: error });
+  }
+  const validation = validateArtifactManifest(manifestValue);
+  if (!validation.ok) throw new Error("reference artifact manifest is schema-invalid");
+  const manifest = manifestValue as ArtifactManifest;
+  if (manifest.run_id !== input.input.run_id || manifest.node_id !== path.basename(referenceDir)) {
+    throw new Error("reference artifact manifest identity does not match the selected task");
+  }
+  rememberDependencySnapshot(capture, manifestSnapshot);
+  const destinationRoot = path.join(input.staging, path.relative(input.projectRoot, referenceDir));
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  const paths = new Set<string>();
+  for (const file of manifest.files) {
+    if (paths.has(file.path)) throw new Error("reference artifact manifest repeats a file path");
+    paths.add(file.path);
+    const snapshot = readStableRelativeFileSnapshot(
+      referenceDir,
+      file.path,
+      MAX_HANDOFF_SNAPSHOT_FILE_BYTES,
+      `reference publication ${manifest.node_id}/${file.path}`
+    );
+    if (snapshot.bytes.byteLength !== file.size_bytes || snapshot.sha256 !== file.sha256) {
+      throw new Error(`reference publication changed: ${manifest.node_id}/${file.path}`);
+    }
+    rememberDependencySnapshot(capture, snapshot);
+    stageCapturedFile(destinationRoot, snapshot.relativePath, snapshot.bytes);
+  }
+  stageCapturedFile(destinationRoot, ARTIFACT_MANIFEST_FILE, manifestSnapshot.bytes);
 }
 
 function stageAuthenticatedDependencies(input: {
@@ -3251,6 +3686,134 @@ function assertSafeTree(root: string): void {
   }
 }
 
+/**
+ * Binds a stable invariant-proof destination to the controller-owned execution generation that
+ * published it. A reset may advance the proof and receipt together; same-generation bytes remain
+ * immutable. If publication was interrupted after the proof rename, the matching incoming digest
+ * is adopted and only the receipt advances.
+ */
+function prepareInvariantSourceProofPublication(
+  temporaryRoot: string,
+  source: string,
+  destination: string,
+  proofRoot: string,
+  input: ModalNodeSandboxInput,
+  result: ModalNodeResult
+): {
+  proofReplacementAllowed: boolean;
+  provenance: { source: string; destination: string; replacementAllowed: boolean };
+} {
+  assertPublishedFileReplacementAllowed(source, destination, true);
+  const sourceDigest = crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex");
+  const provenance: InvariantSourceProofPublication = {
+    schema_version: INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION,
+    attempt_id: input.attempt_id,
+    execution_generation: input.execution_generation,
+    storage_lineage: result.storage_lineage,
+    logical_dispatch_fingerprint: result.logical_dispatch_fingerprint,
+    source_proof_sha256: sourceDigest
+  };
+  const provenanceSource = path.join(temporaryRoot, "invariant-source-proof-publication.json");
+  fs.writeFileSync(provenanceSource, `${JSON.stringify(provenance, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  const provenanceDestination = path.join(proofRoot, `${input.attempt_id}${INVARIANT_SOURCE_PROOF_PUBLICATION_SUFFIX}`);
+  if (path.dirname(provenanceDestination) !== proofRoot) {
+    throw new Error("cloud node invariant source proof publication path is unsafe");
+  }
+  assertPublishedFileReplacementAllowed(provenanceSource, provenanceDestination, true);
+
+  const destinationExists = fs.existsSync(destination);
+  const provenanceExists = fs.existsSync(provenanceDestination);
+  if (!destinationExists) {
+    if (provenanceExists) throw new Error("cloud node invariant source proof publication provenance is invalid");
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  const destinationDigest = crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex");
+  if (!provenanceExists) {
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  const published = readInvariantSourceProofPublication(provenanceDestination, input);
+  if (published.execution_generation === input.execution_generation) {
+    if (
+      published.logical_dispatch_fingerprint !== result.logical_dispatch_fingerprint ||
+      published.source_proof_sha256 !== destinationDigest
+    ) {
+      throw new Error("cloud node invariant source proof publication provenance is invalid");
+    }
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+
+  if (input.execution_generation === "base") {
+    return {
+      proofReplacementAllowed: false,
+      provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: false }
+    };
+  }
+  if (published.source_proof_sha256 !== destinationDigest && destinationDigest !== sourceDigest) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  return {
+    proofReplacementAllowed: destinationDigest !== sourceDigest,
+    provenance: { source: provenanceSource, destination: provenanceDestination, replacementAllowed: true }
+  };
+}
+
+function readInvariantSourceProofPublication(
+  publicationPath: string,
+  input: ModalNodeSandboxInput
+): InvariantSourceProofPublication {
+  const stat = fs.lstatSync(publicationPath);
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    stat.size > MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES
+  ) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJsonBytes(
+      readRegularFileSnapshot(publicationPath, MAX_INVARIANT_SOURCE_PROOF_PUBLICATION_BYTES)
+    );
+  } catch (error) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid", { cause: error });
+  }
+  const expectedKeys = [
+    "attempt_id",
+    "execution_generation",
+    "logical_dispatch_fingerprint",
+    "schema_version",
+    "source_proof_sha256",
+    "storage_lineage"
+  ];
+  if (
+    !isRecord(parsed) ||
+    JSON.stringify(Object.keys(parsed).sort()) !== JSON.stringify(expectedKeys) ||
+    parsed.schema_version !== INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION ||
+    parsed.attempt_id !== input.attempt_id ||
+    !isCloudExecutionGeneration(parsed.execution_generation) ||
+    parsed.storage_lineage !== `${input.run_id}/${input.attempt_id}/${parsed.execution_generation}` ||
+    typeof parsed.logical_dispatch_fingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(parsed.logical_dispatch_fingerprint) ||
+    typeof parsed.source_proof_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(parsed.source_proof_sha256)
+  ) {
+    throw new Error("cloud node invariant source proof publication provenance is invalid");
+  }
+  return parsed as unknown as InvariantSourceProofPublication;
+}
+
 function replacePublishedDirectory(source: string, destination: string): void {
   assertPublishedDirectoryReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -3302,7 +3865,20 @@ function publishImmutableFileExclusive(root: string, source: string, destination
   assertPublishedFileReplacementAllowed(source, destination);
 }
 
-function assertPublishedFileReplacementAllowed(source: string, destination: string): void {
+function publishControlledFile(root: string, source: string, destination: string, replacementAllowed = false): void {
+  assertPublishedFileReplacementAllowed(source, destination, replacementAllowed);
+  if (!replacementAllowed) {
+    publishImmutableFileExclusive(root, source, destination);
+    return;
+  }
+  const bytes = fs.readFileSync(source);
+  const destinationState = lstatIfPresent(destination);
+  if (destinationState !== undefined && fs.readFileSync(destination).equals(bytes)) return;
+  writeFileDurable(destination, bytes);
+  assertPublishedFileReplacementAllowed(source, destination, false);
+}
+
+function assertPublishedFileReplacementAllowed(source: string, destination: string, replacementAllowed = false): void {
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud node result source file is unsafe");
@@ -3314,10 +3890,64 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
   ) {
     throw new Error("cloud node result destination file is unsafe");
   }
-  if (destinationStat !== undefined) {
+  if (destinationStat !== undefined && !replacementAllowed) {
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
       throw new Error("cloud node result would replace an immutable publication file");
     }
+  }
+}
+
+function isRefreshedVerificationMarker(source: string, destination: string, artifactDir: string): boolean {
+  if (!fs.existsSync(destination)) return false;
+  const remote = readVerificationMarkerDigests(source);
+  const published = readVerificationMarkerDigests(destination);
+  if (remote === undefined || published === undefined || remote.skeleton !== published.skeleton) return false;
+  let refreshed = false;
+  for (const [index, entry] of published.digests.entries()) {
+    if (remote.digests[index]?.sha256 === entry.sha256) continue;
+    if (!publishedArtifactHasDigest(artifactDir, entry.path, entry.sha256)) return false;
+    refreshed = true;
+  }
+  return refreshed;
+}
+
+function readVerificationMarkerDigests(
+  markerPath: string
+): { skeleton: string; digests: Array<{ path: string; sha256: string }> } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJsonBytes(readRegularFileSnapshot(markerPath, 4 * 1024 * 1024));
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(parsed)) return undefined;
+  const digests: Array<{ path: string; sha256: string }> = [];
+  const skeleton: Record<string, unknown> = { ...parsed };
+  for (const key of ["artifacts", "publications"] as const) {
+    const entries = parsed[key];
+    if (!Array.isArray(entries)) continue;
+    skeleton[key] = entries.map((entry) => {
+      if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.sha256 !== "string") return entry;
+      digests.push({ path: entry.path, sha256: entry.sha256 });
+      return { ...entry, sha256: null };
+    });
+  }
+  return { skeleton: JSON.stringify(skeleton), digests };
+}
+
+function publishedArtifactHasDigest(artifactDir: string, relativePath: string, sha256: string): boolean {
+  if (!/^[0-9a-f]{64}$/u.test(sha256)) return false;
+  const resolved = path.resolve(artifactDir, relativePath);
+  const relative = path.relative(artifactDir, resolved);
+  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+  try {
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || fs.realpathSync(resolved) !== resolved) {
+      return false;
+    }
+    return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex") === sha256;
+  } catch {
+    return false;
   }
 }
 

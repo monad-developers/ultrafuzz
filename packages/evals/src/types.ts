@@ -58,7 +58,7 @@ export interface EvalPrivateBenchmarkWorkflowInput {
 }
 
 export interface EvalPublicFullBenchmarkWorkflowInput {
-  benchmark_lane: "full";
+  benchmark_lane: "full" | "threat-model";
   target_frameworks: Record<string, string>;
   excluded_strategy_families: string[];
   benchmark_execution: EvalBenchmarkExecutionInput;
@@ -366,7 +366,20 @@ export interface EvalEfficiency {
 
 export type EvalNodeStatusCounts = Record<NodeStatus, number>;
 
-export type EvalExpansionCompleteness = { status: "complete"; reason: null };
+export type EvalExpansionReason =
+  | "workflow-state-unavailable"
+  | "run-graph-unavailable"
+  | "concurrency-unavailable"
+  | "goal-plan-unavailable"
+  | "goal-plan-unreadable"
+  | "usage-ledger-unavailable"
+  | "usage-ledger-node-unmatched"
+  | "usage-incomplete"
+  | "pricing-incomplete"
+  | "goal-lane-nodes-unobserved";
+
+export type EvalExpansionCompleteness =
+  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalExpansionReason };
 
 /** One node the run added after the graph was fixed, with its declared lineage. */
 export interface EvalDynamicNode {
@@ -385,6 +398,73 @@ export interface EvalRunConcurrencyObservation {
   effective: number;
   ready_queue_depth: number;
   active_work: number;
+}
+
+/**
+ * What the planner wrote down in `goal-plan.json` at planning time.
+ *
+ * Every number here is *read*, never recomputed. The cardinality rule lives in the planner alone
+ * (#364, option (a)); if the eval side derived it a second time, a planner that under-expands would
+ * agree with its own checker and the comparison below would prove nothing.
+ */
+export interface EvalExpansionPlan {
+  expected_child_count: number;
+  threat_count: number;
+  applicable_class_count: number;
+  max_dynamic_nodes: number;
+  lane_count: number;
+}
+
+/**
+ * Expected versus actual dynamic children.
+ *
+ * A mismatch is reported, never dropped: `matches` is false and `delta` carries the size and sign of
+ * the disagreement, so a planner that under-expands or a runtime that fails to expand is visible in
+ * the record rather than absent from it.
+ */
+export interface EvalExpansionExpectation {
+  expected_child_count: number | null;
+  actual_dynamic_node_count: number | null;
+  delta: number | null;
+  matches: boolean | null;
+}
+
+/**
+ * One goal lane the planner named, joined to the nodes the run actually ran for it.
+ *
+ * Lanes are a grouping of data the run already records -- per-node status for failures, the usage
+ * ledger for tokens and cost, node timestamps for wall-clock -- so #183's "failed goal lanes" and
+ * per-lane cost need no new telemetry.
+ */
+export interface EvalGoalLaneObservation {
+  lane_id: string;
+  kind: string;
+  /** Node IDs the planner assigned to this lane. */
+  planned_node_ids: string[];
+  /** Planned node IDs that resolved to at least one run-state node. */
+  observed_planned_node_ids: string[];
+  /** State nodes matched to those planned IDs, by node ID or recorded producer. */
+  observed_node_ids: string[];
+  observed_node_count: number;
+  status_counts: EvalNodeStatusCounts;
+  failed: boolean;
+  failed_node_ids: string[];
+  timed_out_node_ids: string[];
+  retried_node_count: number;
+  /** How many of this lane's observed nodes the usage ledger actually carried an entry for. */
+  usage_matched_node_count: number;
+  /** Null when no ledger entry joined to this lane's nodes; see `cost_evidence` for why. */
+  total_tokens: number | null;
+  cost_usd: number | null;
+  /**
+   * Whether this lane's tokens and cost could be joined at all.
+   *
+   * The field that makes a zero-cost lane distinguishable from a broken join: both report
+   * `total_tokens: null`, and only this says which one happened.
+   */
+  cost_evidence: EvalExpansionCompleteness;
+  /** Null when this lane's nodes never recorded both a start and a finish. */
+  wall_time_seconds: number | null;
 }
 
 /**
@@ -409,10 +489,18 @@ export interface EvalRunExpansion {
   timed_out_node_count: number;
   timed_out_node_ids: string[];
   concurrency: EvalRunConcurrencyObservation;
+  /** What the planner claimed, or null when no goal plan was retained with the run. */
+  plan: EvalExpansionPlan | null;
+  expected_vs_actual: EvalExpansionExpectation;
+  goal_lanes: EvalGoalLaneObservation[] | null;
   truncated: boolean;
   nodes: EvalExpansionCompleteness;
   lineage: EvalExpansionCompleteness;
   concurrency_evidence: EvalExpansionCompleteness;
+  /** Whether the planner's own numbers could be read; unavailable is never reported as zero. */
+  plan_evidence: EvalExpansionCompleteness;
+  /** Whether the usage ledger backing per-lane tokens and cost could be read. */
+  lane_cost_evidence: EvalExpansionCompleteness;
 }
 
 export interface EvalRunRecord {

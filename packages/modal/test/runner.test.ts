@@ -43,6 +43,7 @@ import {
   CODEX_CLI_VERSION,
   KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
   MODAL_COLLECT_RESULT_FILES,
+  PI_CLI_VERSION,
   ModalTerminationError,
   assertPublicBenchmarkBundleDiagnosticsMatch,
   assertPublicBenchmarkBundleLineage,
@@ -484,6 +485,15 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain(expected);
     expect(commands).not.toContain("@openai/codex@0.144.3");
     expect(standaloneDockerfile).not.toContain("@openai/codex@0.144.3");
+  });
+
+  it("pins the documented Pi CLI in both Modal image definitions", () => {
+    const commands = modalSecurityToolchainCommands().join("\n");
+    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+    const expected = `@earendil-works/pi-coding-agent@${PI_CLI_VERSION}`;
+
+    expect(commands).toContain(expected);
+    expect(standaloneDockerfile).toContain(expected);
   });
 
   it("installs recon-fuzzer as the only fuzzing backend", () => {
@@ -1130,6 +1140,83 @@ describe("Modal result collection", () => {
     await expect(
       publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })
     ).rejects.toThrow(/KIMI_API_KEY or MOONSHOT_API_KEY/u);
+  });
+
+  /**
+   * A detached worker fetching a declared private reference during its pre-model phase needs the read
+   * credential inside the sandbox. It travels as a Modal secret alongside the model API keys -- never
+   * baked into the immutable image and never written into the launch state.
+   */
+  it("forwards the private reference read credential into the sandbox secret with its allowlist", () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "gpt-5-6-luna",
+      model: "gpt-5.6-luna",
+      provider: "openai",
+      agent: "CodexAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    };
+    const base = { OPENAI_API_KEY: "judge-secret" };
+    const privateRepo = "example/private-reference";
+
+    // The allowlist travels with the token deliberately: without it the sandbox would attach the
+    // token to every reference remote, which is strictly less safe than sending neither value.
+    expect(
+      modalBenchmarkSecretValues(config, model, {
+        ...base,
+        ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "ghs_reference",
+        ULTRAFUZZ_REFERENCE_GITHUB_REPOS: privateRepo
+      })
+    ).toEqual({
+      OPENAI_API_KEY: "judge-secret",
+      ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "ghs_reference",
+      ULTRAFUZZ_REFERENCE_GITHUB_REPOS: privateRepo
+    });
+
+    // No declared private reference means no credential in the sandbox at all.
+    expect(modalBenchmarkSecretValues(config, model, base)).toEqual(base);
+    expect(
+      modalBenchmarkSecretValues(config, model, { ...base, ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "ghs_reference" })
+    ).toEqual(base);
+
+    // A declared private reference with no token fails at launch, where it is free, rather than
+    // inside the sandbox after an image build and a launch have already been paid for.
+    for (const token of [undefined, "   "]) {
+      expect(() =>
+        modalBenchmarkSecretValues(config, model, {
+          ...base,
+          ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: token,
+          ULTRAFUZZ_REFERENCE_GITHUB_REPOS: privateRepo
+        })
+      ).toThrow(/ULTRAFUZZ_REFERENCE_GITHUB_TOKEN is empty/u);
+    }
+  });
+
+  it("treats the reference token as a forbidden value in every published artifact", async () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "gpt-5-6-luna",
+      model: "gpt-5.6-luna",
+      provider: "openai",
+      agent: "CodexAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    };
+
+    // The token entered the sandbox, so a collected bundle, diagnostic, or lifecycle log that echoed
+    // it must be rejected exactly like one echoing a model API key.
+    expect(
+      await publicBenchmarkCollectionSecretValues(config, model, {
+        OPENAI_API_KEY: "judge-secret",
+        ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "ghs_reference",
+        ULTRAFUZZ_REFERENCE_GITHUB_REPOS: "example/private-reference"
+      })
+    ).toContain("ghs_reference");
+
+    expect(
+      await publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })
+    ).not.toContain("ghs_reference");
   });
 
   it("passes Kimi API base URLs to remote Modal benchmark workers", () => {

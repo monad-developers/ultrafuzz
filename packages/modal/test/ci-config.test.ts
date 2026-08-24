@@ -636,7 +636,11 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["main"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
-      benchmark_mode: expect.objectContaining({ default: "full", type: "choice", options: ["full", "smoke"] }),
+      benchmark_mode: expect.objectContaining({
+        default: "full",
+        type: "choice",
+        options: ["smoke", "full", "threat-model"]
+      }),
       smoke_provider: expect.objectContaining({ default: "deepseek", type: "choice" }),
       smoke_model: expect.objectContaining({ default: "deepseek-v4-flash", type: "string" }),
       smoke_reasoning: expect.objectContaining({ default: "max", type: "string" }),
@@ -650,13 +654,11 @@ describe("public Modal benchmark configuration", () => {
       deepseek_reasoning: expect.objectContaining({ default: "max", type: "string" })
     });
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
-    expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
+    expect(workflow.env.BENCHMARK_MODE).toContain("inputs.benchmark_mode");
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.after");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.sha");
-    expect(workflow.concurrency.group).toContain("inputs.benchmark_mode");
-    expect(workflow.concurrency.group).toContain("'full'");
-    expect(workflow.concurrency.group).toContain("'smoke'");
+    expect(workflow.concurrency.group).toContain("inputs.benchmark_mode || 'smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
     expect(workflow.concurrency.group).not.toContain("pull_request");
@@ -685,6 +687,10 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("'deepseek-v4-pro'");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.benchmark_mode == 'smoke'");
+    expect(prepare?.env?.BENCHMARK_SMOKE_PROVIDER).toContain("inputs.smoke_provider");
+    expect(prepare?.env?.BENCHMARK_SMOKE_MODEL).toContain("inputs.smoke_model");
+    expect(prepare?.env?.BENCHMARK_SMOKE_REASONING).toContain("inputs.smoke_reasoning");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
@@ -720,6 +726,10 @@ describe("public Modal benchmark configuration", () => {
     expect(workflowText).not.toContain("pull-requests: write");
     expect(workflowText).not.toContain("group: publish-eval-history");
     expect(workflowText).not.toContain("peter-evans/create-pull-request");
+    expect(workflowText).not.toContain("ULTRAFUZZ_REFERENCE_GITHUB_TOKEN");
+    expect(workflowText).not.toContain("ULTRAFUZZ_REFERENCE_GITHUB_REPOS");
+    expect(workflowText).not.toContain("preflight-reference-access.mjs");
+    expect(workflowText).not.toContain("web3-vulnerability-database");
     expect(workflowText).not.toContain("ultrafuzz-benchmark");
     expect(workflowText).not.toContain("self-hosted");
     expect(workflowText).not.toMatch(/ablation|fake binary|BENCHMARK_EXPERIMENT/iu);
@@ -874,8 +884,8 @@ describe("public Modal benchmark configuration", () => {
             lane: "package-gates",
             description: "Package, dependency, and policy gates",
             gates:
-              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,security,topology,prompts,artifacts,evals,modal",
-            timeout_minutes: 30,
+              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,packed-install,security,references,topology,prompts,artifacts,dashboard,evals,evmbench,modal",
+            timeout_minutes: 45,
             build_modal_dependencies: true
           },
           {
@@ -1604,7 +1614,10 @@ describe("public Modal benchmark configuration", () => {
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
     const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
-    const laneProfile = worker.indexOf("modalTargetToml(model, config.node_timeout_seconds, scope.lane)", smithersSeed);
+    const laneProfile = worker.indexOf(
+      "modalTargetToml(model, config.node_timeout_seconds, auditProfile)",
+      smithersSeed
+    );
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
     const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
     const referenceSync = worker.indexOf('["node", CLI, "references", "sync"', init);

@@ -721,6 +721,21 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/boundedPath" }
         },
+        "reference_artifact_dirs": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/boundedPath" }
+        },
+        "vulnerability_database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["catalogPath", "catalogSha256"],
+          "properties": {
+            "catalogPath": { "$ref": "#/$defs/boundedPath" },
+            "catalogSha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
         "optional_dependency_artifact_dirs": {
           "type": "array",
           "maxItems": 100000,
@@ -742,6 +757,8 @@
             }
           }
         },
+        "selected_task": { "type": "object" },
+        "project_content_sha256": { "$ref": "#/$defs/sha256" },
         "project_archive_sha256": { "$ref": "#/$defs/sha256" },
         "resources": {
           "type": "object",

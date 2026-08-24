@@ -12,6 +12,7 @@ import {
   loadBenchmarkLanesManifest,
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
+import { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
 import {
   isEvalPublicBenchmarkWorkflowInput,
   type EvalEfficiencyCompleteness,
@@ -44,7 +45,7 @@ const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
 const MAX_EVAL_HISTORY_BYTES = 64 * 1024 * 1024;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
-export type EvalHistoryLane = "smoke" | "full";
+export type EvalHistoryLane = BenchmarkLaneName;
 
 export interface EvalHistoryCompleteness {
   status: "complete" | "partial" | "unavailable";
@@ -191,7 +192,7 @@ const targetPublicationSchema = z.strictObject({
 const observationBaseShape = {
   id: safeText,
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
-  lane: z.enum(["smoke", "full"]),
+  lane: z.enum(BENCHMARK_LANE_NAMES),
   target: safeText,
   variant: safeText,
   trial_count: positiveInteger,

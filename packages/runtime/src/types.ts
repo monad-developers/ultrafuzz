@@ -172,6 +172,11 @@ export interface PlanRunValue {
   validation: ValidateProjectResult;
   layout: RunLayout;
   rendered_prompts: RenderedPromptPlan[];
+  /**
+   * The run-root-relative materialized vulnerability-database planner catalog, when the run has one.
+   * Storing it relative keeps it correct after a workspace relocation or a cloud-root remap.
+   */
+  vulnerability_database?: { relative_path: string; sha256: string };
 }
 
 export interface StartRunInput extends PlanRunInput {

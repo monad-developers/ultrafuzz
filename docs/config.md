@@ -76,6 +76,50 @@ api_key_env = "OPENAI_API_KEY"
 
 API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
+### OpenRouter through Codex
+
+The v0.1.0 Codex workflow can use an OpenRouter catalogue model through an
+isolated Codex provider configuration. This is a compatibility pairing: the
+Codex CLI harness pointed at a gateway rather than at OpenAI. Two separate
+things are true of it. The pairing is not selected by default — the shipped root
+config points `[models.default]` at `CodexAgent` against OpenAI, and reaching
+OpenRouter means editing `[models.default]` and `[agents.CodexAgent]` as shown
+below; there is no OpenRouter profile or agent ref to select and no `--agent`
+value that reaches it. Separately, once OpenRouter is the provider, Codex CLI is
+the harness this release ships for it. Select the catalogue ID and name the same
+credential variable in Ultrafuzz that the provider configuration reads:
+
+```toml
+[models.default]
+agent = "CodexAgent"
+model = "anthropic/claude-sonnet-4"
+reasoning = "high"
+
+[agents.CodexAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+config_dir = ".ultrafuzz/openrouter-codex"
+```
+
+Create `.ultrafuzz/openrouter-codex/config.toml` with the corresponding Codex
+route (the generated `.ultrafuzz` state is already ignored by Git):
+
+```toml
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+env_key = "OPENROUTER_API_KEY"
+```
+
+Then export `OPENROUTER_API_KEY` before `ultrafuzz run`. The generated adapter
+uses that value for both Smithers credential preflight and the spawned Codex
+provider, and preflight probes the configured OpenRouter route rather than the
+first-party OpenAI endpoint. Keep the provider config local and do not commit
+credentials.
+
 ## Claude agent
 
 `ultrafuzz init` also generates a `ClaudeAgent`, backed by the Claude Code CLI
@@ -200,6 +244,18 @@ auth = "api-key"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
+This is a compatibility pairing: it runs the Claude Code harness against
+DeepSeek's Anthropic-compatible endpoint, not DeepSeek's first-party coding
+agent. The profile is opt-in and non-default: `[models.default]` stays on
+`CodexAgent`, and this profile is selected per node or group in
+`.ultrafuzz/topology.yml` (`model_profiles = ["deepseek"]`). `--agent` and
+`--model` override fields of the default profile rather than selecting a profile
+by id, so `ultrafuzz run --agent DeepSeekAgent` swaps only the default profile's
+agent and carries neither this profile's `deepseek-v4-pro` nor its
+`reasoning = "max"`. Add `--model deepseek-v4-pro` to pin the model on such a
+run; an `--agent` override clears reasoning, so no `--effort` is passed and the
+Claude Code CLI default applies.
+
 DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,
 `https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
@@ -223,53 +279,75 @@ subscription plan cannot supply a zero or unrelated rate. The current
 DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
 million cache-hit input tokens, and $0.87 per million output tokens.
 
-## OpenRouter agent
+## OpenCode agent
 
-`ultrafuzz init` generates a dedicated `OpenRouterAgent` backed by the Codex
-CLI and its API-key configuration. Add a profile with any OpenRouter catalogue
-ID:
+`ultrafuzz init` also generates a dedicated `OpenCodeAgent`. It is opt-in and
+non-default: nothing selects it until a topology group or `--agent` names it.
+The default root config includes an opt-in OpenCode profile:
 
 ```toml
-[models.openrouter]
-agent = "OpenRouterAgent"
-model = "~anthropic/claude-sonnet-latest:free"
-reasoning = "high"
+[models.opencode]
+agent = "OpenCodeAgent"
+model = "openrouter/anthropic/claude-opus-4.8"
+
+[agents.OpenCodeAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
 ```
 
-Set the key outside TOML, then select the profile in topology or use a one-off
-override:
+The adapter runs the installed OpenCode CLI with `--pure`, so no external
+plugin is loaded, and with OpenCode's permission checks bypassed, matching
+`permissions.trust_model = "skip-permissions"`. OpenCode addresses models as
+`provider/model` and resolves the identifier against its own catalogue, so the
+profile's `model` is opaque to Ultrafuzz; a profile `reasoning` value is passed
+through as OpenCode's provider-defined variant rather than a fixed effort
+ladder. `api-key` auth places the named variable in the child environment only
+— OpenCode reads provider credentials from the environment and emits no
+credential flag, so the key never appears in a command line or a process
+listing. `auth = "subscription"` is **rejected**: OpenCode reads `auth.json`
+from `$XDG_DATA_HOME/opencode`, and the adapter always relocates
+`XDG_DATA_HOME` into the run, so a subscription login held in the operator's
+home is unreachable by construction. Building an agent from it would produce a
+silently unauthenticated run, so the adapter throws instead, naming
+`agents.OpenCodeAgent.auth`.
 
-```bash
-export OPENROUTER_API_KEY=...
-ultrafuzz run --agent OpenRouterAgent --model '~anthropic/claude-sonnet-latest:free'
-```
+**Run-scoped state.** OpenCode otherwise writes its config directory, database
+and write-ahead log, snapshots, tool output, cached model catalogue, and
+downloaded binaries into the operator's real home. A child process is not
+implicitly sandboxed, so the adapter names each of those locations under a
+directory belonging to the run rather than deriving them:
 
-OpenRouter authentication is fixed to `OPENROUTER_API_KEY`; the key is never written to config or provenance. Its managed Codex home is under the operator provider-home root, and its route is fixed to `https://openrouter.ai/api/v1`.
-Competing provider credentials and ambient endpoint overrides are cleared from
-the model subprocess.
+- `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, and
+  `XDG_RUNTIME_DIR` — the base directories OpenCode resolves state from.
+- `OPENCODE_CONFIG_DIR` — OpenCode's own configuration directory.
+- `OPENCODE_DB` — the database, its write-ahead log, and its shared-memory
+  file. OpenCode resolves this ahead of `XDG_DATA_HOME` and honours an absolute
+  value outright, so redirecting the XDG roots alone still leaves an inherited
+  value pointing outside the run.
+- `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_MODELS_PATH`,
+  `OPENCODE_TUI_CONFIG`, and `OPENCODE_PLUGIN_META_FILE` — set empty, because
+  each names a single file that would otherwise be read from, or written
+  outside, the run.
+- `npm_config_cache` — OpenCode shells out to npm, which ignores the XDG base
+  directories and falls back to `~/.npm`, so its cache has to be named
+  separately.
+- `BUN_INSTALL_CACHE_DIR` — bun already resolves its cache under
+  `XDG_CACHE_HOME`, so this pins the exact directory rather than closing a leak
+  of its own.
 
-Codex does not apply its provider request retry count to an HTTP 429 response.
-The adapter therefore recovers from OpenRouter 429s for up to two minutes with
-exponential backoff, a 30-second base-delay cap, and up to 25% jitter. Before
-Codex emits substantive model, tool, command, or file activity, it starts a
-fresh attempt. After substantive activity, it captures Codex's exact thread ID
-and continues only with `codex exec resume` and a continuation prompt; it never
-replays the original task prompt or starts the task fresh against a workspace
-that may already have changed. Substantive progress in the resumed session
-starts a new recovery window, while the caller's total timeout continues to
-bound the whole operation. A missing or conflicting thread ID fails closed.
-If another complete backoff does not fit in the recovery window, no request is
-started at its deadline and the last provider rate-limit error is returned.
+It also disables autoupdate, session sharing, model-catalogue fetch, default
+plugins, project config, and LSP downloads. This list is what the adapter
+actually sets; it is not a claim that OpenCode has no other state root.
 
-The `model` value is an opaque OpenRouter catalogue ID. Ultrafuzz preserves it
-exactly through CLI overrides, resolved config, Codex `--model`, Modal launch
-state, and benchmark provenance. It does not download or ship a model
-allowlist, so vendor/model IDs, `~` aliases, and catalogue variants such as
-`:free` remain usable as OpenRouter evolves. IDs must be at most 256 characters
-and contain no whitespace or control characters. Choose a model that supports
-the coding and tool behavior required by the selected Ultrafuzz topology; being
-listed by OpenRouter alone does not guarantee agent compatibility. See
-OpenRouter's [Codex CLI integration](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli).
+Set `config_dir` under `[agents.OpenCodeAgent]` to anchor that state somewhere
+else. `config_dir` is the XDG parent, not OpenCode's own directory:
+`XDG_DATA_HOME` becomes `<config_dir>/data`, so pointing it at
+`~/.config/opencode` or `~/.local/share/opencode` picks nothing up.
+
+`ultrafuzz doctor` requires the `opencode` executable whenever any configured
+profile uses `OpenCodeAgent` — every profile in `[models.*]` is checked, not
+only the one a run selects, so keeping the shipped `[models.opencode]` profile
+means every contributor needs the CLI installed.
 
 Default triage requires quorum `3` from a panel size of `4`:
 
@@ -278,6 +356,55 @@ Default triage requires quorum `3` from a panel size of `4`:
 quorum = 3
 panel_size = 4
 ```
+
+## Pi agent
+
+`ultrafuzz init` also generates a `PiAgent`, backed by the `pi` CLI
+(`@earendil-works/pi-coding-agent`). The default root config includes an opt-in
+profile:
+
+```toml
+[models.pi]
+agent = "PiAgent"
+model = "openai/gpt-mini-latest"
+
+[agents.PiAgent]
+auth = "api-key"
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The adapter routes pi through OpenRouter and nothing else: the provider is the
+adapter's identity, fixed as `--provider openrouter`, not a configuration field.
+`model` is an opaque OpenRouter catalogue id that pi resolves itself, so no base
+URL is configured or needed. `auth` must be `api-key`; anything else is
+rejected before execution.
+
+The credential never reaches a command line. Smithers' `apiKey` option is the
+only path that emits `--api-key`, so the adapter never sets it; the value is
+read from `api_key_env` (default `OPENROUTER_API_KEY`) on the operator side and
+handed to the child process as `OPENROUTER_API_KEY`, which is the variable pi
+itself looks up. Naming a different `api_key_env` changes only where ultrafuzz
+reads the value from.
+
+State stays off the operator's home. `PI_CODING_AGENT_DIR` points pi at an
+isolated directory (default `.ultrafuzz/pi-coding-agent`, selectable with
+`config_dir` under `[agents.PiAgent]`) instead of `~/.pi/agent`, sessions are
+written to a `sessions` directory beneath it via `--session-dir`, and
+`PI_TELEMETRY=0` suppresses install telemetry.
+
+When a Pi profile sets `reasoning`, the adapter passes it to pi as
+`--thinking <level>`. The levels supported today are `off`, `minimal`, `low`,
+`medium`, `high`, and `xhigh`; any other value is rejected before execution.
+
+Note that `max` is not currently among them, even though the `pi` CLI itself
+accepts it (`VALID_THINKING_LEVELS` in pi 0.84.2 has seven entries, ending in
+`max`). The orchestrator's `PiAgentOptions.thinking` union stops at `xhigh`, so
+the adapter validates against that narrower range and throws when a profile
+asks for `max`. This matters because the shipped `[models.kimi]` and
+`[models.deepseek]` profiles both set `reasoning = "max"`: copying that line
+onto `[models.pi]` fails when the agent is constructed, rather than degrading
+to a lower level. The supported range can widen once the orchestrator option
+accepts `max`.
 
 ## Forge process guard
 
@@ -302,8 +429,9 @@ stay in root `ultrafuzz.toml` and editable product surfaces under
 `.ultrafuzz/**`.
 
 `ultrafuzz init` also writes `.ultrafuzz/references.yml`. That catalog pins
-property reference material to full GitHub commit SHAs and traversal-free
-relative paths. It is not configured through `ultrafuzz.toml`; use
+property and specialized vulnerability-database reference material to full
+GitHub commit SHAs and traversal-free relative paths. It is not configured
+through `ultrafuzz.toml`; use
 `ultrafuzz references status`, `ultrafuzz references sync`, and guarded
 `ultrafuzz references update --latest` for the reference cache flow.
 

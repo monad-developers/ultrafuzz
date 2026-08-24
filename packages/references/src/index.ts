@@ -19,6 +19,12 @@ import {
 import { parse, stringify } from "yaml";
 
 import {
+  redactReferenceGitCredential,
+  referenceGitCredential,
+  referenceGitCredentialEnv,
+  type ReferenceGitCredential
+} from "./git-credential.js";
+import {
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
   REFERENCE_CACHE_SCHEMA_VERSION,
   referenceCacheManifestJsonSchema
@@ -29,6 +35,18 @@ import {
   referenceSchemaEntry,
   referenceSchemaRegistry
 } from "./schema-registry.js";
+import {
+  VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH,
+  VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY,
+  VULNERABILITY_DATABASE_REFERENCE_KIND,
+  VULNERABILITY_DATABASE_REQUIRED_PATHS,
+  parseVulnerabilityDatabaseCatalog,
+  parseVulnerabilityDatabaseGitTree,
+  validateVulnerabilityDatabaseDirectory,
+  validateVulnerabilityDatabaseGitTree,
+  vulnerabilityDatabaseReferencePaths,
+  type VulnerabilityDatabaseGitTreeEntry
+} from "./vulnerability-database.js";
 
 export {
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
@@ -39,6 +57,8 @@ export {
   referenceSchemaEntry,
   referenceSchemaRegistry
 };
+export * from "./git-credential.js";
+export * from "./vulnerability-database.js";
 
 export const PROJECT_REFERENCES_FILE = ".ultrafuzz/references.yml";
 export const REFERENCES_VERSION = 1;
@@ -47,6 +67,7 @@ export const RUN_REFERENCE_MANIFEST_FILE = "references/manifest.json";
 export const RUN_REFERENCE_MANIFEST_SCHEMA_VERSION = "ultrafuzz.reference-manifest.v1";
 
 export type ReferenceProvider = "github";
+export type ReferenceKind = "document" | typeof VULNERABILITY_DATABASE_REFERENCE_KIND;
 
 export interface ReferenceCatalog {
   version: number;
@@ -54,6 +75,7 @@ export interface ReferenceCatalog {
 }
 
 export interface ReferenceEntry {
+  kind?: ReferenceKind;
   provider: ReferenceProvider;
   repo: string;
   commit: string;
@@ -134,6 +156,7 @@ export interface RunReferenceManifest {
   repo: string;
   commit: string;
   resolved_at: string;
+  kind?: ReferenceKind;
   source_files: ReferenceManifestFile[];
   artifacts: ReferenceManifestFile[];
 }
@@ -385,9 +408,35 @@ export function materializeReferenceArtifacts(input: {
 
   const artifactDir = path.resolve(input.artifactDir);
   const referenceArtifact = prepareSafeFilePath(artifactDir, primaryArtifact);
-  writeFileDurable(referenceArtifact, normalizedReferenceMarkdown(input.id, reference, cacheDir));
+  const artifactFiles: ReferenceManifestFile[] = [];
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    if (primaryArtifact !== VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH) {
+      throw referenceError(
+        "INVALID_VULNERABILITY_DATABASE_OUTPUT",
+        `vulnerability database reference \`${input.id}\` primary output must be ${VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH}`
+      );
+    }
+    const database = validateVulnerabilityDatabaseDirectory(cacheDir);
+    for (const sourcePath of vulnerabilityDatabaseReferencePaths(database.catalog)) {
+      const source = safeResolveInside(cacheDir, sourcePath, "cached vulnerability database path");
+      const artifactPath = path.posix.join(VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY, sourcePath);
+      const destination = prepareSafeFilePath(artifactDir, artifactPath);
+      writeFileDurable(destination, fs.readFileSync(source));
+      artifactFiles.push(manifestFileForPath(artifactDir, artifactPath));
+    }
+    validateVulnerabilityDatabaseDirectory(path.join(artifactDir, VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY), {
+      provider: reference.provider,
+      repo: reference.repo,
+      commit: reference.commit,
+      resolved_at: reference.resolved_at
+    });
+  } else {
+    writeFileDurable(referenceArtifact, normalizedReferenceMarkdown(input.id, reference, cacheDir));
+    artifactFiles.push(manifestFileForPath(artifactDir, primaryArtifact));
+  }
 
   const manifestArtifact = prepareSafeFilePath(artifactDir, RUN_REFERENCE_MANIFEST_FILE);
+  const sourcePaths = effectiveCachedReferencePaths(reference, cacheDir);
   const runManifest: RunReferenceManifest = {
     schema_version: RUN_REFERENCE_MANIFEST_SCHEMA_VERSION,
     reference: input.id,
@@ -395,8 +444,9 @@ export function materializeReferenceArtifacts(input: {
     repo: reference.repo,
     commit: reference.commit,
     resolved_at: reference.resolved_at,
-    source_files: cacheManifest.files.filter((file) => reference.paths.includes(file.path)),
-    artifacts: [manifestFileForPath(artifactDir, primaryArtifact)]
+    ...(reference.kind === undefined ? {} : { kind: reference.kind }),
+    source_files: cacheManifest.files.filter((file) => sourcePaths.includes(file.path)),
+    artifacts: artifactFiles
   };
   const runManifestBytes = Buffer.from(`${JSON.stringify(runManifest, null, 2)}\n`, "utf8");
   const runManifestValidation = validateArtifactContractBytes(
@@ -511,6 +561,11 @@ function normalizeReferenceEntry(id: string, value: unknown): ReferenceEntry {
   if (value.provider !== "github") {
     throw referenceError("UNSUPPORTED_PROVIDER", `reference \`${id}\` must use provider \`github\``, { id });
   }
+  if (value.kind !== undefined && value.kind !== "document" && value.kind !== VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    throw referenceError("INVALID_REFERENCE_KIND", `reference \`${id}\` has invalid kind \`${String(value.kind)}\``, {
+      id
+    });
+  }
   if (typeof value.repo !== "string" || typeof value.commit !== "string" || typeof value.resolved_at !== "string") {
     throw referenceError("INVALID_REFERENCE", `reference \`${id}\` must define repo, commit, and resolved_at`, { id });
   }
@@ -518,6 +573,7 @@ function normalizeReferenceEntry(id: string, value: unknown): ReferenceEntry {
     throw referenceError("INVALID_REFERENCE", `reference \`${id}\` paths must be a string array`, { id });
   }
   return {
+    ...(value.kind === undefined ? {} : { kind: value.kind }),
     provider: "github",
     repo: value.repo,
     commit: value.commit,
@@ -548,6 +604,17 @@ function validateReference(id: string, reference: ReferenceEntry): void {
       });
     }
     seen.add(referencePath);
+  }
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    const required = [...VULNERABILITY_DATABASE_REQUIRED_PATHS].sort();
+    const actual = [...reference.paths].sort();
+    if (JSON.stringify(actual) !== JSON.stringify(required)) {
+      throw referenceError(
+        "INVALID_VULNERABILITY_DATABASE_PATHS",
+        `reference \`${id}\` must list exactly ${required.join(", ")}; record paths are discovered from catalog.json`,
+        { id }
+      );
+    }
   }
 }
 
@@ -606,7 +673,11 @@ function validateReferencePath(id: string, referencePath: string): void {
 function cacheDirForRoot(reference: ReferenceEntry, root: string): string {
   const { owner, repo } = githubRepoParts(reference, "cache-path");
   const githubRoot = path.resolve(root, "github");
-  const cacheDir = path.resolve(githubRoot, owner, repo, reference.commit);
+  const commitDir = path.resolve(githubRoot, owner, repo, reference.commit);
+  const cacheDir =
+    referenceKind(reference) === "document"
+      ? commitDir
+      : path.resolve(githubRoot, owner, repo, VULNERABILITY_DATABASE_REFERENCE_KIND, reference.commit);
   assertPathInside(githubRoot, cacheDir, "reference cache path");
   return cacheDir;
 }
@@ -635,7 +706,7 @@ function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: stri
     );
   }
   const manifestFiles = new Map(manifest.files.map((file) => [file.path, file]));
-  for (const referencePath of reference.paths) {
+  for (const referencePath of effectiveCachedReferencePaths(reference, cacheDir)) {
     const cachePath = safeResolveInside(cacheDir, referencePath, "cached reference path");
     if (!fs.existsSync(cachePath) || !fs.statSync(cachePath).isFile()) {
       throw referenceError(
@@ -667,6 +738,9 @@ function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: stri
       });
     }
   }
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    validateVulnerabilityDatabaseDirectory(cacheDir);
+  }
 }
 
 interface ReferenceCacheGroup {
@@ -679,12 +753,13 @@ function referenceCacheGroups(catalog: ReferenceCatalog): ReferenceCacheGroup[] 
   for (const [id, reference] of Object.entries(catalog.references).sort(([left], [right]) =>
     left.localeCompare(right)
   )) {
-    const key = `${reference.provider}\0${reference.repo}\0${reference.commit}`;
+    const key = `${reference.provider}\0${reference.repo}\0${reference.commit}\0${referenceKind(reference)}`;
     const group =
       groups.get(key) ??
       ({
         ids: [],
         reference: {
+          ...(reference.kind === undefined ? {} : { kind: reference.kind }),
           provider: reference.provider,
           repo: reference.repo,
           commit: reference.commit,
@@ -707,23 +782,34 @@ function referenceCacheGroups(catalog: ReferenceCatalog): ReferenceCacheGroup[] 
 function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string): boolean {
   const { owner, repo } = githubRepoParts(reference, id);
   const remote = `https://github.com/${owner}/${repo}.git`;
+  const credential = referenceGitCredential();
   const cacheParent = path.dirname(cacheDir);
   fs.mkdirSync(cacheParent, { recursive: true });
   const tempRoot = fs.mkdtempSync(path.join(cacheParent, ".sync-"));
+  const gitEnv = {
+    ...referenceGitCredentialEnv(credential, reference.repo, remote),
+    GIT_CEILING_DIRECTORIES: tempRoot
+  };
   try {
-    runGit(tempRoot, ["init"]);
-    runGit(tempRoot, ["remote", "add", "origin", remote]);
-    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit]);
+    runGit(tempRoot, ["init"], gitEnv, credential);
+    // The remote URL stays credential-free, so the token cannot leak through the temp repo config,
+    // `git remote -v`, or any diagnostic that reports the configured remote.
+    runGit(tempRoot, ["remote", "add", "origin", remote], gitEnv, credential);
+    runGit(tempRoot, ["fetch", "--depth=1", "--filter=blob:none", "origin", reference.commit], gitEnv, credential);
 
     const staging = path.join(tempRoot, "cache");
     fs.mkdirSync(staging, { recursive: true });
     const files: ReferenceManifestFile[] = [];
-    for (const referencePath of reference.paths) {
-      const data = gitBlob(id, tempRoot, reference.commit, referencePath);
+    const sourcePaths = referencePathsAtCommit(id, reference, tempRoot, gitEnv, credential);
+    for (const referencePath of sourcePaths) {
+      const data = gitBlob(id, tempRoot, reference.commit, referencePath, gitEnv, credential);
       const destination = safeResolveInside(staging, referencePath, "reference cache path");
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.writeFileSync(destination, data);
       files.push(manifestFileForPath(staging, referencePath));
+    }
+    if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+      validateVulnerabilityDatabaseDirectory(staging);
     }
     files.sort((left, right) => left.path.localeCompare(right.path));
     const cacheManifest = {
@@ -767,17 +853,30 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   };
   const { owner, repo: repoName } = githubRepoParts(reference, "update-latest");
   const remote = `https://github.com/${owner}/${repoName}.git`;
+  const credential = referenceGitCredential();
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-reference-ls-remote-"));
+  const gitEnv = {
+    ...referenceGitCredentialEnv(credential, repo, remote),
+    GIT_CEILING_DIRECTORIES: tempRoot
+  };
   let stdout: string;
   try {
     stdout = execFileSync("git", ["ls-remote", "--symref", remote, "HEAD"], {
+      cwd: tempRoot,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv
     });
   } catch (error) {
     throw referenceError(
       "GIT_FAILED",
-      `git command failed: git ls-remote --symref ${remote} HEAD: ${stderrFor(error)}`
+      redactReferenceGitCredential(
+        `git command failed: git ls-remote --symref ${remote} HEAD: ${stderrFor(error)}`,
+        credential
+      )
     );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
   for (const line of stdout.split("\n")) {
     const [sha, name] = line.split("\t");
@@ -788,19 +887,40 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   throw referenceError("MISSING_HEAD_SHA", `git output for \`${repo}\` did not contain a full HEAD SHA`, { repo });
 }
 
-function runGit(cwd: string, args: string[]): void {
+/**
+ * Runs one git command, optionally authenticated to a single remote.
+ *
+ * `gitEnv` is the isolated process environment for this exact remote, so the token never reaches
+ * `args` and cannot appear in the failure message this throws -- which deliberately echoes the
+ * command. The stderr is still redacted, because git may quote a rejected authorization header
+ * back at us.
+ */
+function runGit(cwd: string, args: string[], gitEnv: NodeJS.ProcessEnv, credential?: ReferenceGitCredential): void {
   try {
-    execFileSync("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
-  } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
-      command: ["git", ...args]
+    execFileSync("git", args, {
+      cwd,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: gitEnv
     });
+  } catch (error) {
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, credential),
+      { command: ["git", ...args] }
+    );
   }
 }
 
-function gitBlob(id: string, cwd: string, commit: string, referencePath: string): Buffer {
+function gitBlob(
+  id: string,
+  cwd: string,
+  commit: string,
+  referencePath: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): Buffer {
   const object = `${commit}:${referencePath}`;
-  const objectType = gitOutput(cwd, ["cat-file", "-t", object]).trim();
+  const objectType = gitOutput(cwd, ["cat-file", "-t", object], gitEnv, credential).trim();
   if (objectType !== "blob") {
     throw referenceError(
       "NON_BLOB_PATH",
@@ -809,22 +929,80 @@ function gitBlob(id: string, cwd: string, commit: string, referencePath: string)
     );
   }
   try {
-    return execFileSync("git", ["show", object], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["show", object], { cwd, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git show ${object}: ${stderrFor(error)}`, {
-      command: ["git", "show", object]
-    });
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git show ${object}: ${stderrFor(error)}`, credential),
+      { command: ["git", "show", object] }
+    );
   }
 }
 
-function gitOutput(cwd: string, args: string[]): string {
+function gitOutput(
+  cwd: string,
+  args: string[],
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
-    throw referenceError("GIT_FAILED", `git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, {
-      command: ["git", ...args]
-    });
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ${args.join(" ")}: ${stderrFor(error)}`, credential),
+      { command: ["git", ...args] }
+    );
   }
+}
+
+function referencePathsAtCommit(
+  id: string,
+  reference: ReferenceEntry,
+  checkout: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): string[] {
+  if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
+  const catalog = parseVulnerabilityDatabaseCatalog(
+    gitBlob(id, checkout, reference.commit, "catalog.json", gitEnv, credential)
+  );
+  const entries = gitTreeEntries(checkout, reference.commit, gitEnv, credential);
+  validateVulnerabilityDatabaseGitTree(entries, catalog);
+  return vulnerabilityDatabaseReferencePaths(catalog);
+}
+
+function effectiveCachedReferencePaths(reference: ReferenceEntry, cacheDir: string): string[] {
+  if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
+  const catalogPath = safeResolveInside(cacheDir, "catalog.json", "cached vulnerability database catalog");
+  return vulnerabilityDatabaseReferencePaths(parseVulnerabilityDatabaseCatalog(fs.readFileSync(catalogPath)));
+}
+
+function gitTreeEntries(
+  cwd: string,
+  commit: string,
+  gitEnv: NodeJS.ProcessEnv,
+  credential?: ReferenceGitCredential
+): VulnerabilityDatabaseGitTreeEntry[] {
+  let output: Buffer;
+  try {
+    output = execFileSync("git", ["ls-tree", "-r", "-z", commit], {
+      cwd,
+      env: gitEnv,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  } catch (error) {
+    throw referenceError(
+      "GIT_FAILED",
+      redactReferenceGitCredential(`git command failed: git ls-tree -r -z ${commit}: ${stderrFor(error)}`, credential),
+      { command: ["git", "ls-tree", "-r", "-z", commit] }
+    );
+  }
+  return parseVulnerabilityDatabaseGitTree(output);
+}
+
+function referenceKind(reference: ReferenceEntry): ReferenceKind {
+  return reference.kind ?? "document";
 }
 
 function normalizedReferenceMarkdown(id: string, reference: ReferenceEntry, cacheDir: string): string {

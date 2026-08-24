@@ -21,6 +21,27 @@
       "reasoning": "xhigh"
     }
   },
+  "threat-model": {
+    "trials_per_variant": 1,
+    "strategy_loops": 1,
+    "disable_invariant_tests": false,
+    "disable_differential_tests": false,
+    "disable_dynamic_strategies": false,
+    "model_profiles": [
+      {
+        "id": "benchmark-threat-model-gpt-5-6-luna-high",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "high"
+      }
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
+  },
   "full": {
     "trials_per_variant": 1,
     "strategy_loops": 1,

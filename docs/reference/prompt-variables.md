@@ -19,6 +19,13 @@ prompt.rendered.md
 
 Unknown template variables fail validation.
 
+Runtime-generated topology nodes additionally receive item-scoped variables.
+Scalar planner fields render as `{{item.<field>}}`; namespaced replacement keys
+such as `{{liquidation:overdue}}` come from the item's `replacements` object.
+Replacement values may reference other item-scoped variables recursively, with
+cycle and depth checks. They cannot override built-in variables. See
+[Runtime Dynamic Expansion](topology-yaml.md#runtime-dynamic-expansion).
+
 ## Frontmatter
 
 Prompt frontmatter may contain only:
@@ -160,6 +167,13 @@ Use deterministic split-work assignment for looped strategies:
 ```text
 n % {{strategy_loop_count}} == {{strategy_loop_index}}
 ```
+
+Dynamic topology items additionally expose scalar `item.*` values and a
+bounded, item-scoped `replacements` map. Namespaced keys such as
+`{{class:liquidation:fixed-term-before-overdue}}` and
+`{{liquidation:overdue}}` resolve only from that item. A value such as
+`{{item.goal_prompt}}` may retain those placeholders for the bounded nested
+replacement pass; unresolved, cyclic, non-scalar, or non-item references fail.
 
 ## Output Contract
 

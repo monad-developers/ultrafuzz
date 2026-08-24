@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,7 +15,10 @@ import {
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
+  BENCHMARK_SMOKE_WORKFLOW_PATH,
   BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+  DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
+  THREAT_MODEL_GOAL_FANOUT_NODE_IDS,
   evmbenchCohortZodSchema,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -149,7 +153,7 @@ describe("public benchmark manifests", () => {
     });
     expect(suite.targets.map((target) => target.id)).toEqual(cohort.smoke_targets);
     expect(suite.targets.every((target) => target.sensitivity === "public")).toBe(true);
-    expect(suite.run.trials_per_variant).toBe(1);
+    expect(suite.run.trials_per_variant).toBe(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT);
     expect(suite.model_profiles).toEqual({
       "benchmark-smoke-gpt-5-6-luna-high": {
         agent: "CodexAgent",
@@ -532,6 +536,48 @@ describe("public benchmark manifests", () => {
       excluded_strategy_families: [],
       excluded_node_ids: []
     });
+  });
+
+  it("names every default-on threat-model node the production topology declares", () => {
+    // Curated lanes prune by explicit node ID, so this constant is the only
+    // place that knows which nodes the threat-model workstream turned on. If a
+    // later change adds another one, this fails instead of silently widening
+    // every curated lane.
+    const topology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), "utf8")) as {
+      nodes: { id: string; group?: string }[];
+    };
+    const goalGroupNodeIds = topology.nodes.filter((node) => node.group === "goals").map((node) => node.id);
+    const declared = [...goalGroupNodeIds, "threat-model", "goal-plan", "reference-vulnerability-database"].sort();
+    expect([...THREAT_MODEL_GOAL_FANOUT_NODE_IDS].sort()).toEqual(declared);
+
+    // Each one must really exist, or a curated lane fails planning outright.
+    const topologyNodeIds = new Set(topology.nodes.map((node) => node.id));
+    for (const id of THREAT_MODEL_GOAL_FANOUT_NODE_IDS) expect(topologyNodeIds.has(id)).toBe(true);
+  });
+
+  it("keeps the smoke graph free of dynamic and threat-model work by construction", () => {
+    // #277 requires the smoke lane to run no invariant, differential or dynamic
+    // work, and its results append to already-published observations. The lane
+    // therefore holds that guarantee structurally -- the dedicated graph simply
+    // does not declare those nodes -- rather than by pruning them, which would
+    // move the execution-policy fingerprint and break comparability.
+    const smokeTopology = parseYaml(fs.readFileSync(path.join(REPOSITORY_ROOT, BENCHMARK_SMOKE_WORKFLOW_PATH), "utf8"));
+    const nodes = (smokeTopology as { nodes: { id: string; dynamic?: unknown }[] }).nodes;
+    const smokeNodeIds = new Set(nodes.map((node) => node.id));
+
+    expect(nodes.filter((node) => node.dynamic !== undefined)).toEqual([]);
+    for (const id of THREAT_MODEL_GOAL_FANOUT_NODE_IDS) expect(smokeNodeIds.has(id)).toBe(false);
+
+    const suite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort: loadBenchmarkCohortManifest(ULTRAFUZZ_BENCH_PATH),
+      lanes: loadBenchmarkLanesManifest(LANES_PATH)
+    });
+    const transform = benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input });
+    // An empty list keeps benchmark_execution -- and so the execution-policy and
+    // cohort fingerprints -- byte-identical to the published smoke observations.
+    expect(transform.topologyTransform?.excludedNodeIds).toEqual([]);
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {

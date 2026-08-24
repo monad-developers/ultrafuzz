@@ -54,6 +54,19 @@ describe("trusted Modal benchmark publication qualification", () => {
     ).toEqual(expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "smoke" }));
   });
 
+  it("refuses threat-model artifacts from longitudinal publication", () => {
+    for (const artifactSet of [
+      artifacts("threat-model"),
+      { artifacts: [...artifacts("full").artifacts, ...artifacts("threat-model").artifacts] },
+      { artifacts: [...artifacts("full").artifacts, artifacts("threat-model").artifacts[0]] },
+      { artifacts: [...artifacts("smoke").artifacts, artifacts("threat-model").artifacts[1]] }
+    ]) {
+      expect(
+        qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, artifactSet, repository)
+      ).toEqual(expect.objectContaining({ eligible: false }));
+    }
+  });
+
   it("skips incomplete producers whose paid jobs did not both succeed", () => {
     const skippedJobs = [
       {

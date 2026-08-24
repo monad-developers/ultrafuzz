@@ -51,6 +51,12 @@ Use only the authoritative report-bound note vocabulary:
 
 {{finding_note_key_vocabulary}}
 
+Represent every source location as an evidence object with a canonical
+repository-relative POSIX `path` and optional positive integer `line` and
+`end_line` fields. Keep exactly one contiguous range per evidence object and
+use separate objects for noncontiguous ranges. Never put line suffixes,
+comma-separated ranges, symbols, or prose in `path`.
+
 If you create a target-native test, keep it under
 `{{strategy_attempt_test_dir}}`, mirror it byte-for-byte beneath
 the `generated-tests/` directory under `{{artifact_path}}`, and list that safe artifact-relative path

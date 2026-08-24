@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { builtInPromptRoot } from "./assets.js";
 import { parsePromptFrontmatter, PromptError, type ParsedPromptDocument, titleFromId } from "./frontmatter.js";
 import { validatePromptVariables } from "./render.js";
 
@@ -100,20 +100,6 @@ export function builtInPromptRelativePaths(): string[] {
   return discoverBuiltInPromptRelativePaths(builtInPromptRoot());
 }
 
-function builtInPromptRoot(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [path.join(here, "prompts"), path.resolve(here, "../../../.ultrafuzz/prompts")];
-  const found = candidates.find((candidate) => {
-    try {
-      return statSync(candidate).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  if (found === undefined) throw new Error(`unable to locate the packaged prompt catalog from ${here}`);
-  return found;
-}
-
 function discoverBuiltInPromptRelativePaths(root: string): string[] {
   return discoverPromptFiles(root)
     .map((absolutePath) => normalizePromptRelativePath(path.relative(root, absolutePath)))
@@ -131,7 +117,10 @@ function parseCatalogEntry(
 ): PromptCatalogEntry {
   const document = parsePromptFrontmatter(markdown);
   if (options.validateVariables) {
-    validatePromptVariables(document.body);
+    // Catalog loading validates syntax without topology context. Whether item-
+    // scoped variables are legal is enforced later for the concrete topology
+    // node; static nodes still reject them before launch.
+    validatePromptVariables(document.body, { allowDynamicItemVariables: true });
   }
   const fallbackId = path.basename(options.relativePath).replace(/\.(md|mdx)$/i, "");
   const id = document.frontmatter.id ?? fallbackId;

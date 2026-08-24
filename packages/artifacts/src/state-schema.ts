@@ -196,6 +196,28 @@ export const terminalDispositionJsonSchema = {
 const executionNodeProvenanceSchema = z
   .strictObject({
     source_node_id: nonEmptyString.optional(),
+    producer_node_id: nonEmptyString.optional(),
+    concrete_node_id: nonEmptyString.optional(),
+    strategy_attempt_id: nonEmptyString.optional(),
+    storage_id: nonEmptyString.optional(),
+    dynamic: z
+      .strictObject({
+        groupNodeId: nonEmptyString,
+        sourceNodeId: nonEmptyString,
+        sourceAttemptId: nonEmptyString,
+        sourceDigest: sha256,
+        expansionKey: nonEmptyString,
+        itemDigest: sha256,
+        manifestPath: nonEmptyString
+      })
+      .optional(),
+    dynamic_group: z
+      .strictObject({
+        status: z.literal("expanded"),
+        generated_count: nonNegativeInteger,
+        generated_node_ids: uniqueNonEmptyStrings
+      })
+      .optional(),
     workflow: z.union([taskWorkflowProvenanceSchema, aggregateWorkflowProvenanceSchema]).optional(),
     output_contracts: outputContractProvenanceSchema.optional(),
     findings_count: nonNegativeInteger.optional(),
@@ -657,6 +679,46 @@ export const runStateJsonSchema = {
       additionalProperties: false,
       properties: {
         source_node_id: { type: "string", minLength: 1 },
+        producer_node_id: { type: "string", minLength: 1 },
+        concrete_node_id: { type: "string", minLength: 1 },
+        strategy_attempt_id: { type: "string", minLength: 1 },
+        storage_id: { type: "string", minLength: 1 },
+        dynamic: {
+          type: "object",
+          required: [
+            "groupNodeId",
+            "sourceNodeId",
+            "sourceAttemptId",
+            "sourceDigest",
+            "expansionKey",
+            "itemDigest",
+            "manifestPath"
+          ],
+          additionalProperties: false,
+          properties: {
+            groupNodeId: { type: "string", minLength: 1 },
+            sourceNodeId: { type: "string", minLength: 1 },
+            sourceAttemptId: { type: "string", minLength: 1 },
+            sourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            expansionKey: { type: "string", minLength: 1 },
+            itemDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+            manifestPath: { type: "string", minLength: 1 }
+          }
+        },
+        dynamic_group: {
+          type: "object",
+          required: ["status", "generated_count", "generated_node_ids"],
+          additionalProperties: false,
+          properties: {
+            status: { const: "expanded" },
+            generated_count: nonNegativeIntegerJsonSchema,
+            generated_node_ids: {
+              type: "array",
+              uniqueItems: true,
+              items: { type: "string", minLength: 1 }
+            }
+          }
+        },
         workflow: {
           oneOf: [{ $ref: "#/$defs/taskWorkflowProvenance" }, { $ref: "#/$defs/aggregateWorkflowProvenance" }]
         },

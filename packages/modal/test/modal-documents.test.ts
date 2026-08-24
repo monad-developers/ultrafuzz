@@ -260,6 +260,7 @@ function contractFixtures(): ContractFixtures {
       artifact_archive: "/data/run/artifacts.tgz",
       artifact_sha256: shaA,
       storage_lineage: "run-1/attempt-1/base",
+      logical_dispatch_fingerprint: shaB,
       durable_checkpoint: "/data/run/checkpoints/0003-completed.json",
       durable_checkpoint_index: "/data/run/checkpoints/index.json"
     },
@@ -270,6 +271,7 @@ function contractFixtures(): ContractFixtures {
       stage: "prepared",
       created_at: timestamp,
       storage_lineage: "run-1/attempt-1/base",
+      logical_dispatch_fingerprint: shaB,
       workspace_path: "/data/run/workspace",
       run_root: ".ultrafuzz/runs/run-1",
       execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
@@ -279,6 +281,7 @@ function contractFixtures(): ContractFixtures {
     [MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]: {
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
       storage_lineage: "run-1/attempt-1/base",
+      logical_dispatch_fingerprint: shaB,
       workspace_path: "/data/run/workspace",
       run_root: ".ultrafuzz/runs/run-1",
       execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",

@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
+import {
+  BENCHMARK_LANE_NAMES,
+  benchmarkLaneSelectedTargetIds,
+  loadBenchmarkCohortManifest,
+  loadBenchmarkLanesManifest
+} from "../../packages/evals/dist/index.js";
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import { MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID } from "../../packages/modal/dist/modal-contracts.js";
 import { readModalDocument } from "../../packages/modal/dist/modal-documents.js";
@@ -34,7 +39,7 @@ export function validateModalBenchmarkLaunch(input) {
   const rawManifest = readModalDocument(manifestPath, MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID).value;
 
   const mode = rawManifest.mode;
-  if (mode !== "smoke" && mode !== "full") {
+  if (!BENCHMARK_LANE_NAMES.includes(mode)) {
     throw new Error(`Modal benchmark launch manifest ${manifestPath} has invalid mode`);
   }
   if (input.expectedMode !== undefined && mode !== input.expectedMode) {
@@ -188,10 +193,9 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode, runnerProvider)
   const lanesPath = path.join(policyRoot, "benchmarks", "ultrafuzzbench", "lanes.json");
   const cohort = loadBenchmarkCohortManifest(cohortPath);
   const lanes = loadBenchmarkLanesManifest(lanesPath);
-  const selectedTargets =
-    mode === "smoke"
-      ? cohort.smoke_targets.map((id) => cohort.targets.find((target) => target.id === id))
-      : cohort.targets;
+  const selectedTargets = benchmarkLaneSelectedTargetIds(mode, cohort).map((id) =>
+    cohort.targets.find((target) => target.id === id)
+  );
   if (selectedTargets.some((target) => target === undefined)) {
     throw new Error(`Modal benchmark launch config ${cohortPath} contains an unknown selected target`);
   }
@@ -273,10 +277,14 @@ function gitOutput(cwd, args, label) {
 
 function main(args) {
   if (args.length !== 3) {
-    throw new Error("usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <smoke|full>");
+    throw new Error(
+      `usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <${BENCHMARK_LANE_NAMES.join("|")}>`
+    );
   }
   const [manifestPath, policyRoot, expectedMode] = args;
-  if (expectedMode !== "smoke" && expectedMode !== "full") throw new Error("expected mode must be smoke or full");
+  if (!BENCHMARK_LANE_NAMES.includes(expectedMode)) {
+    throw new Error(`expected mode must be one of ${BENCHMARK_LANE_NAMES.join(", ")}`);
+  }
   console.log(JSON.stringify(validateModalBenchmarkLaunch({ manifestPath, policyRoot, expectedMode })));
 }
 

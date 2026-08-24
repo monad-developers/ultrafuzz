@@ -134,7 +134,7 @@ const privateBenchmarkWorkflowInputSchema = z.strictObject({
 });
 
 const publicFullBenchmarkWorkflowInputSchema = z.strictObject({
-  benchmark_lane: z.literal("full"),
+  benchmark_lane: z.enum(["full", "threat-model"]),
   target_frameworks: targetFrameworksSchema,
   excluded_strategy_families: z.array(benchmarkStrategyFamily).max(0),
   benchmark_execution: z.strictObject({

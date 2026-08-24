@@ -6,7 +6,9 @@
   "required": ["schema_version", "attempts"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
     "attempts": {
       "type": "array",
       "items": {
@@ -14,13 +16,23 @@
         "required": ["ordinal", "launcher_status", "workflow_status"],
         "additionalProperties": false,
         "properties": {
-          "ordinal": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-          "launcher_status": { "enum": ["launched", "failed"] },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "launcher_status": {
+            "enum": ["launched", "failed"]
+          },
           "workflow_status": {
             "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled", "unknown"]
           },
-          "started_at": { "$ref": "#/$defs/timestamp" },
-          "finished_at": { "$ref": "#/$defs/timestamp" }
+          "started_at": {
+            "$ref": "#/$defs/timestamp"
+          },
+          "finished_at": {
+            "$ref": "#/$defs/timestamp"
+          }
         }
       }
     }

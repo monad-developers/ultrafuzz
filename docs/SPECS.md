@@ -117,7 +117,7 @@ A compatible config MUST support:
 - `dynamic_strategies_enumerator`
 - `[project] repo`
 - `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
-  `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
+  `max_dynamic_nodes`, `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
@@ -298,6 +298,11 @@ The prompt variable set includes:
 - `ancestor_contract_artifact_authority:<contract>`
 - `ancestor_artifact_path_authority:<path>[,<path>...]`
 
+Runtime-generated prompts MAY additionally use scalar `item.*` variables and
+namespaced replacement keys supplied by the selected source item. Their values
+MAY recursively reference other item-scoped variables but MUST NOT override
+built-in runtime variables.
+
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
 producers MUST declare a primary contracted output. Exact artifact paths MUST
 resolve to declared producer outputs. The legacy collection helpers
@@ -408,9 +413,14 @@ an explicit operator action.
 
 Reference materialization MUST write durable artifacts under the reference node
 artifact directory, including normalized Markdown and `references/manifest.json`
-when declared by topology. Missing cache entries, digest mismatches, unsafe
-paths, unknown reference IDs, or missing required reference artifacts MUST fail
-before dependent agentic nodes run.
+when declared by topology. A `kind: vulnerability-database` reference MUST
+instead preserve the validated external database tree byte-for-byte, discover
+record paths only from its pinned `catalog.json`, and retain repository, commit,
+schema, aggregate, and per-file digests. Missing cache entries, digest
+mismatches, unsafe paths, unknown reference IDs, malformed database contracts,
+or missing required reference artifacts MUST fail before dependent agentic
+nodes run. Ultrafuzz MUST NOT execute code from the external reference while
+validating it.
 
 ## Execution And Lifecycle
 

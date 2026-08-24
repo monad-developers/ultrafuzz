@@ -1,0 +1,84 @@
+---
+id: goal-hunter
+display_name: Dynamic goal hunter
+---
+
+# Focused vulnerability goal
+
+{{item.goal_prompt}}
+
+That sentence is the authoritative focused goal, but it is a label and not the
+specification: its placeholders resolve to the short human-readable titles in
+this item's `replacements` map. Read the full records from the files below. Do
+not broaden the assigned bug class or threat into unrelated generic review.
+
+Canonical threat model:
+{{artifact_path:threat-model}}/threat-model.json
+
+Goal plan and node mapping:
+{{artifact_path:goal-plan}}/goal-plan.json
+
+Goal-plan artifact directory containing the selected records under
+`vulnerability-db/selected`:
+{{artifact_path:goal-plan}}
+
+Resolve the titles to their records in this order:
+
+1. Find your own entry in the goal plan: the single element of `class_goals`
+   or `threat_goals` whose `node_id` is `{{item.node_id}}`.
+2. A class goal carries one `class_id` and one `selected_record`. A threat
+   goal carries the one `threat_ids` element that is its scope plus
+   `class_ids`, plural, resolved against the plan's `selected_class_records`.
+   It has no `class_id`, no `selected_record`, and no `coverage_gap`. When
+   `class_ids` is long, read first the records bearing on that threat.
+3. Read each class record from `selected_record.path` or the matching
+   `selected_class_records[].path`. Those values resolve as written against
+   {{artifact_path:goal-plan}}, where only `vulnerability-db/selected`
+   exists; do not route them through `vulnerability-db-manifest.json`,
+   whose `path` fields are relative to the upstream vulnerability
+   database rather than to this artifact.
+4. For each ID in your `threat_ids`, read that element of `threats` in the
+   threat model, then dereference `asset_ids` and its other `*_ids` fields,
+   plus your own `attack_surface_ids`, against that file's matching top-level
+   array: `assets`, `actors`, `attack_surfaces`, `invariants`, `assumptions`,
+   `unknowns`, `capabilities`, `trust_boundaries`.
+5. A coverage-gap class goal has no threat entry — `coverage_gap` true,
+   `threat_ids` empty. Read the class record, `selection_rationale`, the
+   threat model's `coverage_gaps` section, and your `class_id`'s element of
+   `applicability_decisions`.
+
+Inspect the assigned threat or class context, then trace concrete repository
+paths that could violate its invariants or preconditions. Confirm reachability,
+scope, and impact from repository evidence. Use focused native compilation or
+tests when they materially strengthen a candidate and can complete before the
+deadline below.
+
+Derive this node's absolute UTC deadline from the Topology Runtime Context:
+run `date -u +%s` once at startup and add the working budget it states.
+Re-run `date -u +%s` before each expensive step and compare epochs. At the
+deadline, stop investigating, write `{{output_findings_path}}` and the
+generated-test manifest, and exit cleanly. An empty result is a
+negative result, not a failure: publishing the contract-defined empty result is strictly better
+than being killed at the timeout with no output, and better than inventing
+a finding.
+
+Do not inspect sibling runs, historical reports, benchmark ground truth,
+host-global files, package internals, or network resources. Do not invent a
+finding to satisfy the goal.
+
+Use these runtime-owned vocabularies exactly when authoring any finding:
+
+{{finding_reachability_vocabulary}}
+
+{{finding_note_key_vocabulary}}
+
+Write normalized findings to `{{output_findings_path}}`. When no supported
+vulnerability is found, publish the empty result defined by the pinned schema.
+The runtime records this generated node as
+the producer; do not replace `source_node_id` or `source_nodes` with a parent
+group ID.
+
+If you create focused tests, place them below
+`{{strategy_attempt_test_dir}}` and write their ordinary manifest to
+`{{artifact_path}}/generated-tests.json`. Otherwise satisfy the pinned
+generated-test schema with its no-test result.

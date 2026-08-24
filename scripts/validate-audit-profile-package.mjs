@@ -16,8 +16,8 @@ const expectedConfigFiles = [
 ];
 assertPackFiles(path.join(root, "packages", "config"), expectedConfigFiles);
 assertPackFiles(path.join(root, "packages", "prompts"), [
-  "dist/prompts/review/aggregate-test-files.md",
-  "dist/prompts/review/dedupe-findings.md"
+  "dist/assets/prompts/review/aggregate-test-files.md",
+  "dist/assets/prompts/review/dedupe-findings.md"
 ]);
 
 for (const relativePath of expectedConfigFiles) {

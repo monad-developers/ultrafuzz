@@ -8,6 +8,12 @@ import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 export const SAFE_PATH_SEGMENT_PATTERN = CANONICAL_ARTIFACT_PATH_SEGMENT_PATTERN;
+/**
+ * Human-facing topology provenance may contain `:` even though filesystem
+ * identities may not. Keep this deliberately separate from SAFE_ID_PATTERN so
+ * it cannot be reused as a filesystem segment.
+ */
+export const NODE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/u;
 
 export class ArtifactPathError extends Error {
   readonly code: string;
@@ -28,6 +34,16 @@ export function validateSafeId(value: string, label = "id"): string {
   }
   if (value === "." || value === "..") {
     throw new ArtifactPathError("unsafe-id", `${label} cannot be ${value}`);
+  }
+  return value;
+}
+
+export function validateNodeReference(value: string, label = "node reference"): string {
+  if (!NODE_REFERENCE_PATTERN.test(value)) {
+    throw new ArtifactPathError(
+      "unsafe-node-reference",
+      `${label} must match ${NODE_REFERENCE_PATTERN.source}; received ${JSON.stringify(value)}`
+    );
   }
   return value;
 }

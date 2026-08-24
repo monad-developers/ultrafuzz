@@ -106,6 +106,7 @@
         "loops": { "$ref": "#/$defs/positiveSafeInteger" },
         "timeout_seconds": { "$ref": "#/$defs/positiveSafeInteger" },
         "max_attempts": { "$ref": "#/$defs/positiveSafeInteger" },
+        "failure_policy": { "enum": ["halt", "continue"] },
         "model_profiles": {
           "type": "array",
           "uniqueItems": true,
@@ -163,6 +164,24 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "dynamic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "key", "node_id"],
+          "properties": {
+            "from": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["node", "path"],
+              "properties": {
+                "node": { "$ref": "#/$defs/nodeId" },
+                "path": { "$ref": "#/$defs/nonEmptyString" }
+              }
+            },
+            "key": { "$ref": "#/$defs/nonEmptyString" },
+            "node_id": { "$ref": "#/$defs/nonEmptyString" }
+          }
         },
         "required_commands": {
           "type": "array",
@@ -597,14 +616,24 @@
     "graphResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "document_type", "topology", "expandedGraph", "logicalNodes", "expandedNodes"],
+      "required": [
+        "schema_version",
+        "document_type",
+        "topology",
+        "expandedGraph",
+        "logicalNodes",
+        "expandedNodes",
+        "generatedNodes"
+      ],
       "properties": {
         "schema_version": { "const": "ultrafuzz.dashboard.http.v1" },
         "document_type": { "const": "graph" },
         "topology": { "$ref": "#/$defs/projectTopology" },
         "expandedGraph": { "$ref": "urn:ultrafuzz:schema:topology:expanded-graph:4" },
+        "runtimeGraph": { "$ref": "urn:ultrafuzz:schema:artifacts:planned-graph:4" },
         "logicalNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
-        "expandedNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" }
+        "expandedNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" },
+        "generatedNodes": { "$ref": "#/$defs/nonNegativeSafeInteger" }
       }
     },
     "nodesResponse": {

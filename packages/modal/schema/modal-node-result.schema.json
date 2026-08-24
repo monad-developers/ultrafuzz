@@ -10,6 +10,7 @@
     "artifact_archive",
     "artifact_sha256",
     "storage_lineage",
+    "logical_dispatch_fingerprint",
     "durable_checkpoint",
     "durable_checkpoint_index"
   ],
@@ -19,6 +20,7 @@
     "artifact_archive": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
     "artifact_sha256": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
     "storage_lineage": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/nonEmptyString" },
+    "logical_dispatch_fingerprint": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/sha256" },
     "durable_checkpoint": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" },
     "durable_checkpoint_index": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/boundedPath" }
   }

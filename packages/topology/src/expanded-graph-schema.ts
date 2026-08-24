@@ -154,9 +154,10 @@ export const expandedGraphJsonSchema = {
           reference: { type: "string", minLength: 1 },
           referenceRevision: {
             type: "object",
-            required: ["provider", "repo", "commit", "paths"],
+            required: ["kind", "provider", "repo", "commit", "paths"],
             additionalProperties: false,
             properties: {
+              kind: { enum: ["document", "vulnerability-database"] },
               provider: { const: "github" },
               repo: { type: "string", minLength: 1 },
               commit: { type: "string", pattern: "^[0-9a-fA-F]{40}$" },
@@ -215,6 +216,25 @@ export const expandedGraphJsonSchema = {
                 loopIndex: { type: "integer", minimum: 0 },
                 attemptIndex: { type: "integer", minimum: 0 }
               }
+            }
+          },
+          dynamic: {
+            type: "object",
+            required: ["from", "key", "nodeIdTemplate"],
+            additionalProperties: false,
+            properties: {
+              from: {
+                type: "object",
+                required: ["node", "path"],
+                additionalProperties: false,
+                properties: {
+                  node: { type: "string", minLength: 1 },
+                  path: { type: "string", minLength: 1 }
+                }
+              },
+              key: { type: "string", minLength: 1 },
+              nodeIdTemplate: { type: "string", minLength: 1 },
+              templateDigest: { type: "string", pattern: "^[0-9a-f]{64}$" }
             }
           }
         }

@@ -6,6 +6,9 @@ import type { PolicyDiagnostic, PolicyResult } from "@ultrafuzz/security";
 
 import { RUNTIME_SCHEMA_VERSION, type PostureItem, type RuntimeDiagnostic, type RuntimeResult } from "./types.js";
 
+/** Immutable transformed prompt templates for prompts whose rendering is deferred to compilation. */
+export const DEFERRED_PROMPT_TEMPLATE_DIR = "dynamic-prompt-templates";
+
 export function runtimeResult<T>(ok: boolean, value?: T, diagnostics: RuntimeDiagnostic[] = []): RuntimeResult<T> {
   return {
     schema_version: RUNTIME_SCHEMA_VERSION,
@@ -98,6 +101,11 @@ export function diagnosticFromError(error: unknown, source: string, fallbackCode
 export function generateRunId(prefix: string): string {
   const timestamp = new Date().toISOString().replace(/[-:.]/gu, "").replace("T", "t").replace("Z", "z");
   return `${prefix}-${timestamp}-${crypto.randomBytes(4).toString("hex")}`;
+}
+
+/** Digest of exact text bytes, matching how topology expansion hashes prompt templates. */
+export function sha256Text(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 export function sha256Stable(value: unknown): string {

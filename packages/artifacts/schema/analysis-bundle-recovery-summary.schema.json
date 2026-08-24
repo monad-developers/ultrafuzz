@@ -23,19 +23,45 @@
   ],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
-    "total_generations": { "$ref": "#/$defs/count" },
-    "terminal_generations": { "$ref": "#/$defs/count" },
-    "active_generations": { "$ref": "#/$defs/count" },
-    "progress_generations": { "$ref": "#/$defs/count" },
-    "no_progress_generations": { "$ref": "#/$defs/count" },
-    "unknown_progress_generations": { "$ref": "#/$defs/count" },
-    "model_work_generations": { "$ref": "#/$defs/count" },
-    "no_model_work_generations": { "$ref": "#/$defs/count" },
-    "unknown_model_work_generations": { "$ref": "#/$defs/count" },
-    "genuine_failures": { "$ref": "#/$defs/count" },
-    "rotations": { "$ref": "#/$defs/count" },
-    "resumptions": { "$ref": "#/$defs/count" },
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
+    "total_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "terminal_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "active_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "progress_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "no_progress_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "unknown_progress_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "model_work_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "no_model_work_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "unknown_model_work_generations": {
+      "$ref": "#/$defs/count"
+    },
+    "genuine_failures": {
+      "$ref": "#/$defs/count"
+    },
+    "rotations": {
+      "$ref": "#/$defs/count"
+    },
+    "resumptions": {
+      "$ref": "#/$defs/count"
+    },
     "start_reasons": {
       "type": "object",
       "required": [
@@ -49,13 +75,27 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "initial": { "$ref": "#/$defs/count" },
-        "pre-model-retry": { "$ref": "#/$defs/count" },
-        "post-model-resume": { "$ref": "#/$defs/count" },
-        "image-rollout": { "$ref": "#/$defs/count" },
-        "stale-probe-rotation": { "$ref": "#/$defs/count" },
-        "operator-restart": { "$ref": "#/$defs/count" },
-        "unknown": { "$ref": "#/$defs/count" }
+        "initial": {
+          "$ref": "#/$defs/count"
+        },
+        "pre-model-retry": {
+          "$ref": "#/$defs/count"
+        },
+        "post-model-resume": {
+          "$ref": "#/$defs/count"
+        },
+        "image-rollout": {
+          "$ref": "#/$defs/count"
+        },
+        "stale-probe-rotation": {
+          "$ref": "#/$defs/count"
+        },
+        "operator-restart": {
+          "$ref": "#/$defs/count"
+        },
+        "unknown": {
+          "$ref": "#/$defs/count"
+        }
       }
     },
     "terminal_reasons": {
@@ -75,17 +115,39 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "active": { "$ref": "#/$defs/count" },
-        "succeeded": { "$ref": "#/$defs/count" },
-        "genuine-worker-failure": { "$ref": "#/$defs/count" },
-        "operational-failure": { "$ref": "#/$defs/count" },
-        "image-rollout": { "$ref": "#/$defs/count" },
-        "stale-probe-rotation": { "$ref": "#/$defs/count" },
-        "operator-request": { "$ref": "#/$defs/count" },
-        "timeout": { "$ref": "#/$defs/count" },
-        "resource-termination": { "$ref": "#/$defs/count" },
-        "recovery-budget-exhausted": { "$ref": "#/$defs/count" },
-        "unknown": { "$ref": "#/$defs/count" }
+        "active": {
+          "$ref": "#/$defs/count"
+        },
+        "succeeded": {
+          "$ref": "#/$defs/count"
+        },
+        "genuine-worker-failure": {
+          "$ref": "#/$defs/count"
+        },
+        "operational-failure": {
+          "$ref": "#/$defs/count"
+        },
+        "image-rollout": {
+          "$ref": "#/$defs/count"
+        },
+        "stale-probe-rotation": {
+          "$ref": "#/$defs/count"
+        },
+        "operator-request": {
+          "$ref": "#/$defs/count"
+        },
+        "timeout": {
+          "$ref": "#/$defs/count"
+        },
+        "resource-termination": {
+          "$ref": "#/$defs/count"
+        },
+        "recovery-budget-exhausted": {
+          "$ref": "#/$defs/count"
+        },
+        "unknown": {
+          "$ref": "#/$defs/count"
+        }
       }
     },
     "terminal_classes": {
@@ -103,19 +165,41 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "active": { "$ref": "#/$defs/count" },
-        "succeeded": { "$ref": "#/$defs/count" },
-        "genuine-worker-failure": { "$ref": "#/$defs/count" },
-        "operational-failure": { "$ref": "#/$defs/count" },
-        "controller-rotation": { "$ref": "#/$defs/count" },
-        "timeout": { "$ref": "#/$defs/count" },
-        "resource-termination": { "$ref": "#/$defs/count" },
-        "recovery-budget-exhausted": { "$ref": "#/$defs/count" },
-        "unknown": { "$ref": "#/$defs/count" }
+        "active": {
+          "$ref": "#/$defs/count"
+        },
+        "succeeded": {
+          "$ref": "#/$defs/count"
+        },
+        "genuine-worker-failure": {
+          "$ref": "#/$defs/count"
+        },
+        "operational-failure": {
+          "$ref": "#/$defs/count"
+        },
+        "controller-rotation": {
+          "$ref": "#/$defs/count"
+        },
+        "timeout": {
+          "$ref": "#/$defs/count"
+        },
+        "resource-termination": {
+          "$ref": "#/$defs/count"
+        },
+        "recovery-budget-exhausted": {
+          "$ref": "#/$defs/count"
+        },
+        "unknown": {
+          "$ref": "#/$defs/count"
+        }
       }
     }
   },
   "$defs": {
-    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
   }
 }

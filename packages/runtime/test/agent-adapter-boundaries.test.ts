@@ -93,12 +93,12 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "codex.tsx": {
-    classifiedSourceSha256: "614e45e4ecba581ca8e32f1ae0f69be223da25fb4d8ecdcc964b9d820265feda",
+    classifiedSourceSha256: "a44eb5c47e6374457476a86420eca0c5ff23616fc8201637f0139d37e13b92f5",
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
   "deepseek.tsx": {
-    classifiedSourceSha256: "dfb7c44c89e6c8a17555c1496f8ddf26dcbea8c6e3970ecd169f1d290bec64a4",
+    classifiedSourceSha256: "19cda147d4cf9f0cb00056c76c875087deb00d1f5c6a63116e64cb526459c396",
     responsibilities: ["output-interpretation", "token-accounting"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
@@ -108,7 +108,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "index.tsx": {
-    classifiedSourceSha256: "89dff9ebf9e542adac8465a6f1b13dfdf79e204cdfab0f0f320da1afc86aaf23",
+    classifiedSourceSha256: "ce5f94b3bf12ae40c5b59ebd587a77d1e80e532d92c785f3353d272e627d79e4",
     responsibilities: [],
     upstreamIssues: []
   },
@@ -126,6 +126,11 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
       "https://github.com/smithersai/smithers/issues/1626"
     ]
   },
+  "opencode.tsx": {
+    classifiedSourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489",
+    responsibilities: [],
+    upstreamIssues: []
+  },
   "openrouter.tsx": {
     classifiedSourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling"],
@@ -133,6 +138,11 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
       "https://github.com/smithersai/smithers/issues/1622",
       "https://github.com/smithersai/smithers/issues/1625"
     ]
+  },
+  "pi.tsx": {
+    classifiedSourceSha256: "7b60cc3827a8b09587d6e32b0f8b5178ccaba843df2d68a9e390bbff09ee2d61",
+    responsibilities: [],
+    upstreamIssues: []
   },
   "provider-home.tsx": {
     classifiedSourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744",
@@ -163,16 +173,16 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "04c785868e9a6955d1f048fb1377b61dca6f3da0e4de6a305536a8b0979f73d9"
   },
   "codex.tsx": {
-    maxLines: 175,
-    maxSyntaxNodes: 851,
+    maxLines: 250,
+    maxSyntaxNodes: 1_300,
     purpose: "adapter",
-    sourceSha256: "614e45e4ecba581ca8e32f1ae0f69be223da25fb4d8ecdcc964b9d820265feda"
+    sourceSha256: "a44eb5c47e6374457476a86420eca0c5ff23616fc8201637f0139d37e13b92f5"
   },
   "deepseek.tsx": {
     maxLines: 350,
     maxSyntaxNodes: 1_609,
     purpose: "adapter",
-    sourceSha256: "dfb7c44c89e6c8a17555c1496f8ddf26dcbea8c6e3970ecd169f1d290bec64a4"
+    sourceSha256: "19cda147d4cf9f0cb00056c76c875087deb00d1f5c6a63116e64cb526459c396"
   },
   "environment.tsx": {
     maxLines: 425,
@@ -182,9 +192,9 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   },
   "index.tsx": {
     maxLines: 30,
-    maxSyntaxNodes: 77,
+    maxSyntaxNodes: 125,
     purpose: "registry",
-    sourceSha256: "89dff9ebf9e542adac8465a6f1b13dfdf79e204cdfab0f0f320da1afc86aaf23"
+    sourceSha256: "ce5f94b3bf12ae40c5b59ebd587a77d1e80e532d92c785f3353d272e627d79e4"
   },
   "kimi.tsx": {
     maxLines: 1_525,
@@ -192,11 +202,23 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     purpose: "adapter",
     sourceSha256: "104e72c4fe049514a20112897c2740764629fa54e7115dfffcfd4c28e7077b07"
   },
+  "opencode.tsx": {
+    maxLines: 150,
+    maxSyntaxNodes: 650,
+    purpose: "adapter",
+    sourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489"
+  },
   "openrouter.tsx": {
     maxLines: 1_250,
     maxSyntaxNodes: 6_719,
     purpose: "adapter",
     sourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f"
+  },
+  "pi.tsx": {
+    maxLines: 125,
+    maxSyntaxNodes: 650,
+    purpose: "adapter",
+    sourceSha256: "7b60cc3827a8b09587d6e32b0f8b5178ccaba843df2d68a9e390bbff09ee2d61"
   },
   "provider-home.tsx": {
     maxLines: 75,

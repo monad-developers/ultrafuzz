@@ -39,7 +39,7 @@ import {
 
 import { verifyRequiredArtifactsForAttempt, type ArtifactGateAttemptAuthority } from "./artifact-gates.js";
 import { authenticatedDependencyAdmissionAttemptIds } from "./dependency-admission.js";
-import { projectCanonicalFinalReport } from "./final-report-markdown.js";
+import { loadGoalSearchCoverageSnapshot, projectCanonicalFinalReport } from "./final-report-markdown.js";
 import { verifySealedTaskManifestSnapshot, type VerifiedSealedTaskManifestSnapshot } from "./workflow-integrity.js";
 
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
@@ -774,7 +774,9 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
   ) {
     throw invalidOutput("verified report run_metadata.run_id does not match the authenticated Ultrafuzz run");
   }
-  const projection = projectCanonicalFinalReport(report.value);
+  const projection = projectCanonicalFinalReport(report.value, {
+    goalSearchCoverage: loadGoalSearchCoverageSnapshot(authority.run_root)
+  });
   if (!isDeepStrictEqual(projection.report, report.value)) {
     throw invalidOutput("verified report.json is not the canonical final-report projection");
   }

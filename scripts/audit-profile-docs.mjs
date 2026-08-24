@@ -50,7 +50,7 @@ The \`default\` profile is reserved for the unmodified project workflow: it has 
 
 Use \`ultrafuzz config audit-profiles\` for the catalog, \`ultrafuzz config audit-profile <name>\` for effective project settings, and \`ultrafuzz run --audit-profile <name>\` for a one-run override.
 
-Ultrafuzz ships \`default\`, \`full\`, \`smoke\`, and \`invariant-only\` topology files. Inspect them with \`ultrafuzz topology list\` and \`ultrafuzz topology show <name>\`, or safely copy one into a project with \`ultrafuzz topology copy <name> <path>\`.
+Ultrafuzz ships \`full\`, \`smoke\`, and \`invariant-only\` topology files. Inspect them with \`ultrafuzz topology list\` and \`ultrafuzz topology show <name>\`, or safely copy one into a project with \`ultrafuzz topology copy <name> <path>\`.
 `;
 }
 

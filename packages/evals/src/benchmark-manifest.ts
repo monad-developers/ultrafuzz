@@ -1,6 +1,7 @@
 import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
+import type { BenchmarkLaneName } from "./benchmark-lane-names.js";
 import { readStrictJsonDocument } from "./eval-durable.js";
 import {
   EVAL_BENCHMARK_COHORT_SCHEMA_ID,
@@ -16,10 +17,28 @@ import { EvalError } from "./utils.js";
 export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as const;
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
 export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v2" as const;
+export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
+export { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
+export const BENCHMARK_LANE_COHORTS: Record<BenchmarkLaneName, "evmbench" | "ultrafuzz-bench"> = {
+  smoke: "ultrafuzz-bench",
+  "threat-model": "ultrafuzz-bench",
+  full: "evmbench"
+};
 export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
+/** One sandbox row per pinned target: the whole cohort runs as a single wave. */
+export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS = 3;
+/**
+ * The goal fanout can queue one child per structured threat and per applicable
+ * vulnerability class, so the lane needs real in-workflow concurrency to
+ * demonstrate that a large ready queue is scheduled rather than collapsed into
+ * one opaque agent node. Eight matches the production full-lane bound.
+ */
+export const BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS = 8;
+/** Repository-relative source path retained for topology parity checks. */
+export const BENCHMARK_SMOKE_WORKFLOW_PATH = "packages/config/topologies/smoke.yml" as const;
 export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
 export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
   "time-warp-sequences",
@@ -43,31 +62,115 @@ export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
   "differential-red-triage",
   "differential-repair-and-report-review"
 ] as const;
-export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = ["dynamic-strategy-generator"] as const;
+/**
+ * Dynamic goal fanout expands one child per planned threat and per applicable
+ * vulnerability class, so its cost is unbounded by the static graph. They exist
+ * only in the production topology; the dedicated smoke graph declares no
+ * dynamic node at all, which is what keeps that lane comparable.
+ */
+export const BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS = ["threat-goals", "class-goals"] as const;
+
+/**
+ * What it takes to remove the goal fanout from a graph and leave it valid.
+ * `goal-plan` exists only to feed the fanout, so once the fanout goes it is
+ * terminal, and it is the producer the report prompts cite through
+ * `artifact_path`, which requires an ancestor. Pruning it with the fanout also
+ * strips those citations from the rendered prompts.
+ */
+export const BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS = [
+  ...BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS,
+  "goal-plan"
+] as const;
+
+/**
+ * Every default-on node the threat-model workstream adds to the production
+ * topology. Curated lanes that prune by an explicit node-ID list cannot name
+ * these, because their lists were written before the IDs existed, so the list
+ * is published here and kept honest by a topology-derived test.
+ *
+ * `threat-model` and `goal-plan` join the pre-existing `setup` group and
+ * `reference-vulnerability-database` the `references` group, so no group-level
+ * filter catches them either.
+ */
+export const THREAT_MODEL_GOAL_FANOUT_NODE_IDS = [
+  "reference-vulnerability-database",
+  "threat-model",
+  "goal-roaming",
+  ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
+] as const;
+
+/**
+ * The generated-node-ID prefix each fanout group renders, keyed by the group node.
+ * These are the literal halves of the `dynamic:<kind>:{{ item.id }}` templates in
+ * `.ultrafuzz/topology.yml`, and the same spelling the `ultrafuzz/goal-plan@1`
+ * contract pins per goal (`node_id === "dynamic:threat:" + id`). The release gate
+ * asserts generated IDs against these rather than restating the literal, so a
+ * topology or contract respelling fails the lane instead of drifting past it.
+ */
+export const BENCHMARK_DYNAMIC_GOAL_NODE_ID_PREFIXES: Record<
+  (typeof BENCHMARK_DYNAMIC_GOAL_FANOUT_NODE_IDS)[number],
+  string
+> = {
+  "threat-goals": "dynamic:threat:",
+  "class-goals": "dynamic:class:"
+};
+
+/**
+ * The artifacts the release gate must retain from every run, beyond the report
+ * bundle every lane already uploads. #183 requires the real threat model, the
+ * real plan, and the pinned database provenance to be human-reviewable after
+ * the fact, because its automated assertions are deliberately structural.
+ */
+export const BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS = [
+  "THREAT_MODEL.md",
+  "threat-model.json",
+  "goal-plan.json",
+  "vulnerability-db-manifest.json"
+] as const;
+
+export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = [
+  "dynamic-strategy-generator",
+  ...BENCHMARK_GOAL_FANOUT_EXCLUDED_NODE_IDS
+] as const;
 export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
   "stateful-invariant",
   "differential",
   "dynamic-strategy"
 ] as const;
+/**
+ * What the smoke lane's three `disable_*` flags would prune from the PRODUCTION
+ * topology. The smoke lane itself never applies this: it runs a dedicated graph
+ * that omits all of these by construction and passes an empty exclusion list, so
+ * its execution-policy fingerprint stays equal to its published observations'.
+ * This set is the derivation those flags describe, and every ID in it exists in
+ * `.ultrafuzz/topology.yml`, not in the packaged `packages/config/topologies/smoke.yml`.
+ */
 export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
   ...BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS,
   ...BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS,
   ...BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS
 ] as const;
 
-export function benchmarkLaneConcurrency(lane: "smoke" | "full"): {
+export function benchmarkLaneConcurrency(lane: BenchmarkLaneName): {
   max_parallel_runs: number;
   max_parallel_targets: number;
 } {
-  return lane === "smoke"
-    ? {
-        max_parallel_runs: BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
-        max_parallel_targets: BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS
-      }
-    : {
-        max_parallel_runs: BENCHMARK_FULL_MAX_PARALLEL_RUNS,
-        max_parallel_targets: BENCHMARK_FULL_MAX_PARALLEL_TARGETS
-      };
+  if (lane === "smoke") {
+    return {
+      max_parallel_runs: BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
+      max_parallel_targets: BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS
+    };
+  }
+  if (lane === "threat-model") {
+    return {
+      max_parallel_runs: BENCHMARK_THREAT_MODEL_MAX_PARALLEL_RUNS,
+      max_parallel_targets: BENCHMARK_THREAT_MODEL_MAX_PARALLEL_TARGETS
+    };
+  }
+  return {
+    max_parallel_runs: BENCHMARK_FULL_MAX_PARALLEL_RUNS,
+    max_parallel_targets: BENCHMARK_FULL_MAX_PARALLEL_TARGETS
+  };
 }
 
 export interface BenchmarkTargetManifest {
@@ -115,11 +218,9 @@ export interface BenchmarkLaneManifest {
   judge_profile: BenchmarkModelProfileManifest;
 }
 
-export interface BenchmarkLanesManifest {
+export type BenchmarkLanesManifest = {
   schema_version: typeof BENCHMARK_LANES_SCHEMA_VERSION;
-  smoke: BenchmarkLaneManifest;
-  full: BenchmarkLaneManifest;
-}
+} & Record<BenchmarkLaneName, BenchmarkLaneManifest>;
 
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
@@ -177,6 +278,7 @@ const laneSchema = z.strictObject({
 export const benchmarkLanesZodSchema = z.strictObject({
   schema_version: z.literal(BENCHMARK_LANES_SCHEMA_VERSION),
   smoke: laneSchema,
+  "threat-model": laneSchema,
   full: laneSchema
 });
 
@@ -284,20 +386,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function adaptBenchmarkManifestToEvalSuite(input: {
   benchmark: "evmbench" | "ultrafuzz-bench";
-  lane: "smoke" | "full";
+  lane: BenchmarkLaneName;
   cohort: BenchmarkCohortManifest;
   lanes: BenchmarkLanesManifest;
   runnerModelProfileId?: string;
   runnerModelProfileOverride?: BenchmarkModelProfileManifest;
   selectedTargetIds?: string[];
 }): EvalSuiteSpec {
-  if (
-    (input.lane === "smoke" && input.benchmark !== "ultrafuzz-bench") ||
-    (input.lane === "full" && input.benchmark !== "evmbench")
-  ) {
+  if (input.benchmark !== BENCHMARK_LANE_COHORTS[input.lane]) {
     throw new EvalError(
       "EVAL_BENCHMARK_MANIFEST_INVALID",
-      "smoke requires the Ultrafuzz-bench cohort and full requires the EVMBench cohort"
+      "smoke and threat-model require the Ultrafuzz-bench cohort and full requires the EVMBench cohort"
     );
   }
   if (input.benchmark === "evmbench" && input.cohort.schema_version !== EVMBENCH_COHORT_SCHEMA_VERSION) {
@@ -312,6 +411,18 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   const lane = input.lanes[input.lane];
   const smokeAuditPolicy = input.lane === "smoke" ? benchmarkSmokeAuditPolicy() : undefined;
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
+  if (input.lane === "threat-model") {
+    // The gate's whole subject is the threat-model workstream's own nodes. A lane
+    // that prunes any of them still produces a green run and proves nothing, so
+    // refuse to compile the suite rather than publish a hollow observation.
+    const pruned = THREAT_MODEL_GOAL_FANOUT_NODE_IDS.filter((id) => topologyExclusions.excluded_node_ids.includes(id));
+    if (pruned.length > 0) {
+      throw new EvalError(
+        "EVAL_BENCHMARK_MANIFEST_INVALID",
+        `threat-model lane cannot exclude the nodes it exists to exercise: ${pruned.join(", ")}`
+      );
+    }
+  }
   const selectedTargets = resolveBenchmarkTargets(input);
   if (input.runnerModelProfileId !== undefined && input.runnerModelProfileOverride !== undefined) {
     throw new EvalError(
@@ -385,8 +496,14 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
               }
             : {}),
           strategy_loops: lane.strategy_loops,
-          // The packaged smoke profile contains only its selected nodes, so
-          // production-topology exclusions would be unknown-node errors.
+          // The packaged smoke graph contains only its selected nodes -- no
+          // invariant, differential, dynamic-strategy or goal-fanout node -- so
+          // production-topology exclusions would be unknown-node errors here.
+          // Keeping the list empty also keeps the lane's execution-policy
+          // fingerprint identical to the one its published observations carry.
+          // The threat-model lane disables nothing, so this is already empty; it
+          // stays derived rather than hard-coded so a lane edit that starts
+          // pruning is caught by the guard above instead of by a silent no-op.
           excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
         }
       }
@@ -419,6 +536,11 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   };
 }
 
+export function benchmarkLaneSelectedTargetIds(lane: BenchmarkLaneName, cohort: BenchmarkCohortManifest): string[] {
+  // Only the EVMbench full lane runs a cohort wider than its curated selection.
+  return lane === "full" ? cohort.targets.map((target) => target.id) : [...cohort.smoke_targets];
+}
+
 function benchmarkSmokeAuditPolicy(): {
   audit_profile: "smoke";
   audit_profile_catalog_digest: string;
@@ -436,13 +558,11 @@ function benchmarkSmokeAuditPolicy(): {
 }
 
 function resolveBenchmarkTargets(input: {
-  lane: "smoke" | "full";
+  lane: BenchmarkLaneName;
   cohort: BenchmarkCohortManifest;
   selectedTargetIds?: string[];
 }): BenchmarkTargetManifest[] {
-  const ids =
-    input.selectedTargetIds ??
-    (input.lane === "smoke" ? input.cohort.smoke_targets : input.cohort.targets.map((target) => target.id));
+  const ids = input.selectedTargetIds ?? benchmarkLaneSelectedTargetIds(input.lane, input.cohort);
   assertUnique(ids, "selected target", "benchmark suite input");
   const targetsById = new Map(input.cohort.targets.map((target) => [target.id, target]));
   return ids.map((id) => {

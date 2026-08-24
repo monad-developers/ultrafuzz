@@ -86,6 +86,7 @@ export interface ModalNodeCheckpointResultContext {
     readonly artifactArchive: string;
     readonly checkpointIndex: string;
     readonly storageLineage: string;
+    readonly logicalDispatchFingerprint: string;
     readonly workspacePath: string;
     readonly runRoot: string;
     readonly executionSnapshotRoot: string;
@@ -190,6 +191,13 @@ export function assertModalNodeCheckpointResultContext(context: ModalNodeCheckpo
     index.storage_lineage !== expected.storageLineage
   ) {
     failContext("result, checkpoint, and index storage lineage must match the trusted attempt lineage");
+  }
+  if (
+    result.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint ||
+    checkpoint.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint ||
+    index.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint
+  ) {
+    failContext("result, checkpoint, and index logical dispatch must match the trusted dispatch");
   }
   if (
     result.artifact_archive !== expected.artifactArchive ||

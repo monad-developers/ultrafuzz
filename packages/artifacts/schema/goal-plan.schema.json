@@ -1,0 +1,517 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "ultrafuzz.goal-plan.v1"
+    },
+    "policy": {
+      "type": "string",
+      "const": "additive-v1"
+    },
+    "threat_model_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "vulnerability_database": {
+      "type": "object",
+      "properties": {
+        "planner_catalog_schema_version": {
+          "type": "string",
+          "const": "ultrafuzz.vulnerability-db.planner-catalog.v1"
+        },
+        "snapshot_manifest_schema_version": {
+          "type": "string",
+          "const": "ultrafuzz.vulnerability-db.snapshot.v1"
+        },
+        "database_schema_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "aggregate_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "catalog_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "planner_catalog_schema_version",
+        "snapshot_manifest_schema_version",
+        "database_schema_version",
+        "aggregate_sha256",
+        "catalog_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "catalog_class_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+      }
+    },
+    "modeled_threat_ids": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+      }
+    },
+    "threat_goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "threat"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+          },
+          "node_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+          },
+          "threat_ids": {
+            "minItems": 1,
+            "maxItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+            }
+          },
+          "class_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+            }
+          },
+          "attack_surface_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+            }
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "goal_prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replacements": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "selection_rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "node_id",
+          "threat_ids",
+          "class_ids",
+          "attack_surface_ids",
+          "title",
+          "goal_prompt",
+          "replacements",
+          "selection_rationale"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "class_goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "class"
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+          },
+          "node_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+          },
+          "class_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+          },
+          "class_replacement_key": {
+            "type": "string"
+          },
+          "threat_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+            }
+          },
+          "threat_replacement_keys": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "attack_surface_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+            }
+          },
+          "coverage_gap": {
+            "type": "boolean"
+          },
+          "selected_record": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^vulnerability-db\\/selected\\/(?:(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}\\/)*[A-Za-z0-9@+_-][A-Za-z0-9._@+-]{0,127}\\.(?:md|yml)$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": ["id", "path", "sha256", "size_bytes"],
+            "additionalProperties": false
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "goal_prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "replacements": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            }
+          },
+          "selection_rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "node_id",
+          "class_id",
+          "class_replacement_key",
+          "threat_ids",
+          "threat_replacement_keys",
+          "attack_surface_ids",
+          "coverage_gap",
+          "selected_record",
+          "title",
+          "goal_prompt",
+          "replacements",
+          "selection_rationale"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "applicability_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "class_id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+          },
+          "decision": {
+            "type": "string",
+            "enum": ["applicable", "inapplicable"]
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "capability_id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+                },
+                "requirement": {
+                  "type": "string",
+                  "enum": ["required", "optional", "incompatible"]
+                },
+                "observed_status": {
+                  "type": "string",
+                  "enum": ["present", "absent", "unknown"]
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "line": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "end_line": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "symbol": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "note": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                  }
+                },
+                "rationale": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": ["capability_id", "requirement", "observed_status", "evidence", "rationale"],
+              "additionalProperties": false
+            }
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["class_id", "decision", "checks", "rationale"],
+        "additionalProperties": false
+      }
+    },
+    "selected_class_records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^vulnerability-db\\/selected\\/(?:(?!\\.{1,2}(?:\\/|$))[A-Za-z0-9._@+-]{1,128}\\/)*[A-Za-z0-9@+_-][A-Za-z0-9._@+-]{0,127}\\.(?:md|yml)$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["id", "path", "sha256", "size_bytes"],
+        "additionalProperties": false
+      }
+    },
+    "roaming_goal": {
+      "type": "object",
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "const": "goal-roaming"
+        },
+        "prompt_path": {
+          "type": "string",
+          "const": "strategies/roaming-goal.md"
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["node_id", "prompt_path", "purpose"],
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "threats": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "applicable_classes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "inapplicable_classes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dynamic_goals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "total_goals": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["threats", "applicable_classes", "inapplicable_classes", "dynamic_goals", "total_goals"],
+      "additionalProperties": false
+    },
+    "expected_child_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "threat_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "applicable_class_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "max_dynamic_nodes": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991
+    },
+    "goal_lanes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "lane_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[a-z0-9]+(?:[.-][a-z0-9]+)*)*$"
+              },
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-][a-z0-9]+)*$"
+              }
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["threat", "class", "roaming"]
+          },
+          "node_ids": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+            }
+          }
+        },
+        "required": ["lane_id", "kind", "node_ids"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "policy",
+    "threat_model_sha256",
+    "vulnerability_database",
+    "catalog_class_ids",
+    "modeled_threat_ids",
+    "threat_goals",
+    "class_goals",
+    "applicability_decisions",
+    "selected_class_records",
+    "roaming_goal",
+    "counts",
+    "expected_child_count",
+    "threat_count",
+    "applicable_class_count",
+    "max_dynamic_nodes",
+    "goal_lanes"
+  ],
+  "additionalProperties": false,
+  "$id": "urn:ultrafuzz:schema:artifacts:goal-plan:1",
+  "title": "Ultrafuzz goal plan"
+}

@@ -6,32 +6,62 @@
   "required": ["schema_version", "terminal", "status", "run_count", "status_counts"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "const": "ultrafuzz.analysis-bundle.v1" },
-    "terminal": { "type": "boolean" },
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
+    "terminal": {
+      "type": "boolean"
+    },
     "status": {
       "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled", "mixed", "unknown"]
     },
-    "run_count": { "$ref": "#/$defs/count" },
+    "run_count": {
+      "$ref": "#/$defs/count"
+    },
     "status_counts": {
       "type": "object",
       "required": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled", "unknown"],
       "additionalProperties": false,
       "properties": {
-        "pending": { "$ref": "#/$defs/count" },
-        "running": { "$ref": "#/$defs/count" },
-        "paused": { "$ref": "#/$defs/count" },
-        "succeeded": { "$ref": "#/$defs/count" },
-        "failed": { "$ref": "#/$defs/count" },
-        "timed-out": { "$ref": "#/$defs/count" },
-        "canceled": { "$ref": "#/$defs/count" },
-        "unknown": { "$ref": "#/$defs/count" }
+        "pending": {
+          "$ref": "#/$defs/count"
+        },
+        "running": {
+          "$ref": "#/$defs/count"
+        },
+        "paused": {
+          "$ref": "#/$defs/count"
+        },
+        "succeeded": {
+          "$ref": "#/$defs/count"
+        },
+        "failed": {
+          "$ref": "#/$defs/count"
+        },
+        "timed-out": {
+          "$ref": "#/$defs/count"
+        },
+        "canceled": {
+          "$ref": "#/$defs/count"
+        },
+        "unknown": {
+          "$ref": "#/$defs/count"
+        }
       }
     },
-    "started_at": { "$ref": "#/$defs/timestamp" },
-    "finished_at": { "$ref": "#/$defs/timestamp" }
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    }
   },
   "$defs": {
-    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "timestamp": {
       "type": "string",
       "format": "date-time",
