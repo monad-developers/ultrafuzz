@@ -116,7 +116,24 @@ function renderHealth(value: RunHealthValue): string {
       }`
     );
   }
+  if (value.quota !== null) {
+    lines.push(renderQuota(value.quota, value.run_id));
+  }
   return `${lines.join("\n")}\n`;
+}
+
+const QUOTA_PARKED_NODE_SAMPLE = 3;
+
+/** Parked nodes hold their attempts; say how the operator un-parks them (#677). */
+function renderQuota(quota: NonNullable<RunHealthValue["quota"]>, runId: string): string {
+  const sample = quota.parked_node_ids.slice(0, QUOTA_PARKED_NODE_SAMPLE);
+  const omitted = quota.parked_node_ids.length - sample.length;
+  const nodes = sample.length === 0 ? "" : ` — ${sample.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`;
+  const remediation =
+    quota.reset_at_ms === null
+      ? `no provider reset time — provider credit exhausted; restore credit, then run \`ultrafuzz resume ${runId}\``
+      : `earliest provider reset ${new Date(quota.reset_at_ms).toISOString()}`;
+  return `Quota: ${quota.parked_count} node(s) parked (attempts preserved)${nodes}; ${remediation}`;
 }
 
 function lifecycleDivergenceLines(value: RunHealthValue): string[] {

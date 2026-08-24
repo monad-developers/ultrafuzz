@@ -6931,6 +6931,64 @@ test("agent preflight failures redact configured credentials without retaining t
   });
 });
 
+test("402 gateway failures are promoted to Smithers quota parking controls", async () => {
+  // The exact status line from the #677 incident: 41 NodeFailed events whose
+  // message began this way burned their attempts instead of parking the run.
+  const incidentMessage = "unexpected status 402 Payment Required: This request requires more credits";
+
+  // The pinned engine throws the CLI's stderr as a plain SmithersError with an
+  // unlisted code; the normalizer sees code AGENT_CLI_ERROR (dropped by the
+  // allowlist) or no code at all. Both must classify as a quota failure.
+  for (const failure of [
+    new Error(incidentMessage),
+    Object.assign(new Error(incidentMessage), { code: "AGENT_CLI_ERROR" })
+  ]) {
+    const normalized = await captureAgentFailure(failure);
+    assert.equal(normalized.code, "AGENT_QUOTA_EXCEEDED");
+    // Exactly the scheduler's park predicate — and no fabricated quotaResetAtMs:
+    // a 402 has no reset time, so the run stays parked until `ultrafuzz resume`.
+    assert.deepEqual(normalized.details, { failureQuota: true });
+  }
+
+  // Preflight failures route through the same normalizer and must promote too.
+  const preflight = await captureAgentFailure(new Error(incidentMessage), { agentChain: [{}] }, true);
+  assert.equal(preflight.code, "AGENT_QUOTA_EXCEEDED");
+  assert.deepEqual(preflight.details, { failureQuota: true });
+
+  // Every accepted spelling is a status-code token, never provider prose.
+  for (const message of [
+    "HTTP 402 from the routed gateway",
+    "provider request failed with HTTP status 402",
+    "gateway replied 402 Payment Required"
+  ]) {
+    const normalized = await captureAgentFailure(new Error(message));
+    assert.equal(normalized.code, "AGENT_QUOTA_EXCEEDED", message);
+    assert.deepEqual(normalized.details, { failureQuota: true });
+  }
+
+  // Non-402 statuses, credit prose without a status token, and incidental 402
+  // digits must stay unclassified so real failures keep failing.
+  for (const message of [
+    "unexpected status 400 Bad Request: malformed tool call",
+    "unexpected status 429 Too Many Requests: slow down",
+    "This request requires more credits, or fewer max_tokens",
+    "wrote 402 bytes to the provider socket before EOF"
+  ]) {
+    const normalized = await captureAgentFailure(new Error(message));
+    assert.equal("code" in normalized, false, message);
+    assert.equal("details" in normalized, false, message);
+  }
+
+  // A source-classified control error is never overridden by the 402 matcher.
+  const configFailure = Object.assign(new Error(incidentMessage), {
+    code: "AGENT_CONFIG_INVALID",
+    details: { failureRetryable: false }
+  });
+  const normalizedConfig = await captureAgentFailure(configFailure);
+  assert.equal(normalizedConfig.code, "AGENT_CONFIG_INVALID");
+  assert.deepEqual(normalizedConfig.details, { failureRetryable: false });
+});
+
 test("agent preflight and generation share one lazily admitted agent instance", async () => {
   let metadataPreflights = 0;
   let admittedFactories = 0;
