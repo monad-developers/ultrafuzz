@@ -8358,8 +8358,9 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
   assert.equal(callSpans.length, source.split("execFileSync(").length - 1);
   const gitCallSpans = callSpans.filter((span) => /^execFileSync\(\s*"git"/u.test(span));
   // The template invokes git from several fixed sites plus the one bounded helper; if this floor is no
-  // longer met the scanner itself has broken, which must fail rather than vacuously pass.
-  assert.ok(gitCallSpans.length >= 8, `${gitCallSpans.length}`);
+  // longer met the scanner itself has broken, which must fail rather than vacuously pass. (#727 moved
+  // the read-tree reset into the runtime's lock-recovering helper, taking the template from 8 to 7.)
+  assert.ok(gitCallSpans.length >= 7, `${gitCallSpans.length}`);
   for (const span of gitCallSpans) {
     assert.match(span, /maxBuffer:/u, span);
   }
