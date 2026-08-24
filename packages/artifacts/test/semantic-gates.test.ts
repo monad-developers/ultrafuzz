@@ -5830,3 +5830,260 @@ test("attempt source-event joins accept only declared host-side validation failu
     "failed"
   );
 });
+
+// #693: every campaign gate failure must report the expected value next to the
+// actual one — four of the five incident surfaces were only diagnosable by
+// reading gate source.
+test("campaign evidence-file closure names duplicated, missing, and unreferenced paths", () => {
+  const result = executeSemanticGate("property-campaign-evidence-file-closure", {
+    document: {
+      execution: { usable_results: true, started_at: "2026-01-01T00:00:00Z" },
+      paths: { log: "backends/recon-fuzzer/run.log", raw_results: "backends/recon-fuzzer/results.json" },
+      coverage: { status: "reported", metrics: [] },
+      property_results: [],
+      failures: [],
+      evidence_files: [{ path: "stale/one.log" }, { path: "stale/one.log" }]
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  const message = result.status === "failed" ? result.issues[0]!.message : "";
+  assert.equal(
+    message,
+    "Evidence files must contain exactly one authenticated entry for every referenced campaign evidence path " +
+      "(duplicated evidence_files paths: stale/one.log; " +
+      "referenced paths missing from evidence_files: backends/recon-fuzzer/results.json, backends/recon-fuzzer/run.log; " +
+      "evidence_files entries nothing references: stale/one.log)"
+  );
+});
+
+test("campaign timeout evidence reports the expected final artifact deadline next to a forged execution deadline", () => {
+  const command =
+    "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
+    "--timeout 60 --test-limit 18446744073709551615";
+  const plan = {
+    configured_fuzzer_timeout_seconds: 60,
+    recon_internal_timeout_seconds: 60,
+    host_soft_timeout_seconds: 60,
+    host_force_kill_grace_seconds: 300,
+    artifact_finalization_reserve_seconds: 100,
+    finalization_reserve_seconds: 100,
+    configured_budget_seconds: 460,
+    recon_test_limit: "18446744073709551615",
+    backend_started_at: "2026-01-01T00:00:00.000Z",
+    fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
+    force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
+    final_artifact_deadline_utc: "2026-01-01T00:07:40.000Z",
+    deadline: "2026-01-01T00:07:40.000Z",
+    backend: { exact_shell_escaped_command: command },
+    command_plan: [{ phase: "campaign", command }]
+  };
+  const result = executeSemanticGate("property-campaign-timeout-evidence", {
+    document: {
+      configured_timeout_seconds: 60,
+      exact_command: command,
+      start_timestamp: "2026-01-01T00:00:00.000Z",
+      end_timestamp: "2026-01-01T00:01:00.000Z",
+      termination_reason: "configured-timeout",
+      campaign_outcome: "complete",
+      usable_results: true,
+      execution: {
+        command,
+        usable_results: true,
+        started_at: "2026-01-01T00:00:00.000Z",
+        finished_at: "2026-01-01T00:01:00.000Z",
+        // The incident's wrong-field bug: copied from the plan's
+        // fuzzing_deadline_utc instead of final_artifact_deadline_utc.
+        deadline: "2026-01-01T00:01:00.000Z"
+      }
+    },
+    context: {
+      artifactSet: { campaignPlan: plan, campaignSummary: { outcome: "complete" } },
+      propertyCampaignTimeout: {
+        configuredFuzzerTimeoutSeconds: 60,
+        plannedTimeoutSeconds: 600,
+        finalizationReserveSeconds: 100
+      }
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  const issues = result.status === "failed" ? result.issues : [];
+  assert.deepEqual(
+    issues.map((entry) => ({ path: entry.path, message: entry.message })),
+    [
+      {
+        path: "$.execution.deadline",
+        message:
+          "Execution deadline must equal plan final artifact deadline " +
+          '(expected "2026-01-01T00:07:40.000Z", actual "2026-01-01T00:01:00.000Z")'
+      }
+    ]
+  );
+});
+
+test("campaign context joins report the expected bare declared path next to a node-dir reference", () => {
+  const positive = {
+    campaign_plan_ref: "campaign-plan.json",
+    implemented_properties_ref: "implemented-properties.json",
+    findings_ref: "findings.json",
+    campaign_summary_ref: "campaign-summary.json",
+    fuzzer_backend: "recon",
+    backend_version: null,
+    execution: {
+      status: "complete",
+      usable_results: true,
+      command: "recon fuzz .",
+      workers: 1,
+      deadline: "2026-01-01T00:01:00Z"
+    },
+    paths: {},
+    property_results: [],
+    failures: []
+  };
+  const context: SemanticGateContext = {
+    artifactIdentity: {
+      runId: "run",
+      nodeId: "stateful-invariant-campaign",
+      artifactPath: "recon-fuzzer-results.json"
+    },
+    artifactSet: {
+      campaignPlanPath: "campaign-plan.json",
+      campaignPlan: {
+        backend: { name: "recon", version: null },
+        workers: 1,
+        deadline: "2026-01-01T00:01:00Z",
+        command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+        paths: {}
+      },
+      implementedPropertiesPath: "implemented-properties.json",
+      implementedProperties: { properties: [] },
+      findingsPath: "findings.json",
+      findings: [],
+      campaignSummaryPath: "campaign-summary.json",
+      campaignSummary: {
+        outcome: "complete",
+        campaign_plan_ref: "campaign-plan.json",
+        implemented_property_suite_refs: ["implemented-properties.json"],
+        backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "recon-fuzzer-results.json" }],
+        finding_refs: [],
+        reproducer_refs: []
+      }
+    }
+  };
+
+  const forged = executeSemanticGate("property-campaign-context-joins", {
+    document: { ...positive, campaign_plan_ref: "stateful-invariant-campaign/campaign-plan.json" },
+    context
+  });
+  assert.equal(forged.status, "failed");
+  const issues = forged.status === "failed" ? forged.issues : [];
+  assert.deepEqual(
+    issues.map((entry) => ({ path: entry.path, message: entry.message })),
+    [
+      {
+        path: "$.campaign_plan_ref",
+        message:
+          "Campaign plan reference does not name the authenticated sibling plan " +
+          '(expected "campaign-plan.json", actual "stateful-invariant-campaign/campaign-plan.json")'
+      }
+    ]
+  );
+
+  const forgedSummary = executeSemanticGate("property-campaign-context-joins", {
+    document: positive,
+    context: {
+      ...context,
+      artifactSet: {
+        ...context.artifactSet!,
+        campaignSummary: {
+          ...(context.artifactSet!.campaignSummary as Record<string, unknown>),
+          backend_results: [
+            {
+              fuzzer_backend: "recon",
+              status: "complete",
+              result_ref: "stateful-invariant-campaign/recon-fuzzer-results.json"
+            }
+          ]
+        }
+      }
+    }
+  });
+  assert.equal(forgedSummary.status, "failed");
+  const summaryIssues = forgedSummary.status === "failed" ? forgedSummary.issues : [];
+  assert.deepEqual(
+    summaryIssues.map((entry) => ({ path: entry.path, message: entry.message })),
+    [
+      {
+        path: "$.campaign_summary_ref#backend_results[0].result_ref",
+        message:
+          "Campaign summary backend result reference does not name this authenticated record " +
+          '(expected "recon-fuzzer-results.json", actual "stateful-invariant-campaign/recon-fuzzer-results.json")'
+      }
+    ]
+  );
+});
+
+test("gate value descriptions are bounded for whole-object comparisons", () => {
+  const wide = Object.fromEntries(
+    Array.from({ length: 64 }, (_, index) => [`key-${index}`, `backends/recon-fuzzer/very/long/path/${index}`])
+  );
+  const result = executeSemanticGate("property-campaign-context-joins", {
+    document: {
+      campaign_plan_ref: "campaign-plan.json",
+      implemented_properties_ref: "implemented-properties.json",
+      findings_ref: "findings.json",
+      campaign_summary_ref: "campaign-summary.json",
+      fuzzer_backend: "recon",
+      backend_version: null,
+      execution: {
+        status: "complete",
+        usable_results: true,
+        command: "recon fuzz .",
+        workers: 1,
+        deadline: "2026-01-01T00:01:00Z"
+      },
+      paths: wide,
+      property_results: [],
+      failures: []
+    },
+    context: {
+      artifactIdentity: {
+        runId: "run",
+        nodeId: "stateful-invariant-campaign",
+        artifactPath: "recon-fuzzer-results.json"
+      },
+      artifactSet: {
+        campaignPlanPath: "campaign-plan.json",
+        campaignPlan: {
+          backend: { name: "recon", version: null },
+          workers: 1,
+          deadline: "2026-01-01T00:01:00Z",
+          command_plan: [{ phase: "campaign", command: "recon fuzz ." }],
+          paths: {}
+        },
+        implementedPropertiesPath: "implemented-properties.json",
+        implementedProperties: { properties: [] },
+        findingsPath: "findings.json",
+        findings: [],
+        campaignSummaryPath: "campaign-summary.json",
+        campaignSummary: {
+          outcome: "complete",
+          campaign_plan_ref: "campaign-plan.json",
+          implemented_property_suite_refs: ["implemented-properties.json"],
+          backend_results: [{ fuzzer_backend: "recon", status: "complete", result_ref: "recon-fuzzer-results.json" }],
+          finding_refs: [],
+          reproducer_refs: []
+        }
+      }
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  const issues = result.status === "failed" ? result.issues : [];
+  const pathsIssue = issues.find((entry) => entry.path === "$.paths");
+  assert.notEqual(pathsIssue, undefined);
+  assert.match(pathsIssue!.message, /^Campaign paths do not match the plan \(expected \{\}, actual /u);
+  assert.match(pathsIssue!.message, /\.\.\.\)$/u);
+  assert.ok(pathsIssue!.message.length < 400, pathsIssue!.message);
+});

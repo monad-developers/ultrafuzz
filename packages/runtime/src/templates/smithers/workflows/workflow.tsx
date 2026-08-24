@@ -6959,16 +6959,27 @@ function rememberExpectedInvariantSuitePublications(
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
+  // Keep the caller's failure message as the verbatim prefix, but preserve the
+  // resolution evidence and the underlying cause: a wrong-base recorded path
+  // (#693) resolves to a doubled candidate whose ENOENT was previously
+  // discarded, leaving the failure undiagnosable without reading this code.
+  const resolutionEvidence = `(resolved ${artifactPath} against base ${artifactDir})`;
+  let resolvedPath: string;
+  let regularFile: boolean;
   try {
     assertRegularFileInside(artifactDir, artifactPath, failureMessage);
-    const resolvedPath = realpathSync(artifactPath);
-    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
-      throw new Error(failureMessage);
-    }
-    return resolvedPath;
-  } catch {
-    throw new Error(failureMessage);
+    resolvedPath = realpathSync(artifactPath);
+    regularFile = statSync(resolvedPath).isFile();
+  } catch (error) {
+    throw new Error(
+      `${failureMessage} ${resolutionEvidence}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
   }
+  if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !regularFile) {
+    throw new Error(`${failureMessage} ${resolutionEvidence}: not a regular file strictly inside the base`);
+  }
+  return resolvedPath;
 }
 
 function resolveNonEmptyRegularArtifactFile(

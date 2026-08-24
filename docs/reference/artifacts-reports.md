@@ -402,6 +402,14 @@ one result row for every implemented property. Every observed failure carries
 its raw evidence plus either a deterministic reproducer or a typed reproduction
 blocker. Failure records caused by implemented catalog properties carry
 non-empty `property_ids`; non-property failures use an empty array.
+Two path bases apply: recorded path fields (the plan's and result's `paths.*`,
+`evidence_files[].path`, coverage `source_ref`, property-result
+`evidence_refs`, and failure reproducer references) are relative to the node's
+artifact directory (for example `backends/recon-fuzzer/run.log`), while
+reference fields (`campaign_plan_ref`, `implemented_properties_ref`,
+`findings_ref`, `campaign_summary_ref`, and the summary's own references) carry
+the bare declared output path (for example `campaign-plan.json`) with no
+directory prefix.
 The required `evidence_files` array is a closed, bounded manifest of exact file
 references rather than a recursive backend-directory inventory. It lists the
 log when the backend started, raw results when the document claims usable or
