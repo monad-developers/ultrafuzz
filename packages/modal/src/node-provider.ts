@@ -1654,7 +1654,44 @@ async function publishModalNodeResult(
     const workspace = path.join(extracted, "workspace");
     if (fs.existsSync(workspace)) {
       assertPublishedDirectoryReplacementAllowed(workspace, workspaceDir);
-      replacePublishedDirectory(workspace, workspaceDir);
+      const executionSnapshotRoot = checkedPath(root, input.execution_snapshot_root, "execution snapshot root");
+      const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
+      const runRoot = checkedPath(root, input.run_root, "run root");
+      assertExecutionSnapshotRoot(runRoot, executionSnapshotRoot);
+      assertChildPath(executionSnapshotRoot, workflowPath, "workflow path");
+      assertExactPathValue(
+        workflowPath,
+        path.join(executionSnapshotRoot, ".smithers", "workflows", `ultrafuzz-${input.run_id}.tsx`),
+        "cloud workflow path"
+      );
+      const gitExecutable = trustedGitExecutable(root);
+      const governedSource = readGovernedSourceIdentity(
+        root,
+        runRoot,
+        executionSnapshotRoot,
+        workflowPath,
+        gitExecutable
+      );
+      const registration = relocateWorkspaceGitControlFile(root, workspace, workspaceDir, governedSource.commit);
+      try {
+        replacePublishedDirectory(
+          workspace,
+          workspaceDir,
+          registration === undefined
+            ? undefined
+            : (destination) => {
+                if (registration.created) {
+                  repairControllerWorktreeRegistration(root, destination, registration.administration);
+                }
+                assertPublishedWorkspaceRevision(root, destination, registration.administration, governedSource);
+              }
+        );
+      } catch (error) {
+        if (registration?.created === true) {
+          removeCreatedControllerWorktreeRegistration(root, registration.administration);
+        }
+        throw error;
+      }
     }
     replacePublishedDirectory(artifacts, artifactDir);
     for (const { source, destination, replacementAllowed } of sourceProofs) {
@@ -3833,7 +3870,190 @@ function readInvariantSourceProofPublication(
   return parsed as unknown as InvariantSourceProofPublication;
 }
 
-function replacePublishedDirectory(source: string, destination: string): void {
+/**
+ * A worker workspace's root `.git` file names its Modal-volume worktree administration directory,
+ * which cannot exist on the controller. Replace that location-specific control file with the one
+ * controller registration bound to this destination, creating a detached registration when the
+ * destination has not been prepared as a worktree yet.
+ */
+function relocateWorkspaceGitControlFile(
+  projectRoot: string,
+  staged: string,
+  destination: string,
+  sourceRevision: string
+): { administration: string; created: boolean } | undefined {
+  const stagedControl = path.join(staged, ".git");
+  const stagedControlExists = fs.existsSync(stagedControl);
+  if (!stagedControlExists && !fs.existsSync(path.join(destination, ".git"))) return undefined;
+  if (stagedControlExists && !fs.lstatSync(stagedControl).isFile()) {
+    throw new Error("cloud node workspace Git control metadata is unsafe");
+  }
+  const registration = controllerWorktreeRegistration(projectRoot, destination);
+  if (registration === undefined) {
+    if (!stagedControlExists) return undefined;
+    return {
+      administration: createControllerWorktreeRegistration(projectRoot, staged, sourceRevision),
+      created: true
+    };
+  }
+  fs.rmSync(stagedControl, { force: true });
+  fs.writeFileSync(stagedControl, `gitdir: ${registration}\n`, { mode: 0o600 });
+  return { administration: registration, created: false };
+}
+
+/** Register the cloud-populated staging tree without checking out over its verified bytes. */
+function createControllerWorktreeRegistration(projectRoot: string, staged: string, sourceRevision: string): string {
+  const nonce = `${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  const payload = `${staged}.registration-payload-${nonce}`;
+  const seed = `${staged}.registration-seed-${nonce}`;
+  const stagedControl = path.join(staged, ".git");
+  const originalControl = fs.readFileSync(stagedControl);
+  const gitExecutable = trustedGitExecutable(projectRoot);
+  const environment = deterministicGitEnvironment(gitExecutable);
+  let registration: string | undefined;
+  let payloadRestored = false;
+  fs.renameSync(staged, payload);
+  try {
+    execFileSync(gitExecutable, ["worktree", "add", "--quiet", "--detach", "--no-checkout", seed, sourceRevision], {
+      cwd: projectRoot,
+      env: environment,
+      stdio: "pipe"
+    });
+    registration = execFileSync(gitExecutable, ["rev-parse", "--path-format=absolute", "--git-dir"], {
+      cwd: seed,
+      env: environment,
+      encoding: "utf8"
+    }).trim();
+    const controllerControl = fs.readFileSync(path.join(seed, ".git"));
+    assertCreatedControllerWorktreeRegistration(projectRoot, registration);
+    fs.rmSync(seed, { recursive: true, force: true });
+    fs.renameSync(payload, staged);
+    payloadRestored = true;
+    fs.rmSync(stagedControl, { force: true });
+    fs.writeFileSync(stagedControl, controllerControl, { mode: 0o600 });
+    execFileSync(gitExecutable, ["worktree", "repair", staged], {
+      cwd: projectRoot,
+      env: environment,
+      stdio: "pipe"
+    });
+    if (controllerWorktreeRegistration(projectRoot, staged) !== registration) {
+      throw new Error("cloud node workspace controller-local Git worktree registration is invalid");
+    }
+    return registration;
+  } catch (error) {
+    if (fs.existsSync(seed)) fs.rmSync(seed, { recursive: true, force: true });
+    if (!payloadRestored && fs.existsSync(payload) && !fs.existsSync(staged)) {
+      fs.renameSync(payload, staged);
+      payloadRestored = true;
+    }
+    if (payloadRestored) {
+      fs.rmSync(stagedControl, { force: true });
+      fs.writeFileSync(stagedControl, originalControl, { mode: 0o600 });
+    }
+    if (registration !== undefined) removeCreatedControllerWorktreeRegistration(projectRoot, registration);
+    throw error;
+  }
+}
+
+function repairControllerWorktreeRegistration(projectRoot: string, destination: string, registration: string): void {
+  assertCreatedControllerWorktreeRegistration(projectRoot, registration);
+  const gitExecutable = trustedGitExecutable(projectRoot);
+  execFileSync(gitExecutable, ["worktree", "repair", destination], {
+    cwd: projectRoot,
+    env: deterministicGitEnvironment(gitExecutable),
+    stdio: "pipe"
+  });
+  if (controllerWorktreeRegistration(projectRoot, destination) !== registration) {
+    throw new Error("published cloud workspace controller-local Git worktree registration is invalid");
+  }
+}
+
+function removeCreatedControllerWorktreeRegistration(projectRoot: string, registration: string): void {
+  assertCreatedControllerWorktreeRegistration(projectRoot, registration);
+  fs.rmSync(registration, { recursive: true, force: true });
+}
+
+function assertCreatedControllerWorktreeRegistration(projectRoot: string, registration: string): void {
+  const worktreesRoot = controllerWorktreesRoot(projectRoot);
+  if (
+    path.dirname(registration) !== worktreesRoot ||
+    !fs.existsSync(registration) ||
+    !fs.lstatSync(registration).isDirectory() ||
+    fs.lstatSync(registration).isSymbolicLink()
+  ) {
+    throw new Error("cloud node workspace controller-local Git worktree registration is unsafe");
+  }
+}
+
+/** Return the sole controller registration whose backpointer names this workspace control file. */
+function controllerWorktreeRegistration(projectRoot: string, destination: string): string | undefined {
+  const worktreesRoot = controllerWorktreesRoot(projectRoot);
+  if (!fs.existsSync(worktreesRoot)) return undefined;
+  const control = canonicalControlPath(path.join(destination, ".git"));
+  const bound: string[] = [];
+  for (const entry of fs.readdirSync(worktreesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const administration = path.join(worktreesRoot, entry.name);
+    const backpointer = path.join(administration, "gitdir");
+    if (!fs.existsSync(backpointer) || !fs.lstatSync(backpointer).isFile()) continue;
+    const target = fs.readFileSync(backpointer, "utf8").trim();
+    if (target.length === 0 || canonicalControlPath(path.resolve(administration, target)) !== control) continue;
+    bound.push(administration);
+  }
+  if (bound.length > 1) {
+    throw new Error("cloud node workspace destination has ambiguous Git worktree registrations");
+  }
+  return bound[0];
+}
+
+function controllerWorktreesRoot(projectRoot: string): string {
+  const gitExecutable = trustedGitExecutable(projectRoot);
+  return path.join(
+    execFileSync(gitExecutable, ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: projectRoot,
+      env: deterministicGitEnvironment(gitExecutable),
+      encoding: "utf8"
+    }).trim(),
+    "worktrees"
+  );
+}
+
+function canonicalControlPath(control: string): string {
+  const parent = path.dirname(control);
+  return fs.existsSync(parent) ? path.join(fs.realpathSync(parent), path.basename(control)) : path.resolve(control);
+}
+
+/** Prove the installed workspace is the expected registration at the run's sealed source revision. */
+function assertPublishedWorkspaceRevision(
+  projectRoot: string,
+  destination: string,
+  registration: string,
+  governedSource: { commit: string; tree: string }
+): void {
+  const gitExecutable = trustedGitExecutable(projectRoot);
+  const resolve = (cwd: string, args: readonly string[]): string =>
+    execFileSync(gitExecutable, [...args], {
+      cwd,
+      env: deterministicGitEnvironment(gitExecutable),
+      encoding: "utf8"
+    }).trim();
+  if (
+    canonicalControlPath(resolve(destination, ["rev-parse", "--path-format=absolute", "--show-toplevel"])) !==
+      canonicalControlPath(destination) ||
+    canonicalControlPath(resolve(destination, ["rev-parse", "--path-format=absolute", "--git-dir"])) !==
+      canonicalControlPath(registration)
+  ) {
+    throw new Error("published cloud workspace is not the controller-local Git worktree");
+  }
+  if (
+    resolve(destination, ["rev-parse", "HEAD"]) !== governedSource.commit ||
+    resolve(destination, ["rev-parse", "HEAD^{tree}"]) !== governedSource.tree
+  ) {
+    throw new Error("published cloud workspace does not resolve to the sealed source revision");
+  }
+}
+
+function replacePublishedDirectory(source: string, destination: string, verify?: (destination: string) => void): void {
   assertPublishedDirectoryReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
@@ -3841,9 +4061,13 @@ function replacePublishedDirectory(source: string, destination: string): void {
   fs.renameSync(source, pending);
   const hadPrevious = fs.existsSync(destination);
   if (hadPrevious) fs.renameSync(destination, previous);
+  let installed = false;
   try {
     fs.renameSync(pending, destination);
+    installed = true;
+    verify?.(destination);
   } catch (error) {
+    if (installed) fs.rmSync(destination, { recursive: true, force: true });
     if (hadPrevious && !fs.existsSync(destination)) fs.renameSync(previous, destination);
     throw error;
   }
