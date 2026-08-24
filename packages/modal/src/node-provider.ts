@@ -2978,7 +2978,8 @@ function stageRuntimeSelectedInputs(input: {
       input,
       input.vulnerabilityDatabaseCatalog,
       "vulnerability database catalog",
-      capture
+      capture,
+      { allowIdenticalExisting: true }
     );
     if (snapshot.sha256 !== input.input.vulnerability_database?.catalogSha256) {
       throw new Error("vulnerability database catalog changed during cloud handoff capture");
@@ -2991,7 +2992,8 @@ function stageRuntimeSelectedProjectFile(
   input: { projectRoot: string; staging: string },
   sourcePath: string,
   label: string,
-  capture: DependencyHandoffCapture
+  capture: DependencyHandoffCapture,
+  options: { allowIdenticalExisting?: boolean } = {}
 ): StableRelativeFileSnapshot {
   const relativePath = path.relative(input.projectRoot, sourcePath).split(path.sep).join("/");
   const snapshot = readStableRelativeFileSnapshot(
@@ -3001,7 +3003,7 @@ function stageRuntimeSelectedProjectFile(
     label
   );
   rememberDependencySnapshot(capture, snapshot);
-  stageCapturedFile(input.staging, relativePath, snapshot.bytes);
+  stageCapturedFile(input.staging, relativePath, snapshot.bytes, options);
   return snapshot;
 }
 
@@ -3444,11 +3446,28 @@ function assertDependencyEntryCapacity(capture: DependencyHandoffCapture, additi
   }
 }
 
-function stageCapturedFile(root: string, relativePath: string, contents: Buffer): void {
+function stageCapturedFile(
+  root: string,
+  relativePath: string,
+  contents: Buffer,
+  options: { allowIdenticalExisting?: boolean } = {}
+): void {
   const checked = checkedDependencyRelativePath(relativePath, "authenticated dependency publication");
   const destination = path.join(root, ...checked.split("/"));
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(destination, contents, { flag: "wx", mode: 0o600 });
+  try {
+    fs.writeFileSync(destination, contents, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (!options.allowIdenticalExisting || !isNodeError(error) || error.code !== "EEXIST") throw error;
+    const existing = fs.lstatSync(destination);
+    if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+      throw new Error("authenticated dependency publication collides with an unsafe staged path", { cause: error });
+    }
+    const existingBytes = fs.readFileSync(destination);
+    if (!existingBytes.equals(contents)) {
+      throw new Error("authenticated dependency publication collides with different staged bytes", { cause: error });
+    }
+  }
 }
 
 function assertDependencyCaptureCurrent(capture: DependencyHandoffCapture): void {
