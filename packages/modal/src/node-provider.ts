@@ -1778,6 +1778,11 @@ function assertChildPath(parent: string, child: string, label: string): void {
   }
 }
 
+function assertPromptPathConfinement(runRoot: string, snapshotRoot: string, promptPath: string): void {
+  if (promptPath !== snapshotRoot && promptPath.startsWith(`${snapshotRoot}${path.sep}`)) return;
+  assertChildPath(runRoot, promptPath, "runtime-rendered prompt path");
+}
+
 function assertExecutionSnapshotRoot(runRoot: string, snapshotRoot: string): void {
   assertChildPath(runRoot, snapshotRoot, "execution snapshot root");
   const expectedParent = path.join(runRoot, "smithers", "execution-snapshots");
@@ -2107,7 +2112,7 @@ export function verifyModalExecutionSnapshotClosure(
   assertExecutionSnapshotRoot(runRoot, snapshotRoot);
   assertChildPath(snapshotRoot, workflowPath, "workflow path");
   if (input.prompt_path !== undefined) {
-    assertChildPath(snapshotRoot, checkedPath(root, input.prompt_path, "rendered prompt path"), "rendered prompt path");
+    assertPromptPathConfinement(runRoot, snapshotRoot, checkedPath(root, input.prompt_path, "rendered prompt path"));
   }
   const snapshotAccessRoot = options.snapshotAccessRoot ?? snapshotRoot;
   const canonicalSnapshotIdentity = fs.lstatSync(snapshotRoot, { bigint: true });

@@ -2344,6 +2344,27 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   });
 
+  it("verifies a runtime-rendered prompt under the run root but outside the sealed snapshot", async () => {
+    const fixture = createProjectFixture();
+    fixture.input.prompt_path = fixture.mutablePromptPath;
+    fixture.input.selected_task = {
+      ...fixture.input.selected_task!,
+      promptPath: fixture.mutablePromptPath
+    };
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "runtime-rendered-prompt");
+    try {
+      expect(() => verifyModalExecutionSnapshotClosure(fixture.root, fixture.input)).not.toThrow();
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).resolves.toMatchObject({
+        hasCompletedCheckpoint: false
+      });
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("does not chmod outside the snapshot when a seal directory is swapped", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
