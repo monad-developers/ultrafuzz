@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -1112,4 +1112,173 @@ function runGitBuffer(workspaceRoot: string, args: string[], index?: string): Bu
     // sized message, which still beats a bare `spawnSync git ENOBUFS`.
     return rethrowOversizedGitOutput(args, error);
   }
+}
+
+/** Delay between polls of a colliding live-worktree `index.lock` during preparation restore. */
+export const WORKSPACE_INDEX_LOCK_WAIT_DELAY_MS = 50;
+/**
+ * Poll budget per collision: 1200 × 50 ms = 60 s. Sized by #727's production evidence — a legitimate
+ * LIVE lock was held for 6 s on slow durable storage, and an earlier 101 × 50 ms policy exhausted all
+ * 101 attempts while the owner was still alive — so the bound must comfortably exceed real live holds.
+ */
+export const WORKSPACE_INDEX_LOCK_WAIT_ATTEMPTS = 1200;
+/** Upper bound on `read-tree` invocations per restore, counting the initial attempt. */
+export const WORKSPACE_INDEX_RESET_COMMAND_ATTEMPTS = 5;
+
+/**
+ * True only for git's own index-lock collision on exactly the resolved lock path.
+ *
+ * When git 2.x cannot `O_EXCL`-create the worktree's `index.lock` it exits 128 with
+ * `fatal: Unable to create '<lock>': File exists.` (issue #727). Anything else — a different status,
+ * different stderr, or a collision naming any OTHER path (changed path identity) — is not a retryable
+ * collision and must stay terminal.
+ */
+export function isWorkspaceIndexLockCollision(error: unknown, lockPath: string): boolean {
+  if (!(error instanceof Error)) return false;
+  const record = error as unknown as { status?: unknown; stderr?: unknown };
+  if (record.status !== 128) return false;
+  // The reset primitive captures stderr without `encoding`, so accept the raw bytes as well as the
+  // decoded form; the comparison itself stays byte-exact either way.
+  const stderr = Buffer.isBuffer(record.stderr)
+    ? record.stderr.toString("utf8")
+    : typeof record.stderr === "string"
+      ? record.stderr
+      : "";
+  return stderr.includes(`fatal: Unable to create '${lockPath}': File exists.`);
+}
+
+/**
+ * Resets the live task-worktree index and files to `tree`, surviving transient `index.lock` collisions
+ * (#727) and recovering a provably orphaned lock (#725).
+ *
+ * This is the ONLY git invocation in the system that writes a live worktree index — every other index
+ * writer runs against a temporary `GIT_INDEX_FILE` — so it is the only one that can collide on the
+ * worktree's `index.lock`. The one-shot call it replaces turned a lock held for milliseconds by a
+ * concurrent transaction into a terminal node failure before any model execution, and #727's shipped
+ * interposition attempts (PATH-front wrapper, Bun preload/module mock, LD_PRELOAD spawn interposer)
+ * were each bypassed by the retained renderer's isolated bundled realm; the generated helper's own
+ * code is the only layer guaranteed to execute, which is why the recovery lives here.
+ *
+ * Fail-closed behavior, in order:
+ * - The success path is byte-identical to the old one-shot call: one exec, zero additional git
+ *   invocations (the lock path is resolved lazily, only after a failure).
+ * - Only git's collision naming the canonically resolved lock path is ever retried. Every other
+ *   failure — including a collision naming any other path, or a workspace whose lock path cannot be
+ *   resolved — rethrows the ORIGINAL error object untouched, so outer classifiers keep matching the
+ *   raw status and stderr byte-for-byte.
+ * - A symlink, non-regular, or multi-link lock is terminal and never waited on or removed.
+ * - A lock whose identity changes during the bounded wait has a live writer: exhaustion rethrows the
+ *   original collision error and never removes it.
+ * - A lock frozen (same dev/ino/size/mtime) across the ENTIRE wait window has no live owner — a git
+ *   child killed mid-write never touches its lock again, and no live git holds a lock for the full
+ *   window without touching it — so it is re-verified immediately before removal, unlinked (exactly
+ *   that one path), and the reset is retried (#725). Recovery therefore costs one full wait window:
+ *   full-window unchanged identity is the only orphan proof that needs no clock or age heuristic.
+ */
+export function restoreWorkspaceTreeWithIndexLockRecovery(
+  workspaceRoot: string,
+  tree: string,
+  options?: { lockWaitDelayMs?: number; lockWaitAttempts?: number; commandAttempts?: number }
+): void {
+  assertObjectId(tree, "workspace preparation tree");
+  const lockWaitDelayMs = options?.lockWaitDelayMs ?? WORKSPACE_INDEX_LOCK_WAIT_DELAY_MS;
+  const lockWaitAttempts = options?.lockWaitAttempts ?? WORKSPACE_INDEX_LOCK_WAIT_ATTEMPTS;
+  const commandAttempts = options?.commandAttempts ?? WORKSPACE_INDEX_RESET_COMMAND_ATTEMPTS;
+  let lockPath: string | undefined;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync("git", ["read-tree", "--reset", "-u", tree], {
+        cwd: workspaceRoot,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      return;
+    } catch (error) {
+      lockPath ??= resolveWorkspaceIndexLockPath(workspaceRoot);
+      if (lockPath === undefined || !isWorkspaceIndexLockCollision(error, lockPath)) throw error;
+      if (attempt >= commandAttempts) throw error;
+      awaitWorkspaceIndexLockRelease(lockPath, lockWaitDelayMs, lockWaitAttempts, error);
+    }
+  }
+}
+
+/**
+ * Canonical absolute lock path for the worktree's live index, or undefined when it cannot be resolved.
+ * Resolution failure makes a collision unclassifiable, and the caller then rethrows the original
+ * `read-tree` error — fail closed while keeping unrelated failures byte-for-byte intact.
+ */
+function resolveWorkspaceIndexLockPath(workspaceRoot: string): string | undefined {
+  let index: string;
+  try {
+    index = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-path", "index"], {
+      cwd: workspaceRoot,
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+      .toString("utf8")
+      .trim();
+  } catch {
+    return undefined;
+  }
+  if (index === "" || !path.isAbsolute(index)) return undefined;
+  return `${index}.lock`;
+}
+
+interface WorkspaceIndexLockIdentity {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * Snapshot of the lock's identity, or undefined once it is gone. Throws the terminal unsafe-lock error
+ * for anything that is not a plain single-link regular file — never wait on or remove such a lock.
+ */
+function observeWorkspaceIndexLock(lockPath: string): WorkspaceIndexLockIdentity | undefined {
+  let stats;
+  try {
+    stats = lstatSync(lockPath);
+  } catch (error) {
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (stats.isSymbolicLink() || !stats.isFile() || stats.nlink !== 1) {
+    throw new Error(`workspace index lock is unsafe: ${lockPath}`);
+  }
+  return { dev: stats.dev, ino: stats.ino, size: stats.size, mtimeMs: stats.mtimeMs };
+}
+
+function sameWorkspaceIndexLockIdentity(a: WorkspaceIndexLockIdentity, b: WorkspaceIndexLockIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
+/**
+ * Blocks until the colliding lock disappears, or a provably orphaned lock is removed; returning means
+ * the caller should retry the reset. Throws `collision` (the original git error) when the bound
+ * exhausts against a lock a live writer touched, and the unsafe-lock error for a lock that is not a
+ * plain regular file. Synchronous on purpose: the preparation restore path is fully synchronous, so
+ * this uses the codebase's established `Atomics.wait` sleep idiom (see dynamic-expansion.ts).
+ */
+function awaitWorkspaceIndexLockRelease(lockPath: string, delayMs: number, attempts: number, collision: unknown): void {
+  const initial = observeWorkspaceIndexLock(lockPath);
+  if (initial === undefined) return;
+  let previous = initial;
+  let frozen = true;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    const current = observeWorkspaceIndexLock(lockPath);
+    if (current === undefined) return;
+    if (!sameWorkspaceIndexLockIdentity(previous, current)) {
+      frozen = false;
+      previous = current;
+    }
+  }
+  if (!frozen) throw collision;
+  // Orphan recovery (#725): the identity was byte-identical across the entire window. Re-verify
+  // immediately before removal; any mismatch means a live writer appeared and the collision stands.
+  // Residual TOCTOU between this lstat and the unlink is microseconds after a full frozen window, and
+  // its worst case is another git process failing loudly, not corruption of this reset.
+  const final = observeWorkspaceIndexLock(lockPath);
+  if (final === undefined) return;
+  if (!sameWorkspaceIndexLockIdentity(initial, final)) throw collision;
+  unlinkSync(lockPath);
 }
