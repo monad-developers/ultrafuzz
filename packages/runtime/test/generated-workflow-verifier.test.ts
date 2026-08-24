@@ -8002,14 +8002,65 @@ test("generated Smithers invariant discovery bounds every git enumeration it cap
     "invariantWorkspaceSourcePaths",
     "changedTestTreePaths",
     "changedInvariantSourcePaths",
-    "gitTestTreePaths"
+    "gitTestTreePaths",
+    "removeStaleWorkspaceFiles"
   ]) {
     const start = source.indexOf(`function ${enumeration}(`);
     assert.ok(start >= 0, enumeration);
     const body = source.slice(start, source.indexOf("\n}\n", start));
     assert.match(body, /invariantSuiteGitPaths\(/u, enumeration);
-    assert.doesNotMatch(body, /execFileSync\("git", \["ls-files"/u, enumeration);
+    assert.doesNotMatch(body, /execFileSync\(\s*"git",\s*\["ls-files"/u, enumeration);
   }
+  // The stale-file cleanup (#691) captures nothing outside the bounded helper -- not even its ls-tree.
+  const staleCleanupStart = source.indexOf("function removeStaleWorkspaceFiles(");
+  const staleCleanup = source.slice(staleCleanupStart, source.indexOf("\n}\n", staleCleanupStart));
+  assert.doesNotMatch(staleCleanup, /execFileSync\(/u);
+});
+
+test("#691 every git capture in the generated workflow states an explicit maxBuffer", () => {
+  // #323 bounded the three enumeration sites it happened to list and missed a fourth,
+  // `removeStaleWorkspaceFiles`, whose `--ignored` listing overflows Node's 1 MB default on any
+  // workspace with a populated node_modules. This scan is the exhaustive version of that criterion:
+  // every `execFileSync("git", ...)` call in the template must state a bound, so a future bare site
+  // fails here instead of dying in production as an anonymous `spawnSync git ENOBUFS`. Discovery is
+  // whitespace-tolerant: prettier renders long-argument calls as `execFileSync(\n  "git", ...)` --
+  // this template already carries that shape at its smithers and ultrafuzz sites -- so anchoring on
+  // the single-line `execFileSync("git"` literal would skip exactly the sites it exists to catch.
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const callSpans: string[] = [];
+  for (let from = source.indexOf("execFileSync("); from >= 0; from = source.indexOf("execFileSync(", from + 1)) {
+    let depth = 0;
+    for (let index = source.indexOf("(", from); index < source.length; index += 1) {
+      const character = source[index];
+      if (character === '"' || character === "'" || character === "`") {
+        for (index += 1; index < source.length && source[index] !== character; index += 1) {
+          if (source[index] === "\\") index += 1;
+        }
+        continue;
+      }
+      if (character === "(") depth += 1;
+      if (character === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          callSpans.push(source.slice(from, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  // Every occurrence must parse to one balanced span: a site the scanner cannot delimit fails here
+  // instead of silently dropping out of the criterion.
+  assert.equal(callSpans.length, source.split("execFileSync(").length - 1);
+  const gitCallSpans = callSpans.filter((span) => /^execFileSync\(\s*"git"/u.test(span));
+  // The template invokes git from several fixed sites plus the one bounded helper; if this floor is no
+  // longer met the scanner itself has broken, which must fail rather than vacuously pass.
+  assert.ok(gitCallSpans.length >= 8, `${gitCallSpans.length}`);
+  for (const span of gitCallSpans) {
+    assert.match(span, /maxBuffer:/u, span);
+  }
+  // The criterion covers every spawn flavor: nothing else in the template shells out to git at all.
+  assert.doesNotMatch(source, /(?:^|[^.\w])execSync\(/u);
+  assert.doesNotMatch(source, /spawnSync\(/u);
 });
 
 test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
@@ -8112,7 +8163,20 @@ test("generated Smithers retry snapshots are durable and restore through canonic
       preparationRestore.indexOf("removeStaleWorkspaceFiles(workspaceRoot, preparationTree)"),
     preparationRestore
   );
-  assert.match(preparationRestore, /\["ls-files", "--others", "--ignored", "--exclude-standard", "-z"\]/u);
+  // #691: both stale-cleanup listings exclude the runtime roots in the pathspec itself -- git never
+  // enumerates node_modules only for the loop to discard it -- and keep the explicit `--`, `.`.
+  assert.match(
+    preparationRestore,
+    /\["ls-files", "--others", "--exclude-standard", "-z", "--", "\.", \.\.\.staleExclusionPathspecs\]/u
+  );
+  assert.match(
+    preparationRestore,
+    /\["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", "\.", \.\.\.staleExclusionPathspecs\]/u
+  );
+  assert.match(source, /const WORKSPACE_RUNTIME_ROOTS = \["\.ultrafuzz", "\.smithers", "node_modules", "artifacts"\]/u);
+  assert.match(preparationRestore, /WORKSPACE_RUNTIME_ROOTS\.map\(\(root\) => `:\(exclude\)\$\{root\}`\)/u);
+  // The last gate before rmSync stays: the pathspec aligns the producer with it, it does not replace it.
+  assert.match(preparationRestore, /isWorkspaceRuntimePath\(relativePath\)/u);
   assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
   assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
   assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
