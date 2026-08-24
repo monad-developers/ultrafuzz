@@ -667,7 +667,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       ).toISOString();
       writeRunState(evidence.layout, stateBeforeSynchronization);
       const { syncRun } = await import("./workflow-sync.js");
-      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      const synchronization = await syncRun(
+        { projectRoot: input.projectRoot, runId: input.runId, env: input.env },
+        { allowMissingWorkflowRun: true }
+      );
       if (!synchronization.ok) {
         return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
       }
@@ -865,7 +868,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
         controller_invoked_at: controllerInvocation.timestamp,
-        ...(retryFailedLifecycle ? { retry_failed: true } : {})
+        ...(retryFailedLifecycle ? { retry_failed: true } : {}),
+        ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
     const linkedWorkflow = await updateLinkedWorkflowRunId(evidence.layout, workflowRunId, {

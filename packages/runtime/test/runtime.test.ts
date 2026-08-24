@@ -21026,10 +21026,15 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   fs.writeFileSync(configPath, localConfig, "utf8");
   fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
 
+  const ordinarySync = await syncRun({ projectRoot: project, runId: "missing-workflow-run", env });
+  assert.equal(ordinarySync.ok, false);
+  assert.equal(ordinarySync.diagnostics[0]?.code, "WORKFLOW_INSPECT_FAILED");
+
   const resumed = await resumeRun({
     projectRoot: project,
     runId: "missing-workflow-run",
     maxConcurrency: 8,
+    retryFailed: true,
     env
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
@@ -21052,6 +21057,82 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   assert.equal(recovery.command?.includes("<redacted>"), true);
   const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as { status?: string };
   assert.equal(state.status, "running");
+});
+
+test("missing-run recovery authenticates a fresh attempt epoch after a synchronized failure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "missing-workflow-run-after-failure";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const failedEvents = workflowEvents(workflowRunId, [
+    {
+      type: "NodeFailed",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      error: { message: "discovery failed" }
+    }
+  ]);
+  const failedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "Task failed: node:project-discovery" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: failedEvents
+  });
+  const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const failed = await syncRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
+  assert.equal(failed.value?.status, "failed");
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const failedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(
+    (failedState.nodes["project-discovery"]?.provenance as { workflow?: { attempt?: number } } | undefined)?.workflow
+      ?.attempt,
+    1
+  );
+
+  fs.writeFileSync(
+    failedEnv.SMITHERS_FAKE_INSPECT!,
+    `${JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db")), null, 2)}\n`,
+    "utf8"
+  );
+  const resumed = await resumeRun({ projectRoot: project, runId, retryFailed: true, env: failedEnv });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
+  assert.equal(submitted.provenance?.recovery?.failed_nodes[0]?.failed_attempt, 1);
+  const lifecycleEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
+    (event) => event.event_type === "workflow-lifecycle-result" || event.event_type === "workflow-lifecycle-submitted"
+  );
+  assert.equal(lifecycleEvents.at(-2)?.payload.recovered_missing_workflow_run, true);
+  assert.equal(lifecycleEvents.at(-1)?.payload.recovered_missing_workflow_run, true);
+
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const recoveredEvents = workflowEvents(workflowRunId, [
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+  ]);
+  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: recoveredEvents
+  });
+  const synchronized = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "succeeded", JSON.stringify(synchronized.diagnostics));
+  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(recovered.status, "succeeded");
+  assert.equal(recovered.nodes["project-discovery"]?.status, "succeeded");
+  assert.equal(recovered.provenance?.recovery?.recovered, true);
 });
 
 testWhen(realSmithersGraphUnavailable() === false)(

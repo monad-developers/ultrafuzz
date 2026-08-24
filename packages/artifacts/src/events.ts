@@ -341,7 +341,8 @@ const workflowLifecycleResultPayloadSchema = z.strictObject({
   control_generation: sha256Schema,
   controller_invocation_id: eventIdSchema,
   controller_invoked_at: timestampSchema,
-  retry_failed: z.literal(true).optional()
+  retry_failed: z.literal(true).optional(),
+  recovered_missing_workflow_run: z.literal(true).optional()
 });
 const workflowLifecycleSubmittedPayloadSchema = z.strictObject({
   action: lifecycleActionSchema,
@@ -869,7 +870,8 @@ const eventRecordJsonSchemaDefinitions = {
       control_generation: { $ref: "#/$defs/sha256" },
       controller_invocation_id: { $ref: "#/$defs/eventId" },
       controller_invoked_at: { $ref: "#/$defs/timestamp" },
-      retry_failed: { const: true }
+      retry_failed: { const: true },
+      recovered_missing_workflow_run: { const: true }
     }
   },
   workflowLifecycleSubmittedPayload: {
