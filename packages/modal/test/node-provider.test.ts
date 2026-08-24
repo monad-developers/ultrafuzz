@@ -386,6 +386,30 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("keeps late lifecycle manifests outside the authenticated dependency handoff", async () => {
+    const fixture = createProjectFixture();
+    const dependency = fixture.input.dependency_artifact_dirs[0]!;
+    const dependencyRoot = path.join(fixture.root, dependency);
+    const baseline = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fs.writeFileSync(path.join(dependencyRoot, "artifact-manifest.json"), '{"late":true}\n');
+    fs.mkdirSync(path.join(dependencyRoot, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(dependencyRoot, "nested", "artifact-manifest.json"), '{"nested":true}\n');
+    let reconciled: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      reconciled = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      expect(reconciled.sha256).toBe(baseline.sha256);
+      expect(fs.readFileSync(reconciled.path)).toEqual(fs.readFileSync(baseline.path));
+      const entries = execFileSync("tar", ["-tzf", reconciled.path], { encoding: "utf8" });
+      expect(entries).toContain(`./${dependency}/declared.txt`);
+      expect(entries).not.toContain(`./${dependency}/artifact-manifest.json`);
+      expect(entries).not.toContain(`./${dependency}/nested/artifact-manifest.json`);
+    } finally {
+      reconciled?.cleanup();
+      baseline.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("stages a sealed reference dependency only through its controller manifest closure", async () => {
     const fixture = createProjectFixture({ referenceDependencyAttemptIds: ["dependency-one"] });
     const reference = fixture.input.dependency_artifact_dirs[0]!;

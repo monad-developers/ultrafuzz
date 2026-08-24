@@ -3232,6 +3232,9 @@ function stageVerifiedTaskDependency(
   assertDependencyEntryCapacity(capture, marker.publications.length);
   const destinationRoot = path.join(input.staging, path.relative(input.projectRoot, dependencyDir));
   fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  // The immutable verifier marker is the complete publication authority. Never enumerate the
+  // mutable dependency directory: lifecycle metadata can appear after dispatch without becoming a
+  // new handoff input or changing the authenticated archive identity.
   for (const publication of [...marker.publications].sort((left, right) => comparePathNames(left.path, right.path))) {
     const snapshot = readStableRelativeFileSnapshot(
       dependencyDir,
