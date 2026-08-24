@@ -248,7 +248,14 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         runRoot,
         path.join(projectRoot, ".ultrafuzz", "runs"),
         path.join(projectRoot, ".smithers", "node_modules"),
-        path.join(projectRoot, ".smithers", "workflows")
+        path.join(projectRoot, ".smithers", "workflows"),
+        // The workflow engine opens its SQLite database in the target root, so a
+        // launched run leaves engine state in the governed worktree. Without
+        // these entries the first successful launch dirties the target identity
+        // and every later private-target run fails PRIVATE_TARGET_UNBOUND.
+        path.join(projectRoot, "smithers.db"),
+        path.join(projectRoot, "smithers.db-shm"),
+        path.join(projectRoot, "smithers.db-wal")
       ]
     });
   let governance: ReturnType<typeof prepareDataGovernance>;
