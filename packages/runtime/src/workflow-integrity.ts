@@ -1781,6 +1781,53 @@ function withBunStartupControls(
   return result;
 }
 
+/**
+ * Replace controller-owned Bun startup controls while preparing an append-only
+ * controller generation. The refreshed sources live under a content-addressed
+ * directory so an older control seal's source files are never mutated.
+ */
+export function replaceBunStartupControlsForControllerRefresh(
+  layout: RunLayout,
+  files: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
+): Array<WorkflowExecutionControlFile & { contents: Buffer }> {
+  const controlPaths = new Set(Object.keys(BUN_STARTUP_CONTROLS));
+  const digest = crypto
+    .createHash("sha256")
+    .update("ultrafuzz-bun-startup-controls-v1\0")
+    .update(
+      Object.entries(BUN_STARTUP_CONTROLS)
+        .map(([snapshotPath, contents]) => `${snapshotPath}\0${contents.byteLength}\0${contents.toString("hex")}\0`)
+        .join("")
+    )
+    .digest("hex");
+  const sourceRoot = ensureSafeDirectory(layout.root, path.join("smithers", "controller-bun-startup-controls", digest));
+  const controls = Object.entries(BUN_STARTUP_CONTROLS).map(([snapshotPath, contents]) => {
+    const sourcePath = safeResolveInside(
+      sourceRoot,
+      path.basename(snapshotPath),
+      "refreshed Bun startup control source"
+    );
+    if (pathEntryExists(sourcePath)) {
+      if (
+        !readBoundedRegularFile(layout.root, sourcePath, `refreshed Bun startup control ${snapshotPath}`).equals(
+          contents
+        )
+      ) {
+        throw new Error("refreshed workflow Bun startup control source changed before sealing");
+      }
+    } else {
+      writeFileDurable(sourcePath, contents);
+    }
+    return { sourcePath, snapshotPath, contents: Buffer.from(contents) };
+  });
+  return [
+    ...files
+      .filter((file) => !controlPaths.has(file.snapshotPath))
+      .map((file) => ({ ...file, contents: Buffer.from(file.contents) })),
+    ...controls
+  ];
+}
+
 function readBoundedRegularFile(root: string, filePath: string, label: string): Buffer {
   const trustedRoot = path.resolve(root);
   const exactPath = path.resolve(filePath);

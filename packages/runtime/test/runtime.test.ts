@@ -102,7 +102,11 @@ import {
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
-import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
+import {
+  BUN_MODULE_CONFINEMENT_SOURCE,
+  materializeWorkflowExecutionSnapshot,
+  replaceBunStartupControlsForControllerRefresh
+} from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
@@ -17685,6 +17689,89 @@ test("controller refresh preserves run authority and retains both immutable gene
       [before.controlGeneration, after.controllerGeneration].sort()
     );
   }
+});
+
+test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-legacy-bun-controls";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+  if (!before.ok) return;
+
+  const startupControlPaths = ["controls/bun-module-confinement.js", "controls/bun-empty.env", "controls/bunfig.toml"];
+  const currentControls = new Map(
+    before.verifiedControl.executionFiles
+      .filter((file) => startupControlPaths.includes(file.snapshotPath))
+      .map((file) => [file.snapshotPath, file.contents] as const)
+  );
+  assert.equal(currentControls.size, startupControlPaths.length);
+  const staleSource = path.join(before.layout.root, "smithers", "legacy-bun-module-confinement.js");
+  fs.writeFileSync(staleSource, "legacy startup control\n", "utf8");
+  const legacyFiles = [
+    ...before.verifiedControl.executionFiles.filter((file) => !startupControlPaths.includes(file.snapshotPath)),
+    {
+      sourcePath: staleSource,
+      snapshotPath: startupControlPaths[0]!,
+      contents: Buffer.from("legacy startup control\n")
+    }
+  ];
+  const replaced = replaceBunStartupControlsForControllerRefresh(before.layout, legacyFiles);
+  for (const startupPath of startupControlPaths) {
+    const refreshed = replaced.filter((file) => file.snapshotPath === startupPath);
+    assert.equal(refreshed.length, 1);
+    assert.deepEqual(refreshed[0]!.contents, currentControls.get(startupPath));
+    assert.notEqual(refreshed[0]!.sourcePath, staleSource);
+  }
+  assert.equal(fs.readFileSync(staleSource, "utf8"), "legacy startup control\n");
+
+  const originalSnapshotRoot = before.executionSnapshot.root;
+  const savedOriginalSnapshot = `${path.dirname(originalSnapshotRoot)}.saved-${before.controlGeneration}`;
+  const originalSnapshotMode = fs.statSync(originalSnapshotRoot).mode & 0o777;
+  fs.chmodSync(originalSnapshotRoot, 0o700);
+  fs.renameSync(originalSnapshotRoot, savedOriginalSnapshot);
+  const deferred = await readLinkedWorkflowEvidence(project, runId, {
+    allowPendingControllerRefresh: true,
+    deferExecutionSnapshotForControllerRefresh: true
+  });
+  assert.equal(deferred.ok, true, "diagnostics" in deferred ? JSON.stringify(deferred.diagnostics) : "");
+  if (!deferred.ok) return;
+  assert.equal("executionSnapshot" in deferred, false);
+  assert.equal(fs.existsSync(originalSnapshotRoot), false);
+
+  const boundOldEnvironment = linkedWorkflowExecutionEnvironment(before, env);
+  const oldRunnerSource = fs.readFileSync(env.SMITHERS_BIN!, "utf8");
+  const restoreCommand = [
+    `mv ${shellQuote(savedOriginalSnapshot)} ${shellQuote(originalSnapshotRoot)}`,
+    `chmod ${originalSnapshotMode.toString(8)} ${shellQuote(originalSnapshotRoot)}`
+  ].join("\n");
+  const currentRunnerSource = oldRunnerSource.replace("  inspect)\n", `  inspect)\n${restoreCommand}\n`);
+  assert.notEqual(currentRunnerSource, oldRunnerSource);
+  writeFakeNpmInstaller(project, {
+    count: 0,
+    stderr: [],
+    runnerSource: currentRunnerSource
+  });
+
+  const refreshed = await resumeRun({
+    projectRoot: project,
+    runId,
+    refreshController: true,
+    resetNode: "node:project-discovery",
+    env: boundOldEnvironment
+  });
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
+  if (!after.ok) return;
+  assert.notEqual(after.controllerGeneration, before.controlGeneration);
+  assert.equal(fs.existsSync(after.executionSnapshot.root), true);
+  assert.equal(fs.existsSync(originalSnapshotRoot), true);
+  assert.equal(fs.existsSync(savedOriginalSnapshot), false);
 });
 
 test("ordinary lifecycle calls cannot invent controller workflow-change authority", async () => {

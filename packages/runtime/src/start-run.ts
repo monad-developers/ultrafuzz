@@ -94,6 +94,8 @@ import {
   type WorkflowRunLinkAction,
   type WorkflowRunLinkJournalEntry
 } from "./workflow-run-link.js";
+import { smithersExecutableCapability } from "./smithers-executable-capability.js";
+import { hasWorkflowExecutionSnapshotCapability } from "./workflow-execution-snapshot-capability.js";
 
 export interface LinkedWorkflowEvidence {
   ok: true;
@@ -109,11 +111,39 @@ export interface LinkedWorkflowEvidence {
   executionSnapshot: MaterializedWorkflowExecutionSnapshot;
 }
 
+export type DeferredLinkedWorkflowEvidence = Omit<
+  LinkedWorkflowEvidence,
+  "workflowPath" | "inputJson" | "executionSnapshot"
+>;
+
+type LinkedWorkflowEvidenceFailure = { ok: false; diagnostics: RuntimeDiagnostic[] };
+type ReadLinkedWorkflowEvidenceOptions = {
+  tolerateControlDivergence?: boolean;
+  allowPendingControllerRefresh?: boolean;
+  /** Controller refresh authenticates the old generation but must not execute it before replacement. */
+  deferExecutionSnapshotForControllerRefresh?: boolean;
+};
+
+function hasMaterializedWorkflowEvidence(
+  evidence: LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence
+): evidence is LinkedWorkflowEvidence {
+  return (
+    "executionSnapshot" in evidence &&
+    typeof evidence.executionSnapshot === "object" &&
+    evidence.executionSnapshot !== null &&
+    "workflowPath" in evidence &&
+    typeof evidence.workflowPath === "string" &&
+    "inputJson" in evidence &&
+    typeof evidence.inputJson === "string"
+  );
+}
+
 const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_BIN",
   "SMITHERS_CLI_SRC_DIR",
   "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
@@ -143,6 +173,27 @@ const MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES = [
   "https_proxy",
   "no_proxy"
 ] as const;
+
+function controllerRefreshInspectionEnvironment(
+  env: Record<string, string | undefined> | undefined
+): Record<string, string | undefined> | undefined {
+  if (smithersExecutableCapability(env) === undefined && !hasWorkflowExecutionSnapshotCapability(env)) {
+    return env;
+  }
+  // A lifecycle caller can accidentally hand back the environment from the
+  // old sealed generation. Its enumerable private symbols deliberately survive
+  // ordinary spreads, but refresh must inspect with current operator authority:
+  // copy string credentials only, remove every snapshot-controlled value, and
+  // mask an ambient explicit runner until the current operator runner is bound.
+  const current = Object.fromEntries(
+    Object.entries(env ?? {}).filter(
+      ([name]) => !WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES.has(name.toUpperCase())
+    )
+  );
+  for (const name of WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) current[name] = undefined;
+  current.SMITHERS_BIN = "";
+  return current;
+}
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
@@ -564,36 +615,39 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
       releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
     }
-    let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-      allowPendingControllerRefresh: input.refreshController === true
-    });
+    let evidence: LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure =
+      input.refreshController === true
+        ? await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
+            allowPendingControllerRefresh: true,
+            deferExecutionSnapshotForControllerRefresh: true
+          })
+        : await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
     if (!evidence.ok) return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
     releaseLifecycleLock ??= await acquireWorkflowLifecycleLock(evidence.layout);
-    const lockedEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-      allowPendingControllerRefresh: input.refreshController === true
-    });
+    const lockedEvidence =
+      input.refreshController === true
+        ? await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
+            allowPendingControllerRefresh: true,
+            deferExecutionSnapshotForControllerRefresh: true
+          })
+        : await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
     if (!lockedEvidence.ok) return runtimeFailure<WorkflowLifecycleValue>(lockedEvidence.diagnostics);
     evidence = lockedEvidence;
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
-    const controllerRefreshAuthorityFor = (current: {
-      controlGeneration: string;
-      controllerGeneration: string;
-      executionSnapshot: { root: string };
-    }) =>
+    const controllerRefreshAuthorityFor = (current: LinkedWorkflowEvidence) =>
       current.controllerGeneration === current.controlGeneration
         ? undefined
         : {
             controllerGeneration: current.controllerGeneration,
             executionSnapshotRoot: current.executionSnapshot.root
           };
-    let controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
     if (input.refreshController === true) {
       const releaseControlLock = await acquireWorkflowControlLock(evidence.layout);
       try {
         await assertSmithersControllerRefreshable({
           smithersRunId: evidence.smithersRunId,
           projectRoot: path.resolve(input.projectRoot),
-          env: linkedWorkflowExecutionEnvironment(evidence, input.env)
+          env: controllerRefreshInspectionEnvironment(input.env)
         });
         const original = verifyWorkflowControlSnapshot(path.resolve(input.projectRoot), evidence.layout);
         if (original.generation !== evidence.controlGeneration) {
@@ -643,11 +697,14 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           controllerSnapshot: committed.snapshot,
           executionSnapshot: published
         };
-        controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
       } finally {
         await releaseControlLock();
       }
     }
+    if (!hasMaterializedWorkflowEvidence(evidence)) {
+      throw new Error("controller refresh did not materialize its authenticated execution snapshot");
+    }
+    const controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
     const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
     const taskDocument = parseSealedTaskManifest(evidence.verifiedControl.contents);
     const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
@@ -1074,11 +1131,21 @@ async function persistSmithersEvidence(
   return { verifiedControl, executionSnapshot, workflowLinkId: committedWorkflowLink.link_id };
 }
 
+export function readLinkedWorkflowEvidence(
+  projectRoot: string,
+  runId: string,
+  options: ReadLinkedWorkflowEvidenceOptions & { deferExecutionSnapshotForControllerRefresh: true }
+): Promise<DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure>;
+export function readLinkedWorkflowEvidence(
+  projectRoot: string,
+  runId: string,
+  options?: ReadLinkedWorkflowEvidenceOptions & { deferExecutionSnapshotForControllerRefresh?: false }
+): Promise<LinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure>;
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
   runId: string,
-  options: { tolerateControlDivergence?: boolean; allowPendingControllerRefresh?: boolean } = {}
-): Promise<LinkedWorkflowEvidence | { ok: false; diagnostics: RuntimeDiagnostic[] }> {
+  options: ReadLinkedWorkflowEvidenceOptions = {}
+): Promise<LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure> {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const runsRoot = await runsRootForProject(resolvedProjectRoot);
   let metadataPath: string;
@@ -1175,12 +1242,15 @@ export async function readLinkedWorkflowEvidence(
     const controller = effectiveControllerGeneration(layout, verifiedControl, {
       allowPending: options.allowPendingControllerRefresh === true
     });
-    const executionSnapshot = materializeWorkflowExecutionSnapshot({
-      projectRoot: resolvedProjectRoot,
-      layout,
-      snapshot: controller.snapshot,
-      authorizedGenerations: controller.authorizedGenerations
-    });
+    const executionSnapshot =
+      options.deferExecutionSnapshotForControllerRefresh === true
+        ? undefined
+        : materializeWorkflowExecutionSnapshot({
+            projectRoot: resolvedProjectRoot,
+            layout,
+            snapshot: controller.snapshot,
+            authorizedGenerations: controller.authorizedGenerations
+          });
     const expectedWorkflowFields: Record<string, string> = {
       path: projectRelativePath(resolvedProjectRoot, verifiedControl.paths.workflowPath),
       evidence_path: runRelativePath(layout, verifiedControl.paths.evidenceWorkflowPath),
@@ -1239,15 +1309,19 @@ export async function readLinkedWorkflowEvidence(
     return {
       ok: true,
       smithersRunId,
-      workflowPath: executionSnapshot.workflowPath,
-      inputJson: executionSnapshot.inputJson,
       layout,
       controlGeneration: verifiedControl.generation,
       controllerGeneration: controller.controllerGeneration,
       workflowLinkId: activeWorkflowLink.link_id,
       verifiedControl,
       controllerSnapshot: controller.snapshot,
-      executionSnapshot
+      ...(executionSnapshot === undefined
+        ? {}
+        : {
+            workflowPath: executionSnapshot.workflowPath,
+            inputJson: executionSnapshot.inputJson,
+            executionSnapshot
+          })
     };
   } catch (error) {
     return {
