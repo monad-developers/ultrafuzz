@@ -528,12 +528,15 @@ test("goal search coverage is rendered into the Markdown report instead of only 
     projectCanonicalFinalReport(report, { goalSearchCoverage });
 
   // Every targeted lane searched: an empty findings list is a searched negative.
-  const full = project(empty(), census([
+  const full = project(
+    empty(),
+    census([
       lane(1, "completed-with-findings"),
       lane(2, "completed-no-findings"),
       lane(3, "completed-no-findings"),
       lane(4, "completed-no-findings", "goal-roaming")
-    ]));
+    ])
+  );
   assert.match(full.markdown, /^## Goal search coverage$/mu);
   assert.match(full.markdown, /All 3 targeted goal searches completed and published a verified result/u);
   assert.match(full.markdown, /- Targeted goal search lanes: `3`\n- Completed with a verified result: `3`/u);
@@ -569,10 +572,7 @@ test("goal search coverage is rendered into the Markdown report instead of only 
   assert.equal(isDirectiveConformingFinalReportMarkdown(partial.markdown, partial.report), true);
 
   // Both absences of measurement are named when both happened.
-  const partialAndBlocked = project(
-    { ...empty(), campaign_outcome: { outcome: "blocked" } },
-    census(partialGoals)
-  );
+  const partialAndBlocked = project({ ...empty(), campaign_outcome: { outcome: "blocked" } }, census(partialGoals));
   assert.match(
     partialAndBlocked.markdown,
     /^No issues were reported, but the invariant campaign did not run and only 3 of 77 targeted goal searches completed, so this is not a result\./mu
@@ -608,10 +608,7 @@ test("goal search coverage is rendered into the Markdown report instead of only 
   assert.match(inconsistent.markdown, /census summary disagrees with the per-lane record/u);
 
   // An unrecognized status is a lane, but never a completion.
-  const unrecognized = project(
-    empty(),
-    census([lane(1, "completed-no-findings"), lane(2, "invented-status")])
-  );
+  const unrecognized = project(empty(), census([lane(1, "completed-no-findings"), lane(2, "invented-status")]));
   assert.match(unrecognized.markdown, /\*\*Partial goal search coverage: only 1 of 2 targeted goal searches/u);
   assert.match(unrecognized.markdown, /- Recorded with an unrecognized status: `1`/u);
 

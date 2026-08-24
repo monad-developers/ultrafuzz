@@ -1239,13 +1239,11 @@ function validateDynamicVariables(variables: PromptRenderInput["dynamicVariables
     if (isSupportedTemplateVariable(key)) {
       throw new PromptError("invalid-render-input", `dynamic item variable cannot override built-in variable: ${key}`);
     }
-    if (
-      !(
-        typeof value === "string" ||
-        typeof value === "boolean" ||
-        (typeof value === "number" && Number.isFinite(value))
-      )
-    ) {
+    if (!(
+      typeof value === "string" ||
+      typeof value === "boolean" ||
+      (typeof value === "number" && Number.isFinite(value))
+    )) {
       throw new PromptError("invalid-render-input", `invalid dynamic item variable value for ${key}`);
     }
   }

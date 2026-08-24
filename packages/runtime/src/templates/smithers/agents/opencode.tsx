@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { OpenCodeAgent as SmithersOpenCodeAgent } from "smithers-orchestrator";
+import { OpenCodeAgent as SmithersOpenCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
@@ -16,7 +16,10 @@ export class CompatibleOpenCodeAgent extends SmithersOpenCodeAgent {
     // mode, OPENCODE_PERMISSION. Passing it in as the additions MERGES the
     // scrub over it; replacing it would drop the permission bypass and leave
     // an unattended agent waiting on a prompt nobody can answer.
-    return { ...command, env: workflowControlChildEnvironment(command.env) };
+    return {
+      ...command,
+      env: workflowControlChildEnvironment({ ...this.opts.env, ...command.env })
+    };
   }
 }
 

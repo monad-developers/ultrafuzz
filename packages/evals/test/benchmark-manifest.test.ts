@@ -153,7 +153,7 @@ describe("public benchmark manifests", () => {
     });
     expect(suite.targets.map((target) => target.id)).toEqual(cohort.smoke_targets);
     expect(suite.targets.every((target) => target.sensitivity === "public")).toBe(true);
-    expect(suite.run.trials_per_variant).toBe(1);
+    expect(suite.run.trials_per_variant).toBe(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT);
     expect(suite.model_profiles).toEqual({
       "benchmark-smoke-gpt-5-6-luna-high": {
         agent: "CodexAgent",

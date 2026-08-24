@@ -582,15 +582,7 @@
     },
     "agentId": {
       "type": "string",
-      "enum": [
-        "ClaudeAgent",
-        "CodexAgent",
-        "DeepSeekAgent",
-        "KimiAgent",
-        "OpenCodeAgent",
-        "OpenRouterAgent",
-        "PiAgent"
-      ]
+      "enum": ["ClaudeAgent", "CodexAgent", "DeepSeekAgent", "KimiAgent", "OpenCodeAgent", "OpenRouterAgent", "PiAgent"]
     },
     "nodeId": {
       "type": "string",

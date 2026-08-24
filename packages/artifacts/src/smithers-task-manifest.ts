@@ -1520,7 +1520,11 @@ function assertTaskMatchesPlannedNode(
     const dependency = graphNodes.get(dependencyId);
     if (dependency === undefined)
       throw new Error(`planned-graph dependency ${JSON.stringify(dependencyId)} is missing`);
-    if (dependency.dynamic !== null && dependency.dynamic !== undefined && node.dynamic_dependencies?.includes(dependencyId)) {
+    if (
+      dependency.dynamic !== null &&
+      dependency.dynamic !== undefined &&
+      node.dynamic_dependencies?.includes(dependencyId)
+    ) {
       return [];
     }
     return plannedAttemptIds(dependency);
@@ -1537,7 +1541,11 @@ function assertTaskMatchesPlannedNode(
   );
   const expectedWorkflowDependencies = node.depends_on.flatMap((dependencyId) => {
     const dependency = graphNodes.get(dependencyId)!;
-    if (dependency.dynamic !== null && dependency.dynamic !== undefined && node.dynamic_dependencies?.includes(dependencyId)) {
+    if (
+      dependency.dynamic !== null &&
+      dependency.dynamic !== undefined &&
+      node.dynamic_dependencies?.includes(dependencyId)
+    ) {
       return [];
     }
     return dependency.kind === "agentic" ? plannedAttemptIds(dependency).map((attemptId) => `verify:${attemptId}`) : [];

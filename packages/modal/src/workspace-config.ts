@@ -6,8 +6,6 @@ import {
   type ModalModelSpec,
   type ModelProvider
 } from "./defaults.js";
-import { remoteAuthDir } from "./layout.js";
-
 export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number, auditProfile = "default"): string {
   const selectedProfile = modelProfileToml(model);
   const dynamicStrategiesEnumerator = auditProfile === "smoke" ? "" : "dynamic_strategies_enumerator = 3\n";

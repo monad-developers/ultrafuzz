@@ -206,7 +206,10 @@ const inputSchema = z
     cloud_worker: z.literal(true).optional(),
     task_id: z.string().min(1).max(4_096).optional(),
     attempt_id: z.string().min(1).max(4_096).optional(),
-    execution_generation: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u).optional(),
+    execution_generation: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)
+      .optional(),
     selected_task: z.json().optional(),
     operator_prompt: z.string().optional(),
     operator_input: operatorInputSchema.optional()
@@ -225,7 +228,8 @@ const inputSchema = z
       if (cloudKeys.length !== CLOUD_WORKER_INPUT_KEYS.length) {
         ctx.addIssue({
           code: "custom",
-          message: "cloud worker input requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task"
+          message:
+            "cloud worker input requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task"
         });
       }
       if (value.tasks !== undefined && value.tasks.length > 0) {
@@ -472,11 +476,10 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
         ? {}
         : {
             vulnerabilityDatabase: {
-              catalogPath: path.resolve(process.cwd(), dynamicExecutionPath(
-                task,
-                task.vulnerabilityDatabaseCatalog.path,
-                "vulnerability database catalog"
-              )),
+              catalogPath: path.resolve(
+                process.cwd(),
+                dynamicExecutionPath(task, task.vulnerabilityDatabaseCatalog.path, "vulnerability database catalog")
+              ),
               catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
             },
             vulnerabilityDatabaseRelative: {
@@ -524,9 +527,8 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
         ? {
             configuredFuzzerTimeoutSeconds:
               compiled?.campaignTimeoutExpectations?.configuredFuzzerTimeoutSeconds ??
-              dynamicGroupSpecs.find(
-                (group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId
-              )?.promptContext.resolvedConfig.invariantTestingFuzzerTimeout,
+              dynamicGroupSpecs.find((group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId)
+                ?.promptContext.resolvedConfig.invariantTestingFuzzerTimeout,
             plannedTimeoutSeconds: task.metadata.timeout.seconds,
             finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
           }
@@ -540,8 +542,8 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
       pinnedSubmodules: compiled?.pinnedSubmodules ?? serializedTaskSpecs[0]?.pinnedSubmodules ?? null,
-      productionSourceRoots:
-        compiled?.productionSourceRoots ?? serializedTaskSpecs[0]?.productionSourceRoots ?? ["src", "contracts"]
+      productionSourceRoots: compiled?.productionSourceRoots ??
+        serializedTaskSpecs[0]?.productionSourceRoots ?? ["src", "contracts"]
     };
   });
 }
@@ -1538,11 +1540,7 @@ const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
 const governedSource = readGovernedSource();
 
-function renderAgentPrompt(values: {
-  runtimeContext: string;
-  operatorPrompt: string;
-  taskPrompt: string;
-}): string {
+function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }): string {
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
     ["untrusted_content_boundary", untrustedContentBoundary],
@@ -3218,9 +3216,7 @@ function goalSearchCoveragePath(runRoot: string): string | undefined {
 }
 
 function verifiedGoalSearchFindingCount(task: (typeof taskSpecs)[number]): number | undefined {
-  const findingsOutput = task.outputs.find(
-    (output) => output.primary && output.contract === "ultrafuzz/findings@2"
-  );
+  const findingsOutput = task.outputs.find((output) => output.primary && output.contract === "ultrafuzz/findings@2");
   if (findingsOutput === undefined) return undefined;
   try {
     const artifactDir = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir));

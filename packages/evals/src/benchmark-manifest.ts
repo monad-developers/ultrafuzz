@@ -1,7 +1,7 @@
 import { auditProfile, loadAuditProfileCatalog, packagedTopologyDigest } from "@ultrafuzz/config";
 import { z } from "zod/v4";
 
-import { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
+import type { BenchmarkLaneName } from "./benchmark-lane-names.js";
 import { readStrictJsonDocument } from "./eval-durable.js";
 import {
   EVAL_BENCHMARK_COHORT_SCHEMA_ID,

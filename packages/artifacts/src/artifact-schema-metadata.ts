@@ -431,11 +431,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     ]
   ),
   "trusted-cli.schema.json": runtime("trustedCliMetadataJsonSchema"),
-  "threat-model.schema.json": artifact(
-    "ultrafuzz/threat-model@1",
-    "threatModelJsonSchema",
-    "threatModelSchema"
-  ),
+  "threat-model.schema.json": artifact("ultrafuzz/threat-model@1", "threatModelJsonSchema", "threatModelSchema"),
   "vulnerability-database-planner-catalog.schema.json": artifact(
     "ultrafuzz/vulnerability-database-planner-catalog@1",
     "vulnerabilityDatabasePlannerCatalogJsonSchema",

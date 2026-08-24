@@ -44,7 +44,6 @@ import {
   validateArtifactVerificationMarker,
   validateFindingsSchema,
   validateSafeId,
-  validateNodeReference,
   writeArtifactManifest,
   writeRunMetadataDocument,
   writeRunState,
@@ -1491,29 +1490,6 @@ function prepareWorkflowUsageEvents(
     }
   }
   return { inputs, entries, pendingEntries };
-}
-
-/**
- * Workflow task ID to the identity `state.json` keys that task's node under.
- *
- * A usage event names the workflow task that spent the tokens (`node:<attempt>`, and its
- * `verify:`/`prepare:` wrappers), which is not the identity the run state is keyed by. Only the task
- * table knows the mapping, so the ledger's `node_id` is resolved here rather than by any reader
- * re-deriving the naming rule.
- */
-function stateNodeIdsByWorkflowTaskId(tasks: readonly StoredWorkflowTask[]): Map<string, string> {
-  const byTaskId = new Map<string, string>();
-  for (const task of tasks) {
-    for (const taskId of [
-      task.smithersNodeId,
-      task.verifierSmithersNodeId,
-      preparationSmithersNodeIdForAttempt(task.attemptId),
-      task.attemptId
-    ]) {
-      if (!byTaskId.has(taskId)) byTaskId.set(taskId, task.attemptId);
-    }
-  }
-  return byTaskId;
 }
 
 function normalizedUsageLedgerInput(
@@ -4667,13 +4643,6 @@ function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
 }
 
-// Mirrors the preparation wrapper ID compiled into the task manifest. Deriving
-// it preserves attribution when resuming manifests written before the explicit
-// preparationSmithersNodeId field was introduced.
-function preparationSmithersNodeIdForAttempt(attemptId: string): string {
-  return `prepare:${attemptId}`;
-}
-
 function immutableTerminalFinalization(previous: NodeState | undefined): boolean {
   if (previous === undefined || !terminalStatus(previous.status)) return false;
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
@@ -5056,13 +5025,14 @@ function ensureWorkflowTaskStateRecords(
       waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
       nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
     });
-    state.nodes[task.attemptId]!.provenance = {
+    const provenance = {
       ...(task.metadata.node.producerNodeId === undefined
         ? {}
         : { producer_node_id: task.metadata.node.producerNodeId }),
       ...(task.metadata.node.storageId === undefined ? {} : { storage_id: task.metadata.node.storageId }),
       ...dynamicNodeLineage(task.metadata.node.dynamic)
     };
+    if (Object.keys(provenance).length > 0) state.nodes[task.attemptId]!.provenance = provenance;
     changed = true;
   }
   const firstTaskByConcreteNode = new Map<string, StoredWorkflowTask>();

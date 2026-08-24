@@ -87,11 +87,7 @@ import {
   deleteRunSourceRevision,
   publishRunSourceRevision
 } from "./source-revision.js";
-import {
-  promptTextsForCatalog,
-  transformPromptCatalogForRun,
-  transformTopologyForRun
-} from "./topology-transform.js";
+import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
   materializeVulnerabilityDatabasePlannerCatalog,
   VULNERABILITY_DATABASE_REFERENCE_NODE_ID,

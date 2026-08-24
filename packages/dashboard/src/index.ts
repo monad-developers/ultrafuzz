@@ -591,14 +591,7 @@ class DashboardApp {
     const generatedNodes = (runtimeGraph?.nodes ?? [])
       .filter((node) => node.dynamic_generated !== undefined)
       .map((node, index) =>
-        this.dynamicFlowNode(
-          node,
-          staticNodes.length + index,
-          state,
-          context.runRoot,
-          topology,
-          authorityProjection
-        )
+        this.dynamicFlowNode(node, staticNodes.length + index, state, context.runRoot, topology, authorityProjection)
       );
     const nodes = [...staticNodes, ...generatedNodes];
     const dependencyIds = (logicalNode: TopologyNode): string[] => {

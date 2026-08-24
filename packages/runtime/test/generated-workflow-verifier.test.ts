@@ -113,10 +113,7 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     selected_task: {},
     operator_prompt: "focus"
   };
-  assert.equal(
-    inputSchema.safeParse(cloud).success,
-    true
-  );
+  assert.equal(inputSchema.safeParse(cloud).success, true);
 
   for (const invalid of [
     { ...local, unexpected: true },

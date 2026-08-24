@@ -7,6 +7,9 @@ import test from "node:test";
 
 import {
   CACHE_MANIFEST_FILE,
+  REFERENCE_GITHUB_REPOS_ENV,
+  REFERENCE_GITHUB_TOKEN_ENV,
+  REFERENCE_TOKEN_REDACTION,
   REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID,
   REFERENCE_CACHE_SCHEMA_VERSION,
   RUN_REFERENCE_MANIFEST_FILE,
@@ -24,6 +27,11 @@ import {
   updateProjectReferencesLatest
 } from "../src/index.js";
 import type { ReferenceCacheManifest, ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
+import { fakeGitCommands, fakeGitIsolationEnv, installFakeGit, withProcessEnv } from "./fake-git.js";
+
+const PRIVATE_REFERENCE_TOKEN = "ghs_privatefilteredreferencetoken0123456789";
+const PRIVATE_REFERENCE_REPO = "example/private-reference";
+const PRIVATE_REFERENCE_COMMIT = "cccccccccccccccccccccccccccccccccccccccc";
 
 function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));

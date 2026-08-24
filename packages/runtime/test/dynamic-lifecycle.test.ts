@@ -36,15 +36,15 @@ const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
     "model:codex-route-7cb3cbc344a51b9df15967a7982030649706e28ea6123993a5f78e9d4270ffc7",
     "model:openai"
   ].map((destination) => ({
-      destination,
-      processor: "test",
-      region: "local",
-      retention_policy: "test",
-      training_policy: "none",
-      dpa_status: "n/a",
-      minimization_policy: "synthetic",
-      data_handling_basis: "public"
-    })),
+    destination,
+    processor: "test",
+    region: "local",
+    retention_policy: "test",
+    training_policy: "none",
+    dpa_status: "n/a",
+    minimization_policy: "synthetic",
+    data_handling_basis: "public"
+  })),
   openrouter_model_allowlist: []
 });
 
@@ -178,11 +178,11 @@ function lifecycleEnvironment(project: string): {
       "    attempt_id=${node_id#node:}",
       "    profile_id=default",
       "    model_name=gpt-5.5",
-      "    case \"$attempt_id\" in",
+      '    case "$attempt_id" in',
       "      *__model_1__*) profile_id=claude; model_name=claude-opus-4-8 ;;",
       "    esac",
       "    agent_id=ultrafuzz-agent:${attempt_id}:0:${profile_id}",
-      "    printf '{\"ok\":true,\"data\":{\"node\":{\"nodeId\":\"%s\"},\"attempts\":[{\"nodeId\":\"%s\",\"attempt\":1,\"state\":\"finished\",\"meta\":{\"agentChainIndex\":0,\"agentId\":\"%s\",\"agentModel\":\"%s\"}},{\"nodeId\":\"%s\",\"attempt\":2,\"state\":\"finished\",\"meta\":{\"agentChainIndex\":0,\"agentId\":\"%s\",\"agentModel\":\"%s\"}}]}}\\n' \"$node_id\" \"$node_id\" \"$agent_id\" \"$model_name\" \"$node_id\" \"$agent_id\" \"$model_name\"",
+      '    printf \'{"ok":true,"data":{"node":{"nodeId":"%s"},"attempts":[{"nodeId":"%s","attempt":1,"state":"finished","meta":{"agentChainIndex":0,"agentId":"%s","agentModel":"%s"}},{"nodeId":"%s","attempt":2,"state":"finished","meta":{"agentChainIndex":0,"agentId":"%s","agentModel":"%s"}}]}}\\n\' "$node_id" "$node_id" "$agent_id" "$model_name" "$node_id" "$agent_id" "$model_name"',
       "    ;;",
       "  up)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -206,13 +206,17 @@ function lifecycleEnvironment(project: string): {
       .map((name) => [name, undefined])
   );
   return {
-    env: bindSmithersExecutableCapability({
-      ...ambientRouteEnvironment,
-      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      SMITHERS_BIN: smithers,
-      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
-      ULTRAFUZZ_PRICING_CATALOG_URL: "off"
-    }, smithers, project),
+    env: bindSmithersExecutableCapability(
+      {
+        ...ambientRouteEnvironment,
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        SMITHERS_BIN: smithers,
+        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
+        ULTRAFUZZ_PRICING_CATALOG_URL: "off"
+      },
+      smithers,
+      project
+    ),
     inspectPath,
     eventsPath
   };
@@ -292,52 +296,48 @@ async function createDynamicFixture(input: {
   fs.mkdirSync(plannerArtifactDir, { recursive: true });
   const threatIds = plannedThreatGoals.map((goal) => String(goal.id));
   const planDocument = {
-        schema_version: "ultrafuzz.goal-plan.v1",
-        policy: "additive-v1",
-        threat_model_sha256: "a".repeat(64),
-        vulnerability_database: {
-          planner_catalog_schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
-          snapshot_manifest_schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
-          database_schema_version: 1,
-          aggregate_sha256: "a".repeat(64),
-          catalog_sha256: "a".repeat(64)
-        },
-        catalog_class_ids: [],
-        modeled_threat_ids: threatIds,
-        threat_goals: plannedThreatGoals,
-        class_goals: [],
-        applicability_decisions: [],
-        selected_class_records: [],
-        roaming_goal: {
-          node_id: "goal-roaming",
-          prompt_path: "strategies/roaming-goal.md",
-          purpose: "Challenge taxonomy and threat-model completeness."
-        },
-        counts: {
-          threats: plannedThreatGoals.length,
-          applicable_classes: 0,
-          inapplicable_classes: 0,
-          dynamic_goals: plannedThreatGoals.length,
-          total_goals: plannedThreatGoals.length + 1
-        },
-        expected_child_count: plannedThreatGoals.length,
-        threat_count: plannedThreatGoals.length,
-        applicable_class_count: 0,
-        max_dynamic_nodes: 100,
-        goal_lanes: [
-          ...plannedThreatGoals.map((goal) => ({
-            kind: "threat",
-            lane_id: String(goal.id),
-            node_ids: [String(goal.node_id)]
-          })),
-          { kind: "roaming", lane_id: "goal-roaming", node_ids: ["goal-roaming"] }
-        ]
-      };
-  fs.writeFileSync(
-    path.join(plannerArtifactDir, "plan.json"),
-    `${JSON.stringify(planDocument, null, 2)}\n`,
-    "utf8"
-  );
+    schema_version: "ultrafuzz.goal-plan.v1",
+    policy: "additive-v1",
+    threat_model_sha256: "a".repeat(64),
+    vulnerability_database: {
+      planner_catalog_schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
+      snapshot_manifest_schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
+      database_schema_version: 1,
+      aggregate_sha256: "a".repeat(64),
+      catalog_sha256: "a".repeat(64)
+    },
+    catalog_class_ids: [],
+    modeled_threat_ids: threatIds,
+    threat_goals: plannedThreatGoals,
+    class_goals: [],
+    applicability_decisions: [],
+    selected_class_records: [],
+    roaming_goal: {
+      node_id: "goal-roaming",
+      prompt_path: "strategies/roaming-goal.md",
+      purpose: "Challenge taxonomy and threat-model completeness."
+    },
+    counts: {
+      threats: plannedThreatGoals.length,
+      applicable_classes: 0,
+      inapplicable_classes: 0,
+      dynamic_goals: plannedThreatGoals.length,
+      total_goals: plannedThreatGoals.length + 1
+    },
+    expected_child_count: plannedThreatGoals.length,
+    threat_count: plannedThreatGoals.length,
+    applicable_class_count: 0,
+    max_dynamic_nodes: 100,
+    goal_lanes: [
+      ...plannedThreatGoals.map((goal) => ({
+        kind: "threat",
+        lane_id: String(goal.id),
+        node_ids: [String(goal.node_id)]
+      })),
+      { kind: "roaming", lane_id: "goal-roaming", node_ids: ["goal-roaming"] }
+    ]
+  };
+  fs.writeFileSync(path.join(plannerArtifactDir, "plan.json"), `${JSON.stringify(planDocument, null, 2)}\n`, "utf8");
   const materialized = materializeDynamicRuntime({
     runId: input.runId,
     projectRoot: project,
@@ -620,10 +620,7 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
   // exactly what the eval reader looks for on a dynamic node's provenance. The nested camelCase
   // record stays alongside it for the expansion key, item digest and manifest path.
   assert.equal(generatedProvenance?.source_node_id, "planner");
-  assert.equal(
-    generatedProvenance?.dynamic?.sourceNodeId,
-    "planner"
-  );
+  assert.equal(generatedProvenance?.dynamic?.sourceNodeId, "planner");
   // A static node was never expanded from anything, so it must not claim a source.
   assert.equal(plannerProvenance?.source_node_id, undefined);
 

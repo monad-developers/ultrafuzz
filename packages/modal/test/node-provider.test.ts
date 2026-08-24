@@ -4437,8 +4437,7 @@ function fixtureCloudSelectedTask(input: {
     retries: task.retries,
     retryPolicy: {
       backoff: task.retryPolicy.backoff,
-      initialDelayMs: task.retryPolicy.initialDelayMs,
-      maxDelayMs: 30_000
+      initialDelayMs: task.retryPolicy.initialDelayMs
     },
     metadata: {
       schemaVersion: task.metadata.schemaVersion,
@@ -4474,7 +4473,8 @@ function fixtureCloudSelectedTask(input: {
                 ? {}
                 : { reasoningEffort: task.metadata.model.reasoningEffort }),
               modelIndex: task.metadata.model.modelIndex,
-              attemptIndex: task.metadata.model.attemptIndex
+              attemptIndex: task.metadata.model.attemptIndex,
+              agentChain: task.metadata.model.agentChain.map((entry) => ({ ...entry }))
             }
           }),
       workspace: {

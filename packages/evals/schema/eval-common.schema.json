@@ -778,13 +778,7 @@
     "expansionPlan": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "expected_child_count",
-        "threat_count",
-        "applicable_class_count",
-        "max_dynamic_nodes",
-        "lane_count"
-      ],
+      "required": ["expected_child_count", "threat_count", "applicable_class_count", "max_dynamic_nodes", "lane_count"],
       "properties": {
         "expected_child_count": { "$ref": "#/$defs/nonNegativeInteger" },
         "threat_count": { "$ref": "#/$defs/nonNegativeInteger" },

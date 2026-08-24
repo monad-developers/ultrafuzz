@@ -248,7 +248,13 @@ test("pruning the threat-model workstream leaves a valid, dependency-free produc
     "goal-plan"
   ];
   const transform = { strategyLoops: 1, excludedNodeIds: threatModelWorkstream };
-  const transformed = transformTopologyForRun(loadTopology(REPOSITORY_ROOT, { requirePromptFiles: true }), transform);
+  const transformed = transformTopologyForRun(
+    loadTopology(REPOSITORY_ROOT, {
+      topologyPath: packagedTopology("full").path,
+      requirePromptFiles: true
+    }),
+    transform
+  );
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: REPOSITORY_ROOT }), transform);
   validateTopology(transformed, {
     projectRoot: REPOSITORY_ROOT,

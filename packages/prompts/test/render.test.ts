@@ -129,11 +129,7 @@ interface TopologyDocument {
   nodes: TopologyNode[];
 }
 
-const runtimeOwnedOutputPaths = new Set([
-  "workspace.patch",
-  "workspace-patch.json",
-  "vulnerability-db-manifest.json"
-]);
+const runtimeOwnedOutputPaths = new Set(["workspace.patch", "workspace-patch.json", "vulnerability-db-manifest.json"]);
 const nonSchemaContracts = new Set(["ultrafuzz/nonempty-markdown@1", "ultrafuzz/text@1"]);
 
 function occurrences(haystack: string, needle: string): number {

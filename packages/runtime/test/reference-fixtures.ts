@@ -37,13 +37,15 @@ export function writeShippedDocumentReferenceCaches(xdgCacheHome: string, catalo
     if (reference.kind === "vulnerability-database") continue;
     const [owner, repo] = reference.repo.split("/");
     const cacheDir = path.join(xdgCacheHome, "ultrafuzz", "references", "github", owner!, repo!, reference.commit);
-    const files = reference.paths.map((relativePath) => {
-      const filePath = path.join(cacheDir, ...relativePath.split("/"));
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      const contents = Buffer.from(`# ${id}\n\nOffline fixture for ${relativePath}.\n`);
-      fs.writeFileSync(filePath, contents);
-      return fixtureFileDigest(relativePath, contents);
-    });
+    const files = reference.paths
+      .map((relativePath) => {
+        const filePath = path.join(cacheDir, ...relativePath.split("/"));
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        const contents = Buffer.from(`# ${id}\n\nOffline fixture for ${relativePath}.\n`);
+        fs.writeFileSync(filePath, contents);
+        return fixtureFileDigest(relativePath, contents);
+      })
+      .sort((left, right) => left.path.localeCompare(right.path));
     fs.mkdirSync(cacheDir, { recursive: true });
     fs.writeFileSync(
       path.join(cacheDir, CACHE_MANIFEST_FILE),

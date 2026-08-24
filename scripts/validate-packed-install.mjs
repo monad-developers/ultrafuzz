@@ -150,9 +150,9 @@ try {
   assertMatchingTree(checkedInSchemaRoot, installedSchemaRoot, "installed artifact schemas");
 
   const initializedTopology = fs.readFileSync(path.join(projectRoot, ".ultrafuzz", "topology.yml"));
-  const installedFullTopology = fs.readFileSync(path.join(installedConfigRoot, "topologies", "full.yml"));
-  if (!initializedTopology.equals(installedFullTopology)) {
-    throw new Error("packed init did not scaffold the installed full topology bytes");
+  const installedDefaultTopology = fs.readFileSync(path.join(installedConfigRoot, "topologies", "default.yml"));
+  if (!initializedTopology.equals(installedDefaultTopology)) {
+    throw new Error("packed init did not scaffold the installed default topology bytes");
   }
   for (const name of ["threat-model.schema.json", "goal-plan.schema.json"]) {
     assertSameJson(
@@ -230,7 +230,7 @@ function assertPackedPackagePayload(packageRoot, installedRoot, manifest) {
   ) {
     throw new Error(`${manifest.name} must declare an explicit non-empty runtime files allowlist`);
   }
-  const expectedFiles = ["package.json"];
+  const expectedFiles = ["LICENSE", "package.json"];
   for (const entry of manifest.files) {
     const source = path.join(packageRoot, entry);
     const stat = fs.statSync(source, { throwIfNoEntry: false });
@@ -254,11 +254,8 @@ function assertPackedPackagePayload(packageRoot, installedRoot, manifest) {
     );
   }
   for (const relativePath of expectedFiles.filter((entry) => entry !== "package.json")) {
-    assertSameBytes(
-      path.join(packageRoot, relativePath),
-      path.join(installedRoot, relativePath),
-      `installed ${manifest.name} ${relativePath}`
-    );
+    const sourcePath = relativePath === "LICENSE" ? path.join(root, "LICENSE") : path.join(packageRoot, relativePath);
+    assertSameBytes(sourcePath, path.join(installedRoot, relativePath), `installed ${manifest.name} ${relativePath}`);
   }
 }
 

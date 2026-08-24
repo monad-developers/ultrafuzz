@@ -402,9 +402,7 @@ export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
     if (nodes.has(node.id)) throw new Error(`planned graph repeats node ID ${JSON.stringify(node.id)}`);
     nodes.set(node.id, node);
     const artifactIdentity = node.dynamic_generated?.storage_id ?? node.id;
-    const expectedArtifactDirs = node.model_fanout.map((model) =>
-      `artifacts/${model.attempt_id ?? artifactIdentity}`
-    );
+    const expectedArtifactDirs = node.model_fanout.map((model) => `artifacts/${model.attempt_id ?? artifactIdentity}`);
     const expectedPrimaryArtifactDir =
       node.dynamic_generated === undefined
         ? `artifacts/${node.id}`

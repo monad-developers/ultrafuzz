@@ -302,6 +302,9 @@ test("compilation snapshots the exact transformed prompt body used during planni
   });
   const recompiledJoinTemplate = recompiled.tasks.find((task) => task.concreteNodeId === "join")!.promptTemplatePath!;
   assert.equal(recompiledJoinTemplate, deferredJoinTemplatePath);
-  assert.doesNotMatch(fs.readFileSync(path.resolve(project, recompiledJoinTemplate), "utf8"), /Divergent project bytes/u);
+  assert.doesNotMatch(
+    fs.readFileSync(path.resolve(project, recompiledJoinTemplate), "utf8"),
+    /Divergent project bytes/u
+  );
   assert.match(fs.readFileSync(path.resolve(project, recompiledJoinTemplate), "utf8"), /Summarize all completed work/u);
 });

@@ -63,80 +63,6 @@ function prompt(relativePath: string): string {
   return asset.markdown;
 }
 
-const RENDER_RUN_ARTIFACTS = "/tmp/ufz-dedupe-render/runs/run-1/artifacts";
-
-function artifactDirFor(concreteNodeId: string): string {
-  return `${RENDER_RUN_ARTIFACTS}/${concreteNodeId}`;
-}
-
-/**
- * Renders a real dedupe prompt against a graph whose dynamic goal groups already expanded into
- * several generated children. This exercises the supported artifact-template mechanism end to end
- * instead of asserting that the template text merely mentions it.
- */
-function renderDedupePrompt(body: string, generatedChildren: Record<string, string[]>): string {
-  const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
-  const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
-    nodes: Array<{
-      id: string;
-      depends_on?: string[];
-      outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
-    }>;
-  };
-  const dedupeNode = topology.nodes.find((node) => node.id === "dedupe-findings");
-  if (dedupeNode === undefined) throw new Error("default topology is missing dedupe-findings");
-  const producers = dedupeNode.depends_on ?? [];
-  const logicalNodes = topology.nodes.map((node) => {
-    const concreteIds = generatedChildren[node.id] ?? [node.id];
-    return {
-      id: node.id,
-      dependsOn: node.depends_on,
-      outputs: (node.outputs ?? []).map((output) => ({
-        ...output,
-        primary: output.primary ?? false,
-        description: "Default topology output."
-      })),
-      // A dynamic group resolves to its generated children, never to the group's own directory.
-      artifactDir: artifactDirFor(concreteIds[0]!),
-      artifactDirs: concreteIds.map(artifactDirFor)
-    };
-  });
-  return renderPrompt({
-    prompt: body,
-    graph: {
-      logicalNodes
-    },
-    node: {
-      logicalId: "dedupe-findings",
-      concreteId: "dedupe-findings",
-      artifactDir: artifactDirFor("dedupe-findings"),
-      workspacePath: "/tmp/ufz-dedupe-render/workspace",
-      repoPath: "/tmp/ufz-dedupe-render/repo",
-      dependsOn: producers,
-      attemptIndex: 0,
-      loopIndex: 0,
-      loopCount: 1,
-      outputs: [
-        {
-          path: "deduped-findings.json",
-          contract: "ultrafuzz/findings@1",
-          primary: true,
-          description: "Deduped findings."
-        }
-      ]
-    },
-    run: {
-      id: "run-1",
-      artifactsDir: RENDER_RUN_ARTIFACTS,
-      metadataPath: "/tmp/ufz-dedupe-render/runs/run-1/run.json"
-    },
-    outputs: {
-      findingsPath: `${artifactDirFor("dedupe-findings")}/deduped-findings.json`,
-      patchPath: `${artifactDirFor("dedupe-findings")}/patch.diff`
-    }
-  }).renderedMarkdown;
-}
-
 function generatedTestManifestSources(markdown: string): string[] {
   return [...markdown.matchAll(/\{\{artifact_path:([^}]+)\}\}\/generated-tests\.json/gu)].map((match) => match[1]!);
 }
@@ -329,8 +255,8 @@ describe("prompt semantic anchors", () => {
     ]);
 
     for (const asset of loadBuiltInPromptAssets()) {
-      const forbiddenReferences = extractPromptVariables(asset.markdown, { allowDynamicItemVariables: true }).filter((reference) =>
-        forbiddenVariableNames.has(reference.name)
+      const forbiddenReferences = extractPromptVariables(asset.markdown, { allowDynamicItemVariables: true }).filter(
+        (reference) => forbiddenVariableNames.has(reference.name)
       );
       expect(forbiddenReferences, asset.relativePath).toEqual([]);
     }

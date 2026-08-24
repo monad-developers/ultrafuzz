@@ -314,10 +314,12 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
 
   let graphContents = readBoundedRegularFile(layout.root, layout.graphPath, "run graph");
   let contents = readBoundedRegularFile(layout.root, tasksPath, "workflow task manifest");
-  const runtimeControlsChanged = ([
-    ["graph", graphContents],
-    ["tasks", contents]
-  ] as const).some(([key, bytes]) => {
+  const runtimeControlsChanged = (
+    [
+      ["graph", graphContents],
+      ["tasks", contents]
+    ] as const
+  ).some(([key, bytes]) => {
     const observed = digestBytes(bytes);
     const expected = seal.files[key];
     return observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes;

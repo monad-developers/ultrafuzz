@@ -1614,7 +1614,10 @@ describe("public Modal benchmark configuration", () => {
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
     const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
-    const laneProfile = worker.indexOf("modalTargetToml(model, config.node_timeout_seconds, auditProfile)", smithersSeed);
+    const laneProfile = worker.indexOf(
+      "modalTargetToml(model, config.node_timeout_seconds, auditProfile)",
+      smithersSeed
+    );
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
     const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
     const referenceSync = worker.indexOf('["node", CLI, "references", "sync"', init);

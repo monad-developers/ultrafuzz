@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { PiAgent as SmithersPiAgent } from "smithers-orchestrator";
+import { PiAgent as SmithersPiAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
@@ -26,7 +26,10 @@ const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] 
 export class CompatiblePiAgent extends SmithersPiAgent {
   override async buildCommand(params: PiCommandParams): Promise<PiCommand> {
     const command: PiCommand = await super.buildCommand(params);
-    return { ...command, env: workflowControlChildEnvironment(command.env) };
+    return {
+      ...command,
+      env: workflowControlChildEnvironment({ ...this.opts.env, ...command.env })
+    };
   }
 }
 

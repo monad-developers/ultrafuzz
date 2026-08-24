@@ -93,9 +93,7 @@
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
       "sequence_length": 100,
-      "implemented_property_suite_refs": [
-        "x"
-      ],
+      "implemented_property_suite_refs": ["x"],
       "campaign_plan_ref": "x",
       "backend_results": [],
       "finding_refs": [],
@@ -109,9 +107,7 @@
       "schema_version": "ultrafuzz.campaign-summary.v2",
       "outcome": "complete",
       "sequence_length": 100,
-      "implemented_property_suite_refs": [
-        "x"
-      ],
+      "implemented_property_suite_refs": ["x"],
       "campaign_plan_ref": "x",
       "backend_results": [],
       "finding_refs": [],
@@ -272,9 +268,7 @@
       "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
-      "stop_conditions": [
-        "x"
-      ],
+      "stop_conditions": ["x"],
       "timeout_seconds": 1,
       "finalization_reserve_seconds": 0,
       "blockers": []
@@ -288,9 +282,7 @@
       "current_measurement": null,
       "current_status": "not-run",
       "planned_commands": [],
-      "stop_conditions": [
-        "x"
-      ],
+      "stop_conditions": ["x"],
       "timeout_seconds": 1,
       "finalization_reserve_seconds": 0,
       "blockers": [],
@@ -362,19 +354,13 @@
         "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
-        "public_evidence_paths": [
-          "x"
-        ],
-        "exact_observable_equality_assertions": [
-          "x"
-        ],
+        "public_evidence_paths": ["x"],
+        "exact_observable_equality_assertions": ["x"],
         "oracle_type": "independent_reference",
         "calibration_bucket": "red_seeking_adversarial",
         "red_seeking_priority": "high"
       },
-      "authored_paths": [
-        "x"
-      ],
+      "authored_paths": ["x"],
       "focused_command": "x",
       "focused_command_ran": true,
       "matched_test_count": 1,
@@ -408,19 +394,13 @@
         "surface_id": "x",
         "intended_t_sol_path": "x",
         "focused_command": "x",
-        "public_evidence_paths": [
-          "x"
-        ],
-        "exact_observable_equality_assertions": [
-          "x"
-        ],
+        "public_evidence_paths": ["x"],
+        "exact_observable_equality_assertions": ["x"],
         "oracle_type": "independent_reference",
         "calibration_bucket": "red_seeking_adversarial",
         "red_seeking_priority": "high"
       },
-      "authored_paths": [
-        "x"
-      ],
+      "authored_paths": ["x"],
       "focused_command": "x",
       "focused_command_ran": true,
       "matched_test_count": 1,
@@ -444,12 +424,8 @@
       "planner_attempt_index": 0,
       "candidate_surfaces": [],
       "reference_model_rules": {
-        "allowed_structures": [
-          "x"
-        ],
-        "forbidden_sources": [
-          "x"
-        ]
+        "allowed_structures": ["x"],
+        "forbidden_sources": ["x"]
       },
       "deployment_assumptions": [],
       "phase_priorities": [],
@@ -462,12 +438,8 @@
       "planner_attempt_index": 0,
       "candidate_surfaces": [],
       "reference_model_rules": {
-        "allowed_structures": [
-          "x"
-        ],
-        "forbidden_sources": [
-          "x"
-        ]
+        "allowed_structures": ["x"],
+        "forbidden_sources": ["x"]
       },
       "deployment_assumptions": [],
       "phase_priorities": [],
@@ -706,22 +678,16 @@
         "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "catalog_class_ids": [],
-      "modeled_threat_ids": [
-        "surface:canonical"
-      ],
+      "modeled_threat_ids": ["surface:canonical"],
       "threat_goals": [
         {
           "kind": "threat",
           "id": "surface:canonical",
           "node_id": "dynamic:threat:surface:canonical",
           "title": "Inspect the canonical surface",
-          "threat_ids": [
-            "surface:canonical"
-          ],
+          "threat_ids": ["surface:canonical"],
           "class_ids": [],
-          "attack_surface_ids": [
-            "surface:canonical"
-          ],
+          "attack_surface_ids": ["surface:canonical"],
           "goal_prompt": "Your /goal is to inspect {{surface:canonical}}.",
           "replacements": {
             "surface:canonical": "Canonical modeled threat"
@@ -752,16 +718,12 @@
         {
           "kind": "threat",
           "lane_id": "surface:canonical",
-          "node_ids": [
-            "dynamic:threat:surface:canonical"
-          ]
+          "node_ids": ["dynamic:threat:surface:canonical"]
         },
         {
           "kind": "roaming",
           "lane_id": "goal-roaming",
-          "node_ids": [
-            "goal-roaming"
-          ]
+          "node_ids": ["goal-roaming"]
         }
       ]
     },
@@ -777,22 +739,16 @@
         "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "catalog_class_ids": [],
-      "modeled_threat_ids": [
-        "surface:canonical"
-      ],
+      "modeled_threat_ids": ["surface:canonical"],
       "threat_goals": [
         {
           "kind": "threat",
           "id": "surface:canonical",
           "node_id": "dynamic:threat:surface:canonical",
           "title": "Inspect the canonical surface",
-          "threat_ids": [
-            "surface:canonical"
-          ],
+          "threat_ids": ["surface:canonical"],
           "class_ids": [],
-          "attack_surface_ids": [
-            "surface:canonical"
-          ],
+          "attack_surface_ids": ["surface:canonical"],
           "goal_prompt": "Your /goal is to inspect {{surface:canonical}}.",
           "replacements": {
             "surface:canonical": "Canonical modeled threat"
@@ -823,16 +779,12 @@
         {
           "kind": "threat",
           "lane_id": "surface:canonical",
-          "node_ids": [
-            "dynamic:threat:surface:canonical"
-          ]
+          "node_ids": ["dynamic:threat:surface:canonical"]
         },
         {
           "kind": "roaming",
           "lane_id": "goal-roaming",
-          "node_ids": [
-            "goal-roaming"
-          ]
+          "node_ids": ["goal-roaming"]
         }
       ],
       "__unexpected_fixture_field": true
@@ -861,9 +813,7 @@
       "properties": [],
       "selection": {
         "priority_threshold": "high",
-        "priorities": [
-          "high"
-        ],
+        "priorities": ["high"],
         "property_ids": []
       }
     },
@@ -872,9 +822,7 @@
       "properties": [],
       "selection": {
         "priority_threshold": "high",
-        "priorities": [
-          "high"
-        ],
+        "priorities": ["high"],
         "property_ids": []
       },
       "__unexpected_fixture_field": true
@@ -1313,9 +1261,7 @@
       },
       "protocol": {
         "summary": "A minimal protocol fixture.",
-        "archetypes": [
-          "canonical protocol"
-        ]
+        "archetypes": ["canonical protocol"]
       },
       "capabilities": [
         {
@@ -1350,18 +1296,10 @@
           "id": "surface:canonical",
           "name": "Canonical surface",
           "description": "The surface used by the fixture.",
-          "entry_points": [
-            "Canonical.run"
-          ],
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "actor_ids": [
-            "actor:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "entry_points": ["Canonical.run"],
+          "asset_ids": ["asset:canonical"],
+          "actor_ids": ["actor:canonical"],
+          "capability_ids": ["canonical.capability"],
           "trust_boundary_ids": [],
           "evidence": []
         }
@@ -1374,12 +1312,8 @@
           "name": "Canonical invariant",
           "kind": "state",
           "statement": "Canonical state remains valid.",
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "asset_ids": ["asset:canonical"],
+          "capability_ids": ["canonical.capability"],
           "evidence": []
         }
       ],
@@ -1388,26 +1322,14 @@
           "id": "surface:canonical",
           "title": "Canonical surface violation",
           "description": "The canonical surface may violate its invariant.",
-          "preconditions": [
-            "The canonical surface is reachable."
-          ],
+          "preconditions": ["The canonical surface is reachable."],
           "impact": "The canonical asset may be affected.",
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "actor_ids": [
-            "actor:canonical"
-          ],
-          "attack_surface_ids": [
-            "surface:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "asset_ids": ["asset:canonical"],
+          "actor_ids": ["actor:canonical"],
+          "attack_surface_ids": ["surface:canonical"],
+          "capability_ids": ["canonical.capability"],
           "trust_boundary_ids": [],
-          "invariant_ids": [
-            "invariant:canonical"
-          ],
+          "invariant_ids": ["invariant:canonical"],
           "assumption_ids": [],
           "unknown_ids": [],
           "evidence": []
@@ -1427,9 +1349,7 @@
       },
       "protocol": {
         "summary": "A minimal protocol fixture.",
-        "archetypes": [
-          "canonical protocol"
-        ]
+        "archetypes": ["canonical protocol"]
       },
       "capabilities": [
         {
@@ -1464,18 +1384,10 @@
           "id": "surface:canonical",
           "name": "Canonical surface",
           "description": "The surface used by the fixture.",
-          "entry_points": [
-            "Canonical.run"
-          ],
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "actor_ids": [
-            "actor:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "entry_points": ["Canonical.run"],
+          "asset_ids": ["asset:canonical"],
+          "actor_ids": ["actor:canonical"],
+          "capability_ids": ["canonical.capability"],
           "trust_boundary_ids": [],
           "evidence": []
         }
@@ -1488,12 +1400,8 @@
           "name": "Canonical invariant",
           "kind": "state",
           "statement": "Canonical state remains valid.",
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "asset_ids": ["asset:canonical"],
+          "capability_ids": ["canonical.capability"],
           "evidence": []
         }
       ],
@@ -1502,26 +1410,14 @@
           "id": "surface:canonical",
           "title": "Canonical surface violation",
           "description": "The canonical surface may violate its invariant.",
-          "preconditions": [
-            "The canonical surface is reachable."
-          ],
+          "preconditions": ["The canonical surface is reachable."],
           "impact": "The canonical asset may be affected.",
-          "asset_ids": [
-            "asset:canonical"
-          ],
-          "actor_ids": [
-            "actor:canonical"
-          ],
-          "attack_surface_ids": [
-            "surface:canonical"
-          ],
-          "capability_ids": [
-            "canonical.capability"
-          ],
+          "asset_ids": ["asset:canonical"],
+          "actor_ids": ["actor:canonical"],
+          "attack_surface_ids": ["surface:canonical"],
+          "capability_ids": ["canonical.capability"],
           "trust_boundary_ids": [],
-          "invariant_ids": [
-            "invariant:canonical"
-          ],
+          "invariant_ids": ["invariant:canonical"],
           "assumption_ids": [],
           "unknown_ids": [],
           "evidence": []
@@ -1545,9 +1441,7 @@
         "confidence": "medium",
         "summary": "A canonical typed triage fixture.",
         "triage_classification": "true-positive",
-        "notes": [
-          "triage_reason=confirmed"
-        ]
+        "notes": ["triage_reason=confirmed"]
       }
     ],
     "invalid": null
@@ -1575,15 +1469,11 @@
           "primary_category": "accounting",
           "secondary_categories": [],
           "capabilities": {
-            "required": [
-              "accounting.shares"
-            ],
+            "required": ["accounting.shares"],
             "optional": [],
             "incompatible": []
           },
-          "attack_surfaces": [
-            "deposit"
-          ],
+          "attack_surfaces": ["deposit"],
           "sources": [
             {
               "title": "Reference",
@@ -1619,15 +1509,11 @@
           "primary_category": "accounting",
           "secondary_categories": [],
           "capabilities": {
-            "required": [
-              "accounting.shares"
-            ],
+            "required": ["accounting.shares"],
             "optional": [],
             "incompatible": []
           },
-          "attack_surfaces": [
-            "deposit"
-          ],
+          "attack_surfaces": ["deposit"],
           "sources": [
             {
               "title": "Reference",
@@ -1752,10 +1638,7 @@
       "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "source_snapshot": {
         "status": "preserved",
-        "protected_roots": [
-          "contracts",
-          "src"
-        ]
+        "protected_roots": ["contracts", "src"]
       },
       "files": []
     },
@@ -1767,10 +1650,7 @@
       "patch_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "source_snapshot": {
         "status": "preserved",
-        "protected_roots": [
-          "contracts",
-          "src"
-        ]
+        "protected_roots": ["contracts", "src"]
       },
       "files": [],
       "__unexpected_fixture_field": true

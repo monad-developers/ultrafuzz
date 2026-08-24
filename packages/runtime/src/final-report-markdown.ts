@@ -12,8 +12,7 @@ import {
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
-const SAFE_REPORT_RELATIVE_LINK_PATTERN =
-  /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.

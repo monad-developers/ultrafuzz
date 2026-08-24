@@ -16,9 +16,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
-    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated (Codex|Kimi|DeepSeek|Pi)'",
-    "test:kimi-contract": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated Kimi'",
+    "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
+    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern '^Bun adapter contract:'",
+    "test:pr-smoke:prebuilt": "rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-pr-smoke-tests.mjs",
+    "test:release:runtime-shard": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-runtime-test-shard.mjs",
+    "test:release:supporting": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs supporting && bun test dist-test/test/runtime.test.js --test-name-pattern '^Bun adapter contract:'",
+    "test:kimi-contract": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && bun test dist-test/test/runtime.test.js --test-name-pattern '^Bun adapter contract: generated Kimi'",
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {

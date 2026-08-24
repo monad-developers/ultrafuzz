@@ -16,6 +16,7 @@ export function writeFakeNpmInstaller(
     imported?: string;
     optional?: string;
     required?: string;
+    runnerSource?: string;
   } = { count: 0, stderr: [] }
 ): {
   activate: () => void;
@@ -51,7 +52,10 @@ export function writeFakeNpmInstaller(
         }) +
         " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }",
       "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
-      `fs.writeFileSync(target, ${JSON.stringify('#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n')});`,
+      `fs.writeFileSync(target, ${JSON.stringify(
+        failures.runnerSource ??
+          '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n'
+      )});`,
       "fs.chmodSync(target, 0o755);",
       "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);",
       "fs.writeFileSync(path.join(prefix, 'package-lock.json'), `${JSON.stringify({ name: 'ultrafuzz-smithers', lockfileVersion: 3, requires: true, packages })}\\n`);"

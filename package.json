@@ -23,6 +23,7 @@
     "security:dependency-advisories": "pnpm --filter @ultrafuzz/artifacts... build && node scripts/check-production-dependency-advisories.mjs",
     "test": "pnpm run test:ci-scripts && pnpm -r test",
     "test:ci-scripts": "pnpm --filter @ultrafuzz/modal... build && bun test --timeout 30000 scripts/ci/*.test.ts",
+    "validate:pack": "node scripts/validate-packed-install.mjs",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r --workspace-concurrency=1 typecheck"
   },

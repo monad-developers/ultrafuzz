@@ -7,8 +7,7 @@ import { assertRegularFileInside, prepareSafeFilePath, safeResolveInside, writeF
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const THREAT_MODEL_SCHEMA_VERSION = "ultrafuzz.threat-model.v1" as const;
-export const THREAT_MODEL_JSON_SCHEMA_ID =
-  "urn:ultrafuzz:schema:artifacts:threat-model:1" as const;
+export const THREAT_MODEL_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:threat-model:1" as const;
 export const CAPABILITY_STATUSES = ["present", "absent", "unknown"] as const;
 export const INVARIANT_KINDS = ["economic", "accounting", "state", "authorization", "integration"] as const;
 
