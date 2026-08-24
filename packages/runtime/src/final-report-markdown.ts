@@ -171,21 +171,20 @@ export function projectCanonicalFinalReport(
   return { report: input, markdown };
 }
 
-export function isDirectiveConformingFinalReportMarkdown(
-  markdown: string,
-  report: JsonRecord,
-  requireImplementationCoverage = true
-): boolean {
+export function isDirectiveConformingFinalReportMarkdown(markdown: string, report: JsonRecord): boolean {
   if (!markdown.startsWith("# Ultrafuzz report\n") || !markdown.includes("\n## Run summary\n")) {
     return false;
   }
-  if (requireImplementationCoverage && !markdown.includes("\n## Property implementation coverage\n")) {
+  if (!markdown.includes("\n## Property implementation coverage\n")) {
     return false;
   }
   // A current-run projection always states its goal-search coverage, even when that statement is
   // "coverage is unknown". Requiring the heading keeps a future edit from turning a partial hunt back
-  // into silence, which is indistinguishable from full coverage to a reader (issue #677).
-  if (requireImplementationCoverage && !markdown.includes("\n## Goal search coverage\n")) {
+  // into silence, which is indistinguishable from full coverage to a reader (issue #677). Both
+  // coverage headings are required unconditionally: the former requireImplementationCoverage
+  // parameter had no remaining caller and coupled the goal-coverage requirement to the
+  // property-implementation one, so a single flag could silently drop both (issue #702).
+  if (!markdown.includes("\n## Goal search coverage\n")) {
     return false;
   }
   if (!markdown.includes("\n## Property provenance\n")) {
@@ -895,8 +894,12 @@ function appendGoalSearchCoverage(lines: string[], summary: GoalSearchCoverageSu
       "**No targeted goal search coverage: this run recorded no targeted goal search lanes.** Nothing in this report is a statement about targeted goal coverage."
     );
   } else if (missing > 0) {
+    // "of the ${lanes}" rather than "of ${lanes}": these are lane counts, not code-coverage scores,
+    // but "coverage ... N of M" on one rendered line parses as an unscoped coverage fraction under
+    // the published-coverage gates, and the runtime verifier requires exactly these bytes, so the
+    // gate would reject every partial-census report the projector produced (issue #702).
     lines.push(
-      `**Partial goal search coverage: only ${targeted.completed} of ${targeted.lanes} targeted goal searches completed.** The other ${missing} published no verified result, so nothing was measured for those goals: their empty findings are an absence of evidence, not evidence of absence. This report does not cover them.`
+      `**Partial goal search coverage: only ${targeted.completed} of the ${targeted.lanes} targeted goal searches completed.** The other ${missing} published no verified result, so nothing was measured for those goals: their empty findings are an absence of evidence, not evidence of absence. This report does not cover them.`
     );
   } else {
     lines.push(

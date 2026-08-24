@@ -28,7 +28,12 @@ import {
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
 import { NodeTelemetryPump, type EvalArtifactUpload, type EvalMatrixRow, type EvalReporter } from "@ultrafuzz/evals";
-import { loadVerifiedRunOutputSnapshots, projectCanonicalFinalReport, syncRun } from "@ultrafuzz/runtime";
+import {
+  loadGoalSearchCoverageSnapshot,
+  loadVerifiedRunOutputSnapshots,
+  projectCanonicalFinalReport,
+  syncRun
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
@@ -755,6 +760,103 @@ test("report render gives producers the exact canonical Markdown without host re
   const invalid = await cli(project, ["report", "render", "--file", reportPath, "--output", markdownPath]);
   assert.equal(invalid.code, 1);
   assert.deepEqual(fs.readFileSync(markdownPath), before);
+});
+
+test("report render renders goal coverage from the run-root census only through its flag", async () => {
+  const project = tempProject();
+  const runId = "census-render";
+  const runRoot = path.join(project, "runs", runId);
+  fs.mkdirSync(runRoot, { recursive: true });
+  const report = currentReport(runId, [currentReportIssue()]);
+  const reportPath = path.join(project, "report.json");
+  writeJsonRecord(reportPath, report);
+  const censusPath = path.join(runRoot, "goal-search-coverage.json");
+  writeJsonRecord(censusPath, {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: runId,
+    totals: { planned: 2 },
+    goals: [
+      {
+        node_id: "dynamic:class:1",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-001",
+        status: "completed-no-findings",
+        finding_count: 0
+      },
+      {
+        node_id: "dynamic:class:2",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-002",
+        status: "stopped-early",
+        finding_count: null
+      }
+    ]
+  });
+
+  // With the census flag, the producer output byte-equals the census-aware projection the runtime
+  // verifier and external readers enforce (issue #702).
+  const markdownPath = path.join(project, "report.md");
+  const rendered = await cli(project, [
+    "report",
+    "render",
+    "--file",
+    reportPath,
+    "--output",
+    markdownPath,
+    "--goal-search-coverage",
+    censusPath
+  ]);
+  assert.equal(rendered.code, 0, rendered.stderr);
+  const expected = projectCanonicalFinalReport(report, {
+    goalSearchCoverage: loadGoalSearchCoverageSnapshot(runRoot)
+  }).markdown;
+  assert.equal(fs.readFileSync(markdownPath, "utf8"), expected);
+  assert.match(expected, /\*\*Partial goal search coverage: only 1 of the 2 targeted goal searches completed\.\*\*/u);
+
+  // Without the flag the render is honest-unknown: it understates, never overstates.
+  const unknownPath = path.join(project, "report-unknown.md");
+  const unknown = await cli(project, ["report", "render", "--file", reportPath, "--output", unknownPath]);
+  assert.equal(unknown.code, 0, unknown.stderr);
+  assert.match(fs.readFileSync(unknownPath, "utf8"), /\*\*Goal search coverage is unknown\.\*\*/u);
+
+  // A flag path that is not a run-root goal-search-coverage.json fails without writing, so an
+  // arbitrary file's parent directory cannot masquerade as a run root.
+  const renamedCensusPath = path.join(runRoot, "coverage.json");
+  fs.copyFileSync(censusPath, renamedCensusPath);
+  const rejectedPath = path.join(project, "report-rejected.md");
+  const rejected = await cli(project, [
+    "report",
+    "render",
+    "--file",
+    reportPath,
+    "--output",
+    rejectedPath,
+    "--goal-search-coverage",
+    renamedCensusPath
+  ]);
+  assert.equal(rejected.code, 1);
+  assert.match(rejected.stdout + rejected.stderr, /goal search coverage census must be a run-root/u);
+  assert.equal(fs.existsSync(rejectedPath), false);
+
+  // A census claiming a different run loads as undefined and renders unknown coverage — the same
+  // fail-closed state the runtime verifier computes for that census.
+  const foreignRunRoot = path.join(project, "runs", "another-run");
+  fs.mkdirSync(foreignRunRoot, { recursive: true });
+  const foreignCensusPath = path.join(foreignRunRoot, "goal-search-coverage.json");
+  fs.copyFileSync(censusPath, foreignCensusPath);
+  const mismatchedPath = path.join(project, "report-mismatched.md");
+  const mismatched = await cli(project, [
+    "report",
+    "render",
+    "--file",
+    reportPath,
+    "--output",
+    mismatchedPath,
+    "--goal-search-coverage",
+    foreignCensusPath
+  ]);
+  assert.equal(mismatched.code, 0, mismatched.stderr);
+  assert.match(fs.readFileSync(mismatchedPath, "utf8"), /\*\*Goal search coverage is unknown\.\*\*/u);
 });
 
 const CANONICAL_DEDUPE_KEY = "dedupe-M-01";

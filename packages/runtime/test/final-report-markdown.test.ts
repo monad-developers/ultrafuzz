@@ -368,6 +368,28 @@ test("directive validation rejects injected or presentation-divergent Markdown",
   );
 });
 
+test("directive conformance requires both coverage headings without an opt-out", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("## Property implementation coverage", "## Implementation coverage"),
+      projection.report
+    ),
+    false
+  );
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown,
+      projection.report,
+      // The requireImplementationCoverage opt-out was removed (issue #702): the coverage heading
+      // requirements cannot be waived by any caller.
+      // @ts-expect-error a third argument is no longer accepted
+      false
+    ),
+    true
+  );
+});
+
 test("directive validation treats fenced proof code as code while retaining prose restrictions", () => {
   const input = renderableReport();
   const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
@@ -558,7 +580,7 @@ test("goal search coverage is rendered into the Markdown report instead of only 
   const partial = project(empty(), census(partialGoals));
   assert.match(
     partial.markdown,
-    /\*\*Partial goal search coverage: only 3 of 77 targeted goal searches completed\.\*\*/u
+    /\*\*Partial goal search coverage: only 3 of the 77 targeted goal searches completed\.\*\*/u
   );
   assert.match(partial.markdown, /The other 74 published no verified result/u);
   assert.match(partial.markdown, /absence of evidence, not evidence of absence/u);
@@ -609,7 +631,7 @@ test("goal search coverage is rendered into the Markdown report instead of only 
 
   // An unrecognized status is a lane, but never a completion.
   const unrecognized = project(empty(), census([lane(1, "completed-no-findings"), lane(2, "invented-status")]));
-  assert.match(unrecognized.markdown, /\*\*Partial goal search coverage: only 1 of 2 targeted goal searches/u);
+  assert.match(unrecognized.markdown, /\*\*Partial goal search coverage: only 1 of the 2 targeted goal searches/u);
   assert.match(unrecognized.markdown, /- Recorded with an unrecognized status: `1`/u);
 
   // Dropping the section from a current-run projection is a conformance failure, not a style choice.
