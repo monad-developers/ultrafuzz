@@ -1456,7 +1456,7 @@ describe("longitudinal eval history", () => {
     const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "full", cohort, lanes });
     const matrix = publicMatrix(suite);
     const catalog = loadAuditProfileCatalog(path.join(REPOSITORY_ROOT, "packages", "config", "audit-profiles.yml"));
-    const topologyDigest = packagedTopologyDigest(auditProfile("full", catalog), catalog);
+    const topologyDigest = packagedTopologyDigest(auditProfile("exhaustive", catalog), catalog);
     expect(topologyDigest).toMatch(/^[0-9a-f]{64}$/u);
     if (topologyDigest === undefined) throw new Error("missing packaged full topology");
     const records = matrix.map((row) =>
@@ -1465,7 +1465,7 @@ describe("longitudinal eval history", () => {
         runRoot: path.join("/tmp/public-runs", row.id),
         evalRunId: "eval-full",
         overrides: {
-          audit_profile: "full",
+          audit_profile: "exhaustive",
           audit_profile_catalog_digest: catalog.digest,
           topology_path_origin: "audit-profile",
           topology_digest: topologyDigest

@@ -58,7 +58,7 @@ function writeRunPlanPolicyFixture(runRoot: string, runId: string): void {
       },
       topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1, required_commands: [] },
       audit_profile: {
-        id: "full",
+        id: "exhaustive",
         catalog_digest: digestA,
         effective_topology_path: "topology.json",
         topology_path_origin: "audit-profile",
@@ -169,7 +169,7 @@ function terminalRunFixture(
             estimated_spend: "$0.01",
             partial_pricing: false,
             strategy_loops: 1,
-            audit_profile: "full",
+            audit_profile: "exhaustive",
             audit_profile_catalog_digest: "a".repeat(64),
             topology_digest: "b".repeat(64),
             prompt_digest: "c".repeat(64),
@@ -570,7 +570,7 @@ describe("runner", () => {
     });
 
     expect(record).toMatchObject({
-      audit_profile: "full",
+      audit_profile: "exhaustive",
       audit_profile_catalog_digest: "a".repeat(64),
       topology_path_origin: "audit-profile",
       topology_digest: "b".repeat(64),
@@ -756,7 +756,7 @@ describe("runner", () => {
       configPath,
       fs
         .readFileSync(configPath, "utf8")
-        // The packaged full topology intentionally quarantines stateful
+        // The packaged exhaustive topology intentionally quarantines stateful
         // specialists, so their missing backends are warnings. Use the
         // focused invariant profile to exercise the blocking preflight.
         .replace('audit_profile = "default"', 'audit_profile = "invariant-only"')

@@ -23,6 +23,7 @@ import {
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
 
+import { publicBenchmarkLaneAuditProfileId } from "./benchmark-lane-names.js";
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { appendEvalRunRecord, writeEvalMatrix, writeEvalRunManifest, writeEvalRunSummary } from "./eval-durable.js";
@@ -550,9 +551,9 @@ export function benchmarkModelProfileOverrides(
 
 function packagedBenchmarkAuditPolicy(
   input: EvalPublicFullBenchmarkWorkflowInput | EvalPublicSmokeBenchmarkWorkflowInput
-): { auditProfile: "smoke" | "full"; catalogDigest: string; topologyDigest: string } {
+): { auditProfile: "smoke" | "exhaustive"; catalogDigest: string; topologyDigest: string } {
   const catalog = loadAuditProfileCatalog();
-  const auditProfileId = input.benchmark_lane === "threat-model" ? "full" : input.benchmark_lane;
+  const auditProfileId = publicBenchmarkLaneAuditProfileId(input.benchmark_lane);
   const topologyDigest = packagedTopologyDigest(auditProfile(auditProfileId, catalog), catalog);
   if (topologyDigest === undefined) {
     throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", `${auditProfileId} benchmark packaged topology is missing`);

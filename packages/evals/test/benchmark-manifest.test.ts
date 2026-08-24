@@ -447,7 +447,7 @@ describe("public benchmark manifests", () => {
       )
     ).toEqual({
       runtimeOverrides: {
-        auditProfile: "full",
+        auditProfile: "exhaustive",
         forbidModelFallback: true
       }
     });
@@ -502,7 +502,7 @@ describe("public benchmark manifests", () => {
       message: expect.stringContaining("effective audit profile, catalog digest, and topology digest")
     });
     fs.copyFileSync(
-      path.join(REPOSITORY_ROOT, "packages/config/topologies/full.yml"),
+      path.join(REPOSITORY_ROOT, "packages/config/topologies/exhaustive.yml"),
       path.join(project, ".ultrafuzz/topology.yml")
     );
     await expect(

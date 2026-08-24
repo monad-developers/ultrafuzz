@@ -65,7 +65,7 @@ test("profile list and detail expose the catalog and effective project policy", 
   assert.match(listData.catalog_digest, /^[0-9a-f]{64}$/u);
   assert.deepEqual(
     listData.profiles.map((profile) => profile.id),
-    ["default", "exhaustive", "full", "invariant-only", "low-cost", "smoke"]
+    ["default", "exhaustive", "invariant-only", "low-cost", "smoke"]
   );
 
   const detailed = await cli(project, ["config", "audit-profile", "smoke", "--json"]);
@@ -93,7 +93,7 @@ test("topology list, show, and copy use the packaged assets safely", async () =>
   };
   assert.deepEqual(
     listData.topologies.map((topology) => topology.id),
-    ["default", "full", "smoke", "invariant-only"]
+    ["default", "exhaustive", "smoke", "invariant-only"]
   );
   assert.equal(
     listData.topologies.every((topology) => topology.logical_nodes > 2),
@@ -137,14 +137,14 @@ test("validate accepts CLI profile and topology overrides with the documented pr
   assert.equal(profile.code, 0, profile.stderr);
   assert.equal((data(profile).topology as { origin: string }).origin, "audit-profile");
 
-  const copied = await cli(project, ["topology", "copy", "full", ".ultrafuzz/full.yml", "--json"]);
+  const copied = await cli(project, ["topology", "copy", "exhaustive", ".ultrafuzz/exhaustive.yml", "--json"]);
   assert.equal(copied.code, 0, copied.stderr);
   const overridden = await cli(project, [
     "validate",
     "--audit-profile",
     "smoke",
     "--topology-path",
-    ".ultrafuzz/full.yml",
+    ".ultrafuzz/exhaustive.yml",
     "--json"
   ]);
   assert.equal(overridden.code, 0, overridden.stderr);

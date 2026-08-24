@@ -23,7 +23,7 @@ interface ShippedTopology {
 const SHIPPED_TOPOLOGIES = [
   [".ultrafuzz/topology.yml", "../../../.ultrafuzz/topology.yml"],
   ["packages/config/topologies/default.yml", "../../config/topologies/default.yml"],
-  ["packages/config/topologies/full.yml", "../../config/topologies/full.yml"],
+  ["packages/config/topologies/exhaustive.yml", "../../config/topologies/exhaustive.yml"],
   ["packages/config/topologies/invariant-only.yml", "../../config/topologies/invariant-only.yml"],
   ["packages/config/topologies/smoke.yml", "../../config/topologies/smoke.yml"]
 ] as const;
@@ -815,7 +815,7 @@ describe("prompt semantic anchors", () => {
     const flatCampaign = campaign.replace(/\s+/gu, " ");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
-    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/exhaustive.yml", import.meta.url));
     const topologySource = readFileSync(topologyPath, "utf8");
     const topology = YAML.parse(topologySource) as {
       nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string; contract: string }> }[];
@@ -945,7 +945,7 @@ describe("prompt semantic anchors", () => {
   });
 
   it("publishes runtime-owned workspace patches for every invariant handoff", () => {
-    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/exhaustive.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: {
         id: string;
@@ -1051,7 +1051,7 @@ describe("prompt semantic anchors", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/generated-tests.mdx", import.meta.url)
     );
-    const topologyPath = fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url));
+    const topologyPath = fileURLToPath(new URL("../../config/topologies/exhaustive.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
       nodes: { id: string; outputs?: Array<{ path: string; contract: string }> }[];
     };

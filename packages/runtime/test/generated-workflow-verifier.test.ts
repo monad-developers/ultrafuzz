@@ -7116,8 +7116,8 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
         rayon_threads: 4
       },
       audit_profile: {
-        requested: "full",
-        effective: "full",
+        requested: "exhaustive",
+        effective: "exhaustive",
         catalog_schema_version: 1,
         settings: { controller_private_setting: "must-not-project" },
         catalog_digest: "3".repeat(64),
@@ -7160,7 +7160,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       estimated_spend: "unavailable",
       partial_pricing: false,
       strategy_loops: 3,
-      audit_profile: "full",
+      audit_profile: "exhaustive",
       audit_profile_catalog_digest: "3".repeat(64),
       topology_digest: "4".repeat(64),
       prompt_digest: "5".repeat(64),
@@ -7693,7 +7693,7 @@ const FINAL_REPORT_RUN_METADATA_FIXTURE = {
   estimated_spend: "$0.01",
   partial_pricing: false,
   strategy_loops: 1,
-  audit_profile: "full",
+  audit_profile: "exhaustive",
   audit_profile_catalog_digest: "a".repeat(64),
   topology_digest: "b".repeat(64),
   prompt_digest: "c".repeat(64),

@@ -3,7 +3,7 @@
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
-    "catalogDigest": "eb311ef3501bc1c44a436b254334a813d1451bbf394b3ad5e2b73aa53942c913",
+    "catalogDigest": "f9988e5776a50b524c23edfa3a17ba474cc90fb029454798f40b69849c2bf33a",
     "settings": {},
     "effectiveSettings": {
       "strategy_loops": 1,
