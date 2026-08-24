@@ -8,10 +8,12 @@ import test from "node:test";
 import {
   acquireSmithersExecutableAnchor,
   assertExecutableOutsideRoot,
+  bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
   smithersExecutableCapability
 } from "../src/smithers-executable-capability.js";
 import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smithers.js";
+import { BUN_MODULE_CONFINEMENT_SOURCE } from "../src/workflow-integrity.js";
 
 function temporaryDirectory(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -156,6 +158,59 @@ test(
     } finally {
       fs.closeSync(snapshotDescriptor);
     }
+  }
+);
+
+test(
+  "operator-owned Bun runners use privately bound startup authority",
+  { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const root = temporaryDirectory("ufz-operator-runner-"),
+      operatorRoot = path.join(root, "operator"),
+      targetRoot = path.join(root, "target"),
+      runner = path.join(operatorRoot, "node_modules", "smthrs", "src", "bin", "workflow runner.js"),
+      resultModule = path.join(path.dirname(runner), "result.ts"),
+      controls = path.join(operatorRoot, "controls"),
+      confinement = path.join(controls, "bun-module-confinement.js");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.mkdirSync(controls, { recursive: true });
+    fs.mkdirSync(targetRoot);
+    fs.writeFileSync(resultModule, "export const trusted = true;\n");
+    writeExecutable(
+      runner,
+      '#!/usr/bin/env bun\nimport { trusted } from "./result.ts"; console.log(JSON.stringify({ trusted }));\n'
+    );
+    fs.writeFileSync(confinement, BUN_MODULE_CONFINEMENT_SOURCE);
+    fs.writeFileSync(path.join(controls, "bunfig.toml"), "\n");
+    fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n");
+    let current = true;
+    let checks = 0;
+    const env = bindOperatorSmithersExecutableCapability(
+      { ULTRAFUZZ_BUN_MODULE_CONFINEMENT: confinement },
+      runner,
+      operatorRoot,
+      () => {
+        checks += 1;
+        if (!current) throw new Error("operator controller changed during execution");
+      },
+      targetRoot
+    );
+    const anchor = acquireSmithersExecutableAnchor(env);
+    assert.ok(anchor);
+    assert.equal(anchor.argumentPrefix.at(-1), runner);
+    anchor.close();
+
+    const result = await runSmithersInspectionCommand({
+      args: ["inspect", "fixture", "--format", "json"],
+      projectRoot: targetRoot,
+      env
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.json, { trusted: true });
+    assert.ok(checks >= 4);
+
+    current = false;
+    assert.throws(() => acquireSmithersExecutableAnchor(env), /operator controller changed during execution/u);
   }
 );
 

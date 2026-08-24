@@ -12688,6 +12688,9 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
   }
   applySmithersCompatibilityPatches(project);
+  const patchedRunner = sources.find(({ patch }) => patch.id === "local_delegation");
+  assert.ok(patchedRunner);
+  assert.equal(fs.statSync(patchedRunner.source).mode & 0o777, 0o500);
   for (const { patch, source } of sources) {
     // `patched` is the whole replacement text, so its presence is exactly the
     // statement "this workaround landed in the installed source".
