@@ -2874,7 +2874,7 @@ export async function runSmithersLifecycleCommand(input: {
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
+    if (smithersSnapshotReportsMissingRun(inspection)) {
       const recoveryLogDirArgs = workflowLogDirArgs();
       const inputJson = workflowRelaunchInputJson();
       const recoveryCommand = [
@@ -3190,7 +3190,7 @@ export async function assertSmithersControllerRefreshable(input: {
     projectRoot: input.projectRoot,
     env: input.env
   });
-  if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) return;
+  if (smithersSnapshotReportsMissingRun(inspection)) return;
   if (!inspection.ok) {
     throw new Error(
       `workflow inspection failed before controller refresh: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
@@ -3250,6 +3250,32 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
   const run = snapshot.json.data.run;
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
+}
+
+function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {
+  if (smithersSnapshotHasErrorCode(snapshot, "RUN_NOT_FOUND")) return true;
+  const envelope = snapshot.json;
+  if (
+    !isObjectRecord(envelope) ||
+    !hasExactObjectKeys(envelope, ["ok", "error", "meta"]) ||
+    envelope.ok !== false ||
+    !isObjectRecord(envelope.error) ||
+    !hasExactObjectKeys(envelope.error, ["code", "message"]) ||
+    envelope.error.code !== "INSPECT_FAILED" ||
+    typeof envelope.error.message !== "string" ||
+    !isObjectRecord(envelope.meta) ||
+    !hasExactObjectKeys(envelope.meta, ["command", "duration"]) ||
+    envelope.meta.command !== "inspect" ||
+    typeof envelope.meta.duration !== "string" ||
+    envelope.meta.duration.length === 0
+  ) {
+    return false;
+  }
+  const match =
+    /^No Smithers run history found at (.+[\\/]smithers\.db)\. Run 'smithers up <workflow>' to start a run first\.$/u.exec(
+      envelope.error.message
+    );
+  return match !== null && path.isAbsolute(match[1]!);
 }
 
 function smithersRunStateIsActive(inspect: CurrentSmithersInspect): boolean {
