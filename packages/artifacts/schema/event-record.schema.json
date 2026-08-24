@@ -1542,6 +1542,9 @@
         },
         "retry_failed": {
           "const": true
+        },
+        "recovered_missing_workflow_run": {
+          "const": true
         }
       }
     },

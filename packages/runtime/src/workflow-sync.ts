@@ -598,13 +598,14 @@ export async function synchronizeLinkedWorkflowRun(
   reconcilePreparedRecoveryProvenance(layout);
   const recoveryState = readRunState(layout);
   const recovery = recoveryState.provenance?.recovery;
-  const recoveryDispositionAuthorized = recoverySubmissionAuthorized({
-    layout,
-    state: recoveryState,
-    workflowRunId: evidence.smithersRunId,
-    workflowLinkId: evidence.workflowLinkId,
-    controlGeneration: evidence.controlGeneration
-  });
+  const recoveryDispositionAuthorized =
+    recoverySubmissionAuthority({
+      layout,
+      state: recoveryState,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration
+    }) !== undefined;
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const nonBlockingNodeIds = nonBlockingRuntimeNodeIds(loaded.graph);
   const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
@@ -861,19 +862,20 @@ function recoveryAuthorizesTerminalAggregate(input: {
   tasks: readonly StoredWorkflowTask[];
 }): boolean {
   const recovery = input.state.provenance?.recovery;
+  const submissionAuthority = recoverySubmissionAuthority({
+    layout: input.layout,
+    state: input.state,
+    workflowRunId: input.workflowRunId,
+    workflowLinkId: input.workflowLinkId,
+    controlGeneration: input.controlGeneration
+  });
   const statuses = [...input.nodeStatuses]
     .filter(([nodeId]) => !input.nonBlockingNodeIds.has(nodeId))
     .map(([, status]) => status);
   if (
     (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
     recovery === undefined ||
-    !recoverySubmissionAuthorized({
-      layout: input.layout,
-      state: input.state,
-      workflowRunId: input.workflowRunId,
-      workflowLinkId: input.workflowLinkId,
-      controlGeneration: input.controlGeneration
-    }) ||
+    submissionAuthority === undefined ||
     !input.evidenceComplete ||
     statuses.length === 0 ||
     !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run") ||
@@ -906,6 +908,7 @@ function recoveryAuthorizesTerminalAggregate(input: {
     const matchingTasks = input.tasks.filter((task) => task.attemptId === failedNode.node_id);
     const sealedTask = matchingTasks.length === 1 ? matchingTasks[0] : undefined;
     const failedTask = input.inspect.steps.find((step) => step.id === failedNode.workflow_task_id);
+    const attemptEpochRecreated = submissionAuthority.attemptEpoch === "recreated";
     if (
       node === undefined ||
       sealedTask === undefined ||
@@ -915,12 +918,14 @@ function recoveryAuthorizesTerminalAggregate(input: {
       ) ||
       failedTask === undefined ||
       failedTask.state !== "finished" ||
-      failedTask.attempt <= failedNode.failed_attempt ||
+      (attemptEpochRecreated ? failedTask.attempt < 1 : failedTask.attempt <= failedNode.failed_attempt) ||
       (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
       stringField(workflow, "run_id") !== recovery.workflow_run_id ||
       stringField(workflow, "agent_task_id") !== sealedTask.smithersNodeId ||
       stringField(workflow, "verifier_task_id") !== sealedTask.verifierSmithersNodeId ||
-      (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt
+      (attemptEpochRecreated
+        ? (numberField(workflow, "attempt") ?? -1) < 1
+        : (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt)
     ) {
       return false;
     }
@@ -929,13 +934,13 @@ function recoveryAuthorizesTerminalAggregate(input: {
   return true;
 }
 
-function recoverySubmissionAuthorized(input: {
+function recoverySubmissionAuthority(input: {
   layout: RunLayout;
   state: ReturnType<typeof readRunState>;
   workflowRunId: string;
   workflowLinkId: string;
   controlGeneration: string;
-}): boolean {
+}): { attemptEpoch: "continued" | "recreated" } | undefined {
   const recovery = input.state.provenance?.recovery;
   if (
     recovery?.submission_status !== "submitted" ||
@@ -948,7 +953,7 @@ function recoverySubmissionAuthorized(input: {
     recovery.lifecycle_submission_event_id === undefined ||
     recovery.lifecycle_submitted_at === undefined
   ) {
-    return false;
+    return undefined;
   }
 
   const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
@@ -970,7 +975,7 @@ function recoverySubmissionAuthorized(input: {
     result.record.timestamp !== recovery.lifecycle_result_at ||
     submission.record.timestamp !== recovery.lifecycle_submitted_at
   ) {
-    return false;
+    return undefined;
   }
 
   const invocationPayload = invocation.record.payload as Record<string, unknown>;
@@ -999,17 +1004,24 @@ function recoverySubmissionAuthorized(input: {
     submissionPayload.workflow_link_id !== recovery.workflow_link_id ||
     submissionPayload.control_generation !== recovery.control_generation ||
     submissionPayload.controller_invocation_id !== recovery.controller_invocation_id ||
-    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at
+    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at ||
+    (resultPayload.recovered_missing_workflow_run === true) !==
+      (submissionPayload.recovered_missing_workflow_run === true)
   ) {
-    return false;
+    return undefined;
   }
 
   // A completed recovery remains stable across read-only synchronization, but
   // any later lifecycle action consumes its authority. A new retry-failed
   // action must establish a new exact recovery disposition of its own.
-  return !records.some(
-    (record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking"
-  );
+  if (
+    records.some((record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking")
+  ) {
+    return undefined;
+  }
+  return {
+    attemptEpoch: resultPayload.recovered_missing_workflow_run === true ? "recreated" : "continued"
+  };
 }
 
 function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {
