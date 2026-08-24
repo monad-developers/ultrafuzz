@@ -215,7 +215,15 @@ export function redactSecretsInText(
   const speculative = mode === "all";
   let redacted = redactExactSecretValues(value, placeholder, forbiddenSecretValues)
     .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gu, `$1${placeholder}@`)
-    .replace(/(Bearer\s+)[^\s`'"]+/giu, `$1${placeholder}`);
+    // The token must look like a token. This rule is case-insensitive, so it
+    // also matches the English word "bearer" -- OpenZeppelin's AccessControl
+    // docs say "the role bearer (i.e. `account`)" -- and it was redacting the
+    // following prose, which fails an artifact gate that cannot rewrite bytes.
+    .replace(/(Bearer\s+)([^\s`'"]+)/giu, (match: string, prefix: string, token: string) =>
+      token.length >= MIN_EXACT_SECRET_VALUE_LENGTH && /^[A-Za-z0-9_\-.=+/]+$/u.test(token)
+        ? `${prefix}${placeholder}`
+        : match
+    );
   if (speculative) {
     redacted = redacted.replace(SENSITIVE_ASSIGNMENT_PATTERN, (assignment, prefix: string) => {
       const assignedValue = assignment.slice(prefix.length);
