@@ -235,6 +235,51 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     }
   });
 
+  it("stages a catalog already authenticated by its reference closure exactly once", async () => {
+    const fixture = createProjectFixture({
+      referenceDependencyAttemptIds: ["dependency-one"],
+      vulnerabilityDatabaseReferenceAttemptId: "dependency-one"
+    });
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-overlap-test-"));
+    try {
+      execFileSync("tar", ["-xzf", archive.path, "-C", extracted]);
+      const catalogPath = fixture.input.vulnerability_database!.catalogPath;
+      expect(fs.readFileSync(path.join(extracted, catalogPath))).toEqual(
+        fs.readFileSync(path.join(fixture.root, catalogPath))
+      );
+    } finally {
+      archive.cleanup();
+      fs.rmSync(extracted, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a catalog overlap when the independently authenticated bytes differ", async () => {
+    const fixture = createProjectFixture({
+      referenceDependencyAttemptIds: ["dependency-one"],
+      vulnerabilityDatabaseReferenceAttemptId: "dependency-one"
+    });
+    const catalogPath = path.join(fixture.root, fixture.input.vulnerability_database!.catalogPath);
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    let changed = false;
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((filePath, data, options) => {
+      originalWriteFileSync(filePath, data, options);
+      if (!changed && path.resolve(String(filePath)) !== catalogPath && String(filePath).endsWith("declared.txt")) {
+        changed = true;
+        originalWriteFileSync(catalogPath, "changed after reference capture\n");
+      }
+    });
+    try {
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /reference publication changed|authenticated dependency publication collides with different staged bytes/u
+      );
+    } finally {
+      writeSpy.mockRestore();
+      fixture.cleanup();
+    }
+  });
+
   it("stages the exact verified publication closure and excludes dependency directory extras", async () => {
     const fixture = createProjectFixture();
     const dependency = fixture.input.dependency_artifact_dirs[0]!;
@@ -3557,6 +3602,7 @@ function createProjectFixture(
     divergentSource?: boolean;
     optionalDependencyAttemptIds?: readonly string[];
     referenceDependencyAttemptIds?: readonly string[];
+    vulnerabilityDatabaseReferenceAttemptId?: string;
     agentCredentialEnv?: readonly string[];
     operatorPrompt?: string;
     trackedIgnored?: boolean;
@@ -3574,6 +3620,18 @@ function createProjectFixture(
   const referenceDependencyArtifactDirs = dependencyArtifactDirs.filter((directory) =>
     (options.referenceDependencyAttemptIds ?? []).includes(path.basename(directory))
   );
+  const vulnerabilityDatabaseReferenceArtifactDir =
+    options.vulnerabilityDatabaseReferenceAttemptId === undefined
+      ? undefined
+      : referenceDependencyArtifactDirs.find(
+          (directory) => path.basename(directory) === options.vulnerabilityDatabaseReferenceAttemptId
+        );
+  if (
+    options.vulnerabilityDatabaseReferenceAttemptId !== undefined &&
+    vulnerabilityDatabaseReferenceArtifactDir === undefined
+  ) {
+    throw new Error("fixture vulnerability database must belong to an authenticated reference dependency");
+  }
   if (optionalDependencyArtifactDirs.some((directory) => referenceDependencyArtifactDirs.includes(directory))) {
     throw new Error("fixture reference dependencies cannot be optional");
   }
@@ -3840,6 +3898,17 @@ function createProjectFixture(
         ...(optionalDependencyArtifactDirs.includes(directory) ? { group: "optional" } : {})
       });
     });
+  const vulnerabilityDatabaseCatalog =
+    vulnerabilityDatabaseReferenceArtifactDir === undefined
+      ? undefined
+      : {
+          path: path.join(root, vulnerabilityDatabaseReferenceArtifactDir, "declared.txt"),
+          sha256: sha256Hex(fs.readFileSync(path.join(root, vulnerabilityDatabaseReferenceArtifactDir, "declared.txt")))
+        };
+  const consumerDependencyArtifactDirs =
+    vulnerabilityDatabaseCatalog === undefined
+      ? dependencyArtifactDirs
+      : dependencyArtifactDirs.filter((directory) => !referenceDependencyArtifactDirs.includes(directory));
   const consumerTask = fixtureSmithersTask({
     root,
     runRoot,
@@ -3848,10 +3917,11 @@ function createProjectFixture(
     dependencySmithersNodeIds: dependencyArtifactDirs
       .filter((directory) => !referenceDependencyArtifactDirs.includes(directory))
       .map((directory) => `verify:${path.basename(directory)}`),
-    dependencyArtifactDirs: dependencyArtifactDirs.map((directory) => path.join(root, directory)),
+    dependencyArtifactDirs: consumerDependencyArtifactDirs.map((directory) => path.join(root, directory)),
     referenceArtifactDirs: referenceDependencyArtifactDirs.map((directory) => path.join(root, directory)),
     optionalDependencyArtifactDirs: optionalDependencyArtifactDirs.map((directory) => path.join(root, directory)),
     ...(referenceArtifactManifestAuthorities.length === 0 ? {} : { referenceArtifactManifestAuthorities }),
+    ...(vulnerabilityDatabaseCatalog === undefined ? {} : { vulnerabilityDatabaseCatalog }),
     sourceRevision,
     sourceRef,
     renderedPromptPath: path.join(root, mutablePromptPath),
@@ -4040,10 +4110,18 @@ function createProjectFixture(
     run_root: runRoot,
     artifact_dir: artifactDir,
     workspace_dir: workspaceDir,
-    dependency_artifact_dirs: dependencyArtifactDirs,
+    dependency_artifact_dirs: consumerDependencyArtifactDirs,
     ...(referenceDependencyArtifactDirs.length === 0
       ? {}
       : { reference_artifact_dirs: referenceDependencyArtifactDirs }),
+    ...(vulnerabilityDatabaseCatalog === undefined
+      ? {}
+      : {
+          vulnerability_database: {
+            catalogPath: path.relative(root, vulnerabilityDatabaseCatalog.path).split(path.sep).join("/"),
+            catalogSha256: vulnerabilityDatabaseCatalog.sha256
+          }
+        }),
     optional_dependency_artifact_dirs: optionalDependencyArtifactDirs,
     dependency_verification_authorities: dependencyVerificationAuthorities,
     selected_task: fixtureCloudSelectedTask({
@@ -4054,7 +4132,7 @@ function createProjectFixture(
       promptPath,
       workspacePath: workspaceDir,
       artifactDir,
-      dependencyArtifactDirs,
+      dependencyArtifactDirs: consumerDependencyArtifactDirs,
       referenceArtifactDirs: referenceDependencyArtifactDirs,
       executionGeneration: "base"
     }),
@@ -4284,6 +4362,7 @@ function fixtureSmithersTask(input: {
   referenceArtifactDirs?: string[];
   optionalDependencyArtifactDirs?: string[];
   referenceArtifactManifestAuthorities?: NonNullable<SmithersTaskManifestTask["referenceArtifactManifestAuthorities"]>;
+  vulnerabilityDatabaseCatalog?: SmithersTaskManifestTask["vulnerabilityDatabaseCatalog"];
   sourceRevision?: string;
   sourceRef?: string;
   renderedPromptPath?: string;
@@ -4335,6 +4414,9 @@ function fixtureSmithersTask(input: {
     input.referenceArtifactManifestAuthorities.length === 0
       ? {}
       : { referenceArtifactManifestAuthorities: input.referenceArtifactManifestAuthorities }),
+    ...(input.vulnerabilityDatabaseCatalog === undefined
+      ? {}
+      : { vulnerabilityDatabaseCatalog: input.vulnerabilityDatabaseCatalog }),
     optionalDependencyArtifactDirs: input.optionalDependencyArtifactDirs ?? [],
     ...(input.renderedPromptPath === undefined ? {} : { renderedPromptPath: input.renderedPromptPath }),
     execution: {
@@ -4432,6 +4514,17 @@ function fixtureCloudSelectedTask(input: {
     sourceProjectRoot: input.sourceProjectRoot,
     dependencyArtifactDirs: [...input.dependencyArtifactDirs],
     referenceArtifactDirs: [...input.referenceArtifactDirs],
+    ...(task.vulnerabilityDatabaseCatalog === undefined
+      ? {}
+      : {
+          vulnerabilityDatabase: {
+            catalogPath: path
+              .relative(input.sourceProjectRoot, task.vulnerabilityDatabaseCatalog.path)
+              .split(path.sep)
+              .join("/"),
+            catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
+          }
+        }),
     timeoutMs: task.timeoutMs,
     heartbeatTimeoutMs: task.heartbeatTimeoutMs,
     retries: task.retries,
