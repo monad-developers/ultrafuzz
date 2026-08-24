@@ -774,7 +774,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       layout: evidence.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
       env: forgeGuard.env,
-      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
+      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks),
+      allowIdentityRotation: input.refreshController === true
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
