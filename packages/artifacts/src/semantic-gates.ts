@@ -5861,16 +5861,51 @@ function propertyCampaignReferencedEvidencePaths(document: unknown): string[] {
   ];
 }
 
+const MAX_GATE_VALUE_TEXT_CHARACTERS = 256;
+const MAX_GATE_PATH_LIST_ITEMS = 10;
+
+/**
+ * Bounded expected/actual rendering for campaign gate diagnostics (#693): the
+ * former messages named the failing field but never the expected value, so a
+ * base-path disagreement was only diagnosable by reading gate source. The cap
+ * keeps whole-object comparisons (for example `$.paths`) from ballooning the
+ * bounded node-attempt failure message.
+ */
+function describeGateValue(value: unknown): string {
+  const text = value === undefined ? "undefined" : (JSON.stringify(value) ?? String(value));
+  return text.length <= MAX_GATE_VALUE_TEXT_CHARACTERS ? text : `${text.slice(0, MAX_GATE_VALUE_TEXT_CHARACTERS)}...`;
+}
+
+function describeGatePathSet(paths: readonly string[]): string {
+  const sorted = [...paths].sort();
+  const shown = sorted.slice(0, MAX_GATE_PATH_LIST_ITEMS).join(", ");
+  return sorted.length > MAX_GATE_PATH_LIST_ITEMS
+    ? `${shown} +${sorted.length - MAX_GATE_PATH_LIST_ITEMS} more`
+    : shown;
+}
+
 function propertyCampaignEvidenceFileClosureIssues(document: unknown): SemanticGateIssue[] {
   const evidencePaths = arrayAt(document, ["evidence_files"]).flatMap((entry) => stringField(entry, "path") ?? []);
-  if (
-    new Set(evidencePaths).size !== evidencePaths.length ||
-    !sameStringSet(evidencePaths, propertyCampaignReferencedEvidencePaths(document))
-  ) {
+  const referencedPaths = propertyCampaignReferencedEvidencePaths(document);
+  if (new Set(evidencePaths).size !== evidencePaths.length || !sameStringSet(evidencePaths, referencedPaths)) {
+    const evidenceSet = new Set(evidencePaths);
+    const referencedSet = new Set(referencedPaths);
+    const duplicated = [...new Set(evidencePaths.filter((entry, index) => evidencePaths.indexOf(entry) !== index))];
+    const missing = [...referencedSet].filter((entry) => !evidenceSet.has(entry));
+    const unreferenced = [...evidenceSet].filter((entry) => !referencedSet.has(entry));
+    const details = [
+      ...(duplicated.length > 0 ? [`duplicated evidence_files paths: ${describeGatePathSet(duplicated)}`] : []),
+      ...(missing.length > 0 ? [`referenced paths missing from evidence_files: ${describeGatePathSet(missing)}`] : []),
+      ...(unreferenced.length > 0
+        ? [`evidence_files entries nothing references: ${describeGatePathSet(unreferenced)}`]
+        : [])
+    ];
     return [
       issue(
         "$.evidence_files",
-        "Evidence files must contain exactly one authenticated entry for every referenced campaign evidence path"
+        `Evidence files must contain exactly one authenticated entry for every referenced campaign evidence path${
+          details.length > 0 ? ` (${details.join("; ")})` : ""
+        }`
       )
     ];
   }
@@ -6148,8 +6183,22 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
   const configuredTimeoutSeconds = expectations.configuredFuzzerTimeoutSeconds;
   const plannedTimeoutSeconds = expectations.plannedTimeoutSeconds;
   const finalizationReserveSeconds = expectations.finalizationReserveSeconds;
-  const compare = (pathValue: string, actual: unknown, expected: unknown, message: string): void => {
-    if (!isDeepStrictEqual(actual, expected)) issues.push(issue(pathValue, message));
+  const compare = (
+    pathValue: string,
+    actual: unknown,
+    expected: unknown,
+    message: string,
+    display?: { actual: unknown; expected: unknown }
+  ): void => {
+    if (!isDeepStrictEqual(actual, expected)) {
+      const shown = display ?? { actual, expected };
+      issues.push(
+        issue(
+          pathValue,
+          `${message} (expected ${describeGateValue(shown.expected)}, actual ${describeGateValue(shown.actual)})`
+        )
+      );
+    }
   };
 
   if (!Number.isSafeInteger(configuredTimeoutSeconds) || configuredTimeoutSeconds <= 0) {
@@ -6285,17 +6334,21 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
   }
   compare("$.end_timestamp", executionFinishedAt, endTimestamp, "Result end must equal execution finish");
   if (finalArtifactDeadline !== undefined) {
+    // The predicate compares epoch milliseconds; the raw ISO strings are shown
+    // instead because both are in hand and epoch numbers are hard to diagnose.
     compare(
       `${planPath}#deadline`,
       requiredDeadline,
       finalArtifactDeadline,
-      "Campaign plan deadline must equal final artifact deadline"
+      "Campaign plan deadline must equal final artifact deadline",
+      { actual: stringField(plan, "deadline"), expected: stringField(plan, "final_artifact_deadline_utc") }
     );
     compare(
       "$.execution.deadline",
       executionDeadline,
       finalArtifactDeadline,
-      "Execution deadline must equal plan final artifact deadline"
+      "Execution deadline must equal plan final artifact deadline",
+      { actual: stringField(execution, "deadline"), expected: stringField(plan, "final_artifact_deadline_utc") }
     );
   }
   if (
@@ -6402,7 +6455,11 @@ function propertyCampaignContextJoinIssues(document: unknown, context: SemanticG
   const summary = artifactSet.campaignSummary;
   const issues: SemanticGateIssue[] = [];
   const compare = (pathValue: string, actual: unknown, expected: unknown, message: string): void => {
-    if (!isDeepStrictEqual(actual, expected)) issues.push(issue(pathValue, message));
+    if (!isDeepStrictEqual(actual, expected)) {
+      issues.push(
+        issue(pathValue, `${message} (expected ${describeGateValue(expected)}, actual ${describeGateValue(actual)})`)
+      );
+    }
   };
 
   compare(

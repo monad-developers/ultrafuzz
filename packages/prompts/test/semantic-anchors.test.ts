@@ -915,6 +915,25 @@ describe("prompt semantic anchors", () => {
     expect(flatCampaign).toContain(
       "The campaign-plan, implemented-properties, findings, and campaign-summary references must retain their exact declared artifact paths"
     );
+    // #693: the backend recorded every path field with a workspace/node-dir
+    // prefix the gates reject, surfacing as five sequential terminal node
+    // failures. The path-base convention now lives in the prompt and the gate
+    // fixtures pin the other side, so neither may drift back alone.
+    expect(flatCampaign).toContain(
+      "Write every recorded path field in the JSON artifacts relative to `{{artifact_dir}}`"
+    );
+    expect(flatCampaign).toContain(
+      "never prefixed with the artifact directory itself, a workspace path, or `artifacts/<attempt>/`, and never absolute"
+    );
+    expect(flatCampaign).toContain("the plan's `paths` object and the result's `paths` object must be byte-identical");
+    expect(flatCampaign).toContain(
+      "`exact_command`, `execution.command`, and the plan's `command_plan` keep the literal executed command"
+    );
+    expect(flatCampaign).toContain("carry the bare declared output filename exactly as listed above");
+    expect(flatCampaign).toContain("with no directory prefix");
+    expect(flatCampaign).toContain(
+      "Copy `execution.deadline` from the plan's `deadline`, which must equal `final_artifact_deadline_utc`; never populate it from `fuzzing_deadline_utc`"
+    );
     expect(flatCampaign).toContain(
       "Emit exactly one schema-defined property-result row for every implemented record in `implemented-properties.json`"
     );
