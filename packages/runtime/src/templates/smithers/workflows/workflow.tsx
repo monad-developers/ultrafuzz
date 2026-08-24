@@ -2890,6 +2890,14 @@ function artifactAwareAgent(
       "AGENT_CHECKPOINT_INVALID",
       "TASK_ABORTED"
     ]);
+    // #677: a routed-gateway HTTP 402 (provider credit exhausted) reaches this
+    // normalizer as an anonymous CLI failure because the subprocess boundary
+    // collapses the status code into a deterministic status line. Matching only
+    // status-line tokens — never provider prose — mirrors the 429 precedent in
+    // agents/openrouter.tsx and keeps #572's no-failure-taxonomy-from-message
+    // rule intact for everything else.
+    const gatewayPaymentRequiredPattern =
+      /(?:\bunexpected status 402\b|\bHTTP(?:\s+status)?\s+402\b|\b402\s+Payment\s+Required\b)/i;
     const readProperty = (value: object, key: string): unknown => {
       try {
         return Reflect.get(value, key);
@@ -2945,6 +2953,15 @@ function artifactAwareAgent(
         details.retryAfterMs = retryAfterMs as number;
       }
       if (Object.keys(details).length > 0) normalizedError.details = details;
+    }
+    // Promote an otherwise-unclassified 402 to Smithers' quota control plane so
+    // the scheduler parks the run (waiting-quota) instead of burning the retry
+    // budget on a condition no retry can fix (#677). Source-classified control
+    // codes are never overridden, and no quotaResetAtMs is invented — a 402
+    // carries no reset time, so the run stays parked until `ultrafuzz resume`.
+    if (normalizedError.code === undefined && gatewayPaymentRequiredPattern.test(normalizedError.message)) {
+      normalizedError.code = "AGENT_QUOTA_EXCEEDED";
+      normalizedError.details = { ...normalizedError.details, failureQuota: true };
     }
     return normalizedError;
   };
