@@ -89,6 +89,7 @@ import {
 } from "../src/index.js";
 import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import {
+  assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   refreshedSmithersControllerSnapshot,
   runSmithersInspectionCommand,
@@ -2039,6 +2040,24 @@ function workflowInspect(input: {
       command: "inspect",
       duration: "1ms"
     }
+  };
+}
+
+function missingSmithersInspect(
+  databasePath: string,
+  kind: "history" | "database" = "history"
+): Record<string, unknown> {
+  // Captured from the pinned runner's `inspect --format json --full-output`
+  // contract. Incur appends the stable error-reference suffix to the store
+  // error emitted by Smithers.
+  const missingState = kind === "history" ? "Smithers run history" : "smithers.db";
+  return {
+    ok: false,
+    error: {
+      code: "INSPECT_FAILED",
+      message: `No ${missingState} found at ${databasePath}. Run 'smithers up <workflow>' to start a run first. See https://smithers.sh/reference/errors`
+    },
+    meta: { command: "inspect", duration: "1ms" }
   };
 }
 
@@ -17959,6 +17978,98 @@ test("controller refresh refuses an active workflow without publishing a generat
   assert.equal(fs.readdirSync(path.join(launched.value!.run_root, "smithers", "execution-snapshots")).length, 1);
 });
 
+test("controller refresh admits only the exact current missing-history inspect envelope", async () => {
+  const project = tempProject();
+  const runId = "controller-refresh-missing-history-envelope";
+  const inspectPath = path.join(project, "fake-smithers-inspect.json");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: missingSmithersInspect(path.join(project, "smithers.db"))
+  });
+
+  await assert.doesNotReject(() =>
+    assertSmithersControllerRefreshable({ smithersRunId: `ultrafuzz-${runId}`, projectRoot: project, env })
+  );
+  fs.writeFileSync(
+    inspectPath,
+    `${JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db"), "database"))}\n`,
+    "utf8"
+  );
+  await assert.doesNotReject(() =>
+    assertSmithersControllerRefreshable({ smithersRunId: `ultrafuzz-${runId}`, projectRoot: project, env })
+  );
+
+  const rejected = [
+    {
+      ...missingSmithersInspect(path.join(project, "smithers.db")),
+      unexpected: true
+    },
+    missingSmithersInspect("relative/smithers.db"),
+    {
+      ...missingSmithersInspect(path.join(project, "smithers.db")),
+      error: { code: "INSPECT_FAILED", message: "unrelated inspection failure" }
+    },
+    {
+      ...missingSmithersInspect(path.join(project, "smithers.db")),
+      meta: { command: "status", duration: "1ms" }
+    },
+    {
+      ...missingSmithersInspect(path.join(project, "smithers.db")),
+      error: {
+        code: "INSPECT_FAILED",
+        message: `No Smithers run history found at ${path.join(
+          project,
+          "smithers.db"
+        )}. Run 'smithers up <workflow>' to start a run first.`
+      }
+    }
+  ];
+  for (const envelope of rejected) {
+    fs.writeFileSync(inspectPath, `${JSON.stringify(envelope)}\n`, "utf8");
+    await assert.rejects(
+      () =>
+        assertSmithersControllerRefreshable({
+          smithersRunId: `ultrafuzz-${runId}`,
+          projectRoot: project,
+          env
+        }),
+      /exact current full-output envelope|must report ok: true/u
+    );
+  }
+});
+
+test("controller refresh relaunches an exact current missing-history run from the refreshed snapshot", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-missing-history-relaunch";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db")))}\n`,
+    "utf8"
+  );
+
+  const resumed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const upCommands = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .trim()
+    .split("\n")
+    .filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 2);
+  assert.doesNotMatch(upCommands[1]!, /(?:^| )--resume(?: |$)/u);
+  assert.match(upCommands[1]!, /^up \/proc\/[0-9]+\/fd\/[0-9]+\/\.smithers\/workflows\//u);
+  assert.equal(
+    fs.existsSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json")),
+    true
+  );
+  assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), true);
+});
+
 test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -20772,6 +20883,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   const logPath = path.join(project, "recovery-smithers.log");
   const cloudEnvironmentLog = path.join(project, "recovery-cloud-environment.log");
   const markerPath = path.join(project, "initial-submission-attempted");
+  const missingInspectJson = JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db")));
   const installer = writeFakeNpmInstaller(project);
   const npmFixture = path.join(installer.binDir, "npm");
   fs.chmodSync(npmFixture, 0o700);
@@ -20782,8 +20894,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > ${shellQuote(cloudEnvironmentLog)}`,
     "fi",
     'if [ "$1" = "inspect" ]; then',
-    `  printf '%s\\n' '{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"not found"}}'`,
-    "  exit 4",
+    `  printf '%s\\n' ${shellQuote(missingInspectJson)}`,
+    "  exit 1",
     "fi",
     `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
     `  : > ${shellQuote(markerPath)}`,
@@ -20804,8 +20916,8 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> ${shellQuote(cloudEnvironmentLog)}`,
       "fi",
       'if [ "$1" = "inspect" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_FOUND","message":"No Smithers run history found at /workspace/target/smithers.db. Run \'\\\'\'smithers up <workflow>\'\\\'\' to start a run first."}}\'',
-      "  exit 4",
+      `  printf '%s\\n' ${shellQuote(missingInspectJson)}`,
+      "  exit 1",
       "fi",
       `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
       `  : > ${shellQuote(markerPath)}`,
