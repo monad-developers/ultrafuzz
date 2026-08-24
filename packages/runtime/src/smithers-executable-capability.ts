@@ -160,7 +160,6 @@ export function acquireSmithersExecutableAnchor(
             "--no-env-file",
             "--no-install",
             "--no-addons",
-            "--preserve-symlinks",
             "--preserve-symlinks-main",
             `--preload=${bunControls!.confinement}`
           ]

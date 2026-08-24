@@ -630,7 +630,6 @@ export async function runDurableWorkflow(
       "--no-env-file",
       "--no-install",
       "--no-addons",
-      "--preserve-symlinks",
       "--preserve-symlinks-main",
       `--preload=${confinement}`,
       smithers
