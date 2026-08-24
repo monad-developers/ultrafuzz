@@ -431,8 +431,7 @@ function snapshotFromManifest(
   );
   const loaded = new Map(
     manifest.files.map((file) => {
-      const filePath = safeResolveInside(root, file.path, "controller generation file");
-      assertNoSymlinkComponents(root, filePath, "controller generation file");
+      const filePath = resolveControllerSnapshotFile(root, file.path, "controller generation file");
       assertRegularFileInside(root, filePath, "controller generation file");
       const contents = readRegularFileSnapshot(filePath, MAX_DOCUMENT_BYTES);
       if (contents.byteLength !== file.size_bytes || sha256(contents) !== file.sha256) {
@@ -450,7 +449,7 @@ function snapshotFromManifest(
     executionFiles: manifest.files
       .filter((file) => file.kind === "execution")
       .map((file) => ({
-        sourcePath: safeResolveInside(root, file.path, "controller generation execution file"),
+        sourcePath: resolveControllerSnapshotFile(root, file.path, "controller generation execution file"),
         snapshotPath: file.path,
         contents: loaded.get(file.path)!
       }))
@@ -971,6 +970,14 @@ function safeSnapshotPath(value: string): boolean {
     value !== "." &&
     !value.startsWith("../")
   );
+}
+
+function resolveControllerSnapshotFile(root: string, relativePath: string, label: string): string {
+  if (!safeSnapshotPath(relativePath)) throw new Error(`${label} path is unsafe: ${relativePath}`);
+  const resolved = path.resolve(root, ...relativePath.split("/"));
+  assertPathInside(root, resolved, label);
+  assertNoSymlinkComponents(root, resolved, label);
+  return resolved;
 }
 
 function validTimestamp(value: unknown): value is string {
