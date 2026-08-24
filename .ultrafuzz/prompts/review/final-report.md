@@ -653,7 +653,7 @@ After `report.json` passes validation, generate the required byte-exact
 canonical Markdown with this producer command:
 
 ```sh
-ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'
+ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md' --goal-search-coverage '{{goal_search_coverage_path}}'
 ```
 
 The command fails instead of inventing missing final-review evidence. Treat

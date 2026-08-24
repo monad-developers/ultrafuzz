@@ -47,6 +47,7 @@ import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
+import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import {
   derivePromptArtifactAuthority,
   parsePromptArtifactAuthorityBytes,
@@ -7700,8 +7701,13 @@ const FINAL_REPORT_RUN_METADATA_FIXTURE = {
   expanded_graph_fingerprint: "d".repeat(64)
 };
 
-function loadFinalReportCanonicalProjectionHarness(): (
-  task: { outputs: Array<{ path: string; contract: string }> },
+function loadFinalReportCanonicalProjectionHarness(
+  overrides: {
+    projectCanonicalFinalReport?: typeof projectCanonicalFinalReport;
+    readGoalSearchCoverage?: (runRoot: string) => unknown;
+  } = {}
+): (
+  task: { outputs: Array<{ path: string; contract: string }>; runRoot?: string },
   verifiedOutputs: ReadonlyMap<string, { value: unknown; file: { bytes: Buffer } }>
 ) => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -7727,10 +7733,11 @@ function loadFinalReportCanonicalProjectionHarness(): (
   )(
     () => ({ status: "not-planned", reason: "property-implementation-track-not-declared" }),
     isDeepStrictEqual,
-    (report: unknown) => ({ report, markdown: "# Canonical custom report\n" }),
+    overrides.projectCanonicalFinalReport ??
+      ((report: unknown) => ({ report, markdown: "# Canonical custom report\n" })),
     () => FINAL_REPORT_AGENT_EXECUTION_FIXTURE,
     () => FINAL_REPORT_RUN_METADATA_FIXTURE,
-    () => undefined,
+    overrides.readGoalSearchCoverage ?? (() => undefined),
     Buffer
   ) as ReturnType<typeof loadFinalReportCanonicalProjectionHarness>;
 }
@@ -7787,6 +7794,89 @@ test("generated canonical report verification selects renamed producers and cust
         verified
       ),
     /exactly one current ultrafuzz\/report@3 output/iu
+  );
+});
+
+test("generated canonical report verification enforces census-rendered goal coverage bytes", () => {
+  const census = {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: "run-1",
+    totals: { planned: 2 },
+    goals: [
+      {
+        node_id: "dynamic:class:1",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-001",
+        status: "completed-no-findings",
+        finding_count: 0
+      },
+      {
+        node_id: "dynamic:class:2",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-002",
+        status: "completed-with-findings",
+        finding_count: 1
+      }
+    ]
+  };
+  const report = {
+    schema_version: "ultrafuzz.report.v3",
+    run_metadata: { ...FINAL_REPORT_RUN_METADATA_FIXTURE, agent_execution: FINAL_REPORT_AGENT_EXECUTION_FIXTURE },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
+  };
+  const censusProjection = projectCanonicalFinalReport(report, { goalSearchCoverage: census });
+  const unknownProjection = projectCanonicalFinalReport(report, {});
+  assert.match(censusProjection.markdown, /All 2 targeted goal searches completed and published a verified result/u);
+  assert.match(unknownProjection.markdown, /\*\*Goal search coverage is unknown\.\*\*/u);
+
+  const task = {
+    runRoot: "run-root-fixture",
+    outputs: [
+      { path: "report.json", contract: "ultrafuzz/report@3" },
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const verifiedWith = (markdown: string): Map<string, { value: unknown; file: { bytes: Buffer } }> =>
+    new Map([
+      ["report.json", { value: report, file: { bytes: Buffer.from(`${JSON.stringify(report)}\n`) } }],
+      ["report.md", { value: markdown, file: { bytes: Buffer.from(markdown, "utf8") } }]
+    ]);
+
+  const censusRunRoots: string[] = [];
+  const verifyWithCensus = loadFinalReportCanonicalProjectionHarness({
+    projectCanonicalFinalReport,
+    readGoalSearchCoverage: (runRoot) => {
+      censusRunRoots.push(runRoot);
+      return census;
+    }
+  });
+
+  // The census-rendered projection is the only publishable report.md once the run recorded a census.
+  assert.doesNotThrow(() => verifyWithCensus(task, verifiedWith(censusProjection.markdown)));
+  assert.deepEqual(censusRunRoots, ["run-root-fixture"]);
+
+  // A census-less "unknown" rendering must not publish against a recorded census (issues #684/#702).
+  assert.throws(
+    () => verifyWithCensus(task, verifiedWith(unknownProjection.markdown)),
+    /is not the canonical projection of report\.json/u
+  );
+
+  // Without a census, unknown is the only publishable statement: agent Markdown claiming completed
+  // goal searches fails byte equality, so unknown never reads as full coverage on the runtime path.
+  const verifyWithoutCensus = loadFinalReportCanonicalProjectionHarness({
+    projectCanonicalFinalReport,
+    readGoalSearchCoverage: () => undefined
+  });
+  assert.doesNotThrow(() => verifyWithoutCensus(task, verifiedWith(unknownProjection.markdown)));
+  assert.throws(
+    () => verifyWithoutCensus(task, verifiedWith(censusProjection.markdown)),
+    /is not the canonical projection of report\.json/u
   );
 });
 

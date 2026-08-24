@@ -1413,8 +1413,11 @@ describe("prompt semantic anchors", () => {
       "{{ancestor_artifact_path_authority:setup/project-discovery.md,setup/setup-foundry.md,setup/base-test-setup.md,smoke-context.md}}"
     );
     expect(markdown).toContain(
-      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md'"
+      "ultrafuzz report render --file '{{artifact_path}}/report.json' --output '{{artifact_path}}/report.md' --goal-search-coverage '{{goal_search_coverage_path}}'"
     );
+    // The producer command must hand the renderer the runtime-owned census, or its bytes cannot
+    // match the census-aware projection the runtime verifier enforces (issue #702).
+    expect(markdown).toContain("--goal-search-coverage '{{goal_search_coverage_path}}'");
     expect(markdown).toMatch(/Do not (?:author or )?hand-edit\s+`report\.md` after/u);
     expect(markdown).toContain("the renderer succeeds");
   });
