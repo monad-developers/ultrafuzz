@@ -25,6 +25,12 @@ import {
   type CompiledSmithersTask
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
+import {
+  commitControllerGeneration,
+  prepareControllerGeneration,
+  verifyCommittedControllerGenerationAuthority
+} from "../src/workflow-controller-generation.js";
+import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
   schema_version: "ultrafuzz.data-governance-policy.v1",
@@ -584,6 +590,10 @@ test("controller refresh preserves the sealed dynamic base after runtime materia
   );
   assert.ok(baseTasks);
   assert.ok(resolvedConfig);
+  const baseGraph = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/runtime-base-graph.json"
+  );
+  assert.ok(baseGraph);
   const baseDocument = JSON.parse(baseTasks.contents.toString("utf8")) as { tasks: CompiledSmithersTask[] };
   const currentDocument = JSON.parse(evidence.verifiedControl.contents.tasks.toString("utf8")) as {
     tasks: CompiledSmithersTask[];
@@ -596,18 +606,86 @@ test("controller refresh preserves the sealed dynamic base after runtime materia
     currentDocument.tasks.some((task) => task.attemptId === generated.attemptId),
     true
   );
+  assert.equal(baseGraph.contents.equals(evidence.verifiedControl.contents.graph), false);
+
+  const sealedBase = {
+    ...evidence.verifiedControl,
+    contents: {
+      ...evidence.verifiedControl.contents,
+      graph: baseGraph.contents,
+      tasks: baseTasks.contents
+    }
+  };
+  const config = JSON.parse(resolvedConfig.contents.toString("utf8"));
+  const firstRefresh = refreshedSmithersControllerSnapshot({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    original: sealedBase,
+    config
+  });
+  const firstPrepared = prepareControllerGeneration(evidence.layout, sealedBase, firstRefresh, {
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId
+  });
+  materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    snapshot: firstPrepared.snapshot,
+    authorizedGenerations: firstPrepared.authorizedGenerations
+  });
+  commitControllerGeneration(evidence.layout, sealedBase, firstPrepared.controllerGeneration);
 
   const refreshed = refreshedSmithersControllerSnapshot({
     projectRoot: fixture.project,
     layout: evidence.layout,
     original: evidence.verifiedControl,
-    config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+    config
   });
 
   const workflow = refreshed.snapshot.contents.workflow.toString("utf8");
   assert.equal(workflow.includes(JSON.stringify(generated.attemptId)), false);
   assert.equal(workflow.includes(JSON.stringify(generated.renderedPromptPath)), false);
   assert.deepEqual(refreshed.snapshot.contents.tasks, evidence.verifiedControl.contents.tasks);
+  assert.equal(refreshed.semanticFingerprint, firstRefresh.semanticFingerprint);
+
+  const moduleIndex = refreshed.snapshot.executionFiles.findIndex((file) =>
+    file.snapshotPath.startsWith("modules/@ultrafuzz/runtime/dist/")
+  );
+  assert.notEqual(moduleIndex, -1);
+  const secondRefresh = {
+    ...refreshed,
+    snapshot: {
+      ...refreshed.snapshot,
+      executionFiles: refreshed.snapshot.executionFiles.map((file, index) =>
+        index === moduleIndex
+          ? { ...file, contents: Buffer.concat([file.contents, Buffer.from("\n// synthetic controller update\n")]) }
+          : file
+      )
+    },
+    controllerSourceDigest: crypto
+      .createHash("sha256")
+      .update(refreshed.controllerSourceDigest)
+      .update("synthetic-controller-update")
+      .digest("hex")
+  };
+  const secondPrepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, secondRefresh, {
+    workflowRunId: evidence.smithersRunId,
+    workflowLinkId: evidence.workflowLinkId
+  });
+  materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    snapshot: secondPrepared.snapshot,
+    authorizedGenerations: secondPrepared.authorizedGenerations
+  });
+  commitControllerGeneration(evidence.layout, evidence.verifiedControl, secondPrepared.controllerGeneration);
+  const authority = verifyCommittedControllerGenerationAuthority(
+    evidence.layout,
+    evidence.controlGeneration,
+    secondPrepared.controllerGeneration
+  );
+  assert.equal(authority.controllerGeneration, secondPrepared.controllerGeneration);
+  assert.equal(authority.semanticFingerprint, firstRefresh.semanticFingerprint);
 });
 
 test("dynamic child success is resumable, idempotent, provenance-safe, and opens its strict join", async () => {

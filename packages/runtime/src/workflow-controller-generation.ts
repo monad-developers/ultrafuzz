@@ -33,6 +33,8 @@ const MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
 const JOURNAL_FILE = "controller-generation-journal.json";
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
+const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
 type ControllerGenerationEvent = Extract<EventRecord, { event_type: "workflow-controller-generation-recorded" }>;
 
 interface ControllerGenerationFile {
@@ -903,9 +905,23 @@ function controllerGenerationDigest(input: {
 }
 
 function semanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  const dynamicBaseGraph = snapshot.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH
+  );
+  const dynamicBaseTasks = snapshot.executionFiles.find(
+    (file) => file.snapshotPath === DYNAMIC_BASE_TASKS_SNAPSHOT_PATH
+  );
+  if ((dynamicBaseGraph === undefined) !== (dynamicBaseTasks === undefined)) {
+    throw new Error("controller refresh has an incomplete dynamic control base");
+  }
   const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
   for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
-    const bytes = snapshot.contents[key];
+    const bytes =
+      key === "graph" && dynamicBaseGraph !== undefined
+        ? dynamicBaseGraph.contents
+        : key === "tasks" && dynamicBaseTasks !== undefined
+          ? dynamicBaseTasks.contents
+          : snapshot.contents[key];
     hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
   }
   for (const file of snapshot.executionFiles
