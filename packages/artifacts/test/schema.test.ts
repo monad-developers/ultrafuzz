@@ -28,6 +28,7 @@ import {
   REFERENCE_EXPECTATIONS_SCHEMA_VERSION,
   REPORT_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
+  VALIDATOR_BUILD_IDENTITY,
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   artifactManifestJsonSchema,
@@ -2127,11 +2128,20 @@ test("planned graph v4 validates whole documents and executes every registered d
     ...artifactContractSchemaBinding("ultrafuzz/findings@2"),
     primary: true
   };
+  const preUpgradeValidatorBuild =
+    "ultrafuzz-json-validator.v1:77b2461a78ff8a1e942a70d473460dab54158e204dba791e818717cc9674a6d4";
+  assert.equal(VALIDATOR_BUILD_IDENTITY, preUpgradeValidatorBuild);
   const historicalBundle = structuredClone(graph);
   historicalBundle.nodes = [
     {
       ...node,
-      outputs: [{ ...findingsOutput, schema_bundle_sha256: "f".repeat(64) }]
+      outputs: [
+        {
+          ...findingsOutput,
+          schema_bundle_sha256: "f".repeat(64),
+          validator_build: preUpgradeValidatorBuild
+        }
+      ]
     }
   ];
   assert.throws(() => assertPlannedGraph(historicalBundle), /schema binding changed/u);
