@@ -148,7 +148,7 @@ test("#323 an enumeration that outgrows its capture buffer names the subcommand,
         // The four things the bare `spawnSync git ENOBUFS` did not say.
         assert.match(
           error.message,
-          /^artifact-contract failure: git ls-files listed more than the 8192-byte enumeration buffer of workspace paths\./u
+          /^artifact-contract failure: git ls-files in .+ listed more than the 8192-byte enumeration buffer of workspace paths\./u
         );
         assert.match(error.message, /Largest contributors within the first \d+ bytes git wrote/u);
         assert.match(error.message, /test \(>=\d+ bytes in \d+ paths\)/u);

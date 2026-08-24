@@ -3870,26 +3870,35 @@ function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], work
   workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
   execFileSync("git", ["read-tree", "--reset", "-u", preparationTree], {
     cwd: workspaceRoot,
+    maxBuffer: 64 * 1024,
     stdio: ["ignore", "pipe", "pipe"]
   });
   removeStaleWorkspaceFiles(workspaceRoot, preparationTree);
 }
 
+// Workspace roots the runtime owns. `removeStaleWorkspaceFiles` reads this list twice, and the two
+// readers must never drift: the enumeration below excludes these roots in the pathspec so git never
+// lists them (#691: a populated `node_modules` is 30k ignored paths whose text alone outgrows any
+// capture bound, every one of them discarded on the next statement), and `isWorkspaceRuntimePath` is
+// the final gate that keeps `rmSync` away from them even if an enumeration ever names one.
+const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "artifacts"] as const;
+
 function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: string): void {
   const expected = new Set(
-    execFileSync("git", ["ls-tree", "-r", "--name-only", "-z", preparationTree], {
-      cwd: workspaceRoot,
-      encoding: "utf8"
-    })
+    invariantSuiteGitPaths(workspaceRoot, ["ls-tree", "-r", "--name-only", "-z", preparationTree])
       .split("\0")
       .filter(Boolean)
   );
+  // Bare `:(exclude)<root>` is component-exact -- it matches the root as a file or as a directory
+  // prefix, exactly the first-segment test `isWorkspaceRuntimePath` applies -- where `<root>/**` would
+  // rely on fnmatch across slashes and still enumerate a top-level file named like a root.
+  const staleExclusionPathspecs = WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}`);
   const candidates = new Set<string>();
   for (const args of [
-    ["ls-files", "--others", "--exclude-standard", "-z"],
-    ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+    ["ls-files", "--others", "--exclude-standard", "-z", "--", ".", ...staleExclusionPathspecs],
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".", ...staleExclusionPathspecs]
   ]) {
-    for (const entry of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split("\0")) {
+    for (const entry of invariantSuiteGitPaths(workspaceRoot, args).split("\0")) {
       if (entry) candidates.add(entry);
     }
   }
@@ -3905,7 +3914,7 @@ function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: strin
 
 function isWorkspaceRuntimePath(relativePath: string): boolean {
   const root = relativePath.split("/")[0];
-  return [".ultrafuzz", ".smithers", "node_modules", "artifacts"].includes(root);
+  return (WORKSPACE_RUNTIME_ROOTS as readonly string[]).includes(root);
 }
 
 function hasSymlinkComponent(root: string, candidate: string): boolean {
@@ -5165,6 +5174,7 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     execFileSync("git", args, {
       cwd: workspaceRoot,
       encoding: "utf8",
+      maxBuffer: 64 * 1024,
       stdio: ["ignore", "pipe", "pipe"]
     }).trim();
   const gitUnreachableCommitCount = (): string =>
@@ -6274,8 +6284,8 @@ const workspacePatchPreparationTrees = new Map<string, string>();
 /**
  * Enumerate workspace paths with git, under an explicit capture bound.
  *
- * Every invariant-discovery enumeration goes through here so that the bound is stated once and an
- * overflow arrives as a sentence rather than as a `SystemError`.
+ * Every invariant-discovery enumeration and the workspace-patch stale cleanup (#691) go through here
+ * so that the bound is stated once and an overflow arrives as a sentence rather than a `SystemError`.
  */
 function invariantSuiteGitPaths(workspaceRoot: string, args: readonly string[]): string {
   try {
@@ -6288,7 +6298,7 @@ function invariantSuiteGitPaths(workspaceRoot: string, args: readonly string[]):
       maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES
     }).toString("utf8");
   } catch (error) {
-    rethrowOversizedInvariantSuiteEnumeration(args, error);
+    rethrowOversizedInvariantSuiteEnumeration(workspaceRoot, args, error);
   }
 }
 
@@ -6302,7 +6312,11 @@ function invariantSuiteGitPaths(workspaceRoot: string, args: readonly string[]):
  *
  * Scope: this improves the string. The enumeration has already failed by the time it runs.
  */
-function rethrowOversizedInvariantSuiteEnumeration(args: readonly string[], error: unknown): never {
+function rethrowOversizedInvariantSuiteEnumeration(
+  workspaceRoot: string,
+  args: readonly string[],
+  error: unknown
+): never {
   if (!(error instanceof Error) || (error as { code?: unknown }).code !== "ENOBUFS") throw error;
   // Every call site here passes the subcommand first and no global git options, so no scan is needed.
   const subcommand = args[0] ?? "git";
@@ -6330,7 +6344,9 @@ function rethrowOversizedInvariantSuiteEnumeration(args: readonly string[], erro
     delete (error as unknown as Record<string, unknown>)[field];
   }
   throw new Error(
-    `artifact-contract failure: git ${subcommand} ${detail}${
+    // The cwd is part of the sentence (#691 criterion): a run holds many worktrees, and an overflow
+    // that does not say WHICH workspace overran sends the operator back to tracing git calls.
+    `artifact-contract failure: git ${subcommand} in ${workspaceRoot} ${detail}${
       attribution === ""
         ? ""
         : `. Largest contributors within the first ${stdoutBytes} bytes git wrote; git emits in path order, so anything past that cutoff is not visible here: ${attribution}`
@@ -6350,8 +6366,12 @@ function rankInvariantSuiteEnumerationRoots(capturedStdout: unknown): string {
   const listing = capturedStdout.toString("latin1");
   const totals = new Map<string, { bytes: number; paths: number }>();
   for (let start = 0; start < listing.length;) {
-    const end = listing.indexOf("\n", start);
-    // The last line was cut mid-path by the very overflow being reported, so it is not attributed: its
+    // The stale-cleanup enumerations pass `-z` (#691), so a NUL terminates an entry the same way a
+    // newline does for the line-oriented call sites.
+    const newline = listing.indexOf("\n", start);
+    const nul = listing.indexOf("\0", start);
+    const end = newline < 0 ? nul : nul < 0 ? newline : Math.min(newline, nul);
+    // The last entry was cut mid-path by the very overflow being reported, so it is not attributed: its
     // root may be the prefix of a longer name. Every figure here is a floor for that reason and because
     // the capture is a prefix of what git had to say.
     if (end < 0) break;
@@ -6511,6 +6531,7 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       try {
         execFileSync("git", ["rev-parse", "--verify", `${candidate}^{commit}`], {
           cwd: workspaceRoot,
+          maxBuffer: 64 * 1024,
           stdio: ["ignore", "ignore", "pipe"]
         });
         return true;
@@ -8526,12 +8547,17 @@ function verifyInvariantLedgerSourceEvidence(
       });
     }
   }
-  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspaceRoot, encoding: "utf8" })
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024
+  })
     .trim()
     .toLowerCase();
   const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
     cwd: workspaceRoot,
-    encoding: "utf8"
+    encoding: "utf8",
+    maxBuffer: 64 * 1024
   })
     .trim()
     .toLowerCase();
