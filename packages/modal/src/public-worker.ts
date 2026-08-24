@@ -766,7 +766,7 @@ async function preparePublicBenchmark(
     }
   });
   const suite = preparePublicEvalSuite(baseSuite, scope.lane, model.provider);
-  const auditProfile = scope.lane === "threat-model" ? "default" : scope.lane;
+  const auditProfile = scope.lane === "threat-model" ? "default" : scope.lane === "full" ? "exhaustive" : scope.lane;
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");

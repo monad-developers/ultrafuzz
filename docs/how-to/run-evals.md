@@ -153,7 +153,7 @@ The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
 `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at
 `max`. It also pins
 `strategy_loops: 1`, while all three disable flags are `false`, so it retains
-the packaged `full` audit profile with invariant tests, differential tests, and
+the packaged `exhaustive` audit profile with invariant tests, differential tests, and
 dynamic strategies. The launcher derives the current packaged audit-profile
 catalog and topology digests from the lane and verifies both against the
 target's effective policy before creating a run. Public benchmark variants

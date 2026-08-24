@@ -401,7 +401,7 @@ describe("prompt rendering", () => {
   it("renders the pinned schema and exact validation commands for every agent-authored JSON output", () => {
     const topologyPaths = [
       fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url)),
-      fileURLToPath(new URL("../../config/topologies/full.yml", import.meta.url)),
+      fileURLToPath(new URL("../../config/topologies/exhaustive.yml", import.meta.url)),
       fileURLToPath(new URL("../../config/topologies/invariant-only.yml", import.meta.url)),
       fileURLToPath(new URL("../../config/topologies/smoke.yml", import.meta.url))
     ];

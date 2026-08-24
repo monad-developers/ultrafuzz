@@ -15,7 +15,7 @@ import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
-const PACKAGED_TOPOLOGY_IDS = ["default", "full", "smoke", "invariant-only"] as const;
+const PACKAGED_TOPOLOGY_IDS = ["default", "exhaustive", "smoke", "invariant-only"] as const;
 const DIRECT_BUG_FIRST_STRATEGIES = [
   "boundary-tests",
   "encode-decode",
@@ -73,7 +73,7 @@ const NO_FINDINGS_WITH_GENERATED_TESTS: OutputRole = { findings: 0, generatedTes
 const DEFAULT_PROFILE_ROLES: Record<string, OutputRole> = Object.fromEntries(
   [...DIRECT_BUG_FIRST_STRATEGIES, ...GOAL_STRATEGIES].map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
 );
-const FULL_PROFILE_ROLES: Record<string, OutputRole> = {
+const EXHAUSTIVE_PROFILE_ROLES: Record<string, OutputRole> = {
   ...DEFAULT_PROFILE_ROLES,
   "stateful-invariant-setup": FINDINGS_ONLY,
   "stateful-invariant-handlers": FINDINGS_ONLY,
@@ -93,7 +93,7 @@ const FULL_PROFILE_ROLES: Record<string, OutputRole> = {
 // the role test fails when a topology file exists without a declaration.
 const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
   "default.yml": DEFAULT_PROFILE_ROLES,
-  "full.yml": FULL_PROFILE_ROLES,
+  "exhaustive.yml": EXHAUSTIVE_PROFILE_ROLES,
   "invariant-only.yml": {
     "stateful-invariant-setup": FINDINGS_ONLY,
     "stateful-invariant-handlers": FINDINGS_ONLY,
@@ -111,9 +111,9 @@ const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
 };
 
 describe("packaged topology collection", () => {
-  it("keeps the goal topology in the initialized default and packaged full graphs", () => {
+  it("keeps the goal topology in the initialized default and packaged exhaustive graphs", () => {
     const packagedDefaultPath = path.join(TOPOLOGY_ROOT, "default.yml");
-    const packagedPath = path.join(TOPOLOGY_ROOT, "full.yml");
+    const packagedPath = path.join(TOPOLOGY_ROOT, "exhaustive.yml");
     const projectPath = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
     expect(readFileSync(packagedDefaultPath)).toEqual(readFileSync(projectPath));
 
@@ -130,14 +130,14 @@ describe("packaged topology collection", () => {
       "threat-goals",
       "class-goals"
     ]) {
-      expect(nodes.has(id), `${id} must ship in the full topology`).toBe(true);
+      expect(nodes.has(id), `${id} must ship in the exhaustive topology`).toBe(true);
     }
     expect(nodes.get("threat-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.threat_goals" });
     expect(nodes.get("class-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.class_goals" });
   });
 
   it("validates every shipped topology directly with the built-in prompt catalog", () => {
-    for (const name of ["full", "smoke", "invariant-only"]) {
+    for (const name of ["exhaustive", "smoke", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -181,7 +181,7 @@ describe("packaged topology collection", () => {
           .sort(([left], [right]) => left.localeCompare(right))
       ])
     );
-    for (const name of ["full", "invariant-only"]) {
+    for (const name of ["exhaustive", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true
@@ -231,7 +231,7 @@ describe("packaged topology collection", () => {
         ).toHaveLength(role.generatedTests);
       }
 
-      if (expectedRoles === DEFAULT_PROFILE_ROLES || expectedRoles === FULL_PROFILE_ROLES) {
+      if (expectedRoles === DEFAULT_PROFILE_ROLES || expectedRoles === EXHAUSTIVE_PROFILE_ROLES) {
         expect(
           (nodeById.get("boundary-tests")?.outputs ?? []).map((output) => [
             output.path,
@@ -264,22 +264,22 @@ describe("packaged topology collection", () => {
     }
   });
 
-  it("keeps ordinary discovery direct-only while the full profile ships every specialist lane", () => {
+  it("keeps ordinary discovery direct-only while the exhaustive profile ships every specialist lane", () => {
     const canonical = loadTopology(REPOSITORY_ROOT, {
       topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
       requirePromptFiles: true
     });
-    const full = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, "full.yml"),
+    const exhaustive = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: path.join(TOPOLOGY_ROOT, "exhaustive.yml"),
       requirePromptFiles: true
     });
     const canonicalIds = new Set(canonical.nodes.map((node) => node.id));
-    const fullIds = new Set(full.nodes.map((node) => node.id));
+    const exhaustiveIds = new Set(exhaustive.nodes.map((node) => node.id));
 
     expect(DIRECT_BUG_FIRST_STRATEGIES).toHaveLength(20);
     for (const id of DIRECT_BUG_FIRST_STRATEGIES) {
       expect(canonicalIds.has(id), `canonical:${id}`).toBe(true);
-      expect(fullIds.has(id), `full:${id}`).toBe(true);
+      expect(exhaustiveIds.has(id), `exhaustive:${id}`).toBe(true);
     }
     expect(canonicalIds.has("differential-library-tests"), "the fast direct differential scout stays default").toBe(
       true
@@ -288,7 +288,7 @@ describe("packaged topology collection", () => {
     expect(DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES).toHaveLength(6);
     for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
       expect(canonicalIds.has(id), `canonical excludes specialist ${id}`).toBe(false);
-      expect(fullIds.has(id), `full retains specialist ${id}`).toBe(true);
+      expect(exhaustiveIds.has(id), `exhaustive retains specialist ${id}`).toBe(true);
     }
 
     expect(canonical.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
@@ -296,9 +296,9 @@ describe("packaged topology collection", () => {
       ...GOAL_STRATEGIES
     ]);
     expect(canonical.groups.goals?.defaults?.failure_policy).toBe("continue");
-    expect(full.groups.goals?.defaults?.failure_policy).toBe("continue");
-    expect(full.groups.specialists?.defaults?.failure_policy).toBe("continue");
-    expect(full.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
+    expect(exhaustive.groups.goals?.defaults?.failure_policy).toBe("continue");
+    expect(exhaustive.groups.specialists?.defaults?.failure_policy).toBe("continue");
+    expect(exhaustive.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
       ...DIRECT_BUG_FIRST_STRATEGIES,
       "stateful-invariant-campaign",
       "differential-repair-and-report-review",
@@ -306,12 +306,14 @@ describe("packaged topology collection", () => {
       ...GOAL_STRATEGIES
     ]);
     for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
-      expect(full.nodes.find((node) => node.id === id)?.group, `full optional group:${id}`).toBe("specialists");
+      expect(exhaustive.nodes.find((node) => node.id === id)?.group, `exhaustive optional group:${id}`).toBe(
+        "specialists"
+      );
     }
-    expect(full.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toEqual([
+    expect(exhaustive.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toEqual([
       ...DIRECT_BUG_FIRST_STRATEGIES
     ]);
-    expect(full.nodes.find((node) => node.id === "__finish__")?.depends_on).toEqual(["final-report"]);
+    expect(exhaustive.nodes.find((node) => node.id === "__finish__")?.depends_on).toEqual(["final-report"]);
   });
 
   it("keeps the invariant discovery and campaign chain while omitting unrelated strategies", () => {
@@ -354,7 +356,7 @@ describe("packaged topology collection", () => {
   });
 
   it("declares the invariant backend commands in every topology that runs them", () => {
-    for (const name of ["full", "invariant-only"]) {
+    for (const name of ["exhaustive", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true

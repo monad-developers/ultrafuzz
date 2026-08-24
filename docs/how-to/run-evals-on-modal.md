@@ -244,9 +244,9 @@ DeepSeek V4 Pro at `max` by default. Dispatch inputs `openai_model`,
 `openai_reasoning`, `anthropic_model`,
 `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
 `deepseek_reasoning` provide explicit overrides. The full lane retains the
-packaged `full` audit profile's strategy set, including invariant,
+packaged `exhaustive` audit profile's strategy set, including invariant,
 differential, and dynamic strategies, with all three disable flags set to
-`false`. Target preparation selects and validates that `full` profile, and its
+`false`. Target preparation selects and validates that `exhaustive` profile, and its
 effective catalog and topology digests are attested again before `startRun`.
 Push events can never select the full lane.
 

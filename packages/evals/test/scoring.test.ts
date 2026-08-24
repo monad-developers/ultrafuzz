@@ -169,7 +169,7 @@ function canonicalReport(issues: unknown[]): Record<string, unknown> {
       estimated_spend: "$0.456",
       partial_pricing: false,
       strategy_loops: 1,
-      audit_profile: "full",
+      audit_profile: "exhaustive",
       audit_profile_catalog_digest: "a".repeat(64),
       topology_digest: "b".repeat(64),
       prompt_digest: "c".repeat(64),

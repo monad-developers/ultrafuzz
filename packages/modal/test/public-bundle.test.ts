@@ -886,7 +886,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
         estimated_spend: "0",
         partial_pricing: false,
         strategy_loops: 0,
-        audit_profile: "full",
+        audit_profile: "exhaustive",
         audit_profile_catalog_digest: "a".repeat(64),
         topology_digest: "b".repeat(64),
         prompt_digest: "c".repeat(64),

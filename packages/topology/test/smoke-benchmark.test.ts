@@ -7,7 +7,7 @@ import { expandTopology, loadTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "smoke.yml");
-const FULL_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "full.yml");
+const EXHAUSTIVE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "packages", "config", "topologies", "exhaustive.yml");
 const STRATEGY_IDS = [
   "time-warp-sequences",
   "external-dependency-boundaries",
@@ -78,17 +78,17 @@ describe("packaged smoke topology", () => {
     expect(executable.every((node) => node.modelFanout[0]?.reasoningEffort === "high")).toBe(true);
   });
 
-  it("stays bounded without replacing the default or full production topologies", () => {
+  it("stays bounded without replacing the default or exhaustive production topologies", () => {
     const smoke = loadTopology(REPOSITORY_ROOT, { topologyPath: SMOKE_TOPOLOGY_PATH });
     const defaultTopology = loadTopology(REPOSITORY_ROOT);
-    const full = loadTopology(REPOSITORY_ROOT, { topologyPath: FULL_TOPOLOGY_PATH });
+    const exhaustive = loadTopology(REPOSITORY_ROOT, { topologyPath: EXHAUSTIVE_TOPOLOGY_PATH });
 
     expect(defaultTopology.nodes.some((node) => node.id === "smoke-context")).toBe(false);
     expect(defaultTopology.nodes.length).toBeGreaterThan(smoke.nodes.length);
     expect(defaultTopology.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(false);
     expect(defaultTopology.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(false);
-    expect(full.nodes.length).toBeGreaterThan(defaultTopology.nodes.length);
-    expect(full.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);
-    expect(full.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
+    expect(exhaustive.nodes.length).toBeGreaterThan(defaultTopology.nodes.length);
+    expect(exhaustive.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);
+    expect(exhaustive.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });

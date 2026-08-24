@@ -18,14 +18,7 @@ describe("audit profile catalog", () => {
   it("loads the complete shipped vocabulary and resolves packaged topologies", () => {
     const catalog = loadAuditProfileCatalog();
     expect(catalog.defaultProfile).toBe("default");
-    expect(Object.keys(catalog.profiles)).toEqual([
-      "default",
-      "exhaustive",
-      "full",
-      "invariant-only",
-      "low-cost",
-      "smoke"
-    ]);
+    expect(Object.keys(catalog.profiles)).toEqual(["default", "exhaustive", "invariant-only", "low-cost", "smoke"]);
     expect(catalog.digest).toMatch(/^[0-9a-f]{64}$/u);
 
     const smoke = auditProfile("smoke", catalog);
@@ -38,9 +31,10 @@ describe("audit profile catalog", () => {
     expect(fs.readFileSync(smokePath!, "utf8")).toContain("id: smoke-context");
     expect(packagedTopologyDigest(smoke, catalog)).toMatch(/^[0-9a-f]{64}$/u);
 
-    const full = auditProfile("full", catalog);
-    expect(full.topologyPath).toBe("topologies/full.yml");
-    expect(packagedTopologyPath(full, catalog)).toBeDefined();
+    const exhaustive = auditProfile("exhaustive", catalog);
+    expect(exhaustive.topologyPath).toBe("topologies/exhaustive.yml");
+    expect(packagedTopologyPath(exhaustive, catalog)).toBeDefined();
+    expect(packagedTopologyDigest(exhaustive, catalog)).toMatch(/^[0-9a-f]{64}$/u);
 
     const invariantOnly = auditProfile("invariant-only", catalog);
     expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
@@ -160,10 +154,10 @@ profiles:
     expect(serializeResolvedConfigToml(resolved.value)).toContain('dynamic_strategies_enumerator = "unlimited"');
   });
 
-  it.each(["balanced", "fuzz-only", "thorough"])(
+  it.each(["balanced", "full", "fuzz-only", "thorough"])(
     "rejects removed profile %s with the available profile vocabulary",
     (profile) => {
-      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, full, invariant-only/u);
+      expect(() => auditProfile(profile)).toThrow(/available profiles: default, exhaustive, invariant-only/u);
     }
   );
 

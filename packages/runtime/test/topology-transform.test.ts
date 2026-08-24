@@ -213,7 +213,7 @@ test("the exact smoke exclusions produce a valid filtered production topology", 
     "goal-plan"
   ];
   const transformed = transformTopologyForRun(
-    loadTopology(repositoryRoot, { topologyPath: packagedTopology("full").path, requirePromptFiles: true }),
+    loadTopology(repositoryRoot, { topologyPath: packagedTopology("exhaustive").path, requirePromptFiles: true }),
     {
       strategyLoops: 1,
       excludedNodeIds: smokeExcludedNodeIds
@@ -250,7 +250,7 @@ test("pruning the threat-model workstream leaves a valid, dependency-free produc
   const transform = { strategyLoops: 1, excludedNodeIds: threatModelWorkstream };
   const transformed = transformTopologyForRun(
     loadTopology(REPOSITORY_ROOT, {
-      topologyPath: packagedTopology("full").path,
+      topologyPath: packagedTopology("exhaustive").path,
       requirePromptFiles: true
     }),
     transform
@@ -296,7 +296,7 @@ test("the invariant-only exclusions retain the whole stateful-invariant chain", 
   // has to reach the review fan-in through its own surviving dependencies.
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
   const source = loadTopology(repositoryRoot, {
-    topologyPath: packagedTopology("full").path,
+    topologyPath: packagedTopology("exhaustive").path,
     requirePromptFiles: true
   });
   const invariantNodeIds = source.nodes

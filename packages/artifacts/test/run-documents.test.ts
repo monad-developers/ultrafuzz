@@ -81,7 +81,7 @@ function canonicalRunPlan(): RunPlanDocument {
     },
     topology: { path: "topology.json", logical_nodes: 1, expanded_nodes: 1, required_commands: [] },
     audit_profile: {
-      id: "full",
+      id: "exhaustive",
       catalog_digest: DIGEST_A,
       effective_topology_path: "topology.json",
       topology_path_origin: "audit-profile",

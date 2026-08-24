@@ -50,8 +50,9 @@ The default scaffold is the direct bug-finding workflow:
 - Review reconciles every raw finding, then deduplicates, triages, classifies,
   aggregates any authored test evidence, and produces the final report.
 
-The `full` audit profile explicitly opts into the higher-cost specialist lanes
-in addition to that direct workflow. Those lanes add a five-stage stateful
+The `exhaustive` audit profile explicitly opts into the higher-cost specialist
+lanes in addition to that direct workflow, and raises repetition and
+concurrency settings to their maximums. Those lanes add a five-stage stateful
 invariant campaign, the deep differential oracle/harness/review pipeline, and
 one dynamic strategy coordinator. They are not part of the default scaffold.
 

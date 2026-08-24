@@ -975,7 +975,7 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
       estimated_spend: "$0",
       partial_pricing: false,
       strategy_loops: 1,
-      audit_profile: "full",
+      audit_profile: "exhaustive",
       audit_profile_catalog_digest: "a".repeat(64),
       topology_digest: "b".repeat(64),
       prompt_digest: "c".repeat(64),
@@ -3896,16 +3896,16 @@ test("findings-only strategies do not require a generated-test manifest", () => 
 
 test("shipped converted bug-search nodes accept empty findings plus the empty optional PoC bundle", () => {
   let repositoryRoot = path.dirname(fileURLToPath(import.meta.url));
-  while (!fs.existsSync(path.join(repositoryRoot, "packages", "config", "topologies", "full.yml"))) {
+  while (!fs.existsSync(path.join(repositoryRoot, "packages", "config", "topologies", "exhaustive.yml"))) {
     const parent = path.dirname(repositoryRoot);
     assert.notEqual(parent, repositoryRoot, "repository root with packaged topologies not found");
     repositoryRoot = parent;
   }
   const topology = loadTopology(repositoryRoot, {
-    topologyPath: path.join(repositoryRoot, "packages", "config", "topologies", "full.yml")
+    topologyPath: path.join(repositoryRoot, "packages", "config", "topologies", "exhaustive.yml")
   });
   const logical = topology.nodes.find((candidate) => candidate.id === "round-trip");
-  assert.ok(logical, "round-trip node missing from the packaged full topology");
+  assert.ok(logical, "round-trip node missing from the packaged exhaustive topology");
   assert.deepEqual(
     (logical.outputs ?? []).map((output) => output.contract),
     ["ultrafuzz/findings@2", "ultrafuzz/generated-tests@3"],

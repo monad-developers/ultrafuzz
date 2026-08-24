@@ -39,10 +39,10 @@ describe("Modal target model profiles", () => {
     expect(resolveConfig({ projectConfig: parsed.value, env: {} }).ok).toBe(true);
   });
 
-  it("selects the packaged full audit profile for full target preparation", () => {
-    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, "full");
+  it("selects the packaged exhaustive audit profile for full-lane target preparation", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, "exhaustive");
 
-    expect(config).toContain('audit_profile = "full"');
+    expect(config).toContain('audit_profile = "exhaustive"');
     expect(config).toContain("dynamic_strategies_enumerator = 3");
     const parsed = parseProjectConfigToml(config, "modal-target-ultrafuzz.toml");
     expect(parsed.ok).toBe(true);
@@ -50,9 +50,9 @@ describe("Modal target model profiles", () => {
     const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
-    expect(resolved.value.auditProfile).toBe("full");
+    expect(resolved.value.auditProfile).toBe("exhaustive");
 
-    const topology = parse(fs.readFileSync(path.resolve("../config/topologies/full.yml"), "utf8")) as {
+    const topology = parse(fs.readFileSync(path.resolve("../config/topologies/exhaustive.yml"), "utf8")) as {
       groups: { specialists: { defaults: { failure_policy: string; timeout_seconds: number } } };
       nodes: Array<{ id: string; group?: string }>;
     };

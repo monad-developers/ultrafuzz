@@ -227,7 +227,7 @@ generated-tests.json
 references/manifest.json
 ```
 
-The `stateful-invariant-campaign` node in the packaged `full` and
+The `stateful-invariant-campaign` node in the packaged `exhaustive` and
 `invariant-only` topologies runs one final recon-fuzzer backend and writes
 backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
 `campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan

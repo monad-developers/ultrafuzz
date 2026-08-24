@@ -12,7 +12,11 @@ import {
   loadBenchmarkLanesManifest,
   type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
-import { BENCHMARK_LANE_NAMES, type BenchmarkLaneName } from "./benchmark-lane-names.js";
+import {
+  BENCHMARK_LANE_NAMES,
+  publicBenchmarkLaneAuditProfileId,
+  type BenchmarkLaneName
+} from "./benchmark-lane-names.js";
 import {
   isEvalPublicBenchmarkWorkflowInput,
   type EvalEfficiencyCompleteness,
@@ -1188,7 +1192,8 @@ export function assertPublicBenchmarkRunPolicy(input: {
   const catalog = loadAuditProfileCatalog(
     path.join(input.benchmarkPolicyRoot, "packages", "config", "audit-profiles.yml")
   );
-  const topologyDigest = packagedTopologyDigest(auditProfile(input.lane, catalog), catalog);
+  const laneAuditProfileId = publicBenchmarkLaneAuditProfileId(input.lane);
+  const topologyDigest = packagedTopologyDigest(auditProfile(laneAuditProfileId, catalog), catalog);
   if (topologyDigest === undefined) {
     throw new EvalError(
       "EVAL_HISTORY_RUN_POLICY_INVALID",
@@ -1212,7 +1217,7 @@ export function assertPublicBenchmarkRunPolicy(input: {
     }
     if (
       record.status === "launched" &&
-      (record.audit_profile !== input.lane ||
+      (record.audit_profile !== laneAuditProfileId ||
         record.audit_profile_catalog_digest !== catalog.digest ||
         record.topology_path_origin !== "audit-profile" ||
         record.topology_digest !== topologyDigest)
