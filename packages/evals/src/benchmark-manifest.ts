@@ -13,6 +13,7 @@ import { executeEvalSchemaSemanticGates } from "./eval-semantic-gates.js";
 
 import { EVAL_SPEC_SCHEMA_VERSION, type EvalSuiteSpec } from "./types.js";
 import { EvalError } from "./utils.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as const;
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
@@ -378,10 +379,6 @@ function parseBenchmarkManifest<T>(filePath: string, value: unknown, schemaId: s
     });
   }
   return parsed.data;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function adaptBenchmarkManifestToEvalSuite(input: {

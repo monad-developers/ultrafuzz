@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { z } from "zod/v4";
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
+import { errorMessage } from "@ultrafuzz/artifacts";
 
 export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_AUDIT_PROFILE_ID = "default" as const;
@@ -278,8 +279,4 @@ function assertRegularFileWithoutSymlinks(root: string, candidate: string, label
   if (!fs.statSync(candidate).isFile()) {
     throw new Error(`${label} must be a regular file`);
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

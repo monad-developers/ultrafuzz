@@ -68,7 +68,7 @@ import {
   runWithTerminalPersistence,
   WorkerResultWriter
 } from "./worker-result.js";
-import { modalTargetToml } from "./workspace-config.js";
+import { modalTargetToml, tomlString } from "./workspace-config.js";
 import { runPublicBenchmarkWorker } from "./public-worker.js";
 import {
   childExitFailureCause,
@@ -84,6 +84,8 @@ import {
   readModalWorkerLineage,
   guardCurrentPersistentWorkerLineage
 } from "./worker-lineage.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
@@ -346,7 +348,7 @@ async function waitForTerminalRun(
 }
 
 function isTerminalRunStatus(status: string | undefined): boolean {
-  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+  return status !== undefined && (TERMINAL_RUN_STATE_STATUSES as readonly string[]).includes(status);
 }
 
 async function prepareWorkspace(): Promise<{ target: string; control: string; suitePath: string; evalRunId: string }> {
@@ -549,10 +551,6 @@ async function configureControl(control: string, target: string, groundTruth: st
   return suitePath;
 }
 
-function tomlString(value: string): string {
-  return JSON.stringify(value);
-}
-
 async function runEval(argv: string[], target: string, writer: WorkerResultWriter): Promise<void> {
   const progress = setInterval(() => void reportProgress(target, writer).catch(() => undefined), 60_000);
   try {
@@ -663,10 +661,6 @@ async function readTextIfExists(filePath: string): Promise<string | undefined> {
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 void (

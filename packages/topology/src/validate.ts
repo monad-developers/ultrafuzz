@@ -31,6 +31,7 @@ import type {
   TopologyValidationResult
 } from "./types.js";
 import { assertSafeRelativePath, ensureInside, ensureNoSymlinkComponents, isSafeId } from "./path-utils.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const DEFAULT_LIMITS: TopologyLimits = {
   maxLoops: MAX_LOOPS,
@@ -1050,10 +1051,6 @@ function validateConcreteIdCollisions(
       concreteIds.add(concreteId);
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isString(value: unknown): value is string {

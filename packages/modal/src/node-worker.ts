@@ -42,6 +42,7 @@ import {
 } from "./modal-contracts.js";
 import { readModalDocument, serializeModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
+import { sameStrings } from "@ultrafuzz/artifacts";
 
 const DURABLE_WORKSPACE_DIRECTORY = "workspace";
 const DURABLE_INPUT_DIRECTORY = "input";
@@ -1075,10 +1076,6 @@ function normalizedSelectedTaskForComparison(
 ): StrictModalNodeInputDocument["selected_task"] {
   if (!ignoreExecutionGeneration || selectedTask === undefined) return selectedTask;
   return { ...selectedTask, execution: { ...selectedTask.execution, generation: "<logical>" } };
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function sameDependencyVerificationAuthorities(

@@ -1,3 +1,5 @@
+import { isRecord } from "@ultrafuzz/artifacts";
+
 export const SMITHERS_VERSION = "0.34.0";
 export const SMITHERS_PACKAGE_NAME = "smthrs";
 export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
@@ -250,10 +252,6 @@ function modifiedManifestError(): Error {
   return new Error(
     "generated workflow dependency manifest must retain Ultrafuzz's exact runner versions; recreate it before launch"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

@@ -13,6 +13,7 @@ import type {
   EvalRunRecord
 } from "./types.js";
 import { EvalError } from "./utils.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export interface EvalTerminalSummary {
   lifecycle: EvalRowLifecycle;
@@ -256,10 +257,6 @@ function requiredBoolean(value: unknown, field: string): boolean {
     throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", `${field} must be a Boolean`);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isAggregateNode(node: NodeState): boolean {

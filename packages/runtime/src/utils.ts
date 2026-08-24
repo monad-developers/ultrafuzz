@@ -5,6 +5,7 @@ import type { ConfigDiagnostic } from "@ultrafuzz/config";
 import type { PolicyDiagnostic, PolicyResult } from "@ultrafuzz/security";
 
 import { RUNTIME_SCHEMA_VERSION, type PostureItem, type RuntimeDiagnostic, type RuntimeResult } from "./types.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 /** Immutable transformed prompt templates for prompts whose rendering is deferred to compilation. */
 export const DEFERRED_PROMPT_TEMPLATE_DIR = "dynamic-prompt-templates";
@@ -127,8 +128,4 @@ export function stableJson(value: unknown): string {
 
 export function toProjectRelative(projectRoot: string, candidate: string): string {
   return path.relative(path.resolve(projectRoot), path.resolve(candidate)).split(path.sep).join("/");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

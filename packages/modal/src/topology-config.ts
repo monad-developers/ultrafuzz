@@ -1,4 +1,5 @@
 import YAML from "yaml";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export function topologyWithStrategyLoops(source: string, loops: number): string {
   if (!Number.isSafeInteger(loops) || loops <= 0 || loops > 256) {
@@ -21,8 +22,4 @@ export function topologyWithStrategyLoops(source: string, loops: number): string
   groups.strategies = strategies;
   topology.groups = groups;
   return YAML.stringify(topology);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

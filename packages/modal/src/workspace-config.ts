@@ -93,6 +93,6 @@ function apiKeyEnv(provider: ModelProvider): string {
   return "KIMI_API_KEY";
 }
 
-function tomlString(value: string): string {
+export function tomlString(value: string): string {
   return JSON.stringify(value);
 }

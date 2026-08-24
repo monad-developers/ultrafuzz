@@ -114,6 +114,7 @@ import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import { reconcileSmithersAttemptAgentSelection } from "./smithers-attempt-authority.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 type StoredWorkflowTask = SmithersTaskManifestTask;
 
@@ -5294,10 +5295,6 @@ function errorLooksLikeTimeout(value: unknown): boolean {
     return false;
   }
   return Object.values(value).some((entry) => errorLooksLikeTimeout(entry));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

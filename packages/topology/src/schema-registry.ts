@@ -10,6 +10,7 @@ import {
   schemaRegistryBundleDigest,
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const metadataByFilename = Object.freeze({
   "expanded-graph.schema.json": {
@@ -102,8 +103,4 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
     }
   }
   return output;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

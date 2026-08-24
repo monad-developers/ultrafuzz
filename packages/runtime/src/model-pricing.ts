@@ -5,6 +5,7 @@ import { BlockList, isIP } from "node:net";
 import { Readable } from "node:stream";
 
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
@@ -704,8 +705,4 @@ function nonNegativeNumber(value: unknown): number | undefined {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -15,6 +15,7 @@ import {
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 import { topologySchemaRegistry } from "@ultrafuzz/topology";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const MAX_DASHBOARD_SCHEMA_BYTES = 4 * 1024 * 1024;
 
@@ -210,8 +211,4 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
     for (const entry of Object.values(value)) deepFreeze(entry, seen);
   }
   return Object.freeze(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

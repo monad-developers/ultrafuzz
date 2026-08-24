@@ -69,6 +69,7 @@ import { assertModalDocumentValue, parseModalDocumentBytes, writeModalDocumentAt
 import { assertModalNodeCheckpointResultContext } from "./modal-semantic-gates.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
 const INVARIANT_SOURCE_PROOF_PUBLICATION_SCHEMA_VERSION = "ultrafuzz.modal.invariant-source-proof-publication.v1";
@@ -4203,12 +4204,7 @@ function publishedArtifactHasDigest(artifactDir: string, relativePath: string, s
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.lstatSync(filePath);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-    throw error;
-  }
+  return fs.lstatSync(filePath, { throwIfNoEntry: false });
 }
 
 function requiredCredential(env: Record<string, string | undefined>, name: string | undefined): string {
@@ -4384,10 +4380,6 @@ function boundedIdentity(value: string): string {
       .replace(/^-+|-+$/gu, "")
       .slice(0, 32) || "run";
   return `${normalized}-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 12)}`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -9,6 +9,7 @@ import {
   type SchemaValidationIssue,
   type SchemaValidationResult
 } from "./schema-validation.js";
+import { jsonPointerPath } from "./lang-primitives.js";
 
 export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
 export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v2" as const;
@@ -1080,21 +1081,6 @@ function validateRegisteredPropertySchema<T>(
     );
   }
   return { ok: true, issues: [], value: value as T };
-}
-
-function jsonPointerPath(root: string, pointer: string): string {
-  if (pointer === "") return root;
-  return pointer
-    .slice(1)
-    .split("/")
-    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
-    .reduce(
-      (current, segment) =>
-        /^(?:0|[1-9][0-9]*)$/u.test(segment)
-          ? `${current}[${segment}]`
-          : `${current}${/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`}`,
-      root
-    );
 }
 
 export function validateReferenceExpectationsSchema(

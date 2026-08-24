@@ -7,6 +7,7 @@ import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authori
 import { writeJsonDurable } from "./safe-paths.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
+import { isRecord } from "./lang-primitives.js";
 
 export const SOURCE_RUN_SCHEMA_VERSION = "ultrafuzz.source-run.v2" as const;
 export const SOURCE_RUN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:source-run:2" as const;
@@ -507,8 +508,4 @@ function deepFreeze<T>(value: T): T {
     for (const entry of Object.values(value)) deepFreeze(entry);
   }
   return Object.freeze(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

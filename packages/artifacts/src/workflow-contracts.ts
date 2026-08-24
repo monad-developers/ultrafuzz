@@ -32,6 +32,7 @@ import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
 import { SAFE_ID_PATTERN } from "./safe-paths.js";
 import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { canonicalJsonValueKey } from "./lang-primitives.js";
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
@@ -46,18 +47,6 @@ const uniqueStrings = (minimum = 0) =>
     .meta({ uniqueItems: true })
     .refine((values) => new Set(values).size === values.length, { message: "Values must be unique" });
 const stringList = z.array(nonEmptyString);
-
-function canonicalJsonValueKey(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJsonValueKey(entry)).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonValueKey(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "undefined";
-}
 
 function uniqueJsonValues<T extends z.ZodType>(item: T, maximum: number): z.ZodArray<T> {
   return z

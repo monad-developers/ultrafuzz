@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { z } from "zod/v4";
 
 import { EVAL_SUITE_SCHEMA_ID, validateEvalJsonSchema } from "./eval-schema-registry.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 import {
   EVAL_SPEC_SCHEMA_VERSION,
   type EvalJudgePanelConfig,
@@ -337,10 +338,6 @@ function rejectUnsupportedVariantPrompts(value: unknown, suitePath: string): voi
       );
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type EvalSuiteInput = z.infer<typeof evalSuiteInputSchema>;

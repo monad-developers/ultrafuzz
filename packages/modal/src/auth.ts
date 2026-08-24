@@ -12,6 +12,7 @@ import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifa
 import { readBoundedResponseBytes } from "./bounded-response.js";
 import type { ModalModelSpec, ModelProvider } from "./defaults.js";
 import { remoteAuthDir, remoteAuthPath } from "./layout.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export interface SubscriptionAuthCopy {
   source: string;
@@ -544,10 +545,6 @@ async function writeJsonAtomic(filePath: string, value: Record<string, unknown>)
     await handle?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isOpaqueCredential(value: unknown): value is string {

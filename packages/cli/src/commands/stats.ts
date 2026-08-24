@@ -35,6 +35,7 @@ import {
   type TokenStatistics
 } from "../run-statistics.js";
 import { captureCoherentStatisticsSnapshot, StatisticsSnapshotRaceError } from "../stats-snapshot.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_LEDGER_BYTES = 64 * 1024 * 1024;
@@ -450,10 +451,6 @@ function isReportBundleManifest(value: unknown): value is ReportBundleManifest {
     value.excluded_roots[0] === "workspaces" &&
     Number.isSafeInteger(value.entry_count_without_manifest)
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function safeByteSum(left: number, right: number, label: string): number {

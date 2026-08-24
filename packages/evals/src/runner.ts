@@ -61,6 +61,7 @@ import {
   generateEvalRunId,
   resolveTerminalReportPath
 } from "./utils.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface RowLaunchValue {
   ok: boolean;
@@ -968,8 +969,4 @@ async function mapLimit<T, U>(values: T[], limit: number, worker: (value: T) => 
   });
   await Promise.all(workers);
   return results;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

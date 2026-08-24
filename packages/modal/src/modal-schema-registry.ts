@@ -39,6 +39,7 @@ import {
   MODAL_WORKER_RESULT_SCHEMA_ID
 } from "./modal-contracts.js";
 import { MODAL_SEMANTIC_GATES_BY_SCHEMA_ID, type ModalSemanticGateName } from "./modal-semantic-gates.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 type ModalAjv = ReturnType<typeof createStrictAjv>;
 
@@ -414,8 +415,4 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   Object.freeze(value);
   for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry, seen);
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

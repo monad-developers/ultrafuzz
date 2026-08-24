@@ -14,6 +14,7 @@ import {
 
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
+import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
 
 export interface ModalResumeWorkspace {
   target: string;
@@ -89,7 +90,7 @@ export async function readModalDurableRunState(
 }
 
 function isTerminalRunStatus(status: string | undefined): boolean {
-  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+  return status !== undefined && (TERMINAL_RUN_STATE_STATUSES as readonly string[]).includes(status);
 }
 
 function nodeStatuses(nodes: ModalResumeRunState["nodes"]): Array<[string, string | undefined]> {
