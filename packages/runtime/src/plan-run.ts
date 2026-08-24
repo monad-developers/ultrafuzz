@@ -77,7 +77,11 @@ import {
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
-import { DATA_GOVERNANCE_PROVENANCE_PATH, prepareDataGovernance } from "./data-governance.js";
+import {
+  controllerOwnedGovernancePaths,
+  DATA_GOVERNANCE_PROVENANCE_PATH,
+  prepareDataGovernance
+} from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import { projectArtifactSchemaDir } from "./init.js";
@@ -244,19 +248,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       operatorPrompt: input.prompt,
       workflowInput: input.workflowInput,
       env: input.env,
-      controllerOwnedPaths: [
-        runRoot,
-        path.join(projectRoot, ".ultrafuzz", "runs"),
-        path.join(projectRoot, ".smithers", "node_modules"),
-        path.join(projectRoot, ".smithers", "workflows"),
-        // The workflow engine opens its SQLite database in the target root, so a
-        // launched run leaves engine state in the governed worktree. Without
-        // these entries the first successful launch dirties the target identity
-        // and every later private-target run fails PRIVATE_TARGET_UNBOUND.
-        path.join(projectRoot, "smithers.db"),
-        path.join(projectRoot, "smithers.db-shm"),
-        path.join(projectRoot, "smithers.db-wal")
-      ]
+      controllerOwnedPaths: controllerOwnedGovernancePaths(projectRoot, runRoot)
     });
   let governance: ReturnType<typeof prepareDataGovernance>;
   try {
