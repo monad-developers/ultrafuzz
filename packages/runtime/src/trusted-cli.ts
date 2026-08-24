@@ -49,6 +49,7 @@ export function prepareTrustedCliEnvironment(input: {
   cliEntrypoint?: string;
   env?: Record<string, string | undefined>;
   required?: boolean;
+  allowIdentityRotation?: boolean;
 }): TrustedCliEnvironment {
   const env = { ...(input.env ?? {}) };
   if (input.cliEntrypoint === undefined) {
@@ -75,7 +76,14 @@ export function prepareTrustedCliEnvironment(input: {
   if (fs.existsSync(metadataPath)) {
     const existing = parseTrustedCliMetadata(readRegularFile(metadataPath, "trusted Ultrafuzz CLI metadata"));
     if (stableJson(existing) !== stableJson(metadata)) {
-      throw new Error("trusted Ultrafuzz CLI identity changed since this run was planned");
+      if (input.allowIdentityRotation !== true) {
+        throw new Error("trusted Ultrafuzz CLI identity changed since this run was planned");
+      }
+      assertRotatableTrustedCliIdentity({ launcherPath, existing, replacement: metadata });
+      // The launcher is intentionally unchanged during rotation, so the only
+      // publication boundary is the atomic durable metadata replacement. A
+      // failed write leaves the complete prior launcher/metadata pair intact.
+      writeJsonDurable(metadataPath, metadata);
     }
   } else {
     if (fs.existsSync(launcherPath)) {
@@ -98,6 +106,27 @@ export function prepareTrustedCliEnvironment(input: {
     },
     environmentVariableNames: TRUSTED_CLI_ENVIRONMENT_VARIABLES
   };
+}
+
+function assertRotatableTrustedCliIdentity(input: {
+  launcherPath: string;
+  existing: TrustedCliMetadata;
+  replacement: TrustedCliMetadata;
+}): void {
+  const launcher = readRegularFile(input.launcherPath, "trusted Ultrafuzz launcher");
+  if (sha256(launcher) !== input.existing.launcher_sha256) {
+    throw new Error("trusted Ultrafuzz CLI launcher changed");
+  }
+  const expectedExistingLauncher = Buffer.from(trustedCliLauncher(input.existing.cli_entrypoint), "utf8");
+  if (sha256(expectedExistingLauncher) !== input.existing.launcher_sha256) {
+    throw new Error("trusted Ultrafuzz CLI launcher does not match its identity metadata");
+  }
+  if (
+    input.existing.cli_entrypoint !== input.replacement.cli_entrypoint ||
+    input.existing.launcher_sha256 !== input.replacement.launcher_sha256
+  ) {
+    throw new Error("trusted Ultrafuzz CLI entrypoint path cannot change during identity rotation");
+  }
 }
 
 export function runTrustedJsonValidatorPreflight(input: { layout: RunLayout; trusted: TrustedCliEnvironment }): void {

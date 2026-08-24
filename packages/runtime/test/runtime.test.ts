@@ -18231,6 +18231,28 @@ test("controller refresh relaunches an exact current missing-history run from th
   assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), true);
 });
 
+test("controller refresh rotates a rebuilt trusted CLI identity before resume", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-trusted-cli";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const entrypoint = fakeUltrafuzzCliEntrypoint(project);
+  fs.chmodSync(entrypoint, 0o700);
+  fs.appendFileSync(entrypoint, "// compatible rebuilt CLI\n", "utf8");
+  fs.chmodSync(entrypoint, 0o500);
+
+  const ordinary = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(ordinary.ok, false);
+  assert.match(JSON.stringify(ordinary.diagnostics), /identity changed since this run was planned/u);
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.submitted, true);
+});
+
 test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

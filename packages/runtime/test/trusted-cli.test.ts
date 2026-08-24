@@ -193,3 +193,57 @@ test("resume rejects missing, tampered, and stale trusted CLI identity", () => {
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   assert.throws(() => assertTrustedCliLauncher({ layout: staleLayout, launcherPath: stale.launcherPath! }), /stale/u);
 });
+
+test("controller refresh rotates an intact trusted CLI identity in place", () => {
+  const root = temporaryRoot();
+  const layout = createRunLayout({ projectRoot: root, runId: "rotated-identity" });
+  const entrypoint = fakeCliEntrypoint(root);
+  const original = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
+  const metadataPath = path.join(layout.root, "trusted-cli.json");
+  const originalMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { cli_sha256: string };
+  const originalLauncher = fs.readFileSync(original.launcherPath!);
+
+  fs.chmodSync(entrypoint, 0o700);
+  fs.appendFileSync(entrypoint, "// compatible rebuilt CLI\n", "utf8");
+  fs.chmodSync(entrypoint, 0o500);
+
+  assert.throws(
+    () => prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint }),
+    /identity changed since this run was planned/u
+  );
+  const rotated = prepareTrustedCliEnvironment({
+    layout,
+    cliEntrypoint: entrypoint,
+    allowIdentityRotation: true
+  });
+  const rotatedMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { cli_sha256: string };
+  assert.notEqual(rotatedMetadata.cli_sha256, originalMetadata.cli_sha256);
+  assert.deepEqual(fs.readFileSync(rotated.launcherPath!), originalLauncher);
+  runTrustedJsonValidatorPreflight({ layout, trusted: rotated });
+});
+
+test("controller refresh rejects a tampered trusted CLI identity before rotation", () => {
+  const root = temporaryRoot();
+  const layout = createRunLayout({ projectRoot: root, runId: "tampered-rotation" });
+  const entrypoint = fakeCliEntrypoint(root);
+  const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
+  const metadataPath = path.join(layout.root, "trusted-cli.json");
+  const metadataBefore = fs.readFileSync(metadataPath);
+
+  fs.chmodSync(trusted.launcherPath!, 0o700);
+  fs.appendFileSync(trusted.launcherPath!, "# changed\n", "utf8");
+  fs.chmodSync(entrypoint, 0o700);
+  fs.appendFileSync(entrypoint, "// compatible rebuilt CLI\n", "utf8");
+  fs.chmodSync(entrypoint, 0o500);
+
+  assert.throws(
+    () =>
+      prepareTrustedCliEnvironment({
+        layout,
+        cliEntrypoint: entrypoint,
+        allowIdentityRotation: true
+      }),
+    /launcher changed/u
+  );
+  assert.deepEqual(fs.readFileSync(metadataPath), metadataBefore);
+});
