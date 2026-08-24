@@ -54,6 +54,22 @@ const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
   "controls/bunfig.toml": Buffer.from("\n")
 };
 
+export function writeCurrentBunStartupControls(root: string): string {
+  const resolvedRoot = path.resolve(root);
+  const controlsRoot = ensureSafeDirectory(resolvedRoot, "controls");
+  for (const [snapshotPath, contents] of Object.entries(BUN_STARTUP_CONTROLS)) {
+    const controlPath = safeResolveInside(controlsRoot, path.basename(snapshotPath), "Bun startup control");
+    if (pathEntryExists(controlPath)) {
+      if (!readBoundedRegularFile(resolvedRoot, controlPath, `Bun startup control ${snapshotPath}`).equals(contents)) {
+        throw new Error("Bun startup control changed after operator preparation");
+      }
+    } else {
+      writeFileDurable(controlPath, contents);
+    }
+  }
+  return safeResolveInside(controlsRoot, path.basename(BUN_MODULE_CONFINEMENT_PATH), "Bun module confinement");
+}
+
 const WORKFLOW_CONTROL_FILE_KEYS = [
   "graph",
   "expanded_graph",

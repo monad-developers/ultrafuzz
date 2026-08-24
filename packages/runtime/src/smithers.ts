@@ -93,12 +93,14 @@ import { assertRuntimeDocument, parseRuntimeDocumentBytes, writeRuntimeDocument 
 import {
   acquireSmithersExecutableAnchor,
   assertExecutableOutsideRoot,
+  bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
 import {
   replaceBunStartupControlsForControllerRefresh,
+  writeCurrentBunStartupControls,
   type VerifiedWorkflowControlSnapshot,
   type WorkflowExecutionControlFile
 } from "./workflow-integrity.js";
@@ -3984,7 +3986,18 @@ async function prepareSmithersExecutableEnvironment(
   const controllerRoot = await operatorControllerProjectRoot(projectRoot, env, control);
   const packageRoot = resolveInstalledSmithersPackageRoot(controllerRoot);
   const executable = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
-  return bindSmithersExecutableCapability({ ...(env ?? {}) }, executable, projectRoot);
+  const bunModuleConfinement = writeCurrentBunStartupControls(controllerRoot);
+  const controllerSeal = operatorControllerProjectSeal(controllerRoot);
+  return bindOperatorSmithersExecutableCapability(
+    { ...(env ?? {}), ULTRAFUZZ_BUN_MODULE_CONFINEMENT: bunModuleConfinement },
+    executable,
+    controllerRoot,
+    () => {
+      if (operatorControllerProjectSeal(controllerRoot) !== controllerSeal)
+        throw new Error("operator controller changed during execution");
+    },
+    projectRoot
+  );
 }
 
 async function ensureSmithersDependencies(
@@ -4143,6 +4156,7 @@ async function operatorControllerProjectRoot(
           npmCli: npm.cliPath,
           assertNpmCli: npm.assertCurrent
         });
+        writeCurrentBunStartupControls(root);
         return { npm, root, seal: operatorControllerProjectSeal(root) };
       } catch (error) {
         disposeOperatorControllerRoot(root);
@@ -4170,16 +4184,19 @@ async function operatorControllerProjectRoot(
 
 function operatorControllerProjectSeal(projectRoot: string): string {
   const files = new Map<string, string>();
+  const add = (sourcePath: string, snapshotPath: string): void => {
+    if (files.has(snapshotPath)) throw new Error(`operator controller has a duplicate path: ${snapshotPath}`);
+    files.set(snapshotPath, fs.realpathSync(sourcePath));
+  };
   collectWorkflowExecutionDependencies({
     projectRoot,
     modules: [],
     externalRunner: false,
-    add: (sourcePath, snapshotPath) => {
-      if (files.has(snapshotPath)) throw new Error(`operator controller has a duplicate path: ${snapshotPath}`);
-      files.set(snapshotPath, fs.realpathSync(sourcePath));
-    }
+    add
   });
-  const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v1\0");
+  for (const name of ["bun-module-confinement.js", "bun-empty.env", "bunfig.toml"])
+    add(path.join(projectRoot, "controls", name), `controls/${name}`);
+  const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v2\0");
   for (const [snapshotPath, sourcePath] of [...files].sort(([left], [right]) =>
     compareWorkflowExecutionStrings(left, right)
   )) {
@@ -4296,7 +4313,8 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_BIN_LOCAL_DELEGATION_SOURCE,
       SMITHERS_BIN_LOCAL_DELEGATION_PATCH,
       "target-local runner delegation"
-    )
+    ),
+    { mode: 0o500 }
   );
   let cliContents = fs.readFileSync(cliSource, "utf8");
   for (const [source, patched, label] of [

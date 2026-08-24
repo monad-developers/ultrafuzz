@@ -17,6 +17,7 @@ interface SmithersExecutableIdentity {
   runner: FileIdentity;
   interpreter: FileIdentity & { runtime: "bun" | "other" };
   bunStartup?: Readonly<{ confinement: FileIdentity; config: FileIdentity; environment: FileIdentity }>;
+  operatorController?: Readonly<{ root: string; assertCurrent: () => void }>;
 }
 type Forbidden = Readonly<{ lexical: string; real: string }>;
 
@@ -54,6 +55,39 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
   executable: string,
   forbiddenRoot?: string
 ): T {
+  return bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot);
+}
+
+export function bindOperatorSmithersExecutableCapability<T extends Record<string, string | undefined>>(
+  env: T,
+  executable: string,
+  operatorRoot: string,
+  assertCurrent: () => void,
+  forbiddenRoot?: string
+): T {
+  const root = fs.realpathSync(path.resolve(operatorRoot));
+  assertCurrent();
+  if (!pathInside(root, path.resolve(executable)) || !pathInside(root, fs.realpathSync(executable))) {
+    throw new Error("operator workflow runner must be inside its controller root");
+  }
+  const bound = bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot, {
+    root,
+    assertCurrent
+  });
+  const capability = smithersExecutableCapability(bound)!;
+  if (!pathInside(root, capability.runner.path)) {
+    throw new Error("operator workflow runner must be inside its controller root");
+  }
+  assertCurrent();
+  return bound;
+}
+
+function bindSmithersExecutableCapabilityInternal<T extends Record<string, string | undefined>>(
+  env: T,
+  executable: string,
+  forbiddenRoot?: string,
+  operatorController?: Readonly<{ root: string; assertCurrent: () => void }>
+): T {
   const forbidden =
     forbiddenRoot === undefined
       ? undefined
@@ -74,7 +108,8 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
     value: Object.freeze({
       runner: Object.freeze(runner),
       interpreter: Object.freeze(interpreter),
-      ...(bunStartup === undefined ? {} : { bunStartup: Object.freeze(bunStartup) })
+      ...(bunStartup === undefined ? {} : { bunStartup: Object.freeze(bunStartup) }),
+      ...(operatorController === undefined ? {} : { operatorController: Object.freeze(operatorController) })
     })
   });
   return env;
@@ -107,6 +142,7 @@ export function acquireSmithersExecutableAnchor(
 ): SmithersExecutableAnchor | undefined {
   const capability = smithersExecutableCapability(env);
   if (capability === undefined) return undefined;
+  capability.operatorController?.assertCurrent();
   const dependencies = { ...DEFAULT_ANCHOR_DEPENDENCIES, ...dependencyOverrides };
   const requested = env?.SMITHERS_BIN?.trim() || capability.runner.path;
   const runnerDescriptor = openRegularFileNoFollow(requested);
@@ -135,9 +171,15 @@ export function acquireSmithersExecutableAnchor(
     const useDescriptorPaths = runnerDescriptorPath !== undefined && interpreterDescriptorPath !== undefined;
     const snapshotRunner = requested !== capability.runner.path;
     const bunModuleConfinement = env?.ULTRAFUZZ_BUN_MODULE_CONFINEMENT?.trim();
+    const directOperatorRunner =
+      !snapshotRunner &&
+      capability.operatorController !== undefined &&
+      pathInside(capability.operatorController.root, capability.runner.path) &&
+      capability.bunStartup !== undefined &&
+      path.dirname(path.dirname(capability.bunStartup.confinement.path)) === capability.operatorController.root;
     if (
       capability.interpreter.runtime === "bun" &&
-      (!snapshotRunner || !bunModuleConfinement || capability.bunStartup === undefined)
+      ((!snapshotRunner && !directOperatorRunner) || !bunModuleConfinement || capability.bunStartup === undefined)
     ) {
       throw new Error("Bun workflow runner execution requires a sealed snapshot path");
     }
@@ -168,6 +210,7 @@ export function acquireSmithersExecutableAnchor(
     let closed = false;
     const assertCurrent = (): void => {
       if (closed) throw new Error("workflow runner executable anchor is already closed");
+      capability.operatorController?.assertCurrent();
       assertDescriptorIdentity(runnerDescriptor, capability.runner, "workflow runner");
       assertDescriptorIdentity(interpreterDescriptor!, capability.interpreter, "workflow runner interpreter");
       assertPathIdentity(requested, capability.runner, "workflow runner");
