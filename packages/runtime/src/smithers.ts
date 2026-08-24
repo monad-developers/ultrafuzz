@@ -97,7 +97,11 @@ import {
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
-import type { VerifiedWorkflowControlSnapshot, WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import {
+  replaceBunStartupControlsForControllerRefresh,
+  type VerifiedWorkflowControlSnapshot,
+  type WorkflowExecutionControlFile
+} from "./workflow-integrity.js";
 import {
   acquireWorkflowExecutionSnapshotAnchor,
   hasWorkflowExecutionSnapshotCapability,
@@ -1296,10 +1300,7 @@ export function refreshedSmithersControllerSnapshot(input: {
     ...(taskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: taskDocument.pinned_submodules })
   };
 
-  const executionFiles = input.original.executionFiles.map((file) => ({
-    ...file,
-    contents: Buffer.from(file.contents)
-  }));
+  const executionFiles = replaceBunStartupControlsForControllerRefresh(input.layout, input.original.executionFiles);
   replaceStockAgentFiles(projectRoot, executionFiles);
   const dependencyMap = refreshedControllerDependencyMap(executionFiles);
   replaceInternalModuleFiles(executionFiles, dependencyMap);
