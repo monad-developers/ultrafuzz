@@ -8,6 +8,7 @@ import {
   MAX_GENERATED_TEST_PATH_SEGMENTS,
   MAX_GENERATED_TEST_PROVENANCE_VALUE_CHARS
 } from "./artifact-limits.js";
+import { canonicalJsonValueKey } from "./lang-primitives.js";
 
 export const GENERATED_TESTS_DIR = "generated-tests";
 const GENERATED_TEST_PATH_SEGMENT_PATTERN = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
@@ -89,15 +90,3 @@ export const generatedTestEntriesSchema = z
       seen.add(key);
     }
   });
-
-function canonicalJsonValueKey(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map((entry) => canonicalJsonValueKey(entry)).join(",")}]`;
-  if (typeof value === "object" && value !== null) {
-    return `{${Object.entries(value)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJsonValueKey(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "undefined";
-}

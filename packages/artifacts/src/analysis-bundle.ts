@@ -11,6 +11,7 @@ import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-regis
 import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
 import { executeSemanticGate, type SemanticGateName } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
+import { jsonPointerPath } from "./lang-primitives.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
 export const ANALYSIS_BUNDLE_POLICY_VERSION = "ultrafuzz.analysis-bundle-policy.v1" as const;
@@ -557,21 +558,6 @@ function jsonSchemaValidationIssue(issue: JsonSchemaValidationIssue): SchemaVali
     code: issue.keyword,
     message: issue.message
   };
-}
-
-function jsonPointerPath(root: string, pointer: string): string {
-  if (pointer === "") return root;
-  return pointer
-    .slice(1)
-    .split("/")
-    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
-    .reduce(
-      (current, segment) =>
-        /^(?:0|[1-9][0-9]*)$/u.test(segment)
-          ? `${current}[${segment}]`
-          : `${current}${/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`}`,
-      root
-    );
 }
 
 const FORBIDDEN_BUNDLE_KEYS = new Set([

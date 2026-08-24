@@ -20,6 +20,7 @@ import {
 } from "./source-revision.js";
 import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 interface PlannedRemoval {
   selection: string;
@@ -240,10 +241,6 @@ function readPersistedModalExecution(runRoot: string): ModalExecutionProviderCon
   const modal = plan.execution.providers.modal;
   if (modal === undefined) throw new Error("persisted cloud cleanup plan is missing its Modal provider");
   return modal;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export const cleanGenerated = cleanRun;

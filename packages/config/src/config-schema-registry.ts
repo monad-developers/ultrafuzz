@@ -21,6 +21,7 @@ import {
   resolvedConfigZodSchema
 } from "./resolved-config-schema.js";
 import type { ResolvedConfig } from "./types.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const MAX_CONFIG_SCHEMA_BYTES = 2 * 1024 * 1024;
 const MAX_RESOLVED_CONFIG_BYTES = 4 * 1024 * 1024;
@@ -240,8 +241,4 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
     for (const entry of Object.values(value)) deepFreeze(entry, seen);
   }
   return Object.freeze(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

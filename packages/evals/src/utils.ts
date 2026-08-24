@@ -11,6 +11,8 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import { isRecord } from "@ultrafuzz/artifacts";
+export { isRecord };
 
 export class EvalError extends Error {
   readonly code: string;
@@ -315,10 +317,6 @@ export function mean(values: number[]): number {
     return 0;
   }
   return roundMetric(values.reduce((sum, value) => sum + value, 0) / values.length);
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Deterministic RFC-4122-shaped UUID derived from stable parts (for provider run/span ids). */

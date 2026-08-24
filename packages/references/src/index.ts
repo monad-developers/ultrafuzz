@@ -17,6 +17,7 @@ import {
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 import { parse, stringify } from "yaml";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 import {
   redactReferenceGitCredential,
@@ -1107,8 +1108,4 @@ function stderrFor(error: unknown): string {
     }
   }
   return messageFor(error);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

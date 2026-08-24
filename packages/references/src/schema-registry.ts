@@ -16,6 +16,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { REFERENCE_CACHE_MANIFEST_JSON_SCHEMA_ID, referenceCacheManifestJsonSchema } from "./reference-cache-schema.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const metadataByFilename = Object.freeze({
   "reference-cache-manifest.schema.json": {
@@ -142,8 +143,4 @@ function collectReferences(value: unknown, output = new Set<string>()): Set<stri
     }
   }
   return output;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

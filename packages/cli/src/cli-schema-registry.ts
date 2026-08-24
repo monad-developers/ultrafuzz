@@ -23,6 +23,7 @@ import { modalSchemaBundleDigest, modalSchemaRegistry } from "@ultrafuzz/modal";
 import { referenceSchemaBundleDigest, referenceSchemaRegistry } from "@ultrafuzz/references";
 import { runtimeSchemaBundleDigest, runtimeSchemaRegistry } from "@ultrafuzz/runtime";
 import { topologySchemaBundleDigest, topologySchemaRegistry } from "@ultrafuzz/topology";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export const CLI_RESULT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:cli:result:2" as const;
 export const CLI_RESULT_SCHEMA_FILENAME = "cli-result.schema.json" as const;
@@ -247,8 +248,4 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   seen.add(value);
   for (const entry of Array.isArray(value) ? value : Object.values(value)) deepFreeze(entry, seen);
   return Object.freeze(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

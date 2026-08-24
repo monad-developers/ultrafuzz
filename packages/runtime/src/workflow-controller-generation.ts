@@ -27,6 +27,7 @@ import {
   type VerifiedWorkflowControlSnapshot
 } from "./workflow-integrity.js";
 import { verifyWorkflowRunLinkHistory } from "./workflow-run-link.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const JOURNAL_VERSION = "ultrafuzz.workflow-controller-generation-journal.v1";
 const LEGACY_MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
@@ -1135,10 +1136,6 @@ function sha256(bytes: Uint8Array): string {
 
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, required: readonly string[]): boolean {

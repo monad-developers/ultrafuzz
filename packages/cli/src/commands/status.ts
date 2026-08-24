@@ -13,6 +13,7 @@ import {
   type CommandResult
 } from "../command-shared.js";
 import { formatStatusDuration } from "../status-rendering.js";
+import { setTimeout as wait } from "node:timers/promises";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
@@ -93,12 +94,6 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
 
 function shouldRefresh(value: RunHealthValue | undefined): boolean {
   return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status) && !STOP_WATCH_VERDICTS.has(value.verdict);
-}
-
-async function wait(milliseconds: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 }
 
 function renderHealth(value: RunHealthValue): string {

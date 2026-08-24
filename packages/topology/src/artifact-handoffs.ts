@@ -5,6 +5,7 @@ import { START_NODE_ID } from "./types.js";
 import type { NormalizedProjectTopology, NormalizedTopologyNode } from "./types.js";
 import { topologyError } from "./errors.js";
 import { isSafeId } from "./path-utils.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 export { extractPromptVariables };
 export type { PromptVariableReference };
@@ -208,8 +209,4 @@ function isAncestor(
     }
   }
   return false;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

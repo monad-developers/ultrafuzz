@@ -1,4 +1,5 @@
 import type { PrivateModalBenchmarkConfig } from "./config.js";
+import { tomlString } from "./workspace-config.js";
 
 export type PrivateEvalProvider = "braintrust" | "none";
 
@@ -53,8 +54,4 @@ export function privateEvalPublishCommand(input: {
     "--resume",
     "--json"
   ];
-}
-
-function tomlString(value: string): string {
-  return JSON.stringify(value);
 }

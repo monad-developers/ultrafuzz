@@ -26,6 +26,7 @@ import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { jsonPointerPath } from "./lang-primitives.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
 export const FINDINGS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:findings:2" as const;
@@ -1038,21 +1039,6 @@ function validateRegisteredFindingSchema<T>(
     );
   }
   return { ok: true, issues: [], value: value as T };
-}
-
-function jsonPointerPath(root: string, pointer: string): string {
-  if (pointer === "") return root;
-  return pointer
-    .slice(1)
-    .split("/")
-    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
-    .reduce(
-      (current, segment) =>
-        /^(?:0|[1-9][0-9]*)$/u.test(segment)
-          ? `${current}[${segment}]`
-          : `${current}${/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(segment) ? `.${segment}` : `[${JSON.stringify(segment)}]`}`,
-      root
-    );
 }
 
 export function assertFindingSchema(value: unknown): NormalizedFinding {

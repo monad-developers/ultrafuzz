@@ -46,6 +46,7 @@ import {
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
 import { readTelemetryCursor, writeTelemetryCursor } from "./eval-durable.js";
 import { contentTypeForArtifact, EvalError, isRecord, warningDiagnostic } from "./utils.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
@@ -1004,8 +1005,4 @@ function countByte(bytes: Buffer, expected: number): number {
     if (byte === expected) count += 1;
   }
   return count;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

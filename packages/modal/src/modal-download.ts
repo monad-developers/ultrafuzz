@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { ModalClient } from "modal";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const MODAL_TOKEN_ID_ENV = "MODAL_TOKEN_ID";
 const MODAL_TOKEN_SECRET_ENV = "MODAL_TOKEN_SECRET";
@@ -205,10 +206,6 @@ function checkedField(value: unknown): string {
 
 function validString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && !value.includes("\0");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

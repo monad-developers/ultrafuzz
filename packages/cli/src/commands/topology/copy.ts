@@ -113,10 +113,5 @@ function publishTopology(projectRoot: string, destination: string, contents: Buf
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.lstatSync(filePath);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-    throw error;
-  }
+  return fs.lstatSync(filePath, { throwIfNoEntry: false });
 }

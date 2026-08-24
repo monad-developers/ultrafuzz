@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
 import * as ts from "typescript";
+import { errorMessage } from "@ultrafuzz/artifacts";
 
 export const AGENT_REGISTRY_RELATIVE_PATH = ".smithers/agents/index.ts";
 const MAX_AGENT_REGISTRY_BYTES = 256 * 1024;
@@ -287,8 +288,4 @@ function objectMemberName(property: ts.ObjectLiteralElementLike): string | undef
 
 function isNodeErrorWithCode(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -554,14 +554,7 @@ function displayRelativePath(root: string, absolutePath: string): string {
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.lstatSync(filePath);
-  } catch (error) {
-    if (error && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
+  return fs.lstatSync(filePath, { throwIfNoEntry: false });
 }
 
 function nearestExistingAncestor(candidate: string): string {

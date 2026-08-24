@@ -13,6 +13,7 @@ import {
 } from "./safe-paths.js";
 import { CAPABILITY_STATUSES, repositoryRelativePathSchema } from "./threat-model.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { sameStrings } from "./lang-primitives.js";
 
 export const GOAL_PLAN_SCHEMA_VERSION = "ultrafuzz.goal-plan.v1" as const;
 export const GOAL_PLAN_POLICY = "additive-v1" as const;
@@ -768,10 +769,6 @@ function addDuplicateIssues(
     }
     seen.add(value);
   });
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function uniqueValues(values: readonly string[]): boolean {

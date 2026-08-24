@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 import {
   artifactSchemaRegistry,
@@ -471,8 +472,4 @@ function deepFreeze<T>(value: T): T {
     for (const entry of Object.values(value as Record<string, unknown>)) deepFreeze(entry);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -96,6 +96,7 @@ import {
   type DashboardHttpDefinition,
   type DashboardSseDefinition
 } from "./contracts.js";
+import { errorMessage } from "@ultrafuzz/artifacts";
 
 export * from "./contracts.js";
 export * from "./schema-registry.js";
@@ -2678,14 +2679,7 @@ function readTextIfExists(filePath: string): string | undefined {
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.lstatSync(filePath);
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
+  return fs.lstatSync(filePath, { throwIfNoEntry: false });
 }
 
 function elapsedSeconds(state: RunState | undefined): number | undefined {
@@ -2759,10 +2753,6 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
 
 function unixSeconds(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function isRecord(value: unknown): value is JsonObject {

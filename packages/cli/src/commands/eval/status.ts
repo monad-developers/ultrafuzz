@@ -10,6 +10,7 @@ import {
   projectRoot,
   type CommandResult
 } from "../../command-shared.js";
+import { setTimeout as wait } from "node:timers/promises";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
@@ -82,10 +83,4 @@ function shouldRefresh(snapshot: EvalStatusSnapshot): boolean {
 
 function rowMayStillProgress(status: string): boolean {
   return status === "not-launched" || status === "pending" || status === "running" || status === "paused";
-}
-
-async function wait(milliseconds: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 }

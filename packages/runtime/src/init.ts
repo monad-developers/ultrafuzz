@@ -594,12 +594,7 @@ function writeProjectFileNoFollow(
 }
 
 function lstatIfPresent(filePath: string): fs.BigIntStats | undefined {
-  try {
-    return fs.lstatSync(filePath, { bigint: true });
-  } catch (error) {
-    if (isNodeError(error) && error.code === "ENOENT") return undefined;
-    throw error;
-  }
+  return fs.lstatSync(filePath, { bigint: true, throwIfNoEntry: false });
 }
 
 function initDirectoryDescriptorPath(descriptor: number, directory: fs.BigIntStats): string {

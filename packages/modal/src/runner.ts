@@ -153,6 +153,7 @@ import {
   type ModalRecoveryWorker
 } from "./recovery.js";
 import { getOrCreateModalV2Volume } from "./volume.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 // The pinned Smithers release supplies Codex prompts over stdin and uses the `-`
@@ -3649,8 +3650,4 @@ function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: reado
   } catch {
     return false;
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

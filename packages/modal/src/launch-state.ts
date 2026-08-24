@@ -30,6 +30,7 @@ import {
 } from "./modal-contracts.js";
 import { parseModalDocumentValue, readModalDocument, writeModalDocumentAtomic } from "./modal-documents.js";
 import { WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export interface ModalLineageFingerprints {
   config: string;
@@ -995,8 +996,4 @@ function isNodeError(error: unknown, code: string): boolean {
   if (!(error instanceof Error)) return false;
   if ("code" in error && error.code === code) return true;
   return "cause" in error && isNodeError(error.cause, code);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

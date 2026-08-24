@@ -19,6 +19,7 @@ import {
   type ModelPricing,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
+import { sameStrings } from "@ultrafuzz/artifacts";
 
 export const RUN_STATISTICS_SCHEMA_VERSION = "ultrafuzz.stats.v1" as const;
 
@@ -806,8 +807,4 @@ function safeElapsed(startMs: number, endMs: number, label: string): number {
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
   return [...new Set(values.filter((value): value is string => value !== undefined && value.length > 0))];
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

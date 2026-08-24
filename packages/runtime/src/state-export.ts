@@ -1153,14 +1153,7 @@ function workflowDiagnosticMessage(snapshot: { error?: string; stderr?: string }
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {
-  try {
-    return fs.lstatSync(filePath);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
+  return fs.lstatSync(filePath, { throwIfNoEntry: false });
 }
 
 function currentSmithersStatusData(value: unknown): Record<string, unknown> | undefined {

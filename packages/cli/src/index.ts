@@ -8,6 +8,7 @@ import { parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifa
 
 import { CLI_KNOWN_COMMANDS } from "./cli-contracts.js";
 import { CLI_SCHEMA_VERSION, commandFailure, envelope, type CliIo } from "./command-shared.js";
+import { isRecord } from "@ultrafuzz/artifacts";
 
 const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 
@@ -79,10 +80,6 @@ function packageRoot(): string {
     current = path.dirname(current);
   }
   throw new Error("unable to locate @ultrafuzz/cli package root");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export { CLI_SCHEMA_VERSION };
