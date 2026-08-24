@@ -18719,6 +18719,120 @@ test(
 );
 
 test(
+  "controller refresh durably requires a predecessor-linked successor after a published rollback",
+  { concurrency: false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "controller-refresh-published-legacy-prepared";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(project, runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+      (file) => file.snapshotPath === "controls/resolved-config.json"
+    );
+    assert.ok(resolvedConfig);
+    const current = refreshedSmithersControllerSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      original: evidence.verifiedControl,
+      config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+    });
+    const preparedCurrent = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, current, {
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId
+    });
+    materializeWorkflowExecutionSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      snapshot: preparedCurrent.snapshot,
+      authorizedGenerations: preparedCurrent.authorizedGenerations
+    });
+    commitControllerGeneration(evidence.layout, evidence.verifiedControl, preparedCurrent.controllerGeneration);
+
+    const legacy = {
+      ...current,
+      snapshot: {
+        ...current.snapshot,
+        contents: {
+          ...current.snapshot.contents,
+          workflow: Buffer.concat([current.snapshot.contents.workflow, Buffer.from("\n// legacy controller\n")])
+        }
+      }
+    };
+    const preparedLegacy = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, legacy, {
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId
+    });
+    const publishedLegacy = materializeWorkflowExecutionSnapshot({
+      projectRoot: project,
+      layout: evidence.layout,
+      snapshot: preparedLegacy.snapshot,
+      authorizedGenerations: preparedLegacy.authorizedGenerations
+    });
+    assert.equal(fs.existsSync(publishedLegacy.root), true);
+
+    const snapshotsRoot = path.dirname(publishedLegacy.root);
+    const existingGenerations = new Set(fs.readdirSync(snapshotsRoot));
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+    const originalRenameSync = fs.renameSync;
+    let crashed = false;
+    Object.defineProperty(fs, "renameSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const destinationName = path.basename(String(args[1]));
+        if (!crashed && /^[0-9a-f]{64}$/u.test(destinationName) && !existingGenerations.has(destinationName)) {
+          crashed = true;
+          throw new Error("injected rollback successor publication crash");
+        }
+        return Reflect.apply(originalRenameSync, fs, args) as void;
+      }
+    });
+    try {
+      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+      assert.equal(interrupted.ok, false);
+      assert.equal(crashed, true);
+    } finally {
+      Object.defineProperty(fs, "renameSync", originalDescriptor);
+    }
+
+    const journalPath = path.join(evidence.layout.root, "smithers", "controller-generation-journal.json");
+    const interruptedJournal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+      entries?: Array<{ phase?: string; controller_generation?: string }>;
+    };
+    assert.equal(interruptedJournal.entries?.length, 3);
+    assert.deepEqual(
+      interruptedJournal.entries?.map((entry) => entry.phase),
+      ["committed", "committed", "prepared"]
+    );
+    assert.equal(new Set(interruptedJournal.entries?.map((entry) => entry.controller_generation)).size, 3);
+    assert.equal(interruptedJournal.entries?.[0]?.controller_generation, preparedCurrent.controllerGeneration);
+    assert.equal(interruptedJournal.entries?.[1]?.controller_generation, preparedLegacy.controllerGeneration);
+
+    const ordinary = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(ordinary.ok, false);
+    assert.match(JSON.stringify(ordinary.diagnostics), /requires reconciliation with resume --refresh-controller/u);
+
+    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+      entries?: Array<{ phase?: string; controller_generation?: string }>;
+    };
+    assert.equal(journal.entries?.length, 3);
+    assert.deepEqual(
+      journal.entries?.map((entry) => entry.phase),
+      ["committed", "committed", "committed"]
+    );
+    assert.equal(new Set(journal.entries?.map((entry) => entry.controller_generation)).size, 3);
+  }
+);
+
+test(
   "controller refresh removes an authenticated prepared temporary snapshot after abrupt exit",
   { concurrency: false },
   async () => {
