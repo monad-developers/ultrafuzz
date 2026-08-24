@@ -2,12 +2,7 @@
 
 <img src="docs/assets/ultrafuzz-logo.svg" alt="Ultrafuzz logo" width="96" height="96" />
 
-Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
-
-Model work can run through first-party Codex, Claude, Kimi, and DeepSeek
-adapters or through OpenRouter. The dedicated `OpenRouterAgent` accepts current
-OpenRouter catalogue IDs without a built-in allowlist and reads
-`OPENROUTER_API_KEY`; see [Config](docs/config.md#openrouter-agent).
+Ultrafuzz is an agentic orchestrator for smart contract fuzzing and threat hunting
 
 ![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
 
@@ -16,10 +11,9 @@ specialized agents, collects generated fuzz tests and findings, and serves a
 local dashboard plus final report for review.
 
 > **Trust model:** Agents run in a trusted, skip-permissions workflow, and
-> user-editable prompts can influence what is written into a target repository.
-> Review the checked-in `.ultrafuzz/prompts/` before launching a campaign, and
-> review generated artifacts before copying anything into your project. See
-> [Security](docs/security.md) for details.
+> user-editable prompts can influence what is performed into target repositories.
+> Review the checked-in `.ultrafuzz/prompts/` before launching a campaign. It is recommended
+> to launch Ultrafuzz on a virtual private server. See [Security](docs/security.md) for details.
 
 ## Getting started
 
@@ -28,7 +22,7 @@ Tell your agent:
 ```
 Run Ultrafuzz on my project and monitor it from start to finish.
 If any node fails, for example, due to cyber refusals, resume from where it left off.
-Use subscription auth, the best available model at its highest reasoning effort,
+Use the same authentication method we're using, and the best model at its highest reasoning effort,
 high concurrency limits, and the default audit profile.
 If you need to install any dependencies, ask for my approval first.
 ```
