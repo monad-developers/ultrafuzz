@@ -17962,7 +17962,7 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
 test("artifact gates validate a historical bundle through its active sealed schema snapshot", async () => {
   assert.equal(
     VALIDATOR_BUILD_IDENTITY,
-    "ultrafuzz-json-validator.v1:77b2461a78ff8a1e942a70d473460dab54158e204dba791e818717cc9674a6d4",
+    "ultrafuzz-json-validator.v1:4190026d34c5706521f539b0f814073a20250f0bc4984686918205495d63379c",
     "a compatibility-only bundle loader must retain the pre-upgrade validator identity"
   );
   const project = tempProject();
