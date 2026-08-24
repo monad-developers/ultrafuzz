@@ -24,6 +24,7 @@ import {
   artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
+  artifactSchemaRegistryFromDirectory,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
@@ -31,10 +32,14 @@ import {
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
+  readPlannedGraphDocument,
+  readRunState,
   promptArtifactAuthorityPathSelectorId,
   replayEvents,
   threatModelJsonSchema,
+  validateRegisteredJsonBytesSync,
   VALIDATOR_BUILD_IDENTITY,
+  writeRunState,
   type RunState,
   type SMITHERS_NODE_STATES,
   type SMITHERS_RUN_STATES,
@@ -99,6 +104,7 @@ import { bindSmithersExecutableCapability } from "../src/smithers-executable-cap
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import { BUN_MODULE_CONFINEMENT_SOURCE, materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
+import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
@@ -17672,9 +17678,17 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
     evidence.verifiedControl.executionFiles.some((file) => file.snapshotPath === bootstrapPath),
     true
   );
+  const schemaPath = "modules/@ultrafuzz/artifacts/schema/event-record.schema.json";
+  const sealedSchema = evidence.verifiedControl.executionFiles.find((file) => file.snapshotPath === schemaPath);
+  assert.ok(sealedSchema);
+  const historicalSchemaDocument = JSON.parse(sealedSchema.contents.toString("utf8")) as Record<string, unknown>;
+  historicalSchemaDocument.$comment = "historical controller schema fixture";
+  const historicalSchemaBytes = Buffer.from(`${JSON.stringify(historicalSchemaDocument, null, 2)}\n`, "utf8");
   const syntheticPreFix = {
     ...evidence.verifiedControl,
-    executionFiles: evidence.verifiedControl.executionFiles.filter((file) => file.snapshotPath !== bootstrapPath)
+    executionFiles: evidence.verifiedControl.executionFiles
+      .filter((file) => file.snapshotPath !== bootstrapPath)
+      .map((file) => (file.snapshotPath === schemaPath ? { ...file, contents: historicalSchemaBytes } : file))
   };
   const rebuilt = refreshedSmithersControllerSnapshot({
     projectRoot: project,
@@ -17689,6 +17703,11 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
   assert.deepEqual(rebuilt.snapshot.contents.graph, evidence.verifiedControl.contents.graph);
   assert.deepEqual(rebuilt.snapshot.contents.tasks, evidence.verifiedControl.contents.tasks);
   assert.deepEqual(rebuilt.snapshot.contents.input, evidence.verifiedControl.contents.input);
+  assert.deepEqual(
+    rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === schemaPath)?.contents,
+    historicalSchemaBytes,
+    "controller refresh must preserve the sealed schema bundle"
+  );
 
   const current = refreshedSmithersControllerSnapshot({
     projectRoot: project,
@@ -17778,6 +17797,78 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
     entries?: Array<{ phase?: string }>;
   };
   assert.equal(stillPrepared.entries?.at(-1)?.phase, "prepared");
+});
+
+test("artifact gates validate a historical bundle through its active sealed schema snapshot", async () => {
+  assert.equal(
+    VALIDATOR_BUILD_IDENTITY,
+    "ultrafuzz-json-validator.v1:77b2461a78ff8a1e942a70d473460dab54158e204dba791e818717cc9674a6d4",
+    "a compatibility-only bundle loader must retain the pre-upgrade validator identity"
+  );
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sealed-artifact-schema-bundle";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const layout = layoutForRunRoot(launched.value!.run_root);
+  writeRequiredArtifactSet(layout.root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const state = readRunState(layout);
+  const currentSnapshot =
+    state.provenance?.workflow.controllerExecutionSnapshot ?? state.provenance?.workflow.executionSnapshot;
+  assert.ok(currentSnapshot);
+  const historicalSnapshot = `smithers/execution-snapshots/${"e".repeat(64)}`;
+  const snapshotsRoot = path.join(layout.root, "smithers", "execution-snapshots");
+  const historicalRoot = path.join(layout.root, ...historicalSnapshot.split("/"));
+  fs.chmodSync(snapshotsRoot, 0o700);
+  fs.cpSync(path.join(layout.root, ...currentSnapshot.split("/")), historicalRoot, { recursive: true });
+  fs.chmodSync(snapshotsRoot, 0o500);
+  const unrelatedSchemaPath = path.join(
+    historicalRoot,
+    "modules",
+    "@ultrafuzz",
+    "artifacts",
+    "schema",
+    "event-record.schema.json"
+  );
+  fs.chmodSync(unrelatedSchemaPath, 0o600);
+  const unrelatedSchema = JSON.parse(fs.readFileSync(unrelatedSchemaPath, "utf8")) as Record<string, unknown>;
+  unrelatedSchema.$comment = "historical runtime-only schema fixture";
+  fs.writeFileSync(unrelatedSchemaPath, `${JSON.stringify(unrelatedSchema, null, 2)}\n`, "utf8");
+  fs.chmodSync(unrelatedSchemaPath, 0o400);
+
+  const artifactPath = path.join(layout.artifactsDir, "project-discovery", "findings.json");
+  const schemaPath = path.join(historicalRoot, "modules", "@ultrafuzz", "artifacts", "schema", "findings.schema.json");
+  const historicalValidation = validateRegisteredJsonBytesSync({
+    schemaPath,
+    instanceBytes: fs.readFileSync(artifactPath),
+    schemaRegistry: artifactSchemaRegistryFromDirectory(path.dirname(schemaPath))
+  });
+  assert.equal(historicalValidation.status, "valid", JSON.stringify(historicalValidation.diagnostics));
+  assert.ok(historicalValidation.schema);
+  assert.notEqual(historicalValidation.schema.bundle_sha256, artifactSchemaBundleDigest());
+  state.provenance!.workflow.controllerExecutionSnapshot = historicalSnapshot;
+  writeRunState(layout, state);
+
+  const graph = readPlannedGraphDocument(layout.graphPath);
+  const node = structuredClone(graph.nodes.find((candidate) => candidate.id === "project-discovery")!);
+  for (const output of node.outputs) {
+    if (output.schema_bundle_sha256 !== undefined) {
+      output.schema_bundle_sha256 = historicalValidation.schema.bundle_sha256;
+    }
+  }
+  const verified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(verified.ok, true, JSON.stringify(verified.diagnostics));
+
+  state.provenance!.workflow.controllerExecutionSnapshot = `smithers/execution-snapshots/${"d".repeat(64)}`;
+  writeRunState(layout, state);
+  const missingAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingAuthority.ok, false);
+  assert.ok(
+    missingAuthority.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEALED_SCHEMA_AUTHORITY_INVALID")
+  );
 });
 
 test("controller generation reloads authenticated dependency filenames outside artifact output grammar", async () => {

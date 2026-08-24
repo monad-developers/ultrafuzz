@@ -1416,15 +1416,32 @@ function replaceInternalModuleFiles(
     if (sealed.some((file) => !currentPaths.has(file.snapshotPath))) {
       throw new Error(`controller module ${moduleName} removed a sealed execution path`);
     }
+    const schemaPrefix = path.posix.join("modules", moduleName, "schema/");
+    const sealedSchemaPaths = sealed
+      .map((file) => file.snapshotPath)
+      .filter((snapshotPath) => snapshotPath.startsWith(schemaPrefix))
+      .sort(compareWorkflowExecutionStrings);
+    const currentSchemaPaths = current
+      .map((file) => file.snapshotPath)
+      .filter((snapshotPath) => snapshotPath.startsWith(schemaPrefix))
+      .sort(compareWorkflowExecutionStrings);
+    if (JSON.stringify(sealedSchemaPaths) !== JSON.stringify(currentSchemaPaths)) {
+      throw new Error(`controller module ${moduleName} changed its sealed schema path authority`);
+    }
     const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
     const currentByPath = new Map(current.map((file) => [file.snapshotPath, file]));
     for (const file of sealed) {
+      // Schemas bind campaign output semantics. Controller code may refresh,
+      // but its schema directory must remain the exact sealed generation.
+      if (file.snapshotPath.startsWith(schemaPrefix)) continue;
       const sourcePath = byPath.get(file.snapshotPath)!;
       file.sourcePath = sourcePath;
       file.contents = currentByPath.get(file.snapshotPath)!.contents;
     }
     const sealedPaths = new Set(sealed.map((file) => file.snapshotPath));
-    for (const file of current.filter((candidate) => !sealedPaths.has(candidate.snapshotPath))) {
+    for (const file of current.filter(
+      (candidate) => !sealedPaths.has(candidate.snapshotPath) && !candidate.snapshotPath.startsWith(schemaPrefix)
+    )) {
       files.push({
         sourcePath: file.sourcePath,
         snapshotPath: file.snapshotPath,

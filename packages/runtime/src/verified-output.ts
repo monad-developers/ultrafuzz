@@ -1297,7 +1297,16 @@ function assertCurrentContractBinding(output: PlannedGraphOutput): void {
   }
   const binding = artifactContractSchemaBinding(output.contract);
   const actualBinding = schemaBinding(output);
-  if (!isDeepStrictEqual(binding, actualBinding)) {
+  if (
+    binding === undefined
+      ? actualBinding !== undefined
+      : actualBinding === undefined ||
+        binding.schema_file !== actualBinding.schema_file ||
+        binding.schema_id !== actualBinding.schema_id ||
+        binding.schema_sha256 !== actualBinding.schema_sha256 ||
+        binding.validator_build !== actualBinding.validator_build ||
+        !/^[0-9a-f]{64}$/u.test(actualBinding.schema_bundle_sha256)
+  ) {
     throw invalidAuthority(`current JSON Schema binding changed for ${output.path}`);
   }
 }

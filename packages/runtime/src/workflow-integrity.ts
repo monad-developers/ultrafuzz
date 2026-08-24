@@ -7,6 +7,7 @@ import lockfile from "proper-lockfile";
 
 import {
   assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -335,7 +336,7 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
     contents = verified.contents.tasks;
   }
 
-  const graph = assertPlannedGraph(parseStrictJsonBytes(graphContents));
+  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(graphContents));
   const document = parseSmithersTaskManifestBytes(contents);
   assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
   if (document.run_id !== layout.runId) throw new Error("workflow task manifest run ID does not match the run root");
@@ -482,7 +483,8 @@ export function verifyWorkflowControlSnapshot(
     contents,
     readBoundedRegularFile(layout.root, layout.statePath, "run state"),
     executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents,
-    runtimeStateNodeIds
+    runtimeStateNodeIds,
+    true
   );
   if (JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
     reportDivergence("workflow control completeness binding changed");
@@ -1637,9 +1639,12 @@ function deriveWorkflowControlBindings(
   >,
   stateContents: Buffer,
   planContents: Buffer | undefined,
-  runtimeStateNodeIds?: readonly string[]
+  runtimeStateNodeIds?: readonly string[],
+  allowHistoricalSchemaBundle = false
 ): WorkflowControlBindings {
-  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const graph = (allowHistoricalSchemaBundle ? assertSealedPlannedGraph : assertPlannedGraph)(
+    parseStrictJsonBytes(contents.graph)
+  );
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
   const tasksDocument = parseSmithersTaskManifestBytes(contents.tasks);
   assertSmithersTaskManifestMatchesPlannedGraph(tasksDocument, graph);

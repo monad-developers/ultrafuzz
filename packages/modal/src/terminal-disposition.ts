@@ -4,7 +4,7 @@ import path from "node:path";
 
 import {
   assertTerminalDispositionDocument,
-  assertPlannedGraph,
+  assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
@@ -196,7 +196,7 @@ export function inspectTerminalDispositionAtRunRoot(runRoot: string): TerminalDi
 function readSealedTaskManifest(runRoot: string): SmithersTaskManifestDocument {
   const graphBytes = readRegularFileSnapshot(path.join(runRoot, "graph.json"), 64 * 1024 * 1024);
   const manifestBytes = readRegularFileSnapshot(path.join(runRoot, "smithers", "tasks.json"), 64 * 1024 * 1024);
-  const graph = assertPlannedGraph(parseStrictJsonBytes(graphBytes));
+  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(graphBytes));
   const manifest = parseSmithersTaskManifestBytes(manifestBytes);
   assertSmithersTaskManifestMatchesPlannedGraph(manifest, graph);
   return manifest;
