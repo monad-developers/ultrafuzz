@@ -106,6 +106,7 @@ import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
+  smithersSnapshotReportsMissingRun,
   type CurrentSmithersInspect,
   type SmithersCommandSnapshot
 } from "./smithers.js";
@@ -357,6 +358,8 @@ export interface WorkflowSynchronizationControl {
    * fail-closed by default and rethrows the parser error.
    */
   tolerateInvalidEventStreams?: boolean;
+  /** Retry preparation may defer an exact missing-run envelope to lifecycle recovery. */
+  allowMissingWorkflowRun?: boolean;
 }
 
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
@@ -469,6 +472,19 @@ export async function synchronizeLinkedWorkflowRun(
   const postInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (postInspectBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
+  }
+  if (control.allowMissingWorkflowRun === true && smithersSnapshotReportsMissingRun(inspectSnapshot)) {
+    return {
+      ok: true,
+      diagnostics: [],
+      value: {
+        run_id: layout.runId,
+        run_root: layout.root,
+        status: readRunState(layout).status,
+        workflow_run_id: evidence.smithersRunId,
+        synced_nodes: 0
+      }
+    };
   }
   if (!inspectSnapshot.ok) {
     return {

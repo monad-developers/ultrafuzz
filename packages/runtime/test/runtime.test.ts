@@ -21026,10 +21026,15 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   fs.writeFileSync(configPath, localConfig, "utf8");
   fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
 
+  const ordinarySync = await syncRun({ projectRoot: project, runId: "missing-workflow-run", env });
+  assert.equal(ordinarySync.ok, false);
+  assert.equal(ordinarySync.diagnostics[0]?.code, "WORKFLOW_INSPECT_FAILED");
+
   const resumed = await resumeRun({
     projectRoot: project,
     runId: "missing-workflow-run",
     maxConcurrency: 8,
+    retryFailed: true,
     env
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));

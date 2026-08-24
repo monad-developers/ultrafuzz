@@ -667,7 +667,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       ).toISOString();
       writeRunState(evidence.layout, stateBeforeSynchronization);
       const { syncRun } = await import("./workflow-sync.js");
-      const synchronization = await syncRun({ projectRoot: input.projectRoot, runId: input.runId, env: input.env });
+      const synchronization = await syncRun(
+        { projectRoot: input.projectRoot, runId: input.runId, env: input.env },
+        { allowMissingWorkflowRun: true }
+      );
       if (!synchronization.ok) {
         return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
       }

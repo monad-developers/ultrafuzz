@@ -3252,7 +3252,7 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
 }
 
-function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {
+export function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {
   if (smithersSnapshotHasErrorCode(snapshot, "RUN_NOT_FOUND")) return true;
   const envelope = snapshot.json;
   if (
