@@ -95,8 +95,12 @@ export function isSensitiveSecretValue(value: string, forbiddenSecretValues: rea
   );
 }
 
-export function containsSensitiveSecrets(value: string, forbiddenSecretValues: readonly string[] = []): boolean {
-  return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues) !== value;
+export function containsSensitiveSecrets(
+  value: string,
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
+): boolean {
+  return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues, mode) !== value;
 }
 
 /** Match exact concealed spans without allowing surrounding context to drift. */
@@ -185,27 +189,49 @@ export function hasRedactionPlaceholder(value: string): boolean {
   );
 }
 
+/**
+ * Which detections a scan runs.
+ *
+ * `positive` matches a credential the code can actually name: a configured
+ * value byte-for-byte, a vendor format (`sk-`, `ghp_`, `AKIA`, JWT, PEM, ...),
+ * a BIP39 mnemonic, a context-labeled private key, URL credentials, a Bearer
+ * token.
+ *
+ * `speculative` infers a secret from shape or from a nearby word: the
+ * high-entropy candidate pass, unlabeled 40-hex, and the key-name assignment
+ * rule. These cannot separate a credential from a long identifier, a commit
+ * hash, or an English sentence about tokens -- entropy in particular scores a
+ * versioned contract method above a GitHub token -- so a caller that FAILS on a
+ * hit rather than rewriting the text should leave them off.
+ */
+export type SecretScanMode = "all" | "positive-only";
+
 export function redactSecretsInText(
   value: string,
   placeholder = SENSITIVE_REDACTION_PLACEHOLDER,
-  forbiddenSecretValues: readonly string[] = []
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
 ): string {
+  const speculative = mode === "all";
   let redacted = redactExactSecretValues(value, placeholder, forbiddenSecretValues)
     .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gu, `$1${placeholder}@`)
-    .replace(/(Bearer\s+)[^\s`'"]+/giu, `$1${placeholder}`)
-    .replace(SENSITIVE_ASSIGNMENT_PATTERN, (assignment, prefix: string) => {
+    .replace(/(Bearer\s+)[^\s`'"]+/giu, `$1${placeholder}`);
+  if (speculative) {
+    redacted = redacted.replace(SENSITIVE_ASSIGNMENT_PATTERN, (assignment, prefix: string) => {
       const assignedValue = assignment.slice(prefix.length);
       const quote = assignedValue[0];
       return quote === '"' || quote === "'" || quote === "`"
         ? `${prefix}${quote}${placeholder}${quote}`
         : `${prefix}${placeholder}`;
     });
+  }
   for (const pattern of SECRET_PATTERNS) {
     pattern.lastIndex = 0;
     redacted = redacted.replace(pattern, placeholder);
   }
   redacted = redactContextLabeledPrivateKeys(redacted, placeholder);
   redacted = redactBip39Mnemonics(redacted, placeholder);
+  if (!speculative) return redacted;
   redacted = redactUnlabeledFortyHexSecrets(redacted, placeholder);
   return redacted.replace(HIGH_ENTROPY_CANDIDATE_PATTERN, (candidate, offset: number) =>
     isHighEntropySecretCandidate(redacted, candidate, offset) ? placeholder : candidate

@@ -1025,13 +1025,16 @@ test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run 
 
 test("canonical publication secret gate fails closed without rewriting bytes", () => {
   const maintainedFixtures = new Map<string, Buffer>([
-    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")],
-    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")]
+    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")],
+    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")]
   ]);
   const original = new Map([...maintainedFixtures].map(([artifactPath, bytes]) => [artifactPath, Buffer.from(bytes)]));
+  // The mnemonic is a positive identification and still fails the gate. The
+  // opaque high-entropy blob beside it no longer does -- see the accepted cases
+  // below for why the speculative heuristics are off for publication.
   assert.throws(
     () => assertArtifactPublicationsContainNoSecrets(maintainedFixtures),
-    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "generated/Exploit.t.sol"
+    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "report.md"
   );
   for (const [artifactPath, bytes] of maintainedFixtures) assert.deepEqual(bytes, original.get(artifactPath));
 
@@ -1067,6 +1070,46 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
       ["e"]
     )
   );
+
+  // Ordinary technical prose must publish. Each of these failed the gate before
+  // the speculative heuristics were scoped out of publication, and each killed a
+  // real campaign run: a qualified method group and a long generated test name
+  // clear the high-entropy thresholds purely because mixed-case identifiers are
+  // character-diverse, pinned dependency commits are unlabeled 40-hex, and the
+  // key-name rule fires on an English sentence about tokens.
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        ["setup/actors.md", Buffer.from("IExampleVaultCore.setAuthority/togglePause/transferOwnership\n", "utf8")],
+        ["setup/ledger.json", Buffer.from('{"result":"testFuzz_MaximumPrincipalForGrossIsSafeAndBounded"}\n', "utf8")],
+        ["generated-tests/EnumFixture.t.sol", Buffer.from("IExampleBook.NativeExecInstruction.POST_ONLY;\n", "utf8")],
+        ["setup/invariants.md", Buffer.from("For every token:\n  balance >= sum of credits\n", "utf8")],
+        [
+          "setup/dependencies.md",
+          Buffer.from(`Pinned: \`${"da0e9c1b".repeat(5)}\`, \`${"1a2b3c4d".repeat(5)}\`.\n`, "utf8")
+        ]
+      ])
+    )
+  );
+
+  // Every credential format the codebase can name is still rejected.
+  for (const [artifactPath, body] of [
+    ["k1.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"],
+    ["k2.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"],
+    ["k3.txt", "AKIAIOSFODNN7EXAMPLE"],
+    ["k4.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"],
+    ["k5.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"],
+    ["k6.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"],
+    ["k7.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"],
+    ["k8.txt", "https://admin:hunter2hunter2@example.com/x"],
+    ["k9.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"]
+  ] as const) {
+    assert.throws(
+      () => assertArtifactPublicationsContainNoSecrets(new Map([[artifactPath, Buffer.from(body, "utf8")]])),
+      new RegExp(artifactPath.replaceAll(".", "\\."), "u"),
+      `${artifactPath} must still be rejected`
+    );
+  }
   assert.doesNotThrow(() =>
     assertArtifactPublicationsContainNoSecrets(
       new Map([
