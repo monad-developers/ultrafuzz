@@ -10245,6 +10245,29 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smthrs/);
+  for (const moduleName of ["artifacts", "runtime", "modal"] as const) {
+    const sealedRelativeEntry = `../../modules/@ultrafuzz/${moduleName}/dist/index.js`;
+    assert.equal(
+      workflowSource.includes(`new URL(${JSON.stringify(sealedRelativeEntry)}, import.meta.url).href`),
+      true,
+      `${moduleName} fallback must resolve from the sealed workflow snapshot`
+    );
+    assert.equal(
+      workflowSource.includes(import.meta.resolve(`@ultrafuzz/${moduleName}`)),
+      false,
+      `${moduleName} fallback must not capture the operator checkout`
+    );
+    if (moduleName !== "modal") {
+      const sealedWorkflowUrl = pathToFileURL(
+        path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
+      );
+      assert.equal(
+        fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
+        true,
+        `${moduleName} fallback must identify a sealed snapshot module`
+      );
+    }
+  }
   assert.match(workflowSource, /const taskOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const preparationOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const verificationOutput = z\.strictObject\(/u);
@@ -11324,7 +11347,72 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   );
   fs.chmodSync(pinnedRunner.target, 0o755);
   const controllerEnvironment = fakeSmithersEnv(project);
-  writeFakeNpmInstaller(project);
+  const installer = writeFakeNpmInstaller(project);
+  const requireFromTest = createRequire(import.meta.url);
+  const requireFromSmithers = createRequire(requireFromTest.resolve("smthrs"));
+  const realReactRoot = path.dirname(requireFromSmithers.resolve("react"));
+  const realZodRoot = path.dirname(path.dirname(requireFromTest.resolve("zod/v4")));
+  const npmFixture = path.join(installer.binDir, "npm");
+  fs.chmodSync(npmFixture, 0o700);
+  fs.appendFileSync(
+    npmFixture,
+    `
+const reactRoot = path.join(prefix, "node_modules", "react");
+const zodRoot = path.join(prefix, "node_modules", "zod");
+fs.rmSync(reactRoot, { recursive: true, force: true });
+fs.rmSync(zodRoot, { recursive: true, force: true });
+fs.cpSync(${JSON.stringify(realReactRoot)}, reactRoot, { recursive: true });
+fs.cpSync(${JSON.stringify(realZodRoot)}, zodRoot, { recursive: true });
+const smthrsRoot = path.join(prefix, "node_modules", "smthrs");
+const smthrsManifest = JSON.parse(fs.readFileSync(path.join(smthrsRoot, "package.json"), "utf8"));
+smthrsManifest.type = "module";
+smthrsManifest.exports = {
+  ".": "./index.js",
+  "./jsx-runtime": "./jsx-runtime.js",
+  "./jsx-dev-runtime": "./jsx-runtime.js"
+};
+fs.writeFileSync(path.join(smthrsRoot, "package.json"), JSON.stringify(smthrsManifest) + "\\n");
+fs.writeFileSync(
+  path.join(smthrsRoot, "index.js"),
+  ${JSON.stringify(`
+class Agent {
+  constructor(options = {}) { this.opts = options; }
+  async preflight() {}
+  async buildCommand() { return { args: [], env: {} }; }
+  async generate() { return {}; }
+}
+export class SmithersErrorInstance extends Error {}
+export class ClaudeCodeAgent extends Agent {}
+export class CodexAgent extends Agent {}
+export class KimiAgent extends Agent {}
+export class OpenCodeAgent extends Agent {}
+export class PiAgent extends Agent {}
+const component = () => null;
+export function createSmithers() {
+  return {
+    Workflow: component,
+    Task: component,
+    Worktree: component,
+    Parallel: component,
+    Sandbox: component,
+    smithers: (factory) => ({ factory }),
+    outputs: { task: {}, preparation: {}, verification: {} }
+  };
+}
+`)}
+);
+fs.writeFileSync(
+  path.join(smthrsRoot, "jsx-runtime.js"),
+  ${JSON.stringify(`
+export const Fragment = Symbol.for("ultrafuzz.test.fragment");
+export const jsx = (type, props, key) => ({ type, props, key });
+export const jsxs = jsx;
+export const jsxDEV = jsx;
+`)}
+);
+`
+  );
+  fs.chmodSync(npmFixture, 0o500);
   const env = {
     ...controllerEnvironment,
     SMITHERS_BIN: undefined,
@@ -11356,6 +11444,63 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
   assert.equal(fs.statSync(sealedCloudRunner).isFile(), true);
   assert.notEqual(fs.statSync(sealedCloudRunner).mode & 0o111, 0);
   assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
+
+  const outsideModule = path.join(project, "outside-snapshot.mjs");
+  fs.writeFileSync(outsideModule, 'export default "outside";\n', "utf8");
+  const snapshotDescriptor = fs.openSync(
+    executionSnapshot,
+    fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+  );
+  try {
+    const descriptorRoot = "/proc/self/fd/3";
+    const workflowPath = path.join(descriptorRoot, ".smithers", "workflows", "ultrafuzz-cloud-environment.tsx");
+    const persistedWorkflowPath = path.join(
+      executionSnapshot,
+      ".smithers",
+      "workflows",
+      "ultrafuzz-cloud-environment.tsx"
+    );
+    const descriptorEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      MODAL_TOKEN_ID: "test-token-id",
+      MODAL_TOKEN_SECRET: "test-token-secret",
+      OPENAI_API_KEY: "configured-agent-key",
+      ULTRAFUZZ_CONFIG_PATH: path.join(descriptorRoot, "controls", "ultrafuzz.toml"),
+      ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(descriptorRoot, "controls", "data-governance.json"),
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: persistedWorkflowPath,
+      UFZ_DESCRIPTOR_WORKFLOW_MODULE: pathToFileURL(workflowPath).href,
+      UFZ_OUTSIDE_WORKFLOW_MODULE: pathToFileURL(outsideModule).href
+    };
+    for (const name of ["ULTRAFUZZ_ARTIFACTS_MODULE", "ULTRAFUZZ_MODAL_MODULE", "ULTRAFUZZ_RUNTIME_MODULE"]) {
+      delete descriptorEnvironment[name];
+    }
+    const detachedPreflight = spawnSync(
+      "bun",
+      [
+        `--config=${path.join(descriptorRoot, "controls", "bunfig.toml")}`,
+        `--env-file=${path.join(descriptorRoot, "controls", "bun-empty.env")}`,
+        "--no-env-file",
+        "--no-install",
+        "--no-addons",
+        "--preserve-symlinks",
+        "--preserve-symlinks-main",
+        `--preload=${path.join(descriptorRoot, "controls", "bun-module-confinement.js")}`,
+        "--eval",
+        `const workflow = await import(process.env.UFZ_DESCRIPTOR_WORKFLOW_MODULE); if (workflow.default === undefined) throw new Error("generated workflow has no default export"); let rejected; try { await import(process.env.UFZ_OUTSIDE_WORKFLOW_MODULE); } catch (error) { rejected = String(error); } if (!rejected?.includes("outside its sealed snapshot")) throw new Error("outside module was not rejected"); process.stdout.write("descriptor-preflight-ok");`
+      ],
+      {
+        cwd: project,
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "pipe", snapshotDescriptor],
+        env: descriptorEnvironment
+      }
+    );
+    assert.equal(detachedPreflight.status, 0, detachedPreflight.stderr);
+    assert.equal(detachedPreflight.stdout, "descriptor-preflight-ok");
+  } finally {
+    fs.closeSync(snapshotDescriptor);
+  }
 });
 
 test("startRun forwards Modal credentials and SDK selectors through the workflow environment filter", async () => {
