@@ -92,6 +92,7 @@ const {
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
+  restoreWorkspaceTreeWithIndexLockRecovery,
   smithersTaskAgentId,
   targetIdentity,
   topologyRuntimeContextForTimeout,
@@ -3935,11 +3936,13 @@ function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], work
     throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
   }
   workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
-  execFileSync("git", ["read-tree", "--reset", "-u", preparationTree], {
-    cwd: workspaceRoot,
-    maxBuffer: 64 * 1024,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  // The one git call in the system that writes the live worktree index, so the only one that can
+  // collide on `index.lock`. Never call the one-shot `execFileSync("git", ["read-tree", ...])` here:
+  // issue #727's transient lock collisions and #725's orphaned locks made that terminal before any
+  // model execution, and every out-of-process interposition shipped for the release was bypassed by
+  // the retained renderer. The shared runtime helper waits out a live lock within a fixed bound and
+  // recovers a provably orphaned one, while every other git failure stays immediate and terminal.
+  restoreWorkspaceTreeWithIndexLockRecovery(workspaceRoot, preparationTree);
   removeStaleWorkspaceFiles(workspaceRoot, preparationTree);
 }
 

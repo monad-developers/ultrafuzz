@@ -8463,9 +8463,12 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   const preparationRestoreStart = source.indexOf("function restoreWorkspacePatchPreparation");
   assert.ok(preparationRestoreStart > 0, source);
   const preparationRestore = source.slice(preparationRestoreStart, workflowStart);
+  const preparationReset = preparationRestore.indexOf(
+    "restoreWorkspaceTreeWithIndexLockRecovery(workspaceRoot, preparationTree)"
+  );
   assert.ok(
-    preparationRestore.indexOf('["read-tree", "--reset", "-u"') <
-      preparationRestore.indexOf("removeStaleWorkspaceFiles(workspaceRoot, preparationTree)"),
+    preparationReset >= 0 &&
+      preparationReset < preparationRestore.indexOf("removeStaleWorkspaceFiles(workspaceRoot, preparationTree)"),
     preparationRestore
   );
   // #691: both stale-cleanup listings exclude the runtime roots in the pathspec itself -- git never
@@ -8482,6 +8485,9 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(preparationRestore, /WORKSPACE_RUNTIME_ROOTS\.map\(\(root\) => `:\(exclude\)\$\{root\}`\)/u);
   // The last gate before rmSync stays: the pathspec aligns the producer with it, it does not replace it.
   assert.match(preparationRestore, /isWorkspaceRuntimePath\(relativePath\)/u);
+  // #727: the one-shot reset was terminal on a transient `index.lock` collision. The lock-recovering
+  // runtime helper is the only permitted producer of this reset; no raw one-shot may return anywhere.
+  assert.ok(!source.includes('execFileSync("git", ["read-tree", "--reset", "-u"'), source);
   assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
   assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
   assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
