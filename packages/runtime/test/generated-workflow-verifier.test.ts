@@ -1678,15 +1678,25 @@ function loadVerifyArtifactsHarness(
     "\n\nfunction configuredInvariantPrioritySelection",
     dependencyVerifierStart
   );
+  // The real template resolver and bounded snapshot reader are lifted rather
+  // than stubbed so their failure diagnostics (#693: the resolved candidate,
+  // the base it was resolved against, and the chained cause) are pinned
+  // against the shipped code.
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const resolverEnd = source.indexOf("\n\nfunction sameImmutableFileIdentity", resolverStart);
+  const issueFormatterStart = source.indexOf("function formatSchemaValidationIssues");
+  const issueFormatterEnd = source.indexOf("\n\nfunction firstDependencyRequiringReplay", issueFormatterStart);
   const captureStart = source.indexOf("function captureTaskOutputs");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts", captureStart);
   const verifierStart = source.indexOf("function verifyArtifacts", finalizerStart);
   const verifierEnd = source.indexOf("function readInvariantSourceSnapshot", verifierStart);
   assert.ok(dependencyVerifierStart >= 0 && dependencyVerifierEnd > dependencyVerifierStart, source);
+  assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, source);
+  assert.ok(issueFormatterStart >= 0 && issueFormatterEnd > issueFormatterStart, source);
   assert.ok(captureStart >= 0 && finalizerStart > captureStart, source);
   assert.ok(verifierStart > finalizerStart && verifierEnd > verifierStart, source);
   const emitted = ts.transpileModule(
-    `${source.slice(dependencyVerifierStart, dependencyVerifierEnd)}\n${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
+    `${source.slice(dependencyVerifierStart, dependencyVerifierEnd)}\n${source.slice(resolverStart, resolverEnd)}\n${source.slice(issueFormatterStart, issueFormatterEnd)}\n${source.slice(captureStart, finalizerStart)}\n${source.slice(verifierStart, verifierEnd)}`,
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
   const publications = new Map<string, Buffer>();
@@ -1814,8 +1824,9 @@ function loadVerifyArtifactsHarness(
     "taskSpecs",
     "taskArtifactRoots",
     "isStrictlyInsideDirectory",
-    "resolveRegularArtifactFile",
-    "readBoundedRegularArtifactSnapshot",
+    "assertRegularFileInside",
+    "statSync",
+    "readRegularFileSnapshot",
     "MAX_VERIFIED_ARTIFACT_BYTES",
     "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES",
     "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES",
@@ -1826,7 +1837,6 @@ function loadVerifyArtifactsHarness(
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
     "validateArtifactContractBytes",
-    "formatSchemaValidationIssues",
     "dependencyArtifactAdmission",
     "assertDependencyArtifactAdmissionCurrent",
     "assertVerifiedDependency",
@@ -1862,49 +1872,9 @@ function loadVerifyArtifactsHarness(
     harnessTaskSpecs,
     (_task: VerifyArtifactsTask, artifactDir: string) => [artifactDir],
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    (root: string, candidate: string, failureMessage: string) => {
-      try {
-        assertRegularFileInside(root, candidate, failureMessage);
-        const resolved = fs.realpathSync(candidate);
-        if (resolved === root || !resolved.startsWith(`${root}${path.sep}`) || !fs.statSync(resolved).isFile()) {
-          throw new Error(failureMessage);
-        }
-        return resolved;
-      } catch {
-        throw new Error(failureMessage);
-      }
-    },
-    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty = false) => {
-      if (candidate === root || !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
-      let before: fs.BigIntStats;
-      try {
-        before = fs.lstatSync(candidate, { bigint: true });
-      } catch {
-        throw new Error(failureMessage);
-      }
-      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
-        throw new Error(`${failureMessage}: file is not a singly linked regular file`);
-      }
-      const resolved = fs.realpathSync(candidate);
-      const bytes = readRegularFileSnapshot(resolved, maxBytes);
-      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
-      const after = fs.lstatSync(candidate, { bigint: true });
-      if (
-        !after.isFile() ||
-        after.isSymbolicLink() ||
-        after.nlink !== 1n ||
-        before.dev !== after.dev ||
-        before.ino !== after.ino ||
-        before.size !== after.size ||
-        before.mtimeNs !== after.mtimeNs ||
-        before.ctimeNs !== after.ctimeNs ||
-        after.size !== BigInt(bytes.byteLength) ||
-        resolved !== candidate
-      ) {
-        throw new Error(`${failureMessage}: file changed while it was captured`);
-      }
-      return Object.freeze({ path: resolved, bytes });
-    },
+    assertRegularFileInside,
+    fs.statSync,
+    readRegularFileSnapshot,
     64 * 1024 * 1024,
     MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
     MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
@@ -1941,12 +1911,6 @@ function loadVerifyArtifactsHarness(
     },
     (contract: Parameters<typeof validateArtifactContractBytes>[0], contents: Uint8Array, artifactPath: string) =>
       validateArtifactContractBytes(contract, contents, artifactPath),
-    (issues: readonly { message: string }[]) => {
-      const parserIssue = issues.find(
-        (issue) => issue.message.includes("not valid UTF-8") || issue.message.includes("not strict JSON")
-      );
-      return parserIssue?.message ?? "invalid";
-    },
     dependencyAdmissionFor,
     assertDependencyAdmissionCurrentFor,
     authenticateDependency,
@@ -2758,6 +2722,7 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
   const cases: Array<{
     label: string;
     mutate: (plan: Record<string, unknown>, result: Record<string, unknown>, summary: Record<string, unknown>) => void;
+    alsoMatches?: RegExp;
   }> = [
     {
       label: "configured timeout",
@@ -2793,10 +2758,22 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
       mutate: (_plan, result) => {
         result.campaign_outcome = "partial";
       }
+    },
+    {
+      // #693 surface 3: the wrong-field bug — execution.deadline copied from
+      // the plan's fuzzing_deadline_utc instead of final_artifact_deadline_utc.
+      // The gate must name the expected final-artifact value next to the
+      // forged one.
+      label: "execution deadline from fuzzing deadline",
+      mutate: (_plan, result) => {
+        record(result.execution).deadline = "2026-01-01T01:00:00Z";
+      },
+      alsoMatches:
+        /Execution deadline must equal plan final artifact deadline \(expected "2026-01-01T01:10:00Z", actual "2026-01-01T01:00:00Z"\) at \$\.execution\.deadline/u
     }
   ];
 
-  for (const { label, mutate } of cases) {
+  for (const { label, mutate, alsoMatches } of cases) {
     const root = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`))
     );
@@ -2822,7 +2799,12 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
 
       assert.throws(
         () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
-        /property-campaign-timeout-evidence failed/u,
+        (error: unknown) => {
+          assert.ok(error instanceof Error, label);
+          assert.match(error.message, /property-campaign-timeout-evidence failed/u, label);
+          if (alsoMatches !== undefined) assert.match(error.message, alsoMatches, label);
+          return true;
+        },
         label
       );
       assert.equal(harness.publications.size, 0, label);
@@ -2892,7 +2874,26 @@ test("generated Smithers fails closed when declared campaign evidence is missing
 
       assert.throws(
         () => harness.verifyArtifacts(fixture.task, captured),
-        /campaign evidence (?:is not an immutable regular file|does not match its manifest)/u,
+        (error: unknown) => {
+          assert.ok(error instanceof Error, mode);
+          assert.match(
+            error.message,
+            /campaign evidence (?:is not an immutable regular file|does not match its manifest)/u,
+            mode
+          );
+          if (mode === "missing") {
+            // #693: the resolver preserves the resolution evidence and the
+            // underlying cause instead of collapsing every failure into the
+            // caller's message.
+            assert.match(
+              error.message,
+              /\(resolved \S*backends\/recon-fuzzer\/results\.json against base \S*campaign-artifacts\)/u,
+              mode
+            );
+            assert.ok(error.cause instanceof Error, mode);
+          }
+          return true;
+        },
         mode
       );
       assert.equal(harness.publications.size, 0, mode);
@@ -2929,6 +2930,211 @@ test("generated Smithers rejects symlinked and hard-linked campaign evidence", (
       );
       assert.equal(harness.publications.size, 0, mode);
       assert.equal(harness.markerWrites.length, 0, mode);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+// #693: the recon-fuzzer campaign backend recorded every path field with a
+// workspace/node-directory prefix while the gates expect artifact-dir-relative
+// paths and bare declared output paths. One base disagreement surfaced as five
+// sequential terminal node failures, each diagnosable only from gate source.
+// This one fixture pins all five surfaces at once; the phases are separate
+// verifications only because the node-attempt failure message is capped at
+// 1,000 bytes, which truncates a single aggregate naming every surface.
+test("generated Smithers diagnoses the node-dir campaign path base across all five #693 surfaces", () => {
+  const workspacePrefix = "artifacts/attempt-campaign/";
+  const nodeDirPrefix = "stateful-invariant-campaign/";
+  const prefixedCampaignPaths = Object.fromEntries(
+    Object.entries(generatedCampaignPaths).map(([key, value]) => [key, `${workspacePrefix}${value}`])
+  );
+  const incidentDocuments = (options: {
+    workspacePathFields?: boolean;
+    workspaceEvidenceManifest?: boolean;
+    forgedExecutionDeadline?: boolean;
+    nodeDirResultRefs?: boolean;
+    nodeDirSummaryRefs?: boolean;
+  }): { plan: Record<string, unknown>; result: Record<string, unknown>; summary: Record<string, unknown> } => {
+    const plan = generatedCampaignPlanFixture();
+    const result = generatedPropertyCampaignFixture();
+    const summary = generatedCampaignSummaryFixture([], 0);
+    if (options.workspacePathFields === true) {
+      plan.paths = prefixedCampaignPaths;
+      result.paths = prefixedCampaignPaths;
+      (result.coverage as Record<string, unknown>).metrics = [
+        {
+          name: "executions",
+          value: 1,
+          unit: "count",
+          source_ref: `${workspacePrefix}${generatedCampaignPaths.raw_results}`
+        }
+      ];
+      (result.property_results as Array<Record<string, unknown>>)[0]!.evidence_refs = [
+        `${workspacePrefix}${generatedCampaignPaths.raw_results}`
+      ];
+    }
+    if (options.workspaceEvidenceManifest === true) {
+      result.evidence_files = generatedCampaignEvidenceFiles().map((entry) => ({
+        ...entry,
+        path: `${workspacePrefix}${entry.path}`
+      }));
+    }
+    if (options.forgedExecutionDeadline === true) {
+      (result.execution as Record<string, unknown>).deadline = "2026-01-01T01:00:00Z";
+    }
+    if (options.nodeDirResultRefs === true) {
+      result.campaign_plan_ref = `${nodeDirPrefix}campaign-plan.json`;
+      result.implemented_properties_ref = `${nodeDirPrefix}implemented-properties.json`;
+      result.findings_ref = `${nodeDirPrefix}findings.json`;
+      result.campaign_summary_ref = `${nodeDirPrefix}campaign-summary.json`;
+    }
+    if (options.nodeDirSummaryRefs === true) {
+      summary.campaign_plan_ref = `${nodeDirPrefix}campaign-plan.json`;
+      summary.implemented_property_suite_refs = [`${nodeDirPrefix}implemented-properties.json`];
+      summary.backend_results = [
+        { fuzzer_backend: "recon", status: "complete", result_ref: `${nodeDirPrefix}campaign.json` }
+      ];
+    }
+    return { plan, result, summary };
+  };
+  const phases: Array<{
+    label: string;
+    options: Parameters<typeof incidentDocuments>[0];
+    verify: (error: Error) => void;
+  }> = [
+    {
+      // Surface 1: workspace-prefixed evidence_files[].path resolves to a
+      // doubled candidate; the resolver must name the candidate, the base,
+      // and the underlying cause instead of only the caller's message.
+      label: "surface 1: evidence resolution",
+      options: {
+        workspacePathFields: true,
+        workspaceEvidenceManifest: true,
+        forgedExecutionDeadline: true,
+        nodeDirResultRefs: true,
+        nodeDirSummaryRefs: true
+      },
+      verify: (error) => {
+        assert.match(
+          error.message,
+          /campaign evidence is not an immutable regular file artifacts\/attempt-campaign\/backends\/recon-fuzzer\/run\.log/u
+        );
+        assert.match(
+          error.message,
+          /\(resolved \S*campaign-artifacts\/artifacts\/attempt-campaign\/backends\/recon-fuzzer\/run\.log against base \S*campaign-artifacts\)/u
+        );
+        assert.match(error.message, /does not exist/u);
+        assert.ok(error.cause instanceof Error);
+      }
+    },
+    {
+      // Surfaces 2 and 3: correcting evidence_files one-sidedly desynchronises
+      // the closure set, and execution.deadline carries the plan's
+      // fuzzing_deadline_utc. Both gates must name expected next to actual.
+      label: "surfaces 2 and 3: evidence closure and timeout evidence",
+      options: {
+        workspacePathFields: true,
+        forgedExecutionDeadline: true,
+        nodeDirResultRefs: true,
+        nodeDirSummaryRefs: true
+      },
+      verify: (error) => {
+        assert.match(error.message, /property-campaign-evidence-file-closure failed/u);
+        assert.match(
+          error.message,
+          /referenced paths missing from evidence_files: artifacts\/attempt-campaign\/backends\/recon-fuzzer\/results\.json, artifacts\/attempt-campaign\/backends\/recon-fuzzer\/run\.log/u
+        );
+        assert.match(
+          error.message,
+          /evidence_files entries nothing references: backends\/recon-fuzzer\/results\.json, backends\/recon-fuzzer\/run\.log/u
+        );
+        assert.match(error.message, /property-campaign-timeout-evidence failed/u);
+        assert.match(
+          error.message,
+          /Execution deadline must equal plan final artifact deadline \(expected "2026-01-01T01:10:00Z", actual "2026-01-01T01:00:00Z"\) at \$\.execution\.deadline/u
+        );
+        assert.match(error.message, /property-campaign-context-joins failed/u);
+      }
+    },
+    {
+      // Surface 4: the result's four sibling references carry the node-dir
+      // prefix; the join must name the expected bare declared output path.
+      label: "surface 4: node-dir result references",
+      options: { nodeDirResultRefs: true },
+      verify: (error) => {
+        assert.match(error.message, /property-campaign-context-joins failed/u);
+        assert.match(
+          error.message,
+          /Campaign plan reference does not name the authenticated sibling plan \(expected "campaign-plan\.json", actual "stateful-invariant-campaign\/campaign-plan\.json"\) at \$\.campaign_plan_ref/u
+        );
+        assert.match(
+          error.message,
+          /\(expected "implemented-properties\.json", actual "stateful-invariant-campaign\/implemented-properties\.json"\) at \$\.implemented_properties_ref/u
+        );
+        assert.match(
+          error.message,
+          /\(expected "findings\.json", actual "stateful-invariant-campaign\/findings\.json"\) at \$\.findings_ref/u
+        );
+        assert.match(
+          error.message,
+          /\(expected "campaign-summary\.json", actual "stateful-invariant-campaign\/campaign-summary\.json"\) at \$\.campaign_summary_ref/u
+        );
+      }
+    },
+    {
+      // Surface 5: campaign-summary.json repeats the pattern in its own
+      // references.
+      label: "surface 5: node-dir summary references",
+      options: { nodeDirSummaryRefs: true },
+      verify: (error) => {
+        assert.match(error.message, /property-campaign-context-joins failed/u);
+        assert.match(
+          error.message,
+          /\(expected "campaign-plan\.json", actual "stateful-invariant-campaign\/campaign-plan\.json"\) at \$\.campaign_summary_ref#campaign_plan_ref/u
+        );
+        assert.match(
+          error.message,
+          /Campaign summary implementation references do not match the authenticated handoff \(expected \["implemented-properties\.json"\], actual \["stateful-invariant-campaign\/implemented-properties\.json"\]\) at \$\.campaign_summary_ref#implemented_property_suite_refs/u
+        );
+        assert.match(
+          error.message,
+          /\(expected "campaign\.json", actual "stateful-invariant-campaign\/campaign\.json"\) at \$\.campaign_summary_ref#backend_results\[0\]\.result_ref/u
+        );
+      }
+    }
+  ];
+
+  for (const { label, options, verify } of phases) {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-path-base-")));
+    try {
+      const fixture = generatedCampaignVerificationFixture(root);
+      const documents = incidentDocuments(options);
+      for (const [relativePath, contract, document] of [
+        ["campaign-plan.json", "ultrafuzz/invariant-campaign-plan@2", documents.plan],
+        ["campaign.json", "ultrafuzz/property-campaign@3", documents.result],
+        ["campaign-summary.json", "ultrafuzz/campaign-summary@2", documents.summary]
+      ] as const) {
+        const contents = `${JSON.stringify(document)}\n`;
+        assert.equal(validateArtifactContract(contract, contents).ok, true, `${label}: ${relativePath}`);
+        fs.writeFileSync(path.join(fixture.task.artifactDir, relativePath), contents, "utf8");
+      }
+      const harness = loadVerifyArtifactsHarness({
+        taskSpecs: [fixture.implementationProducer, fixture.task],
+        authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+      });
+
+      assert.throws(
+        () => harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task)),
+        (error: unknown) => {
+          assert.ok(error instanceof Error, label);
+          verify(error);
+          return true;
+        },
+        label
+      );
+      assert.equal(harness.publications.size, 0, label);
+      assert.equal(harness.markerWrites.length, 0, label);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -3039,7 +3245,10 @@ test("generated Smithers rejects property-campaign v2 bytes without converting t
     const harness = loadVerifyArtifactsHarness();
     const captured = harness.captureTaskOutputs(task);
 
-    assert.throws(() => harness.verifyArtifacts(task, captured), /ultrafuzz\/property-campaign@3\): invalid/u);
+    assert.throws(
+      () => harness.verifyArtifacts(task, captured),
+      /ultrafuzz\/property-campaign@3\): .*must be equal to constant/u
+    );
     assert.equal(captured[0]?.file.bytes.equals(legacyBytes), true);
     assert.equal(fs.readFileSync(artifactPath).equals(legacyBytes), true);
     assert.equal(harness.publications.size, 0);

@@ -154,6 +154,19 @@ Use this configured invariant testing fuzzer timeout:
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer
      paths under `{{artifact_dir}}/backends/recon-fuzzer`. Never let concurrent
      processes write the same path.
+   - Write every recorded path field in the JSON artifacts relative to
+     `{{artifact_dir}}` — for example
+     `backends/recon-fuzzer/logs/recon-fuzzer.log` — never prefixed with the
+     artifact directory itself, a workspace path, or `artifacts/<attempt>/`,
+     and never absolute. This one convention governs the plan's `paths.*` and
+     the result's `paths.*`, `evidence_files[].path`,
+     `coverage.metrics[].source_ref`, `property_results[].evidence_refs[]`,
+     `failures[].raw_reproducer_ref`, and
+     `failures[].deterministic_reproducer_ref`; the plan's `paths` object and
+     the result's `paths` object must be byte-identical. It applies to
+     recorded path fields only: `exact_command`, `execution.command`, and the
+     plan's `command_plan` keep the literal executed command, including
+     whatever operational paths it used.
    - Record the backend's locally available version and exact shell-escaped
      command/config before launch. The host supervisor's `SIGINT` at the
      complete configured timeout is the authoritative fuzzing cutoff; its
@@ -190,8 +203,10 @@ Use this configured invariant testing fuzzer timeout:
      `usable_results`. Copy `exact_command` from the plan and the nested
      execution command, copy `start_timestamp` from `backend_started_at` and
      `execution.started_at`, and bind `end_timestamp` to
-     `execution.finished_at`. These duplicate joins are intentional evidence
-     checks; their values must agree exactly.
+     `execution.finished_at`. Copy `execution.deadline` from the plan's
+     `deadline`, which must equal `final_artifact_deadline_utc`; never
+     populate it from `fuzzing_deadline_utc`. These duplicate joins are
+     intentional evidence checks; their values must agree exactly.
    - Populate the schema-defined coverage record only from observed metrics and
      bind every metric to its exact evidence source. When coverage is not
      available, select the schema's unavailable variant and record the actual
@@ -353,7 +368,13 @@ only from this run's finalized Recon execution, plan, implementation handoff,
 findings, summary, and immutable evidence files.
 
 The campaign-plan, implemented-properties, findings, and campaign-summary
-references must retain their exact declared artifact paths. The backend fields
+references must retain their exact declared artifact paths: the reference
+fields (`campaign_plan_ref`, `implemented_properties_ref`, `findings_ref`,
+`campaign_summary_ref`, and the summary's `campaign_plan_ref`,
+`implemented_property_suite_refs[]`, and `backend_results[].result_ref`) carry
+the bare declared output filename exactly as listed above — for example
+`campaign-plan.json`, `implemented-properties.json`, or
+`recon-fuzzer-results.json` — with no directory prefix. The backend fields
 and record paths must match the authenticated plan;
 the implementation reference must name the authenticated ancestor handoff;
 and the findings and summary references must name the authenticated siblings.
