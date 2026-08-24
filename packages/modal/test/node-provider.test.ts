@@ -2436,6 +2436,110 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
     }
   }, 30_000);
 
+  it("relocates cloud workspace Git control metadata before local verifier use", async () => {
+    const fixture = createProjectFixture({ recordedSource: true });
+    const workspace = path.join(fixture.root, fixture.input.workspace_dir);
+    const sourceRevision = fixture.input.source_revision!;
+    const sourceTree = execFileSync("git", ["rev-parse", `${sourceRevision}^{tree}`], {
+      cwd: fixture.root,
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", ["update-ref", fixture.input.source_ref!, sourceRevision], { cwd: fixture.root });
+    fs.rmSync(workspace, { recursive: true, force: true });
+    execFileSync("git", ["worktree", "add", "--quiet", "--detach", fixture.input.workspace_dir, sourceRevision], {
+      cwd: fixture.root
+    });
+    fs.writeFileSync(path.join(fixture.root, "source.txt"), "controller advanced\n");
+    execFileSync("git", ["add", "source.txt"], { cwd: fixture.root });
+    execFileSync("git", ["commit", "--quiet", "-m", "advance controller checkout"], { cwd: fixture.root });
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.root, encoding: "utf8" }).trim()).not.toBe(
+      sourceRevision
+    );
+    const result = createResultArchive(fixture.input, {
+      workspaceGitControlFile: "gitdir: /__modal/volumes/vo-synthetic/external/workspace/.git/worktrees/attempt-one\n"
+    });
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(result)] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(fs.readFileSync(path.join(workspace, "work.txt"), "utf8")).toBe("remote workspace\n");
+      const git = (cwd: string, args: readonly string[]): string =>
+        execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
+      expect(fs.realpathSync(git(workspace, ["rev-parse", "--show-toplevel"]))).toBe(fs.realpathSync(workspace));
+      expect(git(workspace, ["rev-parse", "HEAD"])).toBe(sourceRevision);
+      expect(git(workspace, ["rev-parse", "HEAD^{tree}"])).toBe(sourceTree);
+      const controlFile = fs.readFileSync(path.join(workspace, ".git"), "utf8");
+      expect(controlFile).not.toContain("/__modal/volumes/");
+      expect(controlFile).toBe(
+        `gitdir: ${path.join(fs.realpathSync(fixture.root), ".git", "worktrees", "attempt-one")}\n`
+      );
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("provisions controller Git metadata for an unregistered cloud workspace", async () => {
+    const fixture = createProjectFixture({ recordedSource: true });
+    const workspace = path.join(fixture.root, fixture.input.workspace_dir);
+    const sourceRevision = fixture.input.source_revision!;
+    const sourceTree = execFileSync("git", ["rev-parse", `${sourceRevision}^{tree}`], {
+      cwd: fixture.root,
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", ["update-ref", fixture.input.source_ref!, sourceRevision], { cwd: fixture.root });
+    const worktreesRoot = path.join(fixture.root, ".git", "worktrees");
+    expect(fs.existsSync(worktreesRoot)).toBe(false);
+    expect(fs.existsSync(path.join(workspace, ".git"))).toBe(false);
+    fs.writeFileSync(path.join(fixture.root, "source.txt"), "controller advanced\n");
+    execFileSync("git", ["add", "source.txt"], { cwd: fixture.root });
+    execFileSync("git", ["commit", "--quiet", "-m", "advance controller checkout"], { cwd: fixture.root });
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.root, encoding: "utf8" }).trim()).not.toBe(
+      sourceRevision
+    );
+    const result = createResultArchive(fixture.input, {
+      workspaceGitControlFile: "gitdir: /__modal/volumes/vo-synthetic/external/workspace/.git/worktrees/attempt-one\n"
+    });
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(result)] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      const git = (cwd: string, args: readonly string[]): string =>
+        execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
+      expect(fs.realpathSync(git(workspace, ["rev-parse", "--show-toplevel"]))).toBe(fs.realpathSync(workspace));
+      expect(git(workspace, ["rev-parse", "HEAD"])).toBe(sourceRevision);
+      expect(git(workspace, ["rev-parse", "HEAD^{tree}"])).toBe(sourceTree);
+      expect(fs.readFileSync(path.join(workspace, "work.txt"), "utf8")).toBe("remote workspace\n");
+
+      const registrations = fs
+        .readdirSync(worktreesRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory());
+      expect(registrations).toHaveLength(1);
+      const administration = path.join(worktreesRoot, registrations[0]!.name);
+      expect(fs.readFileSync(path.join(workspace, ".git"), "utf8")).toBe(`gitdir: ${administration}\n`);
+      const backpointer = fs.readFileSync(path.join(administration, "gitdir"), "utf8").trim();
+      expect(fs.realpathSync(path.dirname(backpointer))).toBe(fs.realpathSync(workspace));
+      expect(path.basename(backpointer)).toBe(".git");
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("recovers a published result before starting a replacement worker", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive(fixture.input);
@@ -4735,6 +4839,7 @@ function createResultArchive(
     projectArchiveSha256?: string;
     invariantSourceProof?: string;
     verificationMarker?: string;
+    workspaceGitControlFile?: string;
   } = {}
 ) {
   const executionSnapshotRoot = input.execution_snapshot_root;
@@ -4762,6 +4867,9 @@ function createResultArchive(
     fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
   }
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
+  if (options.workspaceGitControlFile !== undefined) {
+    fs.writeFileSync(path.join(bundle, "workspace", ".git"), options.workspaceGitControlFile);
+  }
   fs.writeFileSync(
     path.join(bundle, "source-proofs", `${input.attempt_id}.invariant.json`),
     options.invariantSourceProof ?? "durable source proof\n"
