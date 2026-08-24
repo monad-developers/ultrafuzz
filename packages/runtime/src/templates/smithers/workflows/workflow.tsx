@@ -17,8 +17,15 @@ import { z } from "zod/v4";
 // .smithers/agents/ directory this workflow needs.
 import { agentFactories as projectAgentFactories } from "../agents/index.ts";
 
-const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
-const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
+// Detached controller preflights do not promise to forward every process
+// environment variable. Keep the fallback rooted in the workflow's sealed
+// execution snapshot instead of the mutable operator checkout that rendered it.
+const artifactsModule =
+  process.env.ULTRAFUZZ_ARTIFACTS_MODULE ??
+  new URL("../../modules/@ultrafuzz/artifacts/dist/index.js", import.meta.url).href;
+const runtimeModule =
+  process.env.ULTRAFUZZ_RUNTIME_MODULE ??
+  new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
 const {
   artifactContractDefinition,
   artifactContractSchemaBinding,
@@ -1518,7 +1525,10 @@ const usesCloudExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((
 const isCloudWorkerProcess = process.env.ULTRAFUZZ_CLOUD_WORKER === "1";
 const modalModule =
   usesCloudExecution && !isCloudWorkerProcess
-    ? await import(process.env.ULTRAFUZZ_MODAL_MODULE ?? __ULTRAFUZZ_MODAL_MODULE__)
+    ? await import(
+        process.env.ULTRAFUZZ_MODAL_MODULE ??
+          new URL("../../modules/@ultrafuzz/modal/dist/index.js", import.meta.url).href
+      )
     : undefined;
 const modalExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].find(
   (task) => task.execution.mode === "cloud"

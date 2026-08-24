@@ -10245,6 +10245,29 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smthrs/);
+  for (const moduleName of ["artifacts", "runtime", "modal"] as const) {
+    const sealedRelativeEntry = `../../modules/@ultrafuzz/${moduleName}/dist/index.js`;
+    assert.equal(
+      workflowSource.includes(`new URL(${JSON.stringify(sealedRelativeEntry)}, import.meta.url).href`),
+      true,
+      `${moduleName} fallback must resolve from the sealed workflow snapshot`
+    );
+    assert.equal(
+      workflowSource.includes(import.meta.resolve(`@ultrafuzz/${moduleName}`)),
+      false,
+      `${moduleName} fallback must not capture the operator checkout`
+    );
+    if (moduleName !== "modal") {
+      const sealedWorkflowUrl = pathToFileURL(
+        path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
+      );
+      assert.equal(
+        fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
+        true,
+        `${moduleName} fallback must identify a sealed snapshot module`
+      );
+    }
+  }
   assert.match(workflowSource, /const taskOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const preparationOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const verificationOutput = z\.strictObject\(/u);
