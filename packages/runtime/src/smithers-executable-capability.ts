@@ -225,11 +225,7 @@ export function acquireSmithersExecutableAnchor(
       executable: useDescriptorPaths ? interpreterDescriptorPath : capability.interpreter.path,
       argumentPrefix: [
         ...interpreterArguments,
-        snapshotRunner || directOperatorRunner
-          ? requested
-          : useDescriptorPaths
-            ? runnerDescriptorPath
-            : capability.runner.path
+        snapshotRunner ? requested : useDescriptorPaths ? runnerDescriptorPath : capability.runner.path
       ],
       assertCurrent,
       close: () => {

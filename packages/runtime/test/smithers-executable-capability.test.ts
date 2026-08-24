@@ -171,7 +171,8 @@ test(
       runner = path.join(operatorRoot, "node_modules", "smthrs", "src", "bin", "workflow runner.js"),
       resultModule = path.join(path.dirname(runner), "result.ts"),
       controls = path.join(operatorRoot, "controls"),
-      confinement = path.join(controls, "bun-module-confinement.js");
+      confinement = path.join(controls, "bun-module-confinement.js"),
+      hostileMarker = path.join(root, "hostile-runner-executed");
     fs.mkdirSync(path.dirname(runner), { recursive: true });
     fs.mkdirSync(controls, { recursive: true });
     fs.mkdirSync(targetRoot);
@@ -197,7 +198,7 @@ test(
     );
     const anchor = acquireSmithersExecutableAnchor(env);
     assert.ok(anchor);
-    assert.equal(anchor.argumentPrefix.at(-1), runner);
+    assert.match(anchor.argumentPrefix.at(-1) ?? "", /^\/proc\/[0-9]+\/fd\/[0-9]+$/u);
     anchor.close();
 
     const result = await runSmithersInspectionCommand({
@@ -208,6 +209,26 @@ test(
     assert.equal(result.ok, true, result.error);
     assert.deepEqual(result.json, { trusted: true });
     assert.ok(checks >= 4);
+
+    const replacementAnchor = acquireSmithersExecutableAnchor(env);
+    assert.ok(replacementAnchor);
+    fs.renameSync(runner, `${runner}.original`);
+    writeExecutable(
+      runner,
+      `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(hostileMarker)}, "hostile"); console.log(JSON.stringify({ trusted: false }));\n`
+    );
+    try {
+      const stdout = execFileSync(
+        replacementAnchor.executable,
+        [...replacementAnchor.argumentPrefix, "inspect", "fixture", "--format", "json"],
+        { cwd: targetRoot, env: process.env, encoding: "utf8" }
+      );
+      assert.deepEqual(JSON.parse(stdout), { trusted: true });
+      assert.equal(fs.existsSync(hostileMarker), false);
+      assert.throws(() => replacementAnchor.assertCurrent(), /changed at the controller command boundary/u);
+    } finally {
+      replacementAnchor.close();
+    }
 
     current = false;
     assert.throws(() => acquireSmithersExecutableAnchor(env), /operator controller changed during execution/u);
