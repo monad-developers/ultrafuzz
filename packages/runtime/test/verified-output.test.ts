@@ -158,6 +158,66 @@ test("verified final-report selection resolves one finalized sealed model-fanout
   assert.equal(loaded.authority.logical_node_id, REPORT_LOGICAL_ID);
 });
 
+function goalSearchCoverageCensus(runId: string): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: runId,
+    totals: { planned: 2 },
+    goals: [
+      {
+        node_id: "dynamic:class:1",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-001",
+        status: "completed-no-findings",
+        finding_count: 0
+      },
+      {
+        node_id: "dynamic:class:2",
+        logical_node_id: "class-goals",
+        attempt_id: "attempt-002",
+        status: "stopped-early",
+        finding_count: null
+      }
+    ]
+  };
+}
+
+test("verified final-report reader returns the census-rendered coverage without re-rendering", () => {
+  const runId = "verified-report-goal-census";
+  const report = currentReport(runId);
+  const census = goalSearchCoverageCensus(runId);
+  const fixture = createVerifiedReportFixture(runId, {
+    report,
+    markdown: projectCanonicalFinalReport(report, { goalSearchCoverage: census }).markdown
+  });
+  writeJsonDurable(path.join(fixture.layout.root, "goal-search-coverage.json"), census);
+
+  const loaded = loadVerifiedFinalReportSnapshot(fixture.layout.root);
+
+  assert.match(loaded.markdown, /^## Goal search coverage$/mu);
+  assert.match(
+    loaded.markdown,
+    /\*\*Partial goal search coverage: only 1 of the 2 targeted goal searches completed\.\*\*/u
+  );
+  // The runtime-published bytes come back unchanged: external readers agree with the runtime
+  // verifier about coverage without anyone running `ultrafuzz report` (issue #702).
+  assert.deepEqual(loaded.markdown_bytes, fixture.markdownBytes);
+});
+
+test("verified final-report reader rejects census-less Markdown once the run recorded a census", () => {
+  const runId = "verified-report-goal-census-mismatch";
+  const fixture = createVerifiedReportFixture(runId);
+  writeJsonDurable(path.join(fixture.layout.root, "goal-search-coverage.json"), goalSearchCoverageCensus(runId));
+
+  assert.throws(
+    () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+    (error: unknown) =>
+      error instanceof VerifiedOutputError &&
+      error.code === "VERIFIED_OUTPUT_INVALID" &&
+      /report\.md is not the canonical projection of report\.json/iu.test(error.message)
+  );
+});
+
 test("run-wide publication capture fails closed for reused outputs without current-run authority", () => {
   const fixture = createVerifiedReportFixture("verified-report-reused");
   updateNodeState(fixture.layout, fixture.attemptId, { status: "reused-from-prior-run" });
