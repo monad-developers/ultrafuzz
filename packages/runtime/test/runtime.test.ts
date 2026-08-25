@@ -18254,6 +18254,24 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
     true
   );
 
+  const admittedBootstrap = admitted.snapshot.executionFiles.find(
+    (file) => file.snapshotPath === bootstrapSnapshotPath
+  );
+  assert.ok(admittedBootstrap);
+  fs.unlinkSync(bootstrapPath);
+  const successor = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: syntheticSnapshot,
+    effective: admitted.snapshot,
+    config
+  });
+  assert.deepEqual(
+    successor.snapshot.executionFiles.find((file) => file.snapshotPath === bootstrapSnapshotPath)?.contents,
+    admittedBootstrap.contents,
+    "a second refresh must retain a path admitted by its authenticated predecessor"
+  );
+
   fs.writeFileSync(
     packageJsonPath,
     `${JSON.stringify({ name: moduleName, version: "1.0.0", dependencies: { "synthetic-dependency": "1.0.0" } })}\n`,
