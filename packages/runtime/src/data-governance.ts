@@ -341,7 +341,11 @@ function effectiveRoute(agent: string, config: ResolvedConfig, env: NodeJS.Proce
   let configDigest: string | undefined;
   if (fs.existsSync(routeConfig)) {
     const bytes = readSinglyLinkedRegularFileSnapshotInside(home, routeConfig, 1024 * 1024, "provider route config");
-    if (agent !== "ClaudeAgent" || claudeSettingsAffectRoute(bytes)) configDigest = hash(bytes);
+    const affectsRoute =
+      agent === "ClaudeAgent"
+        ? claudeSettingsAffectRoute(bytes)
+        : agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
+    if (affectsRoute) configDigest = hash(bytes);
     if (configDigest !== undefined && config.execution.mode === "cloud")
       throw new Error(
         "cloud execution cannot use host provider-home routing; select and acknowledge the route through environment variables"
@@ -350,6 +354,24 @@ function effectiveRoute(agent: string, config: ResolvedConfig, env: NodeJS.Proce
   return routeEnvironment.length > 0
     ? sha256Stable({ agent, config: configDigest ?? null, route: routeEnvironment })
     : configDigest;
+}
+/**
+ * The Codex CLI rewrites its own config.toml on invocation — marketplace
+ * `last_updated` timestamps, plugin toggles, and project trust levels — so
+ * digesting the whole file makes the acknowledged route change the moment the
+ * CLI first runs in a fresh HOME, which failed every sandbox agent task after
+ * disclosure (#908). Mirror claudeSettingsAffectRoute: only content that can
+ * actually redirect traffic — a `model_provider` selection, a
+ * `[model_providers…]` table, or a `base_url` assignment, the same fields
+ * codexProviderRouting reads — participates in the route digest. A config
+ * that gains any of these after acknowledgement still fails closed.
+ */
+function codexConfigAffectsRoute(text: string): boolean {
+  return (
+    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
+    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
+    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
+  );
 }
 function claudeSettingsAffectRoute(bytes: Buffer): boolean {
   const parsed = parseStrictJsonBytes(bytes, {

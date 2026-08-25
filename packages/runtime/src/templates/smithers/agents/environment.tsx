@@ -263,7 +263,11 @@ function effectiveWorkflowDataRoute(
     const configPath = path.join(route.configDir, route.agent === "ClaudeAgent" ? "settings.json" : "config.toml");
     if (existsSync(configPath)) {
       const bytes = readRegularFileSnapshot(configPath, 1024 * 1024);
-      if (route.agent !== "ClaudeAgent" || claudeSettingsAffectRoute(bytes)) configDigest = sha256(bytes);
+      const affectsRoute =
+        route.agent === "ClaudeAgent"
+          ? claudeSettingsAffectRoute(bytes)
+          : route.agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
+      if (affectsRoute) configDigest = sha256(bytes);
     }
   }
   const digest =
@@ -280,6 +284,24 @@ function effectiveWorkflowDataRoute(
   return digest === undefined
     ? `model:${provider}`
     : `model:${route.agent.toLowerCase().replace("agent", "")}-route-${digest}`;
+}
+
+/**
+ * The Codex CLI rewrites its own config.toml on invocation — marketplace
+ * `last_updated` timestamps, plugin toggles, and project trust levels — so
+ * digesting the whole file makes the acknowledged route change the moment the
+ * CLI first runs in a fresh HOME, which failed every sandbox agent task after
+ * disclosure (#908). Keep this generated copy in exact parity with
+ * @ultrafuzz/runtime data-governance.ts: only content that can actually
+ * redirect traffic — a `model_provider` selection, a `[model_providers…]`
+ * table, or a `base_url` assignment — participates in the route digest.
+ */
+function codexConfigAffectsRoute(text: string): boolean {
+  return (
+    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
+    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
+    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
+  );
 }
 
 function claudeSettingsAffectRoute(bytes: Buffer): boolean {
