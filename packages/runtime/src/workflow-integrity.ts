@@ -58,6 +58,10 @@ const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
   "controls/bunfig.toml": Buffer.from("\n")
 };
 
+export function isBunStartupControlPath(snapshotPath: string): boolean {
+  return Object.hasOwn(BUN_STARTUP_CONTROLS, snapshotPath);
+}
+
 export function writeCurrentBunStartupControls(root: string): string {
   const resolvedRoot = path.resolve(root);
   const controlsRoot = ensureSafeDirectory(resolvedRoot, "controls");

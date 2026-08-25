@@ -99,6 +99,7 @@ import {
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
 import {
+  isBunStartupControlPath,
   replaceBunStartupControlsForControllerRefresh,
   writeCurrentBunStartupControls,
   type VerifiedWorkflowControlSnapshot,
@@ -1261,7 +1262,10 @@ export function refreshedSmithersControllerSnapshot(input: {
 }): RefreshedSmithersControllerSnapshot {
   const projectRoot = path.resolve(input.projectRoot);
   const effective = input.effective ?? input.original;
-  if (controllerRefreshSemanticFingerprint(effective) !== controllerRefreshSemanticFingerprint(input.original)) {
+  if (
+    controllerRefreshCampaignSemanticFingerprint(effective) !==
+    controllerRefreshCampaignSemanticFingerprint(input.original)
+  ) {
     throw new Error("effective controller generation is not rooted in the sealed campaign semantics");
   }
   const currentTaskDocument = parseSealedTaskDocument(input.original.contents.tasks);
@@ -1588,6 +1592,20 @@ function assertSameControllerPathSet(
 }
 
 function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  return controllerRefreshSemanticFingerprintWithStartupControls(snapshot, true);
+}
+
+function controllerRefreshCampaignSemanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
+  // Generation manifests already persist the original full fingerprint. Keep
+  // that authority byte-compatible while excluding only the controller-owned
+  // controls that a compatibility refresh is explicitly allowed to replace.
+  return controllerRefreshSemanticFingerprintWithStartupControls(snapshot, false);
+}
+
+function controllerRefreshSemanticFingerprintWithStartupControls(
+  snapshot: VerifiedWorkflowControlSnapshot,
+  includeStartupControls: boolean
+): string {
   const dynamicBaseGraph = snapshot.executionFiles.find(
     (file) => file.snapshotPath === DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH
   );
@@ -1597,7 +1615,13 @@ function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlS
   if ((dynamicBaseGraph === undefined) !== (dynamicBaseTasks === undefined)) {
     throw new Error("controller refresh has an incomplete dynamic control base");
   }
-  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
+  const hash = crypto
+    .createHash("sha256")
+    .update(
+      includeStartupControls
+        ? "ultrafuzz-controller-refresh-semantics-v1\0"
+        : "ultrafuzz-controller-refresh-campaign-semantics-v1\0"
+    );
   for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
     const bytes =
       key === "graph" && dynamicBaseGraph !== undefined
@@ -1608,7 +1632,11 @@ function controllerRefreshSemanticFingerprint(snapshot: VerifiedWorkflowControlS
     hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
   }
   for (const file of snapshot.executionFiles
-    .filter((candidate) => candidate.snapshotPath.startsWith("controls/"))
+    .filter(
+      (candidate) =>
+        candidate.snapshotPath.startsWith("controls/") &&
+        (includeStartupControls || !isBunStartupControlPath(candidate.snapshotPath))
+    )
     .sort((left, right) => compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath))) {
     hash.update(`${file.snapshotPath}\0${file.contents.byteLength}\0`).update(file.contents);
   }

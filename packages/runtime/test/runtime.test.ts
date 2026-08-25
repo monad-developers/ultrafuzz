@@ -18201,7 +18201,9 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
       ...evidence.verifiedControl.executionFiles.map((file) =>
         file.snapshotPath === dependencyManifest.snapshotPath
           ? { ...file, contents: Buffer.from(`${JSON.stringify(refreshedDependencyMap, null, 2)}\n`, "utf8") }
-          : file
+          : file.snapshotPath === "controls/bun-module-confinement.js"
+            ? { ...file, contents: Buffer.from("legacy startup control\n", "utf8") }
+            : file
       ),
       {
         sourcePath: packageJsonPath,
@@ -18235,6 +18237,11 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   assert.deepEqual(
     refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === retiredModuleSnapshotPath)?.contents,
     retiredModule
+  );
+  assert.deepEqual(
+    refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === "controls/bun-module-confinement.js")
+      ?.contents,
+    Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE)
   );
 
   const removedSchemaSnapshotPath = `modules/${moduleName}/schema/retired.schema.json`;
@@ -18313,6 +18320,24 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
     successor.snapshot.executionFiles.find((file) => file.snapshotPath === bootstrapSnapshotPath)?.contents,
     admittedBootstrap.contents,
     "a second refresh must retain a path admitted by its authenticated predecessor"
+  );
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: syntheticSnapshot,
+        effective: {
+          ...admitted.snapshot,
+          executionFiles: admitted.snapshot.executionFiles.map((file) =>
+            file.snapshotPath === "controls/resolved-config.json"
+              ? { ...file, contents: Buffer.concat([file.contents, Buffer.from(" ")]) }
+              : file
+          )
+        },
+        config
+      }),
+    /not rooted in the sealed campaign semantics/u
   );
 
   fs.writeFileSync(
