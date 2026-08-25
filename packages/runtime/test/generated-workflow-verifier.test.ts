@@ -5752,6 +5752,248 @@ test("generated optional admission rejects a present malformed marker before pub
   );
 });
 
+test("rerenders retain one dependency admission epoch and fresh modules reauthenticate", async () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const workflowSource = source.slice(source.indexOf("export default smithers"));
+  assert.equal(
+    workflowSource.match(/taskSpecs = reconcileTaskSpecIdentities\(/gu)?.length,
+    2,
+    "dynamic controller and cloud-worker rerenders must both retain stable task identities"
+  );
+  const reconciliationStart = source.indexOf("function reconcileTaskSpecIdentities");
+  const reconciliationEnd = source.indexOf("\n\nconst INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS", reconciliationStart);
+  const admissionStart = source.indexOf("function assertTaskInputs");
+  const admissionEnd = source.indexOf("\n\nfunction assertVerifiedDependency", admissionStart);
+  const agentStart = source.indexOf("function baseAgentForProfile");
+  const agentEnd = source.indexOf("\n\nfunction artifactAwareAgent", agentStart);
+  assert.ok(reconciliationStart >= 0 && reconciliationEnd > reconciliationStart, source);
+  assert.ok(admissionStart >= 0 && admissionEnd > admissionStart, source);
+  assert.ok(agentStart >= 0 && agentEnd > agentStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(reconciliationStart, reconciliationEnd)}
+${source.slice(admissionStart, admissionEnd)}
+${source.slice(agentStart, agentEnd)}
+function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
+  counters.preparations += 1;
+  assertTaskInputs(task, task.workspacePath);
+}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+
+  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-rerender-admission-")));
+  try {
+    const producerAttemptId = "dependency-producer";
+    const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
+    const consumerDir = path.join(runRoot, "artifacts", "dependency-consumer");
+    fs.mkdirSync(producerDir, { recursive: true });
+    fs.mkdirSync(consumerDir, { recursive: true });
+    const markerBytes = Buffer.from("verified-marker\n", "utf8");
+    const artifactBytes = Buffer.from("authenticated-artifact\n", "utf8");
+    const artifactIdentity = Object.freeze({
+      dev: 1n,
+      ino: 2n,
+      size: BigInt(artifactBytes.length),
+      mtimeNs: 3n,
+      ctimeNs: 4n
+    });
+    const markerIdentity = Object.freeze({
+      dev: 1n,
+      ino: 5n,
+      size: BigInt(markerBytes.length),
+      mtimeNs: 6n,
+      ctimeNs: 7n
+    });
+    const makeTaskSpecs = () => {
+      const producer = { attemptId: producerAttemptId, artifactDir: producerDir };
+      const consumer = {
+        attemptId: "dependency-consumer",
+        runRoot,
+        workspacePath: runRoot,
+        artifactDir: consumerDir,
+        promptPath: undefined,
+        dependencyArtifactDirs: [producerDir],
+        optionalDependencyArtifactDirs: [],
+        agentChain: [{ agentRef: "test-agent" }]
+      };
+      return { producer, consumer, taskSpecs: [producer, consumer] };
+    };
+    const loadRenderModule = (taskSpecs: ReturnType<typeof makeTaskSpecs>["taskSpecs"]) => {
+      const counters = { authentications: 0, preparations: 0, replaceArtifact: false };
+      const factoryAddDirs: string[][] = [];
+      const module = new Function(
+        "path",
+        "Buffer",
+        "isDeepStrictEqual",
+        "taskSpecs",
+        "counters",
+        "assertRegularFileInside",
+        "authenticatedAggregationSourcesByTask",
+        "artifactVerificationMarkerLocation",
+        "pathEntryExists",
+        "lstatSync",
+        "realpathSync",
+        "isStrictlyInsideDirectory",
+        "assertVerifiedDependency",
+        "sameImmutableFileIdentity",
+        "agentFactories",
+        "assertGovernedWorkspaceSource",
+        "artifactAwareAgent",
+        `${emitted}; return {
+          prepare(task) {
+            prepareArtifactMirror(task);
+          },
+          agent(task) {
+            return agentForTask(task, "prompt");
+          },
+          rerender(candidates) {
+            taskSpecs = reconcileTaskSpecIdentities(taskSpecs, candidates);
+            return taskSpecs;
+          }
+        };`
+      )(
+        path,
+        Buffer,
+        isDeepStrictEqual,
+        taskSpecs,
+        counters,
+        () => undefined,
+        new Map(),
+        () => undefined,
+        () => false,
+        fs.lstatSync,
+        fs.realpathSync,
+        (root: string, candidate: string) => {
+          const relative = path.relative(root, candidate);
+          return (
+            relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+          );
+        },
+        (_task: unknown, artifactDir: string) => {
+          counters.authentications += 1;
+          const currentArtifactBytes = counters.replaceArtifact
+            ? Buffer.from("replacement-artifact\n", "utf8")
+            : artifactBytes;
+          const currentArtifactIdentity = counters.replaceArtifact
+            ? Object.freeze({ ...artifactIdentity, ino: 8n, size: BigInt(currentArtifactBytes.length) })
+            : artifactIdentity;
+          return {
+            attemptId: producerAttemptId,
+            artifactDir,
+            marker: {
+              path: path.join(runRoot, ".ultrafuzz-verification", `${producerAttemptId}.json`),
+              bytes: markerBytes,
+              identity: markerIdentity
+            },
+            artifacts: new Map([
+              [
+                "result.json",
+                {
+                  path: path.join(producerDir, "result.json"),
+                  relativePath: "result.json",
+                  contract: "ultrafuzz/test@1",
+                  bytes: currentArtifactBytes,
+                  identity: currentArtifactIdentity
+                }
+              ]
+            ]),
+            publications: new Map([["result.json", createHash("sha256").update(currentArtifactBytes).digest("hex")]]),
+            generatedTestBundles: []
+          };
+        },
+        (left: unknown, right: unknown) => isDeepStrictEqual(left, right),
+        {
+          "test-agent": (options: { addDir?: string[] }) => {
+            factoryAddDirs.push([...(options.addDir ?? [])]);
+            return {
+              preflight: async () => undefined,
+              generate: async () => ({ summary: "ok" })
+            };
+          }
+        },
+        () => undefined,
+        (
+          _task: unknown,
+          _chainIndex: number,
+          _prompt: string,
+          _metadataAgent: unknown,
+          admittedAgent: () => { preflight?: (args: unknown) => Promise<unknown> }
+        ) => ({
+          preflight: async (args: unknown) => admittedAgent().preflight?.(args),
+          generate: async () => ({ summary: "ok" })
+        })
+      ) as {
+        prepare(task: ReturnType<typeof makeTaskSpecs>["consumer"]): void;
+        agent(task: ReturnType<typeof makeTaskSpecs>["consumer"]): {
+          preflight?(args: unknown): Promise<unknown>;
+        };
+        rerender(
+          candidates: ReturnType<typeof makeTaskSpecs>["taskSpecs"]
+        ): ReturnType<typeof makeTaskSpecs>["taskSpecs"];
+      };
+      return { counters, factoryAddDirs, module };
+    };
+
+    const firstRenderTasks = makeTaskSpecs();
+    const firstRender = loadRenderModule(firstRenderTasks.taskSpecs);
+    firstRender.module.prepare(firstRenderTasks.consumer);
+    assert.equal(firstRender.counters.preparations, 1);
+    assert.equal(firstRender.counters.authentications, 1);
+
+    // Dynamic and cloud-worker materialization construct equivalent task
+    // objects on every frame. Reconciliation must retain the object carrying
+    // the exact prepared snapshot epoch.
+    const rerenderTasks = makeTaskSpecs();
+    const reconciledTasks = firstRender.module.rerender(rerenderTasks.taskSpecs);
+    const reconciledConsumer = reconciledTasks.find(
+      (task) => task.attemptId === firstRenderTasks.consumer.attemptId
+    ) as typeof firstRenderTasks.consumer | undefined;
+    assert.equal(reconciledConsumer, firstRenderTasks.consumer);
+    const rehydratedAgent = firstRender.module.agent(reconciledConsumer!);
+    assert.ok(rehydratedAgent.preflight);
+    await rehydratedAgent.preflight({});
+    assert.equal(firstRender.counters.preparations, 1, "an ordinary rerender must not replace the prepared epoch");
+    assert.ok(firstRender.counters.authentications >= 2, "preflight must recheck the admitted snapshot");
+    assert.deepEqual(firstRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
+
+    firstRender.counters.replaceArtifact = true;
+    const replacementCheck = firstRender.module.agent(reconciledConsumer!);
+    assert.ok(replacementCheck.preflight);
+    await assert.rejects(
+      replacementCheck.preflight({}),
+      /dependency artifact changed after admission dependency-producer/u
+    );
+    assert.equal(firstRender.counters.preparations, 1, "replacement detection must retain the original epoch");
+    firstRender.counters.replaceArtifact = false;
+
+    const changedTasks = makeTaskSpecs();
+    changedTasks.consumer.runRoot = path.join(runRoot, "changed-run-root");
+    const changedRender = firstRender.module.rerender(changedTasks.taskSpecs);
+    const changedConsumer = changedRender.find((task) => task.attemptId === changedTasks.consumer.attemptId) as
+      typeof changedTasks.consumer | undefined;
+    assert.notEqual(changedConsumer, firstRenderTasks.consumer);
+    const changedAgent = firstRender.module.agent(changedConsumer!);
+    assert.ok(changedAgent.preflight);
+    await assert.rejects(changedAgent.preflight({}), /dependency admission is unavailable dependency-consumer/u);
+    assert.equal(firstRender.counters.preparations, 1, "a semantic task change must fail closed");
+
+    // A new generated-workflow module has neither the first module's Map nor
+    // its task object identities, even though Smithers can retain the durable
+    // prepare:* output and go directly to this task's preflight.
+    const freshRenderTasks = makeTaskSpecs();
+    const freshRender = loadRenderModule(freshRenderTasks.taskSpecs);
+    assert.notEqual(freshRenderTasks.consumer, firstRenderTasks.consumer);
+    const agent = freshRender.module.agent(freshRenderTasks.consumer);
+    assert.ok(agent.preflight);
+    await agent.preflight({});
+
+    assert.equal(freshRender.counters.preparations, 1);
+    assert.ok(freshRender.counters.authentications >= 2, "admission and currentness must both authenticate");
+    assert.deepEqual(freshRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("generated verifiers require a successful upstream task output before publishing artifacts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");

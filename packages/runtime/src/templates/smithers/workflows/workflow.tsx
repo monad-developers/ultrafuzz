@@ -394,6 +394,14 @@ function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
 }
 let taskSpecs = serializedTaskSpecs.map((task) => hydrateTaskSpec(task));
 
+function reconcileTaskSpecIdentities(previous: typeof taskSpecs, candidates: typeof taskSpecs): typeof taskSpecs {
+  const previousByAttemptId = new Map(previous.map((task) => [task.attemptId, task]));
+  return candidates.map((candidate) => {
+    const prior = previousByAttemptId.get(candidate.attemptId);
+    return prior !== undefined && isDeepStrictEqual(prior, candidate) ? prior : candidate;
+  });
+}
+
 const INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS = new Set([
   "ultrafuzz/invariant-campaign-plan@2",
   "ultrafuzz/property-campaign@3",
@@ -2882,6 +2890,14 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
     const agents = Array.isArray(candidate) ? candidate : [candidate];
     return agents.map((agent, agentIndex) =>
       artifactAwareAgent(task, chainIndex, originalPrompt, agent, () => {
+        // Smithers can persist prepare:* and then construct this agent from a
+        // fresh controller process. Rebuild authority only when this process
+        // has no admission; stable task identities preserve the exact original
+        // snapshot epoch across ordinary rerenders and chain candidates.
+        if (!dependencyArtifactAdmissionsByTask.has(task.attemptId)) {
+          assertGovernedWorkspaceSource(task);
+          prepareArtifactMirror(task);
+        }
         assertDependencyArtifactAdmissionCurrent(task);
         const admitted = baseAgentForProfile(task, profile, admittedDependencyArtifactDirs(task));
         const admittedAgents = admitted === undefined ? [] : Array.isArray(admitted) ? admitted : [admitted];
@@ -9011,9 +9027,13 @@ export default smithers((ctx) => {
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   let availableTaskSpecs = taskSpecs;
   if (cloudWorker) {
-    availableTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
-    const hydratedIds = new Set(availableTaskSpecs.map((task) => task.id));
-    taskSpecs = [...taskSpecs.filter((task) => !hydratedIds.has(task.id)), ...availableTaskSpecs];
+    const hydratedTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
+    const hydratedIds = new Set(hydratedTaskSpecs.map((task) => task.id));
+    taskSpecs = reconcileTaskSpecIdentities(taskSpecs, [
+      ...taskSpecs.filter((task) => !hydratedIds.has(task.id)),
+      ...hydratedTaskSpecs
+    ]);
+    availableTaskSpecs = taskSpecs.filter((task) => hydratedIds.has(task.id));
   } else if (dynamicGroupSpecs.length > 0) {
     const readyGroupIds = dynamicGroupSpecs
       .filter((group) => {
@@ -9035,7 +9055,10 @@ export default smithers((ctx) => {
       groups: dynamicGroupSpecs,
       readyGroupIds
     });
-    taskSpecs = taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks);
+    taskSpecs = reconcileTaskSpecIdentities(
+      taskSpecs,
+      taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks)
+    );
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
   if (!cloudWorker) {
