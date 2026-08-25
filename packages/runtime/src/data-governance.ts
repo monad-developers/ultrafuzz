@@ -429,6 +429,28 @@ export function routeOwnsCredentialLikeEnvironmentVariable(agent: string, name: 
   return owners.has(agent);
 }
 
+/**
+ * Paths Ultrafuzz and its workflow engine own inside the target worktree.
+ *
+ * Both the planning gate and the submit-time re-verification must derive the
+ * governed target identity from the same list. They previously duplicated it,
+ * so adding an entry in one place made planning accept a target that
+ * submission then rejected as "campaign source changed".
+ */
+export function controllerOwnedGovernancePaths(projectRoot: string, runRoot: string): string[] {
+  return [
+    runRoot,
+    path.join(projectRoot, ".ultrafuzz", "runs"),
+    path.join(projectRoot, ".smithers", "node_modules"),
+    path.join(projectRoot, ".smithers", "workflows"),
+    // The workflow engine opens its SQLite database in the target root, so a
+    // launched run leaves engine state in the governed worktree.
+    path.join(projectRoot, "smithers.db"),
+    path.join(projectRoot, "smithers.db-shm"),
+    path.join(projectRoot, "smithers.db-wal")
+  ];
+}
+
 export function targetIdentity(
   projectRoot: string,
   ignoredPaths: readonly string[] = []

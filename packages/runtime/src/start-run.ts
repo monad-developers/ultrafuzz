@@ -53,7 +53,7 @@ import {
   assertControllerExecutionSnapshotDigest,
   assertProviderScopedSensitiveEnvironmentCapability
 } from "./controller-source.js";
-import { targetIdentity } from "./data-governance.js";
+import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governance.js";
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
@@ -281,12 +281,7 @@ export async function startRun(input: StartRunInput) {
       plan.validation.project_root,
       prepared.verifiedControl.executionFiles,
       plan.data_governance.path,
-      [
-        plan.layout.root,
-        path.join(plan.validation.project_root, ".ultrafuzz", "runs"),
-        path.join(plan.validation.project_root, ".smithers", "node_modules"),
-        path.join(plan.validation.project_root, ".smithers", "workflows")
-      ]
+      controllerOwnedGovernancePaths(plan.validation.project_root, plan.layout.root)
     );
     const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
