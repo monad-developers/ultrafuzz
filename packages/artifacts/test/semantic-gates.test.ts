@@ -3483,6 +3483,110 @@ test("every contextual registration executes real positive and negative checks",
   }
 });
 
+test("Smithers planned dependency semantics omit unresolved dynamic groups only", () => {
+  const pendingGraph = {
+    nodes: [
+      {
+        ...validPlannedNode,
+        id: "consumer",
+        depends_on: ["fanout"],
+        dynamic_dependencies: ["fanout"],
+        kind: "agentic"
+      },
+      {
+        ...validPlannedNode,
+        id: "fanout",
+        depends_on: [],
+        kind: "agentic",
+        dynamic: { status: "pending" }
+      }
+    ]
+  };
+  const pendingTask = {
+    tasks: [
+      {
+        concreteNodeId: "consumer",
+        dependencies: [],
+        dependencySmithersNodeIds: [],
+        metadata: { dependencies: { concreteNodeIds: [] } }
+      }
+    ]
+  };
+
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: pendingTask,
+      context: { plannedGraph: { document: pendingGraph } }
+    }).status,
+    "passed"
+  );
+
+  const materializedGraph = {
+    nodes: [
+      { ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["generated"] },
+      {
+        ...structuredClone(pendingGraph.nodes[1]!),
+        dynamic: { status: "expanded" }
+      },
+      { ...validPlannedNode, id: "generated", depends_on: [], kind: "agentic" }
+    ]
+  };
+  const materializedTask = {
+    tasks: [
+      {
+        concreteNodeId: "consumer",
+        dependencies: ["generated"],
+        dependencySmithersNodeIds: ["verify:generated"],
+        metadata: { dependencies: { concreteNodeIds: ["generated"] } }
+      }
+    ]
+  };
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: materializedTask,
+      context: { plannedGraph: { document: materializedGraph } }
+    }).status,
+    "passed"
+  );
+
+  const staleExpandedGraph = structuredClone(materializedGraph);
+  staleExpandedGraph.nodes.find((node) => node.id === "consumer")!.depends_on = ["fanout"];
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: pendingTask,
+      context: { plannedGraph: { document: staleExpandedGraph } }
+    }).status,
+    "failed"
+  );
+
+  const ordinaryGraph = {
+    nodes: [
+      { ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["fanout", "ordinary"] },
+      structuredClone(pendingGraph.nodes[1]!),
+      { ...validPlannedNode, id: "ordinary", depends_on: [], kind: "agentic" }
+    ]
+  };
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: pendingTask,
+      context: { plannedGraph: { document: ordinaryGraph } }
+    }).status,
+    "failed"
+  );
+
+  const missingGraph = {
+    nodes: [{ ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["missing"] }]
+  };
+  const missing = executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+    document: pendingTask,
+    context: { plannedGraph: { document: missingGraph } }
+  });
+  assert.equal(missing.status, "failed");
+  assert.ok(
+    missing.status === "failed" && missing.issues.some((entry) => /planned dependency node/u.test(entry.message))
+  );
+});
+
 test("strict final reports preserve dropped false positives as exactly one non-production row", () => {
   const finding = {
     id: "finding-a",
