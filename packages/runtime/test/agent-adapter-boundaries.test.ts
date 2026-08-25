@@ -140,9 +140,12 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "832ad1ab5cb3a34be312d9cd416c6eab32877d952c5681d4867571a9db08feea",
-    responsibilities: ["output-interpretation"],
-    upstreamIssues: ["https://github.com/smithersai/smithers/issues/1629"]
+    classifiedSourceSha256: "f60204f6f4dc1019accd3dfbe22eb03227d86c6b4e30b4848342a68939bf44fc",
+    responsibilities: ["argv-construction", "output-interpretation"],
+    upstreamIssues: [
+      "https://github.com/monad-developers/ultrafuzz/issues/895",
+      "https://github.com/smithersai/smithers/issues/1629"
+    ]
   },
   "provider-home.tsx": {
     classifiedSourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744",
@@ -215,10 +218,10 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f"
   },
   "pi.tsx": {
-    maxLines: 175,
-    maxSyntaxNodes: 1_000,
+    maxLines: 200,
+    maxSyntaxNodes: 1_100,
     purpose: "adapter",
-    sourceSha256: "832ad1ab5cb3a34be312d9cd416c6eab32877d952c5681d4867571a9db08feea"
+    sourceSha256: "f60204f6f4dc1019accd3dfbe22eb03227d86c6b4e30b4848342a68939bf44fc"
   },
   "provider-home.tsx": {
     maxLines: 75,
