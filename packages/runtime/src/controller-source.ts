@@ -20,12 +20,21 @@ export const STOCK_CONTROLLER_SOURCE_TEMPLATES: Readonly<Record<string, string>>
 );
 type ControllerFile = { name: string; contents: Buffer };
 export type ControllerSourceInspection = Readonly<{ digest: string; stock: true; files: readonly string[] }>;
+export type PackagedControllerSource = Readonly<{
+  digest: string;
+  stock: true;
+  files: readonly Readonly<ControllerFile>[];
+}>;
+export function loadPackagedControllerSource(): PackagedControllerSource {
+  const files = expectedControllerFiles();
+  return { digest: controllerDigest(files), stock: true, files };
+}
 export function inspectControllerSource(projectRoot: string): ControllerSourceInspection {
   const root = path.join(path.resolve(projectRoot), ".smithers", "agents"),
     before = untrustedCall(() => fs.lstatSync(root, { bigint: true }));
   if (!before.isDirectory() || before.isSymbolicLink() || fs.realpathSync(root) !== root)
     throw untrustedControllerSource();
-  const expected = expectedControllerFiles();
+  const expected = loadPackagedControllerSource().files;
   assertExactNames(root, expected);
   const files = expected.map(({ name, contents: packaged }) => {
     const contents = untrustedCall(() =>
