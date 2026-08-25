@@ -478,8 +478,9 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
  *   was a wider regression than the bug it fixed.
  *
  * Naming the exact paths git reports avoids all three. `--exclude-standard` drops ignored untracked
- * paths so none is ever named, and `--cached` keeps tracked paths, including ones deleted from the
- * worktree, so deletions are still captured. The roots are excluded in `ls-files` itself rather than
+ * paths so none is ever named, and `--stage` (an index listing, like the default `--cached`) keeps
+ * tracked paths, including ones deleted from the worktree, so deletions are still captured; it reports
+ * the mode alongside, which is what lets `trackedStageablePaths` drop gitlinks. The roots are excluded in `ls-files` itself rather than
  * filtered afterwards: unlike `git add`, `ls-files` tolerates negative pathspecs and prunes the
  * traversal, which keeps a large `artifacts/` or `.smithers/` from producing path text that would
  * overflow the output buffer.
@@ -535,10 +536,12 @@ function stageableWorkspacePaths(
   // `applyWorkspacePatch` verifies both trees under the same exclusions — so every check still passes and
   // the downstream node simply sees stale content. Generated corpus is untracked by definition, so
   // narrowing the exclusion costs nothing it was meant to catch.
-  const tracked = runGitBuffer(
-    workspaceRoot,
-    ["ls-files", "-z", "--cached", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
-    index
+  const tracked = trackedStageablePaths(
+    runGitBuffer(
+      workspaceRoot,
+      ["ls-files", "-z", "--stage", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
+      index
+    )
   );
   const untracked = runGitBuffer(
     workspaceRoot,
@@ -584,9 +587,59 @@ function stageableWorkspacePaths(
     pathspecs.push(entry);
     if (isUntracked) untrackedPaths.set(key, entry);
   };
-  for (const entry of splitNulBuffer(tracked)) append(entry, false);
+  for (const entry of tracked) append(entry, false);
   for (const entry of splitNulBuffer(untracked)) append(entry, true);
   return { pathspecs, untrackedPaths };
+}
+
+/** Git's mode for a gitlink — a tracked submodule reference, not a file. */
+const GITLINK_MODE = Buffer.from("160000 ", "ascii");
+const TAB = 0x09;
+
+/**
+ * Parse `ls-files -z --stage` and drop every tracked gitlink.
+ *
+ * A submodule is a TRACKED entry, so the untracked-only `WORKSPACE_DEPENDENCY_ROOTS` exclusion above
+ * never sees it. Naming a gitlink in the `git add` below makes Git open the submodule repository to
+ * refresh it, and in a task workspace that open fails, taking the whole invocation with it:
+ *
+ *   $ cat <workspace>/lib/forge-std/.git
+ *   gitdir: ../../.git/modules/lib/forge-std
+ *   $ git --literal-pathspecs add -A --force --pathspec-from-file=- --pathspec-file-nul
+ *   fatal: not a git repository: lib/forge-std/../../.git/modules/lib/forge-std
+ *
+ * That relative pointer resolves from the main checkout, where `.git/modules/...` exists. Task
+ * workspaces are LINKED WORKTREES, whose `.git` is `<project>/.git/worktrees/<name>`, so the inherited
+ * `../../.git/modules/...` names nothing and `git add` dies. Since `add` fails as a whole invocation,
+ * one submodule killed the entire capture, and with it the node. In the run that produced issue #910
+ * this failed 6 of 63 verify lanes, one of them not `continueOnFail`, ending a 13-hour run at 93%.
+ *
+ * Excluding a tracked path is normally the silent data loss described above, but a gitlink is the
+ * documented exception, for the same reason the untracked nested-repository skip in `append` gives:
+ * staging one records a gitlink whose commit object lives only inside the nested repository, which
+ * `assertPatchPathsMatchManifest` refuses, and `validateWorkspacePatchCapture` independently rejects
+ * any patch carrying a `160000` mode. A submodule revision change could therefore never have survived
+ * capture into an applicable patch — before this it aborted capture, and where capture did succeed it
+ * failed validation one step later. Dropping it here makes the already-unreachable outcome quiet
+ * instead of fatal; it does not admit anything that used to reach a patch. Submodule CONTENTS are
+ * pinned by the superproject gitlink and hydrated from the sealed snapshot in `pinned-submodules.ts`,
+ * not authored in the workspace, so they are not wanted in a patch regardless.
+ *
+ * Selected by mode, not by path. `lib` is the Foundry convention, but nothing requires a submodule to
+ * live there, and a name-based list would silently miss `dependencies/` or a repository-root one.
+ *
+ * Bytes throughout: `-z` output is `<mode> <object> <stage>\t<path>` with no quoting, and Git paths
+ * need not be UTF-8. The path begins after the FIRST tab; a later tab belongs to the path itself.
+ */
+function trackedStageablePaths(raw: Buffer): Buffer[] {
+  const paths: Buffer[] = [];
+  for (const entry of splitNulBuffer(raw)) {
+    const tab = entry.indexOf(TAB);
+    if (tab < 0) throw new Error("git ls-files --stage produced an entry without a path separator");
+    if (entry.subarray(0, GITLINK_MODE.length).equals(GITLINK_MODE)) continue;
+    paths.push(entry.subarray(tab + 1));
+  }
+  return paths;
 }
 
 /** A byte-exact key; Git paths need not be UTF-8. */
