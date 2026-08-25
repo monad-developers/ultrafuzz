@@ -10367,10 +10367,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
   assert.match(workflowSource, /<Worktree/);
-  assert.match(
-    workflowSource,
-    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision[\s\S]*?baseBranch: governedSource\.commit/u
-  );
+  assert.match(workflowSource, /const baseBranch = worktreeBaseBranch\(task\)/u);
+  assert.match(workflowSource, /baseBranch === undefined \? \{\} : \{ baseBranch \}/u);
   assert.match(workflowSource, /function readGovernedSource\(\): \{ commit: string; tree: string \} \| undefined/);
   assert.doesNotMatch(workflowSource, /resolveLocalSourceCommit/u);
   assert.match(workflowSource, /function preservePinnedSourceProof/);
