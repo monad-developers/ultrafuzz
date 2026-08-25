@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "lib": ["ES2022", "ES2024.SharedMemory"],
     "rootDir": ".",
     "outDir": "dist-test",
     "declaration": false,

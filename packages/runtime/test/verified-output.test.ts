@@ -90,7 +90,10 @@ test("verified final-report reader binds immutable current bytes to verifier and
 
 test("verified output readers reject authenticated historical publications containing secrets", () => {
   const issue = currentIssue();
-  issue.description = "Executor leaked token=otherwise-unknown-historical-secret";
+  // A positively identified vendor-format credential: the publication gate
+  // scans positive-only (#819), so a bare `token=` keyword assignment is a
+  // display-redaction heuristic and no longer fails publication.
+  issue.description = "Executor leaked ghp_AbCdEf1234567890AbCdEf1234567890AbCd";
   const fixture = createVerifiedReportFixture("verified-report-secret-contamination", {
     report: currentReport("verified-report-secret-contamination", [issue])
   });

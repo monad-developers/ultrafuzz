@@ -949,7 +949,9 @@ const entropyAtRestSecret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q";
 function atRestSecretFixture(): string {
   return [
     `private-key=0x${"1a".repeat(32)}`,
-    "token npm_0123456789abcdefghijklmnopqrstuv",
+    // Real npm tokens are npm_ plus exactly 36 characters; secretlint encodes
+    // the true vendor format, so the fixture uses it.
+    "token npm_0123456789abcdefghijklmnopqrstuvwxyz",
     `mnemonic ${mnemonicAtRestSecret}`,
     "rpc https://eth-mainnet.g.alchemy.com/v2/0123456789abcdefghijklmnopqrstuv",
     `opaque ${entropyAtRestSecret}`,
@@ -1025,13 +1027,16 @@ test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run 
 
 test("canonical publication secret gate fails closed without rewriting bytes", () => {
   const maintainedFixtures = new Map<string, Buffer>([
-    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")],
-    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")]
+    ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")],
+    ["report.md", Buffer.from(`wallet ${mnemonicAtRestSecret}`, "utf8")]
   ]);
   const original = new Map([...maintainedFixtures].map(([artifactPath, bytes]) => [artifactPath, Buffer.from(bytes)]));
+  // The mnemonic is a positive identification and still fails the gate. The
+  // opaque high-entropy blob beside it no longer does — see the accepted cases
+  // below for why the speculative heuristics are off for publication.
   assert.throws(
     () => assertArtifactPublicationsContainNoSecrets(maintainedFixtures),
-    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "generated/Exploit.t.sol"
+    (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "report.md"
   );
   for (const [artifactPath, bytes] of maintainedFixtures) assert.deepEqual(bytes, original.get(artifactPath));
 
@@ -1067,6 +1072,57 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
       ["e"]
     )
   );
+
+  // Ordinary technical prose must publish. Each of these failed the gate
+  // before the speculative heuristics were scoped out of publication, and each
+  // killed a real campaign run (#819, #822): qualified method groups and long
+  // generated test names clear the entropy thresholds purely because
+  // mixed-case identifiers are character-diverse, pinned dependency commits
+  // are unlabeled 40-hex, the key-name rule fires on an English sentence about
+  // tokens, and hyphenated goal identifiers used to read as ak-/as- keys.
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        ["setup/actors.md", Buffer.from("IExampleVaultCore.setAuthority/togglePause/transferOwnership\n", "utf8")],
+        ["setup/ledger.json", Buffer.from('{"result":"testFuzz_MaximumPrincipalForGrossIsSafeAndBounded"}\n', "utf8")],
+        ["generated-tests/EnumFixture.t.sol", Buffer.from("IExampleBook.NativeExecInstruction.POST_ONLY;\n", "utf8")],
+        ["setup/invariants.md", Buffer.from("For every token:\n  balance >= sum of credits\n", "utf8")],
+        [
+          "setup/dependencies.md",
+          Buffer.from(`Pinned: \`${"da0e9c1b".repeat(5)}\`, \`${"1a2b3c4d".repeat(5)}\`.\n`, "utf8")
+        ],
+        ["setup/goals.md", Buffer.from("policy.record-treated-as-private-to-the-service\n", "utf8")],
+        ["report.md", Buffer.from("the role bearer (i.e. `account`) is granted the permission\n", "utf8")]
+      ])
+    )
+  );
+
+  // Every credential format the previous hand-rolled patterns could name is
+  // still rejected — via a secretlint library finding or a documented
+  // supplemental pattern.
+  for (const [artifactPath, body] of [
+    ["k01.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"],
+    ["k02.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"],
+    ["k03.txt", "AKIAIOSFODNN7EXAMPLE"],
+    ["k04.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"],
+    ["k05.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"],
+    ["k06.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"],
+    ["k07.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"],
+    ["k08.txt", "https://admin:hunter2hunter2@example.com/x"],
+    ["k09.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"],
+    ["k10.txt", "modal ak-0123456789abcdefghijklmnop"],
+    ["k11.txt", "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop"],
+    ["k12.txt", "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv"],
+    ["k13.txt", `github fine-grained github_pat_${"A1".repeat(41)}`],
+    ["k14.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"],
+    ["k15.txt", `signing key: ${"2b".repeat(32)}`]
+  ] as const) {
+    assert.throws(
+      () => assertArtifactPublicationsContainNoSecrets(new Map([[artifactPath, Buffer.from(body, "utf8")]])),
+      new RegExp(artifactPath.replaceAll(".", "\\."), "u"),
+      `${artifactPath} must still be rejected`
+    );
+  }
   assert.doesNotThrow(() =>
     assertArtifactPublicationsContainNoSecrets(
       new Map([
