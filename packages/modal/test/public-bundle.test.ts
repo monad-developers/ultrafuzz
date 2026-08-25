@@ -722,6 +722,19 @@ describe("public Modal benchmark bundles", () => {
     expect(() =>
       parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `leaked ${opaque}\n`), [opaque])
     ).toThrow(/injected secret value/u);
+    // CI run ids and volume names are high-entropy kebab-case, not
+    // credentials; the fail-on-hit gate — which scans every file before the
+    // canonical-projection check — must not flag them speculatively (#883).
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(
+          bundle,
+          reportPath,
+          "run ci-32866658497-1-smoke-ultrafuzz-bench-deepseek used volume" +
+            " ultrafuzz-ci-32866658497-1-smoke-ultrafuzz-bench-d-18cb2eabbe80\n"
+        )
+      )
+    ).not.toThrow(/secret-like content/u);
   });
 });
 

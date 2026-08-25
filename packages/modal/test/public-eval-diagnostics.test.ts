@@ -692,6 +692,17 @@ describe("public post-eval diagnostics", () => {
     expect(() => assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, [diagnostics.rows[0]!.target_id])).toThrow(
       /injected secret/u
     );
+    // A CI logical run id is high-entropy kebab-case, not a credential; the
+    // fail-on-hit gate must not flag it speculatively (#883).
+    expect(() =>
+      assertPublicEvalDiagnosticsContainsNoSecrets(
+        {
+          ...diagnostics,
+          lineage: { ...diagnostics.lineage, logical_run_id: "ci-32866658497-1-smoke-ultrafuzz-bench-deepseek" }
+        },
+        []
+      )
+    ).not.toThrow();
 
     const expected = collectedLineage();
     expect(() => assertPublicEvalDiagnosticsLineage(diagnostics, expected)).not.toThrow();

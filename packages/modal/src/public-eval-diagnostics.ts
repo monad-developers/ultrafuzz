@@ -30,7 +30,7 @@ import {
   type PublicEvalFailedNode,
   type PublicEvalDiagnosticsRow
 } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSensitiveSecrets } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { PublicModalBenchmarkConfig } from "./config.js";
@@ -203,7 +203,12 @@ export function assertPublicEvalDiagnosticsContainsNoSecrets(
   if ([...new Set(forbiddenSecretValues)].filter(Boolean).some((secret) => text.includes(secret))) {
     throw new Error("public eval diagnostics contains an injected secret value");
   }
-  if (redactSecretsInText(text) !== text) {
+  // "positive-only": this gate FAILS on a hit and cannot rewrite the
+  // diagnostics, so the speculative heuristics must stay off — the
+  // high-entropy pass flags `lineage.logical_run_id` (`ci-<run_id>-…`) as a
+  // secret and kills the sandbox worker as dependency-unreachable (#883),
+  // exactly the class the artifacts secret gate excludes (#819).
+  if (containsSensitiveSecrets(text, [], "positive-only")) {
     throw new Error("public eval diagnostics contains secret-like content");
   }
 }

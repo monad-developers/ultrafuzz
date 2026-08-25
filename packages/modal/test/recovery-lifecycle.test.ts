@@ -247,6 +247,15 @@ describe("Modal recovery lifecycle", () => {
         createModalRecoveryLifecycleDocument([{ ...records[0]!, attempt_id: `ghp_${"x".repeat(36)}` }])
       )
     ).toThrow(/secret-like/u);
+    // A CI logical run id is high-entropy kebab-case, not a credential; the
+    // fail-on-hit gate must not flag it speculatively (#883).
+    expect(() =>
+      assertModalRecoveryLifecycleContainsNoSecrets(
+        createModalRecoveryLifecycleDocument([
+          { ...records[0]!, logical_run_id: "ci-32866658497-1-smoke-ultrafuzz-bench-deepseek" }
+        ])
+      )
+    ).not.toThrow();
   });
 });
 

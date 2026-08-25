@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSensitiveSecrets } from "@ultrafuzz/security";
 
 import {
   MODAL_COMMON_SCHEMA_ID,
@@ -345,7 +345,11 @@ export function assertModalRecoveryLifecycleContainsNoSecrets(
   if ([...new Set(forbiddenSecretValues)].filter(Boolean).some((secret) => text.includes(secret))) {
     throw new Error("Modal recovery lifecycle contains an injected secret value");
   }
-  if (redactSecretsInText(text) !== text) {
+  // "positive-only": this gate FAILS on a hit and cannot rewrite the record,
+  // so the speculative heuristics must stay off — the high-entropy pass flags
+  // the lifecycle's own `ci-<run_id>-…` logical run ids as secrets (#883),
+  // exactly the class the artifacts secret gate excludes (#819).
+  if (containsSensitiveSecrets(text, [], "positive-only")) {
     throw new Error("Modal recovery lifecycle contains secret-like content");
   }
 }
