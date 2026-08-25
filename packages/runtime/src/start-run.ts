@@ -275,6 +275,7 @@ export async function startRun(input: StartRunInput) {
     const trustedCli = prepareTrustedCliEnvironment({
       layout: plan.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      executionSnapshotRoot: prepared.executionSnapshot.root,
       env: forgeGuard.env,
       required: compiled.tasks.some((task) =>
         task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
@@ -651,6 +652,16 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         : await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
     if (!lockedEvidence.ok) return runtimeFailure<WorkflowLifecycleValue>(lockedEvidence.diagnostics);
     evidence = lockedEvidence;
+    // Trusted-CLI rotation must retain the validator generation sealed when the
+    // run launched. A controller refresh deliberately replaces non-schema
+    // controller code, so sourcing its replacement snapshot here could import
+    // a newer validator build that can never satisfy trusted-cli.json.
+    const trustedCliIdentitySnapshotRoot = path.join(
+      evidence.layout.root,
+      "smithers",
+      "execution-snapshots",
+      evidence.verifiedControl.generation
+    );
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
     const controllerRefreshAuthorityFor = (current: LinkedWorkflowEvidence) =>
       current.controllerGeneration === current.controlGeneration
@@ -842,6 +853,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     const trustedCli = prepareTrustedCliEnvironment({
       layout: evidence.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
+      executionSnapshotRoot:
+        input.refreshController === true ? trustedCliIdentitySnapshotRoot : evidence.executionSnapshot.root,
       env: forgeGuard.env,
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks),
       allowIdentityRotation: input.refreshController === true

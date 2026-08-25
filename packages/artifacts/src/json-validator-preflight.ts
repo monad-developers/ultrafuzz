@@ -104,8 +104,19 @@ export interface JsonValidatorPreflightSuccessEnvelope {
   };
 }
 
+export interface JsonValidatorPreflightExpectedIdentity {
+  schemaId: string;
+  schemaSha256: string;
+  schemaBundleSha256: string;
+  validatorBuild: string;
+  artifactSha256: string;
+}
+
 /** Strict JSON + registered JSON Schema + named contextual identity validation, without repair or coercion. */
-export function parseJsonValidatorPreflightSuccessEnvelope(bytes: Uint8Array): JsonValidatorPreflightSuccessEnvelope {
+export function parseJsonValidatorPreflightSuccessEnvelope(
+  bytes: Uint8Array,
+  expectedIdentity?: JsonValidatorPreflightExpectedIdentity
+): JsonValidatorPreflightSuccessEnvelope {
   const value = parseStrictJsonBytes(bytes);
   const structural = validateRegisteredJsonSchema(JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID, value);
   if (!structural.ok) {
@@ -115,17 +126,26 @@ export function parseJsonValidatorPreflightSuccessEnvelope(bytes: Uint8Array): J
     );
   }
 
-  const binding = artifactContractSchemaBinding("ultrafuzz/findings@2");
-  if (binding === undefined) throw new Error("validator preflight schema is not registered");
+  const binding = expectedIdentity === undefined ? artifactContractSchemaBinding("ultrafuzz/findings@2") : undefined;
+  if (expectedIdentity === undefined && binding === undefined) {
+    throw new Error("validator preflight schema is not registered");
+  }
+  const expected = expectedIdentity ?? {
+    schemaId: binding!.schema_id,
+    schemaSha256: binding!.schema_sha256,
+    schemaBundleSha256: binding!.schema_bundle_sha256,
+    validatorBuild: binding!.validator_build,
+    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  };
   const gates = executeSchemaSemanticGates(JSON_VALIDATOR_PREFLIGHT_SUCCESS_SCHEMA_FILENAME, {
     document: value,
     context: {
       validatorPreflight: {
-        schemaId: binding.schema_id,
-        schemaSha256: binding.schema_sha256,
-        schemaBundleSha256: binding.schema_bundle_sha256,
-        validatorBuild: binding.validator_build,
-        artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+        schemaId: expected.schemaId,
+        schemaSha256: expected.schemaSha256,
+        schemaBundleSha256: expected.schemaBundleSha256,
+        validatorBuild: expected.validatorBuild,
+        artifactSha256: expected.artifactSha256
       }
     }
   });

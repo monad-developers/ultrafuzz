@@ -102,12 +102,20 @@ an agent-owned output.
 
 `trusted-cli.json` binds the run-owned launcher in `trusted-bin/` to the exact
 CLI entrypoint bytes, validator build, and artifact schema-bundle digest. The
-launcher precedes target-controlled directories on the producer's `PATH`.
+entrypoint and its complete package dependency graph live in a run-owned
+content-addressed directory under `trusted-cli-closures/`; the launcher verifies
+the manifest, files, and dependency links before dispatch, clears ambient Node
+loader/search injection, confines ESM and CommonJS module resolution to the
+closure, and precedes target-controlled directories on the producer's `PATH`.
 Before model work, Ultrafuzz uses it to validate a real known-valid fixture and
 checks the returned schema ID, schema digest, bundle digest, and build identity.
-A missing, changed, or stale launcher is a setup failure; it is not recreated
-silently when an existing run resumes. Modal images provide the equivalent
-root-owned, read-only `/usr/local/bin/ultrafuzz` entrypoint and preflight.
+A missing, changed, or stale launcher or closure is a setup failure; it is not
+recreated silently when an existing run resumes. An authenticated controller
+refresh can preflight and atomically select a replacement closure or migrate a
+valid legacy launcher. The replacement validator packages come from the
+original authenticated execution generation, not the refreshed controller
+generation. Modal images provide the equivalent root-owned, read-only
+`/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
 ## State
 
