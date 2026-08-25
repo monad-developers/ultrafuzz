@@ -26,6 +26,20 @@ interfaces when the target repository already generates them.
 
 Create only the minimal harness layout needed by later fuzzing agents.
 
+Solidity dependencies are already materialized in this worktree. The harness
+preamble's note that dependencies may be absent and should be installed fresh
+describes JavaScript packages; it does not apply to `lib/`, which is populated
+before your agent runs. Do not copy, vendor, re-download or duplicate any
+dependency tree into this workspace under any name. Build against the
+dependencies that are already here, and if a dependency genuinely appears to be
+missing, record that as blocked in the handoff instead of vendoring a copy.
+
+Every untracked file you create is captured into the workspace patch below, so a
+vendored copy of a dependency puts megabytes of third-party source into an audit
+artifact. That fails the artifact secret gate on credential-shaped strings those
+libraries legitimately contain, which kills this node and every lane that
+depends on it.
+
 The workflow captures tracked and untracked harness/configuration changes from
 this workspace into a provenance-bound workspace patch for dependent setup and
 strategy nodes. Make the changes in this workspace, validate them, and record
