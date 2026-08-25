@@ -18127,13 +18127,16 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-controller-package-"));
   const packageJsonPath = path.join(packageRoot, "package.json");
   const modulePath = path.join(packageRoot, "dist", "index.js");
+  const retiredModulePath = path.join(packageRoot, "dist", "retired-data.json");
   const packageJson = Buffer.from(`${JSON.stringify({ name: moduleName, version: "1.0.0" })}\n`, "utf8");
   const currentModule = Buffer.from("export const controllerFixture = 'current';\n", "utf8");
+  const retiredModule = Buffer.from('{"retained":"sealed"}\n', "utf8");
   fs.mkdirSync(path.dirname(modulePath), { recursive: true });
   fs.writeFileSync(packageJsonPath, packageJson);
   fs.writeFileSync(modulePath, currentModule);
   const manifestSnapshotPath = `modules/${moduleName}/package.json`;
   const moduleSnapshotPath = `modules/${moduleName}/dist/index.js`;
+  const retiredModuleSnapshotPath = `modules/${moduleName}/dist/retired-data.json`;
   const moduleId = `module:${moduleName}`;
   const moduleRootSnapshotPath = `modules/${moduleName}`;
   const dependencyMap = JSON.parse(dependencyManifest.contents.toString("utf8")) as {
@@ -18166,6 +18169,11 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
         sourcePath: modulePath,
         snapshotPath: moduleSnapshotPath,
         contents: Buffer.from("export const controllerFixture = 'sealed';\n", "utf8")
+      },
+      {
+        sourcePath: retiredModulePath,
+        snapshotPath: retiredModuleSnapshotPath,
+        contents: retiredModule
       }
     ]
   };
@@ -18180,6 +18188,32 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
   assert.deepEqual(
     refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === moduleSnapshotPath)?.contents,
     currentModule
+  );
+  assert.deepEqual(
+    refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === retiredModuleSnapshotPath)?.contents,
+    retiredModule
+  );
+
+  const removedSchemaSnapshotPath = `modules/${moduleName}/schema/retired.schema.json`;
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: {
+          ...syntheticSnapshot,
+          executionFiles: [
+            ...syntheticSnapshot.executionFiles,
+            {
+              sourcePath: path.join(packageRoot, "schema", "retired.schema.json"),
+              snapshotPath: removedSchemaSnapshotPath,
+              contents: Buffer.from("{}\n", "utf8")
+            }
+          ]
+        },
+        config
+      }),
+    /changed its sealed schema path authority/u
   );
 
   const bootstrapPath = path.join(packageRoot, "dist", "bootstrap.js");

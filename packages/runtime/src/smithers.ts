@@ -1241,11 +1241,13 @@ export interface RefreshedSmithersControllerSnapshot {
  * currently installed, stock Ultrafuzz packages. Campaign inputs remain the
  * exact bytes authenticated by the launch seal. A compatibility refresh is
  * deliberately narrower than an upgrade: existing module paths cannot vanish
- * and the sealed dependency map remains authoritative. New Ultrafuzz-owned
- * module files are admitted only from the installed package root and become
- * explicit members of the new generation manifest. Newly required runner
- * compatibility replacements are applied only to their exact sealed package
- * paths and bytes before the refreshed generation is authenticated.
+ * from the refreshed generation, so a non-schema path retired by the current
+ * package retains its authenticated bytes. The sealed dependency map remains
+ * authoritative. New Ultrafuzz-owned module files are admitted only from the
+ * installed package root and become explicit members of the new generation
+ * manifest. Newly required runner compatibility replacements are applied only
+ * to their exact sealed package paths and bytes before the refreshed generation
+ * is authenticated.
  */
 export function refreshedSmithersControllerSnapshot(input: {
   projectRoot: string;
@@ -1415,10 +1417,6 @@ function replaceInternalModuleFiles(
       executable: (fs.statSync(sourcePath).mode & 0o111) !== 0
     }));
     assertRefreshedModuleAuthority(moduleName, current, dependencyMap);
-    const currentPaths = new Set(current.map((file) => file.snapshotPath));
-    if (sealed.some((file) => !currentPaths.has(file.snapshotPath))) {
-      throw new Error(`controller module ${moduleName} removed a sealed execution path`);
-    }
     const schemaPrefix = path.posix.join("modules", moduleName, "schema/");
     const sealedSchemaPaths = sealed
       .map((file) => file.snapshotPath)
@@ -1431,15 +1429,18 @@ function replaceInternalModuleFiles(
     if (JSON.stringify(sealedSchemaPaths) !== JSON.stringify(currentSchemaPaths)) {
       throw new Error(`controller module ${moduleName} changed its sealed schema path authority`);
     }
-    const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
     const currentByPath = new Map(current.map((file) => [file.snapshotPath, file]));
     for (const file of sealed) {
       // Schemas bind campaign output semantics. Controller code may refresh,
       // but its schema directory must remain the exact sealed generation.
       if (file.snapshotPath.startsWith(schemaPrefix)) continue;
-      const sourcePath = byPath.get(file.snapshotPath)!;
-      file.sourcePath = sourcePath;
-      file.contents = currentByPath.get(file.snapshotPath)!.contents;
+      const replacement = currentByPath.get(file.snapshotPath);
+      // A compatible package may retire a non-schema file. Its authenticated
+      // bytes remain append-only authority for the durable run instead of
+      // making that lineage non-resumable or silently deleting the path.
+      if (replacement === undefined) continue;
+      file.sourcePath = replacement.sourcePath;
+      file.contents = replacement.contents;
     }
     const sealedPaths = new Set(sealed.map((file) => file.snapshotPath));
     for (const file of current.filter(
