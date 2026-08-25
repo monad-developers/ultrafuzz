@@ -94,6 +94,29 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic", "out"] as const;
 
+/**
+ * Dependency roots, excluded from the UNTRACKED listing only.
+ *
+ * `node_modules` is already excluded as a runtime root, but `lib` -- the Foundry
+ * and dapptools convention for Solidity dependencies -- was not, even though
+ * this harness targets Solidity. Setup prompts tell the agent that dependencies
+ * may be absent and to install them inside the worktree, and an agent that
+ * vendors them under `lib/<anything>` had that whole tree captured: in one
+ * campaign 505 files and 4.9 MB of third-party library source entered a single
+ * workspace patch.
+ *
+ * That is not merely large. Third-party sources legitimately contain
+ * credential-shaped text -- forge-std's `StdChains.sol` ships a placeholder
+ * Infura URL -- so the patch then failed the artifact secret gate and killed the
+ * node, taking every dependent lane with it.
+ *
+ * Untracked-only, deliberately. `lib` normally holds tracked submodule gitlinks,
+ * and excluding a tracked path from the patch is the silent data loss described
+ * above. Vendored copies are untracked by definition, so this catches them and
+ * nothing else.
+ */
+const WORKSPACE_DEPENDENCY_ROOTS = ["lib"] as const;
+
 export interface WorkspacePatchFile {
   path: string;
 }
@@ -530,7 +553,8 @@ function stageableWorkspacePaths(
       // The prompt-owned destinations remain exact. Prefix matching was added as an incident stopgap,
       // but silently dropped authored paths such as `echidna-config/NewAuthored.sol`. Unknown, nested,
       // case-variant and slash-less generated paths are handled by measured overflow recovery instead.
-      ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}/**`)
+      ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}/**`),
+      ...WORKSPACE_DEPENDENCY_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
     index
   );
