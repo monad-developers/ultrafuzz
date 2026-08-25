@@ -5312,6 +5312,7 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
     if (node === undefined) continue;
     const dynamicDependencyIds = new Set(stringArray(at(node, ["dynamic_dependencies"])));
     const dependencyIds = stringArray(at(node, ["depends_on"]));
+    const pendingDynamicDependencyIds: string[] = [];
     const dependencyNodes = dependencyIds.flatMap((id) => {
       const dependency = nodes.get(id);
       if (dependency === undefined) {
@@ -5323,7 +5324,21 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
         );
         return [];
       }
-      return at(dependency, ["dynamic", "status"]) === "pending" && dynamicDependencyIds.has(id) ? [] : [dependency];
+      const dynamicStatus = at(dependency, ["dynamic", "status"]);
+      if (dynamicStatus === "pending" && dynamicDependencyIds.has(id)) {
+        pendingDynamicDependencyIds.push(id);
+        return [];
+      }
+      if (dynamicStatus === "expanded" && dynamicDependencyIds.has(id)) {
+        issues.push(
+          issue(
+            `$.tasks[${taskIndex}].metadata.dependencies.concreteNodeIds`,
+            `Smithers task retains expanded dynamic dependency placeholder ${JSON.stringify(id)}`
+          )
+        );
+        return [];
+      }
+      return [dependency];
     });
     const expectedAttempts = dependencyNodes.flatMap(smithersPlannedAttemptIds);
     const actualAttempts = stringArray(at(task, ["dependencies"])).filter((id) => id !== "meta-start");
@@ -5339,7 +5354,8 @@ function smithersPlannedDependencyJoinIssues(document: unknown, context: Semanti
     const actualNodes = stringArray(at(task, ["metadata", "dependencies", "concreteNodeIds"])).filter(
       (id) => id !== "__start__"
     );
-    if (!sameStringSet(actualNodes, expectedNodes)) {
+    const compiledExpectedNodes = [...expectedNodes, ...pendingDynamicDependencyIds];
+    if (!sameStringSet(actualNodes, expectedNodes) && !sameStringSet(actualNodes, compiledExpectedNodes)) {
       issues.push(
         issue(
           `$.tasks[${taskIndex}].metadata.dependencies.concreteNodeIds`,

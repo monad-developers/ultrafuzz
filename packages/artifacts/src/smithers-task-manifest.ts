@@ -1516,12 +1516,19 @@ function assertTaskMatchesPlannedNode(
     throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} does not match its planned model fanout`);
   }
 
+  const pendingDynamicDependencyNodeIds: string[] = [];
   const expectedDependencyNodes = node.depends_on.flatMap((dependencyId) => {
     const dependency = graphNodes.get(dependencyId);
     if (dependency === undefined)
       throw new Error(`planned-graph dependency ${JSON.stringify(dependencyId)} is missing`);
     if (dependency.dynamic?.status === "pending" && node.dynamic_dependencies?.includes(dependencyId)) {
+      pendingDynamicDependencyNodeIds.push(dependencyId);
       return [];
+    }
+    if (dependency.dynamic?.status === "expanded" && node.dynamic_dependencies?.includes(dependencyId)) {
+      throw new Error(
+        `Smithers task ${JSON.stringify(task.attemptId)} retains expanded dynamic dependency placeholder ${JSON.stringify(dependencyId)}`
+      );
     }
     return [dependency];
   });
@@ -1531,11 +1538,17 @@ function assertTaskMatchesPlannedNode(
     expectedDependencies,
     `Smithers task ${JSON.stringify(task.attemptId)} planned dependency attempts`
   );
-  assertSameStringSet(
-    task.metadata.dependencies.concreteNodeIds.filter((dependency) => dependency !== "__start__"),
-    expectedDependencyNodes.map((dependency) => dependency.id),
-    `Smithers task ${JSON.stringify(task.attemptId)} planned dependency nodes`
+  const actualConcreteDependencyNodeIds = task.metadata.dependencies.concreteNodeIds.filter(
+    (dependency) => dependency !== "__start__"
   );
+  const loweredConcreteDependencyNodeIds = expectedDependencyNodes.map((dependency) => dependency.id);
+  const compiledConcreteDependencyNodeIds = [...loweredConcreteDependencyNodeIds, ...pendingDynamicDependencyNodeIds];
+  if (
+    !sameStringSet(actualConcreteDependencyNodeIds, loweredConcreteDependencyNodeIds) &&
+    !sameStringSet(actualConcreteDependencyNodeIds, compiledConcreteDependencyNodeIds)
+  ) {
+    throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} planned dependency nodes do not match`);
+  }
   const expectedWorkflowDependencies = expectedDependencyNodes.flatMap((dependency) => {
     return dependency.kind === "agentic" ? plannedAttemptIds(dependency).map((attemptId) => `verify:${attemptId}`) : [];
   });
@@ -1596,9 +1609,16 @@ function assertSameStringArray(actual: readonly string[], expected: readonly str
 }
 
 function assertSameStringSet(actual: readonly string[], expected: readonly string[], label: string): void {
+  if (!sameStringSet(actual, expected)) throw new Error(`${label} do not match`);
+}
+
+function sameStringSet(actual: readonly string[], expected: readonly string[]): boolean {
   const actualSorted = [...actual].sort();
   const expectedSorted = [...expected].sort();
-  assertSameStringArray(actualSorted, expectedSorted, label);
+  return (
+    actualSorted.length === expectedSorted.length &&
+    actualSorted.every((entry, index) => entry === expectedSorted[index])
+  );
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

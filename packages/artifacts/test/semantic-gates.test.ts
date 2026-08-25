@@ -3521,6 +3521,44 @@ test("Smithers planned dependency semantics omit unresolved dynamic groups only"
     "passed"
   );
 
+  const compiledPendingTask = {
+    tasks: [
+      {
+        ...structuredClone(pendingTask.tasks[0]!),
+        metadata: { dependencies: { concreteNodeIds: ["fanout"] } }
+      }
+    ]
+  };
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: compiledPendingTask,
+      context: { plannedGraph: { document: pendingGraph } }
+    }).status,
+    "passed"
+  );
+
+  const twoPendingGraph = {
+    nodes: [
+      {
+        ...structuredClone(pendingGraph.nodes[0]!),
+        depends_on: ["fanout", "fanout-second"],
+        dynamic_dependencies: ["fanout", "fanout-second"]
+      },
+      structuredClone(pendingGraph.nodes[1]!),
+      {
+        ...structuredClone(pendingGraph.nodes[1]!),
+        id: "fanout-second"
+      }
+    ]
+  };
+  assert.equal(
+    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+      document: compiledPendingTask,
+      context: { plannedGraph: { document: twoPendingGraph } }
+    }).status,
+    "failed"
+  );
+
   const materializedGraph = {
     nodes: [
       { ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["generated"] },
@@ -3557,6 +3595,28 @@ test("Smithers planned dependency semantics omit unresolved dynamic groups only"
       context: { plannedGraph: { document: staleExpandedGraph } }
     }).status,
     "failed"
+  );
+
+  const alignedStaleExpandedTask = {
+    tasks: [
+      {
+        ...structuredClone(pendingTask.tasks[0]!),
+        dependencies: ["fanout"],
+        dependencySmithersNodeIds: ["verify:fanout"],
+        metadata: { dependencies: { concreteNodeIds: ["fanout"] } }
+      }
+    ]
+  };
+  const alignedStaleExpanded = executeSemanticGate("smithers-task-planned-graph-dependency-join", {
+    document: alignedStaleExpandedTask,
+    context: { plannedGraph: { document: staleExpandedGraph } }
+  });
+  assert.equal(alignedStaleExpanded.status, "failed");
+  assert.ok(
+    alignedStaleExpanded.status === "failed" &&
+      alignedStaleExpanded.issues.some((entry) =>
+        /retains expanded dynamic dependency placeholder/u.test(entry.message)
+      )
   );
 
   const ordinaryGraph = {

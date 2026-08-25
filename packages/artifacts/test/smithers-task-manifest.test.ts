@@ -468,6 +468,27 @@ test("planned-graph joins omit unresolved dynamic dependencies but retain ordina
 
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(pendingManifest, pendingGraph));
 
+  const compiledPendingManifest = structuredClone(pendingManifest);
+  compiledPendingManifest.tasks.find((entry) => entry.attemptId === "join")!.metadata.dependencies.concreteNodeIds = [
+    "fanout"
+  ];
+  assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(compiledPendingManifest, pendingGraph));
+
+  const twoPendingGraph = structuredClone(pendingGraph);
+  const secondPendingGroup = structuredClone(twoPendingGraph.nodes.find((node) => node.id === "fanout")!);
+  secondPendingGroup.id = "fanout-second";
+  secondPendingGroup.logical_id = "fanout-second";
+  secondPendingGroup.display_name = "fanout-second";
+  secondPendingGroup.artifact_dir = "artifacts/fanout-second";
+  twoPendingGraph.nodes.push(secondPendingGroup);
+  const twoPendingJoin = twoPendingGraph.nodes.find((node) => node.id === "join")!;
+  twoPendingJoin.depends_on = ["fanout", "fanout-second"];
+  twoPendingJoin.dynamic_dependencies = ["fanout", "fanout-second"];
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(compiledPendingManifest, twoPendingGraph),
+    /planned dependency nodes/u
+  );
+
   const materializedGraph = structuredClone(pendingGraph);
   const materializedGroup = materializedGraph.nodes.find((node) => node.id === "fanout")!;
   materializedGroup.dynamic!.status = "expanded";
@@ -505,7 +526,24 @@ test("planned-graph joins omit unresolved dynamic dependencies but retain ordina
   staleExpandedGraph.nodes.find((node) => node.id === "join")!.depends_on = ["fanout"];
   assert.throws(
     () => assertSmithersTaskManifestMatchesPlannedGraph(manifest([task(), generated, join]), staleExpandedGraph),
-    /planned dependency attempts/u
+    /retains expanded dynamic dependency placeholder/u
+  );
+
+  const alignedStaleExpandedJoin = structuredClone(join);
+  alignedStaleExpandedJoin.dependencies = ["fanout"];
+  alignedStaleExpandedJoin.dependencySmithersNodeIds = ["verify:fanout"];
+  alignedStaleExpandedJoin.metadata.dependencies = {
+    concreteNodeIds: ["fanout"],
+    attemptIds: ["fanout"],
+    smithersNodeIds: ["verify:fanout"]
+  };
+  assert.throws(
+    () =>
+      assertSmithersTaskManifestMatchesPlannedGraph(
+        manifest([task(), generated, alignedStaleExpandedJoin]),
+        staleExpandedGraph
+      ),
+    /retains expanded dynamic dependency placeholder/u
   );
 
   const ordinaryDriftGraph = structuredClone(pendingGraph);
