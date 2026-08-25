@@ -503,6 +503,8 @@ export interface WorkflowLifecycleInput {
   retryFailed?: boolean;
   /** Rebuild and authenticate only the controller closure for this same run. */
   refreshController?: boolean;
+  /** Re-run fixed controller finalization against authenticated, already-finished verifier evidence. */
+  refinalizeControllerFailures?: boolean;
   label?: string;
   env?: Record<string, string | undefined>;
 }

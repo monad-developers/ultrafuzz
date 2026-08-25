@@ -32,6 +32,7 @@ import {
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -86,6 +87,7 @@ import {
   pauseRun,
   prepareControllerGeneration,
   readLinkedWorkflowEvidence,
+  refinalizeControllerFailures,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
@@ -1756,6 +1758,7 @@ function fakeLifecycleSmithersEnv(
     statusEvents?: unknown;
     status?: unknown;
     why?: unknown;
+    nodeDetails?: Record<string, unknown>;
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
     enforceWorkflowChangeAcceptance?: boolean;
     failWorkflowChangeAdmissionOnce?: boolean;
@@ -1855,6 +1858,9 @@ function fakeLifecycleSmithersEnv(
       `${JSON.stringify({ node: { nodeId, lastAttempt: Math.max(...rows.map((row) => row.attempt)) }, attempts: rows })}\n`,
       "utf8"
     );
+  }
+  for (const [nodeId, detail] of Object.entries(input.nodeDetails ?? {})) {
+    fs.writeFileSync(path.join(nodeDetailsDirectory, `${nodeId}.json`), `${JSON.stringify(detail, null, 2)}\n`, "utf8");
   }
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-commands.log");
@@ -2280,6 +2286,182 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
   const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(markerRoot, { recursive: true });
   fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+}
+
+function finishedVerifierNodeDetail(input: {
+  workflowRunId: string;
+  verifierTaskId: string;
+  markerPath: string;
+  attempt?: number;
+  iteration?: number;
+  state?: "finished" | "failed" | "in-progress";
+  markerSha256?: string;
+  markerSizeBytes?: number;
+}): unknown {
+  const markerBytes = fs.readFileSync(input.markerPath);
+  const marker = JSON.parse(markerBytes.toString("utf8")) as {
+    artifacts: Array<Record<string, unknown> & { path?: string; primary?: boolean }>;
+  };
+  const attempt = input.attempt ?? 1;
+  const iteration = input.iteration ?? 0;
+  const state = input.state ?? "finished";
+  const startedAtMs = Date.parse("2026-07-03T00:00:01.000Z");
+  const finishedAtMs = state === "in-progress" ? null : startedAtMs + 1_000;
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 0,
+    models: [],
+    agents: []
+  };
+  const attemptRow = {
+    runId: input.workflowRunId,
+    nodeId: input.verifierTaskId,
+    iteration,
+    attempt,
+    state,
+    startedAtMs,
+    finishedAtMs,
+    durationMs: finishedAtMs === null ? null : finishedAtMs - startedAtMs,
+    error: state === "failed" ? "verification failed" : null,
+    errorDetail: null,
+    tokenUsage: usage,
+    toolCalls: [],
+    meta: null,
+    responseText: null,
+    cached: false,
+    jjPointer: null,
+    jjCwd: null
+  };
+  return {
+    ok: true,
+    data: {
+      node: {
+        runId: input.workflowRunId,
+        nodeId: input.verifierTaskId,
+        iteration,
+        state,
+        lastAttempt: attempt,
+        updatedAtMs: finishedAtMs,
+        outputTable: null,
+        label: input.verifierTaskId
+      },
+      status: state,
+      durationMs: attemptRow.durationMs,
+      attemptsSummary: {
+        total: 1,
+        failed: state === "failed" ? 1 : 0,
+        cancelled: 0,
+        succeeded: state === "finished" ? 1 : 0,
+        waiting: state === "in-progress" ? 1 : 0
+      },
+      attempts: [attemptRow],
+      toolCalls: [],
+      tokenUsage: { ...usage, byAttempt: [{ attempt, usage }] },
+      scorers: [],
+      output: {
+        validated: {
+          artifacts: marker.artifacts,
+          primary_artifact: marker.artifacts.find((artifact) => artifact.primary)?.path,
+          verification_marker_sha256:
+            input.markerSha256 ?? crypto.createHash("sha256").update(markerBytes).digest("hex"),
+          verification_marker_size_bytes: input.markerSizeBytes ?? markerBytes.byteLength
+        },
+        raw: null,
+        source: "cache",
+        cacheKey: "verified-output"
+      },
+      approval: null,
+      limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
+    },
+    meta: { command: "node", duration: "1ms" }
+  };
+}
+
+async function controllerFalseFailureFixture(label: string): Promise<{
+  project: string;
+  runId: string;
+  workflowRunId: string;
+  runRoot: string;
+  markerPath: string;
+  env: Record<string, string | undefined>;
+}> {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = `controller-refinalization-${label}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const events = workflowEvents(workflowRunId, [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "RunFinished" }
+  ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const runRoot = launched.value!.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(
+    readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status,
+    "succeeded",
+    JSON.stringify(synchronized.diagnostics)
+  );
+
+  const layout = layoutForRunRoot(runRoot, runId);
+  const state = readRunState(layout);
+  const prior = state.nodes["project-discovery"]!;
+  state.status = "failed";
+  state.nodes["project-discovery"] = {
+    ...prior,
+    status: "failed",
+    timed_out: false,
+    last_error: "controller output validation failed",
+    provenance: {
+      ...prior.provenance,
+      output_contracts: { ok: false, missing: [] },
+      failure: {
+        category: "artifact-contract",
+        causal_task_id: "verify:project-discovery",
+        causal_failure_category: "artifact-contract",
+        dependent_task_ids: []
+      },
+      terminal_disposition: {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure"
+      }
+    }
+  };
+  writeRunState(layout, state);
+  fs.rmSync(path.join(runRoot, "artifacts", "project-discovery", "artifact-manifest.json"));
+  const markerPath = path.join(runRoot, ".ultrafuzz-verification", "project-discovery.json");
+  fs.writeFileSync(
+    path.join(env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
+    `${JSON.stringify(
+      finishedVerifierNodeDetail({
+        workflowRunId,
+        verifierTaskId: "verify:project-discovery",
+        markerPath
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  return { project, runId, workflowRunId, runRoot, markerPath, env };
 }
 
 const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
@@ -15022,6 +15204,356 @@ test("syncRun marks task-output validation failures for terminal disposition", a
     kind: "task-output-validation-failure"
   });
 });
+
+test(
+  "authenticated controller refresh re-finalizes only the original finished verifier output and is idempotent",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("success");
+
+    const resumed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      env: fixture.env
+    });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const state = readRunState(layout);
+    const node = state.nodes["project-discovery"];
+    const provenance = node?.provenance as
+      | {
+          terminal_disposition?: unknown;
+          failure?: unknown;
+          output_contracts?: { ok?: boolean };
+        }
+      | undefined;
+    assert.equal(node?.status, "succeeded");
+    assert.equal(node?.last_error, undefined);
+    assert.equal(provenance?.terminal_disposition, undefined);
+    assert.equal(provenance?.failure, undefined);
+    assert.equal(provenance?.output_contracts?.ok, true);
+    const durable = replayEvents(layout).records;
+    const intent = durable.filter((event) => event.event_type === "node-controller-refinalization-intent");
+    const result = durable.filter((event) => event.event_type === "node-controller-refinalization-result");
+    assert.equal(intent.length, 1);
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.status, "succeeded");
+    assert.equal(result[0]?.payload.operation_id, intent[0]?.payload.operation_id);
+    assert.equal(result[0]?.payload.marker_sha256, intent[0]?.payload.marker_sha256);
+
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const repeated = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+    assert.equal(repeated.ok && repeated.refinalized, 0);
+    assert.equal(
+      replayEvents(layout).records.filter((event) => event.event_type === "node-controller-refinalization-result")
+        .length,
+      1
+    );
+    fs.appendFileSync(
+      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
+      "modified after completed re-finalization\n"
+    );
+    const changedAfterCompletion = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+    assert.equal(changedAfterCompletion.ok, false);
+    assert.match(JSON.stringify(changedAfterCompletion.diagnostics), /changed after verifier approval/u);
+  }
+);
+
+test(
+  "controller re-finalization recovers an authenticated durable intent after a crash",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("intent-recovery");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const markerBytes = fs.readFileSync(fixture.markerPath);
+    const authority = {
+      workflow_run_id: evidence.smithersRunId,
+      workflow_link_id: evidence.workflowLinkId,
+      control_generation: evidence.controlGeneration,
+      controller_generation: evidence.controllerGeneration,
+      verifier_task_id: "verify:project-discovery",
+      verifier_iteration: 0,
+      verifier_attempt: 1,
+      marker_sha256: crypto.createHash("sha256").update(markerBytes).digest("hex"),
+      marker_size_bytes: markerBytes.byteLength,
+      prior_status: "failed" as const
+    };
+    const operationId = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify([
+          "ultrafuzz.controller-refinalization.v1",
+          fixture.runId,
+          "project-discovery",
+          authority.workflow_run_id,
+          authority.workflow_link_id,
+          authority.control_generation,
+          authority.controller_generation,
+          authority.verifier_task_id,
+          authority.verifier_iteration,
+          authority.verifier_attempt,
+          authority.marker_sha256,
+          authority.marker_size_bytes,
+          authority.prior_status
+        ]),
+        "utf8"
+      )
+      .digest("hex");
+    appendEvent(layout, {
+      eventType: "node-controller-refinalization-intent",
+      nodeId: "project-discovery",
+      status: "running",
+      payload: { operation_id: operationId, ...authority }
+    });
+
+    const recovered = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(recovered.ok && recovered.refinalized, 1);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
+    const records = replayEvents(layout).records;
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-result").length, 1);
+  }
+);
+
+test("controller re-finalization cannot weaken ordinary resume immutability without a refresh", async () => {
+  const rejected = await resumeRun({
+    projectRoot: tempProject(),
+    runId: "controller-refinalization-without-refresh",
+    refinalizeControllerFailures: true
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.diagnostics[0]?.code, "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH");
+});
+
+test(
+  "controller re-finalization rejects stale identities, unfinished verifier evidence, and modified publications",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("authentication-rejections");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const base = {
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    };
+
+    for (const changed of [
+      { ...base, controllerGeneration: base.controlGeneration },
+      { ...base, workflowRunId: `${base.workflowRunId}-replayed` },
+      { ...base, workflowLinkId: crypto.randomUUID() },
+      { ...base, graph: { ...base.graph, nodes: [] } },
+      { ...base, tasks: [] }
+    ]) {
+      const rejected = await refinalizeControllerFailures(changed);
+      assert.equal(rejected.ok, false);
+    }
+
+    const detailPath = path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json");
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:foreign-task",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    const wrongTask = await refinalizeControllerFailures(base);
+    assert.equal(wrongTask.ok, false);
+    assert.match(JSON.stringify(wrongTask.diagnostics), /exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          attempt: 2
+        })
+      )}\n`,
+      "utf8"
+    );
+    const wrongAttempt = await refinalizeControllerFailures(base);
+    assert.equal(wrongAttempt.ok, false);
+    assert.match(JSON.stringify(wrongAttempt.diagnostics), /exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          markerSha256: "0".repeat(64)
+        })
+      )}\n`,
+      "utf8"
+    );
+    const digestMismatch = await refinalizeControllerFailures(base);
+    assert.equal(digestMismatch.ok, false);
+    assert.match(JSON.stringify(digestMismatch.diagnostics), /marker digest or size/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          state: "in-progress"
+        })
+      )}\n`,
+      "utf8"
+    );
+    const unfinished = await refinalizeControllerFailures(base);
+    assert.equal(unfinished.ok, false);
+    assert.match(JSON.stringify(unfinished.diagnostics), /unfinished|exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    fs.appendFileSync(
+      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
+      "modified after verification\n"
+    );
+    const modified = await refinalizeControllerFailures(base);
+    assert.equal(modified.ok, false);
+    assert.match(JSON.stringify(modified.diagnostics), /changed after verifier approval/u);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
+    assert.equal(
+      replayEvents(layout).records.some((event) => event.event_type === "node-controller-refinalization-intent"),
+      false
+    );
+  }
+);
+
+test(
+  "controller re-finalization records a terminal rejection when current gates reproduce invalid output",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("invalid-output");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const findingsPath = path.join(fixture.runRoot, "artifacts", "project-discovery", "findings.json");
+    fs.writeFileSync(findingsPath, "{}\n", "utf8");
+    writeCurrentArtifactVerificationMarker(fixture.runRoot, "project-discovery");
+    fs.writeFileSync(
+      path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const rejected = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+
+    assert.equal(rejected.ok, false);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
+    const records = replayEvents(layout).records;
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
+    const result = records.filter((event) => event.event_type === "node-controller-refinalization-result");
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.status, "failed");
+    assert.equal(result[0]?.payload.result, "rejected");
+  }
+);
 
 test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
   const project = tempProject();

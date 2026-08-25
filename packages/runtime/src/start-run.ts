@@ -588,6 +588,26 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       }
     ]);
   }
+  if (input.refinalizeControllerFailures === true && input.refreshController !== true) {
+    return runtimeFailure<WorkflowLifecycleValue>([
+      {
+        code: "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH",
+        message: "controller failure re-finalization requires resume --refresh-controller",
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
+  if (input.refinalizeControllerFailures === true && action !== "resume") {
+    return runtimeFailure<WorkflowLifecycleValue>([
+      {
+        code: "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_RESUME",
+        message: "controller failure re-finalization is supported only by resume",
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
   if (action === "fork" && input.forkFrame === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>([
       {
@@ -838,6 +858,27 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
     );
     assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
+    if (input.refinalizeControllerFailures === true) {
+      const { refinalizeControllerFailures } = await import("./workflow-sync.js");
+      const refinalizationGraph = assertSealedPlannedGraph(
+        parseStrictJsonBytes(evidence.verifiedControl.contents.graph)
+      );
+      assertSmithersTaskManifestMatchesPlannedGraph(taskDocument, refinalizationGraph);
+      const refinalization = await refinalizeControllerFailures({
+        projectRoot: path.resolve(input.projectRoot),
+        layout: evidence.layout,
+        graph: refinalizationGraph,
+        tasks: taskDocument.tasks,
+        workflowRunId: evidence.smithersRunId,
+        workflowLinkId: evidence.workflowLinkId,
+        controlGeneration: evidence.controlGeneration,
+        controllerGeneration: evidence.controllerGeneration,
+        env: lifecycleEnvironment
+      });
+      if (!refinalization.ok) {
+        return runtimeFailure<WorkflowLifecycleValue>(refinalization.diagnostics);
+      }
+    }
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
