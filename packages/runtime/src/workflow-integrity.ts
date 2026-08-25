@@ -154,8 +154,10 @@ export interface VerifiedWorkflowControlSnapshot {
  * A read-only caller — `ultrafuzz status` and friends — needs the run's identity and snapshot
  * environment, not permission to execute it. Gating observability on execution-grade authority made a
  * single divergent control file hide an otherwise healthy run for the rest of its life (issue #674).
- * `tolerateDivergence` collects CONTROL-FILE digest divergences instead of throwing so the caller can
- * report them as warnings. It deliberately does NOT relax:
+ * `tolerateDivergence` collects CONTROL-FILE divergences instead of throwing so the caller can report
+ * them as warnings: a digest that no longer matches the seal, a graph or task plan changed without a
+ * compiled dynamic group to authorize it, and a completeness binding that no longer re-derives or no
+ * longer matches. It deliberately does NOT relax:
  *   - anything structural (an unparseable seal, a mismatched run ID, an unreadable control file), or
  *   - execution-file divergence, because the snapshot env binds the runner executable and the sealed
  *     module URLs inside the snapshot, so an observer still executes those files.
@@ -471,10 +473,15 @@ export function verifyWorkflowControlSnapshot(
     digestBytes(currentGraph).sha256 !== seal.files.graph.sha256 ||
     digestBytes(currentTasks).sha256 !== seal.files.tasks.sha256;
   let runtimeStateNodeIds: readonly string[] | undefined;
-  if (runtimeControlsChanged) {
-    if (baseGraph === undefined || baseTasks === undefined) {
-      throw new Error("sealed workflow graph or task plan changed");
-    }
+  // A changed graph or task plan with no compiled dynamic base has no authority that could explain
+  // the change, so nothing may execute it. That is an execution question, not a reading one: the
+  // digest loop above has already reported both files as diverged, so refusing here told a read-only
+  // caller nothing new and only cost it the run (issue #866). `reportDivergence` still throws this
+  // exact message for every execution caller, which leaves them unchanged.
+  if (runtimeControlsChanged && (baseGraph === undefined || baseTasks === undefined)) {
+    reportDivergence("sealed workflow graph or task plan changed");
+  }
+  if (runtimeControlsChanged && baseGraph !== undefined && baseTasks !== undefined) {
     const taskDocument = parseRecordJson(baseTasks.contents, "sealed base workflow task manifest");
     if (!Array.isArray(taskDocument.tasks) || !Array.isArray(taskDocument.dynamic_groups)) {
       throw new Error("sealed base workflow task manifest cannot define dynamic runtime controls");
@@ -502,15 +509,28 @@ export function verifyWorkflowControlSnapshot(
       )
     ];
   }
-  const observedBindings = deriveWorkflowControlBindings(
-    layout.runId,
-    contents,
-    readBoundedRegularFile(layout.root, layout.statePath, "run state"),
-    executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents,
-    runtimeStateNodeIds,
-    true
-  );
-  if (JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
+  // Deriving the bindings re-runs the compiler's cross-document gates over the control files, so it
+  // can fail outright rather than merely disagree with the seal — a graph and a task plan that no
+  // longer describe each other never reach a comparable binding. A caller that already accepted a
+  // binding *mismatch* as a divergence gains nothing from a hard failure on the strictly worse
+  // version of the same fact, and paying for it with the whole run is what left `status` unusable
+  // (issue #866). Execution callers still take the throw from `reportDivergence`.
+  let observedBindings: WorkflowControlBindings | undefined;
+  try {
+    observedBindings = deriveWorkflowControlBindings(
+      layout.runId,
+      contents,
+      readBoundedRegularFile(layout.root, layout.statePath, "run state"),
+      executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents,
+      runtimeStateNodeIds,
+      true
+    );
+  } catch (error) {
+    reportDivergence(
+      `workflow control completeness binding could not be re-derived: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (observedBindings !== undefined && JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
     reportDivergence("workflow control completeness binding changed");
   }
   return {

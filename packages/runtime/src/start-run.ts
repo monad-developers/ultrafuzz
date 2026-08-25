@@ -1021,6 +1021,45 @@ function parseSealedTaskManifest(contents: Readonly<{ graph: Buffer; tasks: Buff
   return manifest;
 }
 
+/**
+ * `assertSmithersTaskManifestMatchesPlannedGraph` is a re-derivation of the compiled plan, not a
+ * verification of the seal: it re-runs the compiler's cross-document gates over the sealed graph and
+ * task plan and insists the two still agree. Every digest in the seal can match while that
+ * re-derivation disagrees, because the disagreement is between two control files rather than between
+ * a control file and its recorded digest. Refusing to execute such a run is right — its plan is no
+ * longer self-consistent, so scheduling from it is guesswork. Refusing to *report* on it is not, and
+ * that is what happened: a dependency-set mismatch on the node that joins every finding producer made
+ * `ultrafuzz status` fail on all twelve runs of a campaign, so the one supported way to observe a
+ * partially failed run was exactly the thing it broke (issue #866). It also defeated the read-only
+ * tolerance issue #674 added, which `getRunHealth` opts into and which never reached this far.
+ *
+ * An observer therefore keeps the manifest it can still parse and hands the mismatch back as a control
+ * divergence, which `getRunHealth` already knows how to render: a `WORKFLOW_CONTROL_EVIDENCE_DIVERGED`
+ * warning, no state synchronization, and a `WORKFLOW_STATE_SYNC_SKIPPED` note that the reported counts
+ * come from the workflow runner. Nothing structural is relaxed — the sealed graph and the task manifest
+ * must still parse against their schemas, and every identity check the caller runs against the returned
+ * manifest still fails closed. Only the cross-document re-derivation is downgraded, and only for callers
+ * that asked for tolerance.
+ */
+function parseSealedTaskManifestForObserver(contents: Readonly<{ graph: Buffer; tasks: Buffer }>): {
+  document: SmithersTaskManifestDocument;
+  divergences: readonly string[];
+} {
+  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const document = parseSmithersTaskManifestBytes(contents.tasks);
+  try {
+    assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+  } catch (error) {
+    return {
+      document,
+      divergences: [
+        `sealed task manifest no longer re-derives from its planned graph: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
+  return { document, divergences: [] };
+}
+
 async function persistSmithersEvidence(
   layout: RunLayout,
   graph: PlannedGraph,
@@ -1210,15 +1249,17 @@ export async function readLinkedWorkflowEvidence(
     // Observers pass `tolerateControlDivergence` so a divergent control file downgrades to a reported
     // warning instead of hiding a live run entirely (issue #674). Execution callers omit it and keep
     // failing closed.
-    const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, {
-      tolerateDivergence: options.tolerateControlDivergence === true
-    });
+    const tolerateDivergence = options.tolerateControlDivergence === true;
+    const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
     const sealedPlan = verifiedControl.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
     if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
     const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);
     assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, plan.controller_source_digest);
     assertSealedDataGovernance(verifiedControl.executionFiles, plan.data_governance, runId);
-    const taskDocument = parseSealedTaskManifest(verifiedControl.contents);
+    const sealedTaskManifest = tolerateDivergence
+      ? parseSealedTaskManifestForObserver(verifiedControl.contents)
+      : { document: parseSealedTaskManifest(verifiedControl.contents), divergences: [] as readonly string[] };
+    const taskDocument = sealedTaskManifest.document;
     const compiledRunId = workflow.compiled_run_id;
     if (
       typeof compiledRunId !== "string" ||
@@ -1301,7 +1342,15 @@ export async function readLinkedWorkflowEvidence(
       controlGeneration: verifiedControl.generation,
       controllerGeneration: controller.controllerGeneration,
       workflowLinkId: activeWorkflowLink.link_id,
-      verifiedControl,
+      // A re-derivation mismatch is reported on the same channel as a digest divergence so callers
+      // need one place to look, and so `getRunHealth` degrades through the path it already has.
+      verifiedControl:
+        sealedTaskManifest.divergences.length === 0
+          ? verifiedControl
+          : {
+              ...verifiedControl,
+              divergences: [...verifiedControl.divergences, ...sealedTaskManifest.divergences]
+            },
       controllerSnapshot: controller.snapshot,
       ...(executionSnapshot === undefined
         ? {}

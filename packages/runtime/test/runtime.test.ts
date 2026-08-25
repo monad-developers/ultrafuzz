@@ -75,6 +75,7 @@ import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 
 import {
   forkRun as runtimeForkRun,
+  cancelRun,
   commitControllerGeneration,
   diagnoseRun,
   getRunHealth,
@@ -10749,6 +10750,90 @@ test("an observer still refuses a run whose sealed execution files diverged", as
   const health = await getRunHealth({ projectRoot: project, runId, env });
   assert.equal(health.ok, false);
   assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+});
+
+test("a sealed manifest that stops re-deriving leaves status readable while execution stays closed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  // `final-report` joins both strategy nodes, which is the shape that broke: issue #866 was reported
+  // against `dedupe-findings`, the node that joins every finding producer, because a join's dependency
+  // set is the part of a plan a divergent expansion disagrees with.
+  writeOptionalSpecialistTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-manifest-status";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Drop one dependency from the sealed task manifest's own record of what the join depends on. The
+  // manifest still satisfies its schema and the planned graph is untouched, so the failure is a
+  // disagreement between two control documents rather than a control file that stopped matching its
+  // recorded digest — exactly the class that `parseSealedTaskManifest` turns into a hard throw no
+  // tolerance flag could reach.
+  const tasksPath = path.join(run.value!.run_root, "smithers", "tasks.json");
+  const manifest = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks: { attemptId: string; metadata: { dependencies: { concreteNodeIds: string[] } } }[];
+  };
+  const join = manifest.tasks.find((task) => task.attemptId === "final-report");
+  assert.ok(join, "fixture has no join task to diverge");
+  assert.ok(join!.metadata.dependencies.concreteNodeIds.includes("optional-specialist"));
+  join!.metadata.dependencies.concreteNodeIds = join!.metadata.dependencies.concreteNodeIds.filter(
+    (nodeId) => nodeId !== "optional-specialist"
+  );
+  fs.writeFileSync(tasksPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  // Executing this run would be scheduling from a plan that no longer describes itself, so every
+  // execution caller must still refuse it.
+  const strict = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(strict.ok, false);
+  if (!strict.ok) {
+    assert.equal(strict.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  }
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+
+  // An observer reads the same run and is told which document stopped agreeing, naming the task the
+  // re-derivation tripped on so the divergence is diagnosable without reproducing it by hand.
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
+  if (observed.ok) {
+    const rederivation = observed.verifiedControl.divergences.filter((divergence) =>
+      /sealed task manifest no longer re-derives from its planned graph/u.test(divergence)
+    );
+    assert.equal(rederivation.length, 1, JSON.stringify(observed.verifiedControl.divergences));
+    assert.match(rederivation[0] ?? "", /"final-report" planned dependency nodes do not match/u);
+  }
+
+  // status reports the run instead of replacing it with an error, and carries the divergence as a
+  // warning next to the note that its counts come from the workflow runner.
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, runId);
+  const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
+  assert.ok(
+    diverged.some((diagnostic) => /no longer re-derives from its planned graph/u.test(diagnostic.message)),
+    JSON.stringify(health.diagnostics)
+  );
+  assert.ok(diverged.every((diagnostic) => diagnostic.severity === "warning"));
+  assert.equal(
+    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID").length,
+    0,
+    JSON.stringify(health.diagnostics)
+  );
+  const skipped = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED");
+  assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(skipped[0]?.severity, "warning");
+
+  // Reporting the divergence must never repair it.
+  assert.equal(
+    (JSON.parse(fs.readFileSync(tasksPath, "utf8")) as typeof manifest).tasks
+      .find((task) => task.attemptId === "final-report")!
+      .metadata.dependencies.concreteNodeIds.includes("optional-specialist"),
+    false
+  );
 });
 
 test("getRunHealth accepts the terminal degraded verdict without converting it to done", async () => {
