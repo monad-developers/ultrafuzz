@@ -340,11 +340,20 @@ test("a relocated cloud worker rejects an unsafe dynamic selected_task handoff",
   }
   cases.push(["handoff is not an object", "selected"]);
   cases.push(["handoff is an array", [selected]]);
-  cases.push(["handoff is null", null]);
 
   for (const [label, handoff] of cases) {
     await assert.rejects(() => render(handoff), /cloud worker selected_task/u, label);
   }
+  // A null handoff is refused one layer earlier than the rest. The input table the workflow runner
+  // projects returns SQL null for every column a submission did not set, so the envelope reads null
+  // as absence -- which is what it is -- and the dispatch fails as a cloud input that names no
+  // handoff at all instead of reaching the handoff contract. It is still refused outright, and there
+  // is still no fallback to a compiled spec.
+  await assert.rejects(
+    () => render(null),
+    /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u,
+    "handoff is null"
+  );
   // A dispatch that omits the attempt identity cannot bind the handoff: a runtime-generated dynamic
   // attempt has no compiled spec to cross-check, so the identity would be attacker-chosen.
   await assert.rejects(
@@ -565,7 +574,10 @@ test("a relocated cloud worker refuses any dispatch that omits the selected_task
       /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u,
       concreteNodeId
     );
-    // A `null` handoff is not a handoff either: it must fail the contract, not fall back to a spec.
+    // A `null` handoff is not a handoff either: it must be refused, not fall back to a spec. The
+    // envelope reads null as absence because that is what the runner's input table returns for a
+    // column the submission never set, so an explicitly null handoff fails identically to an omitted
+    // one rather than reaching the handoff contract.
     await assert.rejects(
       () =>
         renderGeneratedWorkflow({
@@ -574,7 +586,7 @@ test("a relocated cloud worker refuses any dispatch that omits the selected_task
           forbidDynamicMaterialization: true,
           workflowInput: { ...dispatch, selected_task: null }
         }),
-      /cloud worker selected_task/u,
+      /requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task/u,
       concreteNodeId
     );
   }
