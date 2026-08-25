@@ -3137,7 +3137,10 @@ function assertExactSealedAttemptAuthority(
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
   const plannedAgenticAttempts = new Map<string, PlannedGraphNode>();
   for (const node of graph.nodes) {
-    if (node.kind !== "agentic") continue;
+    // Deferred dynamic templates are compiler inputs for `dynamic_groups`, not
+    // schedulable Smithers tasks. Materialized dynamic nodes remain covered:
+    // they carry `dynamic_generated` lineage and no longer have `dynamic`.
+    if (node.kind !== "agentic" || node.dynamic !== undefined) continue;
     for (const attemptId of plannedAttemptIdsForAuthority(node)) {
       if (plannedAgenticAttempts.has(attemptId)) {
         throw new Error(`planned graph repeats Smithers attempt ${JSON.stringify(attemptId)}`);
