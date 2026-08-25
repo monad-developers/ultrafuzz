@@ -6704,10 +6704,8 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.ok(proofEnd > proofStart, source);
   assert.ok(workflowStart > proofStart, source);
   assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
-  assert.match(
-    source,
-    /usesPinnedSource[\s\S]*?baseBranch: pinnedSourceBranch[\s\S]*?baseBranch: task\.sourceRevision/u
-  );
+  assert.match(source, /const baseBranch = worktreeBaseBranch\(task\)/u);
+  assert.match(source, /baseBranch === undefined \? \{\} : \{ baseBranch \}/u);
   assert.match(source, /function assertWorkspaceSourceRevision/u);
   assert.match(source, /git\("HEAD\^\{commit\}"\)/u);
   assert.match(source, /head !== task\.sourceRevision \|\| sourceRef !== task\.sourceRevision/u);
@@ -6731,6 +6729,87 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
   assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
+});
+
+test("runtime task reconstruction preserves source identity and rejects undefined worktree bases", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /function taskSpecsFromCompiled[\s\S]*?\.\.\.compiledTaskSourceIdentity\(task\)/u);
+  const identityStart = source.indexOf("function compiledTaskSourceIdentity");
+  const identityEnd = source.indexOf("\n\nfunction taskSpecsFromCompiled", identityStart);
+  assert.ok(identityStart >= 0, source);
+  assert.ok(identityEnd > identityStart, source);
+  const identitySource = ts.transpileModule(source.slice(identityStart, identityEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const sourceIdentity = new Function(`${identitySource}; return compiledTaskSourceIdentity;`)() as (task: {
+    attemptId: string;
+    sourceRevision?: string | null;
+    sourceRef?: string | null;
+  }) => { sourceRevision: string | null; sourceRef: string | null };
+
+  const revision = "a".repeat(40);
+  const ref = "refs/ultrafuzz/runs/run-one/source";
+  assert.deepEqual(sourceIdentity({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }), {
+    sourceRevision: revision,
+    sourceRef: ref
+  });
+  assert.deepEqual(sourceIdentity({ attemptId: "dynamic-one" }), { sourceRevision: null, sourceRef: null });
+  assert.throws(
+    () => sourceIdentity({ attemptId: "dynamic-one", sourceRevision: revision }),
+    /incomplete source identity/u
+  );
+
+  const baseStart = source.indexOf("function worktreeBaseBranch");
+  const baseEnd = source.indexOf("\nfunction readCloudExecutionGeneration", baseStart);
+  assert.ok(baseStart >= 0, source);
+  assert.ok(baseEnd > baseStart, source);
+  const baseSource = ts.transpileModule(source.slice(baseStart, baseEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const resolveBase = (
+    task: {
+      attemptId: string;
+      sourceRevision?: string | null;
+      sourceRef?: string | null;
+      execution: { mode: string };
+    },
+    pinned: boolean,
+    governedCommit?: string
+  ): string | undefined =>
+    new Function(
+      "task",
+      "usesPinnedSource",
+      "pinnedSourceBranch",
+      "governedSource",
+      `${baseSource}; return worktreeBaseBranch(task);`
+    )(task, pinned, "ultrafuzz-pinned", governedCommit === undefined ? undefined : { commit: governedCommit });
+
+  assert.equal(
+    resolveBase(
+      { attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref, execution: { mode: "local" } },
+      false
+    ),
+    revision
+  );
+  assert.equal(
+    resolveBase(
+      { attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref, execution: { mode: "local" } },
+      true
+    ),
+    "ultrafuzz-pinned"
+  );
+  assert.equal(
+    resolveBase(
+      { attemptId: "dynamic-one", sourceRevision: null, sourceRef: null, execution: { mode: "local" } },
+      false,
+      "b".repeat(40)
+    ),
+    "b".repeat(40)
+  );
+  assert.throws(
+    () => resolveBase({ attemptId: "dynamic-one", execution: { mode: "local" } }, false),
+    /unnormalized source identity/u
+  );
 });
 
 test("recorded source identity, not later ref creation, selects pinned worktree mode", () => {

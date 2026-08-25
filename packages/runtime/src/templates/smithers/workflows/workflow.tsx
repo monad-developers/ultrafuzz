@@ -437,6 +437,15 @@ function dynamicExecutionMetadata(task: (typeof compiledBaseTasks)[number]) {
   };
 }
 
+function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
+  const sourceRevision = task.sourceRevision ?? null;
+  const sourceRef = task.sourceRef ?? null;
+  if ((sourceRevision === null) !== (sourceRef === null)) {
+    throw new Error(`compiled task ${task.attemptId} carries an incomplete source identity`);
+  }
+  return { sourceRevision, sourceRef };
+}
+
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
@@ -529,6 +538,7 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
           ? path.resolve(process.cwd(), __ULTRAFUZZ_RUN_ROOT_RELATIVE__, "smithers", "tasks.json")
           : path.join(controlPaths.executionSnapshotRoot, "controls", "tasks.json"),
       sourceProjectRoot,
+      ...compiledTaskSourceIdentity(task),
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
@@ -1635,6 +1645,15 @@ function assertWorkspaceSourceRevision(task: (typeof taskSpecs)[number]): void {
   if (head !== task.sourceRevision || sourceRef !== task.sourceRevision) {
     throw new Error(`source-revision failure: workspace ${task.attemptId} does not match the recorded launch commit`);
   }
+}
+function worktreeBaseBranch(task: (typeof taskSpecs)[number]): string | undefined {
+  if (task.sourceRevision === undefined || task.sourceRef === undefined) {
+    throw new Error(`workflow task ${task.attemptId} carries an unnormalized source identity`);
+  }
+  if (usesPinnedSource) return pinnedSourceBranch;
+  if (task.sourceRevision !== null) return task.sourceRevision;
+  if (task.execution.mode === "local" && governedSource !== undefined) return governedSource.commit;
+  return undefined;
 }
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
@@ -9126,18 +9145,13 @@ export default smithers((ctx) => {
               </Fragment>
             );
           }
+          const baseBranch = worktreeBaseBranch(task);
           return (
             <Worktree
               key={task.id}
               path={task.workspacePath}
               branch={task.branch}
-              {...(usesPinnedSource
-                ? { baseBranch: pinnedSourceBranch }
-                : task.sourceRevision !== null
-                  ? { baseBranch: task.sourceRevision }
-                  : task.execution.mode === "local" && governedSource
-                    ? { baseBranch: governedSource.commit }
-                    : {})}
+              {...(baseBranch === undefined ? {} : { baseBranch })}
             >
               <Task
                 id={task.preparationId}

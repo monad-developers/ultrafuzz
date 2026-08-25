@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
 import * as ts from "typescript";
 
@@ -100,8 +100,17 @@ ${
 test("compiled dynamic workflow defers templates and emits executable Smithers TypeScript", async () => {
   const project = tempProject();
   writeDynamicProject(project);
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz Test"]);
+  git(["config", "user.email", "test@invalid"]);
+  git(["add", "--all"]);
+  git(["commit", "--quiet", "-m", "dynamic source"]);
+  const sourceRevision = git(["rev-parse", "HEAD"]);
   const plan = await planRun({ projectRoot: project, runId: "dynamic-compile", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.source_revision, sourceRevision);
   assert.deepEqual(
     plan.value!.rendered_prompts.map((prompt) => prompt.logical_node_id),
     ["planner"]
@@ -112,10 +121,18 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
+    sourceRevision: plan.value!.source_revision,
+    sourceRef: plan.value!.source_ref,
     workflowName: "ultrafuzz-dynamic-compile",
     renderedPrompts: plan.value!.rendered_prompts
   });
   assert.equal(compiled.dynamicGroups.length, 1);
+  assert.equal(compiled.sourceRevision, sourceRevision);
+  assert.equal(compiled.sourceRef, plan.value!.source_ref);
+  assert.ok(compiled.tasks.every((task) => task.sourceRevision === sourceRevision));
+  assert.ok(compiled.tasks.every((task) => task.sourceRef === plan.value!.source_ref));
+  assert.ok(compiled.dynamicGroups[0]!.taskTemplates.every((task) => task.sourceRevision === sourceRevision));
+  assert.ok(compiled.dynamicGroups[0]!.taskTemplates.every((task) => task.sourceRef === plan.value!.source_ref));
   assert.equal(compiled.dynamicGroups[0]?.groupNodeId, "fanout");
   assert.equal(compiled.dynamicGroups[0]?.taskTemplates.length, 1);
   assert.equal(
@@ -128,6 +145,7 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
   const source = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.doesNotMatch(source, /__ULTRAFUZZ_/u);
   assert.match(source, /materializeDynamicRuntime/u);
+  assert.match(source, /function taskSpecsFromCompiled[\s\S]*?\.\.\.compiledTaskSourceIdentity\(task\)/u);
   assert.match(source, /ctx\.outputMaybe/u);
   const transpiled = ts.transpileModule(source, {
     fileName: compiled.workflowPath,
@@ -172,6 +190,8 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
   });
   assert.equal(materialized.tasks.filter((task) => task.metadata.node.dynamic !== undefined).length, 100);
   assert.equal(materialized.tasks.find((task) => task.concreteNodeId === "join")?.dependencies.length, 100);
+  assert.ok(materialized.tasks.every((task) => task.sourceRevision === sourceRevision));
+  assert.ok(materialized.tasks.every((task) => task.sourceRef === plan.value!.source_ref));
 
   const smithersModules = findSmithersModules();
   if (smithersModules !== undefined && smithersGraphAvailable()) {
