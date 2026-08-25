@@ -308,21 +308,22 @@ function redactVendorLibraryFindings(value: string, placeholder: string): string
 export function redactSecretsInValue(
   value: unknown,
   placeholder = SENSITIVE_REDACTION_PLACEHOLDER,
-  forbiddenSecretValues: readonly string[] = []
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
 ): unknown {
   if (Array.isArray(value)) {
-    return value.map((entry) => redactSecretsInValue(entry, placeholder, forbiddenSecretValues));
+    return value.map((entry) => redactSecretsInValue(entry, placeholder, forbiddenSecretValues, mode));
   }
   if (isPlainRecord(value)) {
     return Object.fromEntries(
       Object.entries(value).map(([key, entry]) => [
         key,
-        isSensitiveKeyName(key) ? placeholder : redactSecretsInValue(entry, placeholder, forbiddenSecretValues)
+        isSensitiveKeyName(key) ? placeholder : redactSecretsInValue(entry, placeholder, forbiddenSecretValues, mode)
       ])
     );
   }
   if (typeof value === "string") {
-    return redactSecretsInText(value, placeholder, forbiddenSecretValues);
+    return redactSecretsInText(value, placeholder, forbiddenSecretValues, mode);
   }
   return value;
 }

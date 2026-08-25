@@ -976,7 +976,7 @@ test("state diagnostics redact key, token, mnemonic, URL, entropy, and exact run
   assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/u);
 });
 
-test("event payloads redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {
+test("event payloads redact key, token, mnemonic, URL, and exact run secrets positively", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-expanded-redaction" });
   appendEvent(layout, {
     eventType: "workflow-submit-failed",
@@ -992,10 +992,31 @@ test("event payloads redact key, token, mnemonic, URL, entropy, and exact run se
   });
 
   const serialized = fs.readFileSync(layout.eventsPath, "utf8");
-  for (const secret of ["0x1a", "npm_", "alchemy.com", entropyAtRestSecret, exactAtRestSecret, "abandon abandon"]) {
+  for (const secret of ["0x1a", "npm_", "alchemy.com", exactAtRestSecret, "abandon abandon"]) {
     assert.doesNotMatch(serialized, new RegExp(secret.replaceAll(".", "\\."), "u"));
   }
   assert.match(serialized, /<redacted>/u);
+  // Event payloads are structured identifier records that sealed-integrity
+  // checks byte-compare against their journals, so they scan positive-only:
+  // the speculative entropy pass cannot separate a credential from a long
+  // identifier and was redacting the pipeline's own workflow run ids,
+  // tearing down every CI eval submission (#889). An unlabeled opaque
+  // high-entropy string therefore persists here; prose artifacts such as
+  // attempt-ledger failure messages keep the speculative scrub below.
+  assert.match(serialized, new RegExp(entropyAtRestSecret, "u"));
+
+  const preservedRunId = "ultrafuzz-ci-32872423902-1-smoke-ultrafuzz-benc-346bb576f2a1a2e3";
+  const linked = appendEvent(layout, {
+    eventType: "workflow-link-recorded",
+    status: "pending",
+    payload: {
+      workflow_link_id: "00000000-0000-4000-8000-000000000009",
+      action: "start",
+      workflow_run_id: preservedRunId,
+      control_generation: "d".repeat(64)
+    }
+  });
+  assert.equal((linked.payload as Record<string, unknown>).workflow_run_id, preservedRunId);
 });
 
 test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run secrets", () => {

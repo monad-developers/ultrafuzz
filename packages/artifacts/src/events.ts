@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { redactSecretsInValue } from "@ultrafuzz/security";
+import { redactSecretsInValue, type SecretScanMode } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import { ARTIFACT_CONTRACT_IDS, NON_JSON_ARTIFACT_CONTRACT_IDS } from "./artifact-contract-ids.js";
@@ -1147,7 +1147,17 @@ export function createEventRecord(layout: Pick<RunLayout, "runId">, input: Appen
   const eventType = validateSafeId(input.eventType, "event type");
   const status = validateSafeId(input.status, "event status");
   const timestamp = input.timestamp ?? new Date().toISOString();
-  const payload = redactValue(input.payload, input.forbiddenSecretValues);
+  // "positive-only": event payloads are structured identifier records that
+  // sealed-integrity checks byte-compare against their journals — for example
+  // verifyWorkflowRunLinkEvent and the controller-generation event
+  // authentication. The speculative heuristics flag the pipeline's own
+  // workflow run ids (`ultrafuzz-ci-…`) as secrets and persist `<redacted>`
+  // where the journal keeps the raw id, tearing down every CI eval submission
+  // (#889). Exact forbidden values and every positively identified credential
+  // format (secretlint findings, vendor formats, mnemonics, labeled private
+  // keys, URL and Bearer credentials) are still redacted from persisted
+  // events; the public artifact gates keep their own scans.
+  const payload = redactValue(input.payload, input.forbiddenSecretValues, "positive-only");
   const seed = JSON.stringify([runId, nodeId, eventType, status, timestamp, payload]);
   return assertEventRecord({
     schema_version: EVENT_SCHEMA_VERSION,
@@ -1244,8 +1254,12 @@ export function createEventQueryFacadeInputs(layout: RunLayout): EventQueryFacad
   });
 }
 
-export function redactValue(value: unknown, forbiddenSecretValues: readonly string[] = []): unknown {
-  return redactSecretsInValue(value, undefined, forbiddenSecretValues);
+export function redactValue(
+  value: unknown,
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
+): unknown {
+  return redactSecretsInValue(value, undefined, forbiddenSecretValues, mode);
 }
 
 function eventIndexPaths(layout: RunLayout, record: EventRecord): string[] {
