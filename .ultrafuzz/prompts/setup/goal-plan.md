@@ -108,13 +108,15 @@ derives them after you return, from the plan you wrote plus the run's configured
 dynamic-node limit, and fails closed if a value you wrote disagrees with what it
 derives.
 
-You will see those keys marked required in the canonical schema. That is because
-they are present by the time the plan is validated, not because you are meant to
-supply them, and the validation command you are given accounts for it. Leave
-them out even though the schema lists them: deriving them is not arithmetic you
-are being asked to reproduce, and a plan that is internally consistent can still
-disagree with the derivation and fail closed -- `expected_child_count`, for one,
-counts threat and class goals only and excludes the roaming goal.
+The canonical schema marks those five keys optional, so a plan that omits them
+validates. Do not compute them. `max_dynamic_nodes` is a run setting this prompt
+never states, so you cannot know it, and `expected_child_count` counts threat and
+class goals only and excludes the roaming goal -- a plan that is internally
+consistent can still disagree with the derivation and fail closed.
+
+If you do write them, the contract checks each one against the plan you wrote and
+rejects a value that disagrees, so run the validation command and correct any
+value it reports rather than leaving it for the run to reject later.
 
 `modeled_threat_ids` must exactly equal the IDs in the upstream threat model;
 class goals may reference only those IDs.

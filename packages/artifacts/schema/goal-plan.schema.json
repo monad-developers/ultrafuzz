@@ -504,12 +504,7 @@
     "applicability_decisions",
     "selected_class_records",
     "roaming_goal",
-    "counts",
-    "expected_child_count",
-    "threat_count",
-    "applicable_class_count",
-    "max_dynamic_nodes",
-    "goal_lanes"
+    "counts"
   ],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:goal-plan:1",

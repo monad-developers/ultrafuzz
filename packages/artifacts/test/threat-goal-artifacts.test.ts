@@ -386,7 +386,7 @@ test("goal plans record their own expected dynamic-child cardinality and name ev
   assert.equal(result.value?.expected_child_count, 3);
   assert.equal(result.value?.max_dynamic_nodes, FIXTURE_MAX_DYNAMIC_NODES);
   assert.deepEqual(
-    result.value?.goal_lanes.map((lane) => [lane.kind, lane.lane_id, ...lane.node_ids]),
+    result.value?.goal_lanes?.map((lane) => [lane.kind, lane.lane_id, ...lane.node_ids]),
     [
       ["threat", "liquidation:overdue", "dynamic:threat:liquidation:overdue"],
       ["threat", "surface:threat-001", "dynamic:threat:surface:threat-001"],
@@ -446,10 +446,10 @@ test("goal-plan lanes cover applicable class goals alongside their threat goals"
   assert.equal(result.value?.applicable_class_count, 1);
   assert.equal(result.value?.expected_child_count, 2);
   assert.deepEqual(
-    result.value?.goal_lanes.map((lane) => lane.kind),
+    result.value?.goal_lanes?.map((lane) => lane.kind),
     ["threat", "class", "roaming"]
   );
-  assert.deepEqual(result.value?.goal_lanes[1]?.node_ids, ["dynamic:class:accounting:share-inflation"]);
+  assert.deepEqual(result.value?.goal_lanes?.[1]?.node_ids, ["dynamic:class:accounting:share-inflation"]);
 });
 
 test("goal plans bind to the exact upstream threat-model JSON bytes", () => {

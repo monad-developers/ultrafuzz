@@ -174,6 +174,21 @@ function readGoalPlan(runRoot: string | undefined): {
   } catch {
     return { reason: "goal-plan-unreadable" };
   }
+  // These five are populated by recordGoalPlanExpansionFacts after the planning
+  // agent returns, so the contract marks them optional -- an agent that omits
+  // them, as its prompt instructs, must still validate. By the time the eval
+  // side reads a plan they are always present, because recording precedes any
+  // read. A plan still missing them was never recorded, so it carries no
+  // planner authority to compare against, which is what unreadable means here.
+  if (
+    plan.expected_child_count === undefined ||
+    plan.threat_count === undefined ||
+    plan.applicable_class_count === undefined ||
+    plan.max_dynamic_nodes === undefined ||
+    plan.goal_lanes === undefined
+  ) {
+    return { reason: "goal-plan-unreadable" };
+  }
   return {
     plan: {
       expected_child_count: plan.expected_child_count,
