@@ -100,15 +100,21 @@ identity copied from the supplied planner catalog and to the SHA-256 of that
 catalog's exact bytes. The snapshot-manifest identity is the constant required
 by the pinned schema. Copy every modeled threat and catalog class into the
 corresponding plan collections, record every applicability decision, retain the
-selected source-record identities, and include the fixed roaming goal and
-reconciled counts required by the schema.
+selected source-record identities, and include the fixed roaming goal.
 
 Do not write `expected_child_count`, `threat_count`, `applicable_class_count`,
-`max_dynamic_nodes`, or `goal_lanes`. After the agent returns, Ultrafuzz
-deterministically records those from the plan you wrote plus the run's
-configured dynamic-node limit, and fails closed if a value you wrote disagrees.
-The canonical schema lists them as required because they are present by the time
-the plan is validated.
+`max_dynamic_nodes`, or `goal_lanes` -- omit those five keys entirely. Ultrafuzz
+derives them after you return, from the plan you wrote plus the run's configured
+dynamic-node limit, and fails closed if a value you wrote disagrees with what it
+derives.
+
+You will see those keys marked required in the canonical schema. That is because
+they are present by the time the plan is validated, not because you are meant to
+supply them, and the validation command you are given accounts for it. Leave
+them out even though the schema lists them: deriving them is not arithmetic you
+are being asked to reproduce, and a plan that is internally consistent can still
+disagree with the derivation and fail closed -- `expected_child_count`, for one,
+counts threat and class goals only and excludes the roaming goal.
 
 `modeled_threat_ids` must exactly equal the IDs in the upstream threat model;
 class goals may reference only those IDs.
