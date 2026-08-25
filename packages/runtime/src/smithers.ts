@@ -1947,8 +1947,21 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   writePreparedWorkflowFile(
     input.runLayout.root,
     inputPath,
+    // "positive-only": these persisted bytes are the exact --input the
+    // workflow runner byte-validates against the generated workflow's
+    // compiled literals at detached-launch preflight. The speculative
+    // heuristics flag the eval lane's bounded run ids (ci-<run_id>-…-<hex16>)
+    // as secrets, so an "all" scan rewrote ultrafuzz_run_id to "<redacted>"
+    // and every eval submission failed preflight as INVALID_INPUT (#899).
+    // Positively identified credential formats are still redacted from the
+    // operator-supplied free text this document can carry.
     `${JSON.stringify(
-      redactSecretsInValue(smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput)),
+      redactSecretsInValue(
+        smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput),
+        undefined,
+        [],
+        "positive-only"
+      ),
       null,
       2
     )}\n`,
