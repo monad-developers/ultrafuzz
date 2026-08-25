@@ -166,6 +166,32 @@ export interface VerifyWorkflowControlSnapshotOptions {
   tolerateDivergence?: boolean;
 }
 
+interface WorkflowControlSnapshotAttestation {
+  projectRoot: string;
+  runRoot: string;
+  generation: string;
+  snapshotRoot: string;
+  protectedPaths: readonly string[];
+  changeTokens: readonly string[];
+}
+
+// A verified control snapshot is already retained by the caller for the duration of one
+// controller lifecycle. Keep only a weak generation lookup so recursive verified-output readers
+// can share that authentication without extending its lifetime. A crash, process restart, or GC
+// after the lifecycle drops the capability and requires a fresh byte verification.
+const workflowControlSnapshots = new Map<string, WeakRef<VerifiedWorkflowControlSnapshot>[]>();
+const workflowControlSnapshotAttestations = new WeakMap<
+  VerifiedWorkflowControlSnapshot,
+  WorkflowControlSnapshotAttestation
+>();
+// A run-wide verified-output reader retains its sealed task snapshot while it recursively loads
+// producers. The ephemeron keeps that snapshot's authenticated control bytes alive for exactly the
+// same lifetime without adding a public, forgeable field to either authority object.
+const sealedTaskManifestControlSnapshots = new WeakMap<
+  VerifiedSealedTaskManifestSnapshot,
+  VerifiedWorkflowControlSnapshot
+>();
+
 export interface VerifiedSealedTaskManifestSnapshot {
   tasksPath: string;
   integrityPath: string;
@@ -351,15 +377,16 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
     const expected = seal.files[key];
     return observed.sha256 !== expected.sha256 || observed.size_bytes !== expected.size_bytes;
   });
+  let verifiedControl: VerifiedWorkflowControlSnapshot | undefined;
   if (runtimeControlsChanged) {
     const currentDocument = parseSmithersTaskManifestBytes(contents);
     const projectRoot = currentDocument.dynamic_groups?.[0]?.promptContext.projectRoot;
     if (projectRoot === undefined) {
       throw new Error("sealed workflow graph or task plan changed without a compiled dynamic group");
     }
-    const verified = verifyWorkflowControlSnapshot(projectRoot, layout);
-    graphContents = verified.contents.graph;
-    contents = verified.contents.tasks;
+    verifiedControl = verifyWorkflowControlSnapshot(projectRoot, layout);
+    graphContents = verifiedControl.contents.graph;
+    contents = verifiedControl.contents.tasks;
   }
 
   const graph = assertSealedPlannedGraph(parseStrictJsonBytes(graphContents));
@@ -403,7 +430,9 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
   ) {
     throw new Error("run state identity or fingerprints no longer match the sealed task authority");
   }
-  return { tasksPath, integrityPath, contents, integrityContents, document };
+  const snapshot = { tasksPath, integrityPath, contents, integrityContents, document };
+  if (verifiedControl !== undefined) sealedTaskManifestControlSnapshots.set(snapshot, verifiedControl);
+  return snapshot;
 }
 
 export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
@@ -427,10 +456,55 @@ export function verifyWorkflowControlSnapshot(
   const generation = crypto.createHash("sha256").update(sealContents).digest("hex");
   const publishedSnapshotRoot = path.join(layout.root, "smithers", "execution-snapshots", generation);
   const hasPublishedSnapshot = pathEntryExists(publishedSnapshotRoot);
-  const executionFiles = seal.execution_files.map((entry) => {
+  const publishedWorkflowPath = hasPublishedSnapshot
+    ? snapshotPath(
+        publishedSnapshotRoot,
+        path.posix.join(".smithers/workflows", path.basename(paths.workflowPath)),
+        "published workflow execution workflow"
+      )
+    : undefined;
+  const protectedPaths =
+    publishedWorkflowPath === undefined
+      ? []
+      : [
+          ...new Set([
+            ...seal.execution_files.map((entry) =>
+              snapshotPath(publishedSnapshotRoot, entry.snapshot_path, "published workflow execution file")
+            ),
+            publishedWorkflowPath
+          ])
+        ].sort(compareCanonicalStrings);
+  const reusable = hasPublishedSnapshot
+    ? reusableWorkflowControlSnapshot(
+        projectRoot,
+        layout,
+        generation,
+        publishedSnapshotRoot,
+        protectedPaths,
+        seal.execution_files
+      )
+    : undefined;
+  const snapshotChangeTokensBefore =
+    reusable?.changeTokens ??
+    (hasPublishedSnapshot
+      ? captureWorkflowControlSnapshotChangeTokens(publishedSnapshotRoot, protectedPaths)
+      : undefined);
+  const executionFiles = seal.execution_files.map((entry, index) => {
     const verifiedPath = hasPublishedSnapshot
       ? snapshotPath(publishedSnapshotRoot, entry.snapshot_path, "published workflow execution file")
       : entry.source_path;
+    const cached = reusable?.snapshot.executionFiles[index];
+    if (cached !== undefined) {
+      if (cached.sourcePath !== entry.source_path || cached.snapshotPath !== entry.snapshot_path) {
+        throw new Error("cached workflow execution file authority no longer matches the control seal");
+      }
+      return {
+        sourcePath: entry.source_path,
+        snapshotPath: entry.snapshot_path,
+        contents: cached.contents,
+        verifiedPath
+      };
+    }
     const bytes = readBoundedRegularFileExact(verifiedPath, `workflow execution file ${entry.snapshot_path}`);
     const observed = digestBytes(bytes);
     if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
@@ -444,14 +518,8 @@ export function verifyWorkflowControlSnapshot(
     throw new Error("workflow execution snapshot has an incomplete dynamic control base");
   }
   const sealedWorkflowContents = hasPublishedSnapshot
-    ? readBoundedRegularFileExact(
-        snapshotPath(
-          publishedSnapshotRoot,
-          path.posix.join(".smithers/workflows", path.basename(paths.workflowPath)),
-          "published workflow execution workflow"
-        ),
-        "published workflow execution workflow"
-      )
+    ? (reusable?.snapshot.contents.workflow ??
+      readBoundedRegularFileExact(publishedWorkflowPath!, "published workflow execution workflow"))
     : undefined;
   const contents = controlFileContents(projectRoot, layout, paths, {
     ...(baseGraph === undefined ? {} : { graph: baseGraph.contents }),
@@ -546,7 +614,7 @@ export function verifyWorkflowControlSnapshot(
   if (observedBindings !== undefined && JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
     reportDivergence("workflow control completeness binding changed");
   }
-  return {
+  const verified: VerifiedWorkflowControlSnapshot = {
     paths,
     generation,
     contents: runtimeControlsChanged ? { ...contents, graph: currentGraph, tasks: currentTasks } : contents,
@@ -555,6 +623,142 @@ export function verifyWorkflowControlSnapshot(
     integrityContents: sealContents,
     divergences
   };
+  if (hasPublishedSnapshot && divergences.length === 0 && snapshotChangeTokensBefore !== undefined) {
+    const snapshotChangeTokensAfter = captureWorkflowControlSnapshotChangeTokens(publishedSnapshotRoot, protectedPaths);
+    if (!sameWorkflowControlSnapshotChangeTokens(snapshotChangeTokensBefore, snapshotChangeTokensAfter)) {
+      throw new Error("workflow execution snapshot changed while its control authority was being verified");
+    }
+    rememberWorkflowControlSnapshot(
+      verified,
+      projectRoot,
+      layout,
+      publishedSnapshotRoot,
+      protectedPaths,
+      snapshotChangeTokensAfter
+    );
+  }
+  return verified;
+}
+
+function workflowControlSnapshotCacheKey(projectRoot: string, layout: RunLayout, generation: string): string {
+  return JSON.stringify([path.resolve(projectRoot), path.resolve(layout.root), generation]);
+}
+
+function reusableWorkflowControlSnapshot(
+  projectRoot: string,
+  layout: RunLayout,
+  generation: string,
+  snapshotRoot: string,
+  protectedPaths: readonly string[],
+  executionFileSeals: readonly WorkflowExecutionFileSeal[]
+): { snapshot: VerifiedWorkflowControlSnapshot; changeTokens: readonly string[] } | undefined {
+  const key = workflowControlSnapshotCacheKey(projectRoot, layout, generation);
+  const references = workflowControlSnapshots.get(key) ?? [];
+  while (references.length > 0) {
+    const snapshot = references.at(-1)!.deref();
+    if (snapshot === undefined) {
+      references.pop();
+      continue;
+    }
+    const attestation = workflowControlSnapshotAttestations.get(snapshot);
+    if (
+      attestation === undefined ||
+      attestation.projectRoot !== path.resolve(projectRoot) ||
+      attestation.runRoot !== path.resolve(layout.root) ||
+      attestation.generation !== generation ||
+      attestation.snapshotRoot !== path.resolve(snapshotRoot) ||
+      snapshot.generation !== generation ||
+      crypto.createHash("sha256").update(snapshot.integrityContents).digest("hex") !== generation ||
+      !sameStringSequence(attestation.protectedPaths, protectedPaths) ||
+      snapshot.executionFiles.length !== executionFileSeals.length ||
+      snapshot.executionFiles.some((file, index) => {
+        const seal = executionFileSeals[index];
+        if (seal === undefined || file.sourcePath !== seal.source_path || file.snapshotPath !== seal.snapshot_path) {
+          return true;
+        }
+        const observed = digestBytes(file.contents);
+        return observed.sha256 !== seal.sha256 || observed.size_bytes !== seal.size_bytes;
+      })
+    ) {
+      references.pop();
+      continue;
+    }
+    let current: readonly string[];
+    try {
+      current = captureWorkflowControlSnapshotChangeTokens(snapshotRoot, protectedPaths);
+    } catch {
+      workflowControlSnapshots.delete(key);
+      return undefined;
+    }
+    if (!sameWorkflowControlSnapshotChangeTokens(attestation.changeTokens, current)) {
+      workflowControlSnapshots.delete(key);
+      return undefined;
+    }
+    workflowControlSnapshots.set(key, references);
+    return { snapshot, changeTokens: current };
+  }
+  workflowControlSnapshots.delete(key);
+  return undefined;
+}
+
+function rememberWorkflowControlSnapshot(
+  snapshot: VerifiedWorkflowControlSnapshot,
+  projectRoot: string,
+  layout: RunLayout,
+  snapshotRoot: string,
+  protectedPaths: readonly string[],
+  changeTokens: readonly string[]
+): void {
+  const generation = snapshot.generation;
+  const attestation = Object.freeze({
+    projectRoot: path.resolve(projectRoot),
+    runRoot: path.resolve(layout.root),
+    generation,
+    snapshotRoot: path.resolve(snapshotRoot),
+    protectedPaths: Object.freeze([...protectedPaths]),
+    changeTokens: Object.freeze([...changeTokens])
+  });
+  workflowControlSnapshotAttestations.set(snapshot, attestation);
+  const key = workflowControlSnapshotCacheKey(projectRoot, layout, generation);
+  const references = (workflowControlSnapshots.get(key) ?? []).filter((reference) => reference.deref() !== undefined);
+  references.push(new WeakRef(snapshot));
+  workflowControlSnapshots.set(key, references);
+}
+
+function captureWorkflowControlSnapshotChangeTokens(
+  snapshotRoot: string,
+  protectedPaths: readonly string[]
+): readonly string[] {
+  const resolvedRoot = path.resolve(snapshotRoot);
+  const root = fs.lstatSync(resolvedRoot, { bigint: true });
+  if (!root.isDirectory() || root.isSymbolicLink() || (root.mode & 0o222n) !== 0n) {
+    throw new Error("published workflow execution snapshot is not a sealed physical directory");
+  }
+  const tokens = [`${resolvedRoot}\0${workflowControlSnapshotStatToken(root)}`];
+  for (const protectedPath of protectedPaths) {
+    const resolvedPath = path.resolve(protectedPath);
+    assertPathInside(resolvedRoot, resolvedPath, "published workflow execution snapshot file");
+    const stat = fs.lstatSync(resolvedPath, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || (stat.mode & 0o222n) !== 0n) {
+      throw new Error("published workflow execution snapshot contains an unsealed protected file");
+    }
+    tokens.push(`${resolvedPath}\0${workflowControlSnapshotStatToken(stat)}`);
+  }
+  return Object.freeze(tokens);
+}
+
+function workflowControlSnapshotStatToken(stat: fs.BigIntStats): string {
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs]
+    .map((value) => value.toString())
+    .join(":");
+}
+
+function sameWorkflowControlSnapshotChangeTokens(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((token, index) => token === right[index]);
+}
+
+function sameStringSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): OpenedSnapshotDirectory {
