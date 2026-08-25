@@ -1239,21 +1239,31 @@ export interface RefreshedSmithersControllerSnapshot {
 /**
  * Rebuild the controller-owned portion of an already sealed workflow from the
  * currently installed, stock Ultrafuzz packages. Campaign inputs remain the
- * exact bytes authenticated by the launch seal. A compatibility refresh is
- * deliberately narrower than an upgrade: existing module paths cannot vanish
- * and the sealed dependency map remains authoritative. New Ultrafuzz-owned
- * module files are admitted only from the installed package root and become
- * explicit members of the new generation manifest. Newly required runner
- * compatibility replacements are applied only to their exact sealed package
- * paths and bytes before the refreshed generation is authenticated.
+ * exact bytes authenticated by the launch seal. The effective snapshot is the
+ * authenticated committed head and supplies the append-only execution path set;
+ * the original seal remains the root and semantic authority. A compatibility
+ * refresh is deliberately narrower than an upgrade: existing module paths
+ * cannot vanish from the refreshed generation, so a non-schema path retired by
+ * the current package retains its authenticated bytes. The sealed dependency
+ * map remains authoritative. New Ultrafuzz-owned module files are admitted only
+ * from the installed package root and become explicit members of the new
+ * generation manifest. Newly required runner compatibility replacements are
+ * applied only to their exact sealed package paths and bytes before the
+ * refreshed generation is authenticated.
  */
 export function refreshedSmithersControllerSnapshot(input: {
   projectRoot: string;
   layout: RunLayout;
   original: VerifiedWorkflowControlSnapshot;
+  /** Authenticated committed controller head; defaults to the original seal for a first refresh. */
+  effective?: VerifiedWorkflowControlSnapshot;
   config: ResolvedConfig;
 }): RefreshedSmithersControllerSnapshot {
   const projectRoot = path.resolve(input.projectRoot);
+  const effective = input.effective ?? input.original;
+  if (controllerRefreshSemanticFingerprint(effective) !== controllerRefreshSemanticFingerprint(input.original)) {
+    throw new Error("effective controller generation is not rooted in the sealed campaign semantics");
+  }
   const currentTaskDocument = parseSealedTaskDocument(input.original.contents.tasks);
   if (currentTaskDocument.run_id !== input.layout.runId) {
     throw new Error("controller refresh task manifest does not match the run ID");
@@ -1302,10 +1312,10 @@ export function refreshedSmithersControllerSnapshot(input: {
     ...(taskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: taskDocument.pinned_submodules })
   };
 
-  const executionFiles = replaceBunStartupControlsForControllerRefresh(input.layout, input.original.executionFiles);
+  const executionFiles = replaceBunStartupControlsForControllerRefresh(input.layout, effective.executionFiles);
   replaceStockAgentFiles(projectRoot, executionFiles);
   const dependencyMap = refreshedControllerDependencyMap(executionFiles);
-  replaceInternalModuleFiles(executionFiles, dependencyMap);
+  replaceInternalModuleFiles(executionFiles, dependencyMap, input.original.executionFiles);
   applyRefreshedSmithersCompatibilityPatches(executionFiles, dependencyMap);
   const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
   const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
@@ -1370,8 +1380,10 @@ function refreshedControllerDependencyMap(
 
 function replaceInternalModuleFiles(
   files: Array<WorkflowExecutionControlFile & { contents: Buffer }>,
-  dependencyMap: WorkflowExecutionDependenciesDocument
+  dependencyMap: WorkflowExecutionDependenciesDocument,
+  rootAuthorityFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
 ): void {
+  const rootAuthorityByPath = new Map(rootAuthorityFiles.map((file) => [file.snapshotPath, file]));
   const byModule = new Map<string, Array<WorkflowExecutionControlFile & { contents: Buffer }>>();
   for (const file of files) {
     const match = /^modules\/(@ultrafuzz\/[^/]+)\/(.+)$/u.exec(file.snapshotPath);
@@ -1386,9 +1398,16 @@ function replaceInternalModuleFiles(
     if (sealedManifest === undefined) {
       throw new Error(`controller module ${moduleName} is missing its sealed package manifest`);
     }
-    const moduleRoot = workflowPackageRoot(sealedManifest.sourcePath);
+    // A committed generation's source paths point into its immutable snapshot.
+    // Resolve the live package only through the launch seal's authenticated
+    // source path while retaining the committed head's larger path set.
+    const rootAuthorityManifest = rootAuthorityByPath.get(manifestSnapshotPath);
+    if (rootAuthorityManifest === undefined) {
+      throw new Error(`controller module ${moduleName} is missing its root package manifest authority`);
+    }
+    const moduleRoot = workflowPackageRoot(rootAuthorityManifest.sourcePath);
     const packageJsonPath = path.join(moduleRoot, "package.json");
-    if (fs.realpathSync(packageJsonPath) !== fs.realpathSync(sealedManifest.sourcePath)) {
+    if (fs.realpathSync(packageJsonPath) !== fs.realpathSync(rootAuthorityManifest.sourcePath)) {
       throw new Error(`controller module ${moduleName} has a mismatched sealed package manifest path`);
     }
     const manifest = readWorkflowPackageManifest(packageJsonPath);
@@ -1415,10 +1434,6 @@ function replaceInternalModuleFiles(
       executable: (fs.statSync(sourcePath).mode & 0o111) !== 0
     }));
     assertRefreshedModuleAuthority(moduleName, current, dependencyMap);
-    const currentPaths = new Set(current.map((file) => file.snapshotPath));
-    if (sealed.some((file) => !currentPaths.has(file.snapshotPath))) {
-      throw new Error(`controller module ${moduleName} removed a sealed execution path`);
-    }
     const schemaPrefix = path.posix.join("modules", moduleName, "schema/");
     const sealedSchemaPaths = sealed
       .map((file) => file.snapshotPath)
@@ -1431,15 +1446,18 @@ function replaceInternalModuleFiles(
     if (JSON.stringify(sealedSchemaPaths) !== JSON.stringify(currentSchemaPaths)) {
       throw new Error(`controller module ${moduleName} changed its sealed schema path authority`);
     }
-    const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
     const currentByPath = new Map(current.map((file) => [file.snapshotPath, file]));
     for (const file of sealed) {
       // Schemas bind campaign output semantics. Controller code may refresh,
       // but its schema directory must remain the exact sealed generation.
       if (file.snapshotPath.startsWith(schemaPrefix)) continue;
-      const sourcePath = byPath.get(file.snapshotPath)!;
-      file.sourcePath = sourcePath;
-      file.contents = currentByPath.get(file.snapshotPath)!.contents;
+      const replacement = currentByPath.get(file.snapshotPath);
+      // A compatible package may retire a non-schema file. Its authenticated
+      // bytes remain append-only authority for the durable run instead of
+      // making that lineage non-resumable or silently deleting the path.
+      if (replacement === undefined) continue;
+      file.sourcePath = replacement.sourcePath;
+      file.contents = replacement.contents;
     }
     const sealedPaths = new Set(sealed.map((file) => file.snapshotPath));
     for (const file of current.filter(

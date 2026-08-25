@@ -667,6 +667,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
             projectRoot: path.resolve(input.projectRoot),
             layout: evidence.layout,
             original,
+            effective: evidence.controllerSnapshot,
             config: sealedConfig
           }),
           {
