@@ -472,7 +472,11 @@ describe("packaged topology collection", () => {
   // This is what makes "is the reviewed window the right size" a mechanical question rather than a
   // taste one, and it fails if either side moves: raising a pin, raising either retry budget, or
   // lowering a profile's deadline.
-  it("keeps one stuck agentic node from consuming a whole profile's workflow deadline", () => {
+  // Loads and validates every packaged profile's full topology (#792 added the 67-node
+  // exhaustive graph to that set), ~3.2s on an idle machine — the vitest default of 5s
+  // is a coin flip on a loaded CI runner. The repo convention for such suites is an
+  // explicit budget (cf. modal node-provider, evals lineage).
+  it("keeps one stuck agentic node from consuming a whole profile's workflow deadline", { timeout: 30_000 }, () => {
     const toml = readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
     const configuredDeadline = /^\s*workflow_deadline_seconds\s*=\s*(\d+)\s*$/mu.exec(toml);
     expect(configuredDeadline, "ultrafuzz.toml must declare run.workflow_deadline_seconds").not.toBeNull();
