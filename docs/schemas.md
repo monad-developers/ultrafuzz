@@ -78,9 +78,14 @@ would match a different schema with the same general shape.
 Schema-backed producers receive a run-owned trusted launcher ahead of
 target-controlled `PATH` entries. Local and Modal environments use that launcher
 to validate a real known-valid fixture and compare the returned schema, bundle,
-and validator-build identity before model work. A path lookup alone is not a
-preflight, and a missing or tampered launcher is not silently repaired on
-resume.
+and validator-build identity before model work. Local launchers resolve only a
+verified content-addressed snapshot of the CLI and every transitive package, so
+a working-tree rebuild cannot change an active run. Ambient Node loader/search
+variables are removed and both ESM and CommonJS module resolution must stay
+inside that snapshot; document reads are unaffected. A path lookup alone is not
+a preflight, and a missing or tampered launcher or closure is not silently
+repaired on ordinary resume; an authenticated controller refresh is required to
+publish or migrate a closure.
 
 Exit `0` establishes portable document-shape conformance only. Cross-file
 joins, projected-key uniqueness, filesystem and Git facts, digest relationships,

@@ -86,6 +86,32 @@ test("validator preflight parser accepts only the exact non-transforming success
   );
 });
 
+test("validator preflight parser can authenticate a sealed historical identity explicitly", () => {
+  const value = successEnvelope();
+  const schema = objectField(objectField(value, "data"), "schema");
+  schema.bundle_sha256 = "1".repeat(64);
+  schema.validator_build = "ultrafuzz-json-validator.v1:sealed-history";
+  const binding = artifactContractSchemaBinding("ultrafuzz/findings@2");
+  assert.ok(binding);
+  const expected = {
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256,
+    schemaBundleSha256: schema.bundle_sha256 as string,
+    validatorBuild: schema.validator_build as string,
+    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  };
+
+  assert.deepEqual(parseJsonValidatorPreflightSuccessEnvelope(encode(value), expected), value);
+  assert.throws(
+    () =>
+      parseJsonValidatorPreflightSuccessEnvelope(encode(value), {
+        ...expected,
+        schemaBundleSha256: "2".repeat(64)
+      }),
+    /mismatched identity/u
+  );
+});
+
 const contractMutations: ReadonlyArray<{
   name: string;
   structurallyValid?: true;
