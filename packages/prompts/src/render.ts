@@ -595,6 +595,14 @@ function loadOutputContractTemplate(relativePath: string): string {
 function outputContractTemplateRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    // This build now copies the prompt tree to dist/assets/prompts, so the
+    // packaged templates live here. Without this candidate the only path that
+    // still resolved was the repository fallback below, which exists in a source
+    // checkout but not in a sealed execution snapshot -- where the package sits
+    // at modules/@ultrafuzz/prompts/dist and "../../../" reaches modules/. That
+    // rendered fine at submission and threw the first time a workflow
+    // re-rendered mid-run, taking the whole run down at WORKFLOW_RENDER_FAILED.
+    path.join(here, "assets", "prompts", "_templates", "output-contract"),
     path.join(here, "prompts", "_templates", "output-contract"),
     path.resolve(here, "../../../.ultrafuzz/prompts/_templates/output-contract")
   ];
