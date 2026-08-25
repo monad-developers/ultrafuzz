@@ -11511,7 +11511,6 @@ export const jsxDEV = jsx;
         "--no-env-file",
         "--no-install",
         "--no-addons",
-        "--preserve-symlinks",
         "--preserve-symlinks-main",
         `--preload=${path.join(descriptorRoot, "controls", "bun-module-confinement.js")}`,
         "--eval",
@@ -13103,15 +13102,39 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
     fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n", "utf8");
     fs.writeFileSync(path.join(controls, "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
     fs.writeFileSync(path.join(root, "sealed-helper.mjs"), 'export const value = "sealed";\n', "utf8");
-    fs.writeFileSync(
-      path.join(root, "sealed.tsx"),
-      'import { value } from "./sealed-helper.mjs"; const typed: string = value; export default typed;\n',
-      "utf8"
-    );
-
     const outsideRoot = tempProject();
     const ambientPath = path.join(outsideRoot, "ambient.mjs");
     fs.writeFileSync(ambientPath, 'export default "ambient";\n', "utf8");
+    const dependencyRoot = path.join(root, "dependencies", "sealed-package");
+    const ambientDependencyRoot = path.join(outsideRoot, "ambient-package");
+    fs.mkdirSync(dependencyRoot, { recursive: true });
+    fs.mkdirSync(ambientDependencyRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(dependencyRoot, "package.json"),
+      `${JSON.stringify({ name: "sealed-package", main: "index.cjs" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(path.join(dependencyRoot, "index.cjs"), 'module.exports = { packageValue: "package" };\n', "utf8");
+    fs.writeFileSync(
+      path.join(ambientDependencyRoot, "package.json"),
+      `${JSON.stringify({ name: "ambient-package", type: "module", exports: "./index.js" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(path.join(ambientDependencyRoot, "index.js"), 'export default "ambient-package";\n', "utf8");
+    fs.mkdirSync(path.join(root, "node_modules"), { recursive: true });
+    fs.symlinkSync(
+      path.relative(path.join(root, "node_modules"), dependencyRoot),
+      path.join(root, "node_modules", "sealed-package")
+    );
+    fs.symlinkSync(
+      path.relative(path.join(root, "node_modules"), ambientDependencyRoot),
+      path.join(root, "node_modules", "ambient-package")
+    );
+    fs.writeFileSync(
+      path.join(root, "sealed.tsx"),
+      'import { value } from "./sealed-helper.mjs"; import { packageValue } from "sealed-package"; const typed: string = `${value}:${packageValue}`; let ambientRejected = false; try { await import("ambient-package"); } catch { ambientRejected = true; } export default { value: typed, ambientRejected };\n',
+      "utf8"
+    );
 
     const scriptPath = path.join(root, "second-descriptor-probe.mjs");
     fs.writeFileSync(
@@ -13148,7 +13171,6 @@ process.stdout.write(JSON.stringify({ sealed: sealed.default, ambientRejected, r
         "--no-env-file",
         "--no-install",
         "--no-addons",
-        "--preserve-symlinks",
         "--preserve-symlinks-main",
         `--preload=${path.join(controls, "bun-module-confinement.js")}`,
         scriptPath
@@ -13157,7 +13179,11 @@ process.stdout.write(JSON.stringify({ sealed: sealed.default, ambientRejected, r
     );
 
     assert.equal(probe.status, 0, probe.stderr);
-    assert.deepEqual(JSON.parse(probe.stdout), { sealed: "sealed", ambientRejected: true, reusedRejected: true });
+    assert.deepEqual(JSON.parse(probe.stdout), {
+      sealed: { value: "sealed:package", ambientRejected: true },
+      ambientRejected: true,
+      reusedRejected: true
+    });
   }
 );
 
@@ -13479,7 +13505,6 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
           "--no-env-file",
           "--no-install",
           "--no-addons",
-          "--preserve-symlinks",
           "--preserve-symlinks-main",
           `--preload=${path.join(controllerRoot, "controls", "bun-module-confinement.js")}`,
           path.join(controllerRoot, path.basename(scriptPath)),

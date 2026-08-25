@@ -272,7 +272,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       }
       return value;
     };
-    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
+    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
       cwd,
       stdio:
         snapshotDescriptor === undefined
@@ -314,7 +314,7 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
 const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
 const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
-const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
+const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
 
 // Ultrafuzz invokes this process through a descriptor held by its controller.
 // Each detached descendant receives that directory atomically as fd 3, opens a
