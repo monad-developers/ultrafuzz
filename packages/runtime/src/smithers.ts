@@ -1435,7 +1435,12 @@ export function refreshedSmithersControllerSnapshot(input: {
   const executionFiles = replaceBunStartupControlsForControllerRefresh(input.layout, effective.executionFiles);
   replaceStockAgentFiles(source, executionFiles);
   const dependencyMap = refreshedControllerDependencyMap(executionFiles);
-  replaceInternalModuleFiles(executionFiles, dependencyMap, input.original.executionFiles);
+  replaceInternalModuleFiles(
+    executionFiles,
+    dependencyMap,
+    input.original.executionFiles,
+    currentWorkflowModuleRoots(compiled)
+  );
   applyRefreshedSmithersCompatibilityPatches(executionFiles, dependencyMap);
   const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
   const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
@@ -1498,7 +1503,8 @@ function refreshedControllerDependencyMap(
 function replaceInternalModuleFiles(
   files: Array<WorkflowExecutionControlFile & { contents: Buffer }>,
   dependencyMap: WorkflowExecutionDependenciesDocument,
-  rootAuthorityFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
+  rootAuthorityFiles: readonly (WorkflowExecutionControlFile & { contents: Buffer })[],
+  currentModuleRoots: ReadonlyMap<string, string>
 ): void {
   const rootAuthorityByPath = new Map(rootAuthorityFiles.map((file) => [file.snapshotPath, file]));
   const byModule = new Map<string, Array<WorkflowExecutionControlFile & { contents: Buffer }>>();
@@ -1515,16 +1521,23 @@ function replaceInternalModuleFiles(
     if (sealedManifest === undefined) {
       throw new Error(`controller module ${moduleName} is missing its sealed package manifest`);
     }
-    // A committed generation's source paths point into its immutable snapshot.
-    // Resolve the live package only through the launch seal's authenticated
-    // source path while retaining the committed head's larger path set.
+    // A committed generation's source paths point into its immutable snapshot,
+    // while the launch seal's paths may identify an older compatible Ultrafuzz
+    // installation. An explicit refresh must adopt the package closure that is
+    // executing it. Packages absent from that stock closure (for example a
+    // retired or synthetic sealed module) retain their authenticated launch
+    // context.
     const rootAuthorityManifest = rootAuthorityByPath.get(manifestSnapshotPath);
     if (rootAuthorityManifest === undefined) {
       throw new Error(`controller module ${moduleName} is missing its root package manifest authority`);
     }
-    const moduleRoot = workflowPackageRoot(rootAuthorityManifest.sourcePath);
+    const currentModuleRoot = currentModuleRoots.get(moduleName);
+    const moduleRoot = currentModuleRoot ?? workflowPackageRoot(rootAuthorityManifest.sourcePath);
     const packageJsonPath = path.join(moduleRoot, "package.json");
-    if (fs.realpathSync(packageJsonPath) !== fs.realpathSync(rootAuthorityManifest.sourcePath)) {
+    if (
+      currentModuleRoot === undefined &&
+      fs.realpathSync(packageJsonPath) !== fs.realpathSync(rootAuthorityManifest.sourcePath)
+    ) {
       throw new Error(`controller module ${moduleName} has a mismatched sealed package manifest path`);
     }
     const manifest = readWorkflowPackageManifest(packageJsonPath);
@@ -1587,6 +1600,35 @@ function replaceInternalModuleFiles(
       });
     }
   }
+}
+
+function currentWorkflowModuleRoots(compiled: CompiledSmithersWorkflow): ReadonlyMap<string, string> {
+  const queuedModules = Object.values(workflowModuleEntryUrls(compiled)).filter(
+    (value): value is string => value.length > 0
+  );
+  const rootsByName = new Map<string, string>();
+  const visitedRoots = new Set<string>();
+  while (queuedModules.length > 0) {
+    const entryPath = fileURLToPath(queuedModules.shift()!);
+    const moduleRoot = workflowPackageRoot(entryPath);
+    if (visitedRoots.has(moduleRoot)) continue;
+    visitedRoots.add(moduleRoot);
+    const manifest = readWorkflowPackageManifest(path.join(moduleRoot, "package.json"));
+    if (typeof manifest.name !== "string" || !manifest.name.startsWith("@ultrafuzz/")) {
+      throw new Error(`controller refresh module is not an Ultrafuzz runtime package: ${entryPath}`);
+    }
+    const existing = rootsByName.get(manifest.name);
+    if (existing !== undefined && existing !== moduleRoot) {
+      throw new Error(`controller refresh resolved multiple invoking roots for ${manifest.name}`);
+    }
+    rootsByName.set(manifest.name, moduleRoot);
+    if (!isObjectRecord(manifest.dependencies)) continue;
+    for (const dependency of Object.keys(manifest.dependencies).filter((name) => name.startsWith("@ultrafuzz/"))) {
+      const dependencyRoot = fs.realpathSync(path.join(moduleRoot, "node_modules", ...dependency.split("/")));
+      queuedModules.push(pathToFileURL(path.join(dependencyRoot, "package.json")).href);
+    }
+  }
+  return rootsByName;
 }
 
 function assertRefreshedModuleAuthority(
