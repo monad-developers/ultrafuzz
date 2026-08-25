@@ -1,6 +1,8 @@
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist as englishWordlist } from "@scure/bip39/wordlists/english.js";
 
+import { scanTextForVendorSecrets } from "./secretlint-scanner.js";
+
 export const SENSITIVE_REDACTION_PLACEHOLDER = "<redacted>";
 /**
  * Tiny exact values are too collision-prone for substring matching: a
@@ -9,21 +11,49 @@ export const SENSITIVE_REDACTION_PLACEHOLDER = "<redacted>";
  */
 export const MIN_EXACT_SECRET_VALUE_LENGTH = 8;
 
-const SECRET_PATTERNS: readonly RegExp[] = [
+/**
+ * Vendor-format credential detection is delegated to secretlint
+ * (@secretlint/core with @secretlint/secretlint-rule-preset-recommend), which
+ * owns GitHub/GitLab/Slack/npm/Hugging Face/OpenAI/Anthropic/Stripe/AWS-secret
+ * tokens, PEM private keys, URL basic-auth credentials, database connection
+ * strings, and more — see scanTextForVendorSecrets.
+ *
+ * The patterns below are documented gap-fillers only: each entry names the
+ * concrete true positive the recommended preset cannot see today. Before
+ * adding a pattern here, check whether a secretlint rule already covers it.
+ */
+const SUPPLEMENTAL_SECRET_PATTERNS: readonly RegExp[] = [
+  // secretlint's privatekey rule requires a 100+ character key body, so a
+  // truncated or elided PEM block ("-----BEGIN PRIVATE KEY----- ... -----END
+  // PRIVATE KEY-----" quoting only part of the key) slips through. The BEGIN/
+  // END markers are a positive identification regardless of body length.
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
+  // secretlint's anthropic rule only matches full-length "sk-ant-api0N-"
+  // keys (90-128 chars ending in "AA"); partially leaked or older Anthropic
+  // keys still carry the unambiguous "sk-ant-" prefix.
   /\bsk-ant-[A-Za-z0-9_-]{6,}\b/gu,
+  // secretlint's openai rule requires the "T3BlbkFJ" project-key marker.
+  // OpenRouter, DeepSeek, and legacy OpenAI keys share the bare "sk-" prefix
+  // without that marker.
   /\bsk-[A-Za-z0-9_-]{6,}\b/gu,
-  /\bgh[opusr]_[A-Za-z0-9_]{12,}\b/gu,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/gu,
-  /\bglpat-[A-Za-z0-9_-]{12,}\b/gu,
-  /\bhf_[A-Za-z0-9]{12,}\b/gu,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gu,
+  // secretlint's AWS access-key-ID scan is opt-in (enableIDScanRule) because
+  // upstream bundles it with an account-ID keyword heuristic — exactly the
+  // speculative class #819 retired — and it builtin-ignores the docs example
+  // key. The ID format itself is positive; match it directly.
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
+  // No Google API key rule in the recommended preset.
   /\bAIza[A-Za-z0-9_-]{20,}\b/gu,
-  /\bnpm_[A-Za-z0-9]{20,}\b/gu,
-  /\b(?:ak|as)-[A-Za-z0-9_-]{16,}\b/gu,
+  // Modal workspace keys; no secretlint rule. The suffix class deliberately
+  // excludes "-": these tokens are opaque and never hyphenated, while
+  // kebab-case English ("classified-as-internal-only-...") always is (#822).
+  /\b(?:ak|as)-[A-Za-z0-9_]{16,}\b/gu,
+  // No Google OAuth access-token rule in the recommended preset.
   /\bya29\.[A-Za-z0-9._-]{20,}\b/gu,
+  // No JWT rule in the recommended preset; a three-part base64url token is a
+  // positive format identification.
   /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
+  // Provider-keyed RPC URLs embed the credential in the path; no secretlint
+  // rule covers Alchemy/Infura project keys.
   /\b(?:https?|wss?):\/\/[^\s"'`]*(?:alchemy\.com\/v2\/|infura\.io\/v3\/)[A-Za-z0-9_-]{16,}\b/giu
 ];
 
@@ -95,8 +125,12 @@ export function isSensitiveSecretValue(value: string, forbiddenSecretValues: rea
   );
 }
 
-export function containsSensitiveSecrets(value: string, forbiddenSecretValues: readonly string[] = []): boolean {
-  return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues) !== value;
+export function containsSensitiveSecrets(
+  value: string,
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
+): boolean {
+  return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues, mode) !== value;
 }
 
 /** Match exact concealed spans without allowing surrounding context to drift. */
@@ -185,31 +219,90 @@ export function hasRedactionPlaceholder(value: string): boolean {
   );
 }
 
+/**
+ * Which detections a scan runs.
+ *
+ * `positive` matches a credential the code can actually name: a configured
+ * value byte-for-byte, a secretlint library finding, a supplemental vendor
+ * format the preset cannot see (see SUPPLEMENTAL_SECRET_PATTERNS), a BIP39
+ * mnemonic, a context-labeled private key, URL credentials, a Bearer token.
+ *
+ * `speculative` infers a secret from shape or from a nearby word: the
+ * high-entropy candidate pass, unlabeled 40-hex, and the key-name assignment
+ * rule. These cannot separate a credential from a long identifier, a commit
+ * hash, or an English sentence about tokens — entropy in particular scores a
+ * versioned contract method above a GitHub token (#819) — so a caller that
+ * FAILS on a hit rather than rewriting the text should leave them off.
+ */
+export type SecretScanMode = "all" | "positive-only";
+
 export function redactSecretsInText(
   value: string,
   placeholder = SENSITIVE_REDACTION_PLACEHOLDER,
-  forbiddenSecretValues: readonly string[] = []
+  forbiddenSecretValues: readonly string[] = [],
+  mode: SecretScanMode = "all"
 ): string {
-  let redacted = redactExactSecretValues(value, placeholder, forbiddenSecretValues)
+  let redacted = redactVendorLibraryFindings(
+    redactExactSecretValues(value, placeholder, forbiddenSecretValues),
+    placeholder
+  )
+    // secretlint's basicauth rule skips allowlisted hosts such as localhost;
+    // credentials embedded in a URL are a positive identification regardless
+    // of host or scheme, so keep redacting all of them.
     .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gu, `$1${placeholder}@`)
-    .replace(/(Bearer\s+)[^\s`'"]+/giu, `$1${placeholder}`)
-    .replace(SENSITIVE_ASSIGNMENT_PATTERN, (assignment, prefix: string) => {
-      const assignedValue = assignment.slice(prefix.length);
-      const quote = assignedValue[0];
-      return quote === '"' || quote === "'" || quote === "`"
-        ? `${prefix}${quote}${placeholder}${quote}`
-        : `${prefix}${placeholder}`;
-    });
-  for (const pattern of SECRET_PATTERNS) {
+    // No Bearer rule exists in the recommended preset. The token must look
+    // like a token: this rule is case-insensitive, so it also matches the
+    // English word "bearer" — OpenZeppelin's AccessControl docs say "the role
+    // bearer (i.e. `account`)" — and it was redacting the following prose,
+    // which fails an artifact gate that cannot rewrite bytes (#820).
+    .replace(/(Bearer\s+)([^\s`'"]+)/giu, (match: string, prefix: string, token: string) =>
+      token.length >= MIN_EXACT_SECRET_VALUE_LENGTH && /^[A-Za-z0-9_\-.=+/]+$/u.test(token)
+        ? `${prefix}${placeholder}`
+        : match
+    );
+  for (const pattern of SUPPLEMENTAL_SECRET_PATTERNS) {
     pattern.lastIndex = 0;
     redacted = redacted.replace(pattern, placeholder);
   }
   redacted = redactContextLabeledPrivateKeys(redacted, placeholder);
   redacted = redactBip39Mnemonics(redacted, placeholder);
+  if (mode !== "all") return redacted;
+  redacted = redacted.replace(SENSITIVE_ASSIGNMENT_PATTERN, (assignment, prefix: string) => {
+    const assignedValue = assignment.slice(prefix.length);
+    const quote = assignedValue[0];
+    return quote === '"' || quote === "'" || quote === "`"
+      ? `${prefix}${quote}${placeholder}${quote}`
+      : `${prefix}${placeholder}`;
+  });
   redacted = redactUnlabeledFortyHexSecrets(redacted, placeholder);
   return redacted.replace(HIGH_ENTROPY_CANDIDATE_PATTERN, (candidate, offset: number) =>
     isHighEntropySecretCandidate(redacted, candidate, offset) ? placeholder : candidate
   );
+}
+
+/**
+ * Replace every secretlint finding with the placeholder. Findings arrive as
+ * match ranges, so overlapping reports collapse into one redacted span and the
+ * surrounding text is preserved exactly.
+ */
+function redactVendorLibraryFindings(value: string, placeholder: string): string {
+  const findings = scanTextForVendorSecrets(value);
+  if (findings.length === 0) return value;
+  const sorted = [...findings].sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const finding of sorted) {
+    const previous = merged.at(-1);
+    if (previous !== undefined && finding.start <= previous.end) {
+      previous.end = Math.max(previous.end, finding.end);
+    } else {
+      merged.push({ start: finding.start, end: finding.end });
+    }
+  }
+  let redacted = value;
+  for (const range of merged.reverse()) {
+    redacted = `${redacted.slice(0, range.start)}${placeholder}${redacted.slice(range.end)}`;
+  }
+  return redacted;
 }
 
 export function redactSecretsInValue(

@@ -46,8 +46,19 @@ export function assertArtifactPublicationsContainNoSecrets(
     // sequences with replacement so printable UTF-8/ASCII secret signatures
     // are still scanned, while exact active credentials remain protected by
     // the byte-level check above.
+    //
+    // "positive-only": this gate FAILS on a hit and deliberately does not
+    // rewrite the bytes, so a false positive destroys a run rather than
+    // over-redacting a log line. The speculative heuristics cannot carry that
+    // weight — Shannon entropy scores a versioned contract method (4.62) above
+    // a GitHub token (4.25), unlabeled 40-hex matches every commit hash, and
+    // the key-name rule fires on the English sentence "For every token:"
+    // (#819). Positively identified credentials — secretlint library findings,
+    // the documented supplemental vendor formats, mnemonics, labeled private
+    // keys, URL and Bearer credentials — are all still detected here, and the
+    // configured values are still matched byte-for-byte above.
     const text = new TextDecoder("utf-8").decode(bytes);
-    if (containsSensitiveSecrets(text)) {
+    if (containsSensitiveSecrets(text, [], "positive-only")) {
       throw new ArtifactSecretGateError(artifactPath, "secret-detected");
     }
   }
