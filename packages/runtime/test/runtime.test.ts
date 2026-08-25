@@ -12621,7 +12621,8 @@ test("startRun ignores target-local Smithers in favor of an operator install", a
 });
 
 test("compatibility patcher rewrites every described workaround", async () => {
-  const { applySmithersCompatibilityPatches, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { applySmithersCompatibilityPatches, inspectSmithersInstallation, SMITHERS_COMPATIBILITY_PATCHES } =
+    await import("../src/smithers.js");
   const project = tempProject();
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
@@ -12708,10 +12709,24 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const current = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(current.split(resumeTransfer.patch.patched).length, 2);
     fs.writeFileSync(resumeTransfer.source, current.replace(resumeTransfer.patch.patched, predecessor), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /detached resume execution snapshot transfer implementation is incompatible/u
+    );
+
+    fs.writeFileSync(
+      resumeTransfer.source,
+      `${resumeTransfer.patch.patched}\n${resumeTransfer.patch.patchable}\n`,
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -18716,6 +18731,32 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(refreshedCliResume);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(resumeTransferPatch.patched), true);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(predecessorResumeTransferPatch), false);
+
+  const mixedCliSource = {
+    ...syntheticPreFix,
+    executionFiles: syntheticPreFix.executionFiles.map((file) => {
+      if (file.snapshotPath !== cliResumeSourcePath) return file;
+      const predecessorContents = file.contents.toString("utf8");
+      assert.equal(predecessorContents.split(predecessorResumeTransferPatch).length, 2);
+      return {
+        ...file,
+        contents: Buffer.from(
+          `${predecessorContents.replace(predecessorResumeTransferPatch, resumeTransferPatch.patched)}\n${resumeTransferPatch.patchable}\n`,
+          "utf8"
+        )
+      };
+    })
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: mixedCliSource,
+        config
+      }),
+    /authenticated controller runner resume_snapshot_transfer implementation is incompatible/u
+  );
 
   const prepared = prepareControllerGeneration(evidence.layout, syntheticPreFix, rebuilt, {
     workflowRunId: evidence.smithersRunId,

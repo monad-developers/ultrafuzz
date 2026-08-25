@@ -2856,16 +2856,7 @@ function patchPosture(
     // An unreadable source must degrade, not throw out of `doctor`.
     return "unknown";
   }
-  if (contents.includes(patched)) {
-    return "applied";
-  }
-  // The pinned release carries the exact shape Ultrafuzz patches, so a source
-  // with neither the patch nor the patchable shape has been modified or
-  // replaced. `applySmithersCompatibilityPatches` throws in that state, so
-  // report it as incompatible rather than assuming an upstream fix.
-  return contents.includes(patchable) || predecessors.some((predecessor) => contents.includes(predecessor))
-    ? "missing"
-    : "incompatible";
+  return classifyRequiredSmithersPatch(contents, patchable, patched, predecessors).posture;
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {
@@ -4514,11 +4505,34 @@ function applyRequiredSmithersPatch(
   label: string,
   predecessors: readonly string[] = []
 ): string {
+  const state = classifyRequiredSmithersPatch(contents, source, patched, predecessors);
+  if (state.posture === "applied") return contents;
+  if (state.posture === "incompatible") {
+    throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+  }
+  return contents.replace(state.replacement, patched);
+}
+
+type RequiredSmithersPatchState =
+  | { readonly posture: "applied" }
+  | { readonly posture: "missing"; readonly replacement: string }
+  | { readonly posture: "incompatible" };
+
+function classifyRequiredSmithersPatch(
+  contents: string,
+  source: string,
+  patched: string,
+  predecessors: readonly string[]
+): RequiredSmithersPatchState {
   if (contents.includes(patched)) {
-    if (contents.split(patched).length !== 2 || predecessors.some((predecessor) => contents.includes(predecessor))) {
-      throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+    if (
+      contents.split(patched).length !== 2 ||
+      predecessors.some((predecessor) => contents.includes(predecessor)) ||
+      contents.replace(patched, "").includes(source)
+    ) {
+      return { posture: "incompatible" };
     }
-    return contents;
+    return { posture: "applied" };
   }
   const matchingPredecessors = predecessors.filter((predecessor) => contents.includes(predecessor));
   if (matchingPredecessors.length > 0) {
@@ -4528,14 +4542,13 @@ function applyRequiredSmithersPatch(
       contents.split(predecessor).length !== 2 ||
       contents.replace(predecessor, "").includes(source)
     ) {
-      throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+      return { posture: "incompatible" };
     }
-    return contents.replace(predecessor, patched);
+    return { posture: "missing", replacement: predecessor };
   }
-  if (contents.split(source).length !== 2) {
-    throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
-  }
-  return contents.replace(source, patched);
+  return contents.split(source).length === 2
+    ? { posture: "missing", replacement: source }
+    : { posture: "incompatible" };
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {
