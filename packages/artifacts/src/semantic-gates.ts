@@ -1229,6 +1229,15 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
 
     for (const field of Object.keys(finding)) {
       if (expectedDisposition === "promoted" && (field === "id" || field === "title")) continue;
+      // Bounded classification mode instructs the report to enrich the dedupe
+      // lifecycle record in place and to choose the row's classification, so a
+      // dedupe row that itself carries `lifecycle` or `triage_classification`
+      // can never byte-equal its enriched report row — every compliant report
+      // failed this loop (#911). Both fields already have dedicated
+      // enrichment-aware validation above: the lifecycle record is compared
+      // against the authenticated ledger with the exact owned-field set, and
+      // the row classification must equal the enriched lifecycle record's.
+      if (field === "lifecycle" || field === "triage_classification") continue;
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)

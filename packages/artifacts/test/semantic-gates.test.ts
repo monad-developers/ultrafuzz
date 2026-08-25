@@ -3824,6 +3824,56 @@ test("bounded final reports close over every authenticated deduped finding", () 
     context
   });
   assert.equal(droppedOmission.status, "failed", "a dropped false positive still requires one report row");
+
+  // A dedupe stage may itself emit rows that already carry a lifecycle record
+  // and a preliminary classification. Bounded classification mode then
+  // enriches both in the report row, so the generic preservation loop must not
+  // demand byte-equality for exactly those two fields — that contradiction
+  // failed every compliant bounded report (#911). The enriched values remain
+  // validated by their dedicated checks: owned-field lifecycle preservation
+  // against the authenticated ledger, and row-vs-lifecycle classification
+  // equality.
+  const embeddedFinding = {
+    ...finding,
+    triage_classification: "undetermined",
+    lifecycle: structuredClone(lifecycle)
+  };
+  const embeddedContext = {
+    artifactSet: {
+      severityClassifiedFindings: null,
+      dedupedFindings: [embeddedFinding],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const enrichedRow = {
+    ...embeddedFinding,
+    triage_classification: "false-positive",
+    lifecycle: {
+      ...lifecycle,
+      triage_classification: "false-positive",
+      triage_reason: "The source-backed precondition cannot occur.",
+      demotion_reason: "The candidate is a false positive.",
+      final_disposition: "dropped"
+    }
+  };
+  assert.equal(
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [enrichedRow] },
+      context: embeddedContext
+    }).status,
+    "passed"
+  );
+  const tamperedProse = structuredClone(enrichedRow);
+  tamperedProse.summary = "Rewritten summary.";
+  const tampered = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [tamperedProse] },
+    context: embeddedContext
+  });
+  assert.equal(tampered.status, "failed");
+  assert.ok(
+    tampered.status === "failed" &&
+      tampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
+  );
 });
 
 test("differential reconciliation diagnostics expose exact expected machine-derived values", () => {
