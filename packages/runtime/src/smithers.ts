@@ -213,7 +213,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn(op
       env: process.env,
       detached: true,
     });`;
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescriptorValue =
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH = `    const snapshotDescriptorValue =
       process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR?.trim();
     const snapshotSourceRoot = process.env.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT?.trim();
     const snapshotProcessRoot = process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT?.trim();
@@ -273,7 +273,7 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       }
       return value;
     };
-    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
+    const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
       cwd,
       stdio:
         snapshotDescriptor === undefined
@@ -291,6 +291,10 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `    const snapshotDescripto
       },
       detached: true,
     });`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH.replace(
+  '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
+  '"--no-addons", "--preserve-symlinks-main"'
+);
 const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE =
   'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";';
 const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH =
@@ -780,6 +784,8 @@ export interface SmithersCompatibilityPatch {
   readonly patchable: string;
   /** Replacement text; its presence means the patch is already applied. */
   readonly patched: string;
+  /** Exact earlier replacements that can be upgraded to `patched`. */
+  readonly predecessors?: readonly string[];
   /**
    * Text that must be ABSENT from the pinned source for the workaround to still
    * be warranted. An anchor alone is a weak signal: it can be one generic line
@@ -825,6 +831,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/resume-detached.js",
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
+    predecessors: [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
   {
@@ -1572,7 +1579,8 @@ function applyRefreshedSmithersCompatibilityPatches(
         contents,
         patch.patchable,
         patch.patched,
-        `authenticated controller runner ${patch.id}`
+        `authenticated controller runner ${patch.id}`,
+        patch.predecessors
       ),
       "utf8"
     );
@@ -2798,7 +2806,7 @@ function inspectSmithersCompatibilityPatches(
     const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
     if (candidateRoots.length === 1) {
       const source = path.join(candidateRoots[0]!, ...patch.sourceRelativePath.split("/"));
-      postures[patch.id] = patchPosture(source, patch.patched, patch.patchable);
+      postures[patch.id] = patchPosture(source, patch.patched, patch.patchable, patch.predecessors);
       continue;
     }
     // Two roots make the next run hard-fail in `applySmithersCompatibilityPatches`,
@@ -2832,7 +2840,12 @@ function smithersDependencyRootCandidates(nodeModules: string, packageName: stri
   );
 }
 
-function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
+function patchPosture(
+  sourcePath: string,
+  patched: string,
+  patchable: string,
+  predecessors: readonly string[] = []
+): SmithersPatchPosture {
   if (!fs.existsSync(sourcePath)) {
     return "unknown";
   }
@@ -2850,7 +2863,9 @@ function patchPosture(sourcePath: string, patched: string, patchable: string): S
   // with neither the patch nor the patchable shape has been modified or
   // replaced. `applySmithersCompatibilityPatches` throws in that state, so
   // report it as incompatible rather than assuming an upstream fix.
-  return contents.includes(patchable) ? "missing" : "incompatible";
+  return contents.includes(patchable) || predecessors.some((predecessor) => contents.includes(predecessor))
+    ? "missing"
+    : "incompatible";
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {
@@ -4398,7 +4413,8 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       resumeDetachedContents,
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
-      "detached resume execution snapshot transfer"
+      "detached resume execution snapshot transfer",
+      [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH]
     )
   );
 
@@ -4491,8 +4507,31 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   writeFileDurable(engineSource, engineContents);
 }
 
-function applyRequiredSmithersPatch(contents: string, source: string, patched: string, label: string): string {
-  if (contents.includes(patched)) return contents;
+function applyRequiredSmithersPatch(
+  contents: string,
+  source: string,
+  patched: string,
+  label: string,
+  predecessors: readonly string[] = []
+): string {
+  if (contents.includes(patched)) {
+    if (contents.split(patched).length !== 2 || predecessors.some((predecessor) => contents.includes(predecessor))) {
+      throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+    }
+    return contents;
+  }
+  const matchingPredecessors = predecessors.filter((predecessor) => contents.includes(predecessor));
+  if (matchingPredecessors.length > 0) {
+    const predecessor = matchingPredecessors[0]!;
+    if (
+      matchingPredecessors.length !== 1 ||
+      contents.split(predecessor).length !== 2 ||
+      contents.replace(predecessor, "").includes(source)
+    ) {
+      throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
+    }
+    return contents.replace(predecessor, patched);
+  }
   if (contents.split(source).length !== 2) {
     throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
   }

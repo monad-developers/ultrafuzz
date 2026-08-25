@@ -12700,6 +12700,24 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
   }
   {
+    const resumeTransfer = sources.find(({ patch }) => patch.id === "resume_snapshot_transfer");
+    assert.ok(resumeTransfer);
+    const [predecessor] = resumeTransfer.patch.predecessors ?? [];
+    assert.ok(predecessor);
+    assert.notEqual(predecessor, resumeTransfer.patch.patched);
+    const current = fs.readFileSync(resumeTransfer.source, "utf8");
+    assert.equal(current.split(resumeTransfer.patch.patched).length, 2);
+    fs.writeFileSync(resumeTransfer.source, current.replace(resumeTransfer.patch.patched, predecessor), "utf8");
+    applySmithersCompatibilityPatches(project);
+    assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
+
+    fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /detached resume execution snapshot transfer implementation is incompatible/u
+    );
+  }
+  {
     const delegation = sources.find(({ patch }) => patch.id === "local_delegation");
     assert.ok(delegation);
     const target = path.join(project, "hostile-target"),
@@ -18566,11 +18584,23 @@ test("controller refresh authenticates newly required sealed runner patches and 
   const enginePatches = SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/engine"
   );
+  const cliPatches = SMITHERS_COMPATIBILITY_PATCHES.filter((candidate) => candidate.packageName === "@smthrs/cli");
+  const resumeTransferPatch = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (candidate) => candidate.id === "resume_snapshot_transfer"
+  );
+  assert.ok(resumeTransferPatch);
+  const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
+  assert.ok(predecessorResumeTransferPatch);
+  assert.equal(resumeTransferPatch.predecessors?.length, 1);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
   assert.ok(newlyRequired);
-  const sequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
-  const packageId = `package:${sequence}`;
-  const packageSnapshotPath = `dependencies/packages/${sequence}`;
+  const engineSequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
+  const enginePackageId = `package:${engineSequence}`;
+  const enginePackageSnapshotPath = `dependencies/packages/${engineSequence}`;
+  const cliSequence = String(dependencyMap.packages.length + 2).padStart(6, "0");
+  const cliPackageId = `package:${cliSequence}`;
+  const cliPackageSnapshotPath = `dependencies/packages/${cliSequence}`;
+  const cliResumeSourcePath = `${cliPackageSnapshotPath}/${resumeTransferPatch.sourceRelativePath}`;
   const rootIssuer = dependencyMap.issuers.find((entry) => entry.id === "root");
   assert.ok(rootIssuer);
   const refreshedDependencyMap = {
@@ -18578,10 +18608,16 @@ test("controller refresh authenticates newly required sealed runner patches and 
     packages: [
       ...dependencyMap.packages,
       {
-        id: packageId,
+        id: enginePackageId,
         name: "@smthrs/engine",
         version: SMITHERS_VERSION,
-        snapshot_path: packageSnapshotPath
+        snapshot_path: enginePackageSnapshotPath
+      },
+      {
+        id: cliPackageId,
+        name: "@smthrs/cli",
+        version: SMITHERS_VERSION,
+        snapshot_path: cliPackageSnapshotPath
       }
     ],
     issuers: [
@@ -18591,16 +18627,21 @@ test("controller refresh authenticates newly required sealed runner patches and 
               ...entry,
               dependencies: Object.fromEntries(
                 (
-                  [...Object.entries(entry.dependencies), ["@smthrs/engine", packageId]] as Array<[string, string]>
+                  [
+                    ...Object.entries(entry.dependencies),
+                    ["@smthrs/engine", enginePackageId],
+                    ["@smthrs/cli", cliPackageId]
+                  ] as Array<[string, string]>
                 ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
               )
             }
           : entry
       ),
-      { id: packageId, snapshot_path: packageSnapshotPath, dependencies: {} }
+      { id: enginePackageId, snapshot_path: enginePackageSnapshotPath, dependencies: {} },
+      { id: cliPackageId, snapshot_path: cliPackageSnapshotPath, dependencies: {} }
     ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
   };
-  const engineSourcePath = `${packageSnapshotPath}/${newlyRequired.sourceRelativePath}`;
+  const engineSourcePath = `${enginePackageSnapshotPath}/${newlyRequired.sourceRelativePath}`;
   const engineSources = new Map<string, string>();
   for (const sourceRelativePath of new Set(enginePatches.map((candidate) => candidate.sourceRelativePath))) {
     engineSources.set(
@@ -18614,23 +18655,46 @@ test("controller refresh authenticates newly required sealed runner patches and 
   const preFixEngineSource = engineSources.get(newlyRequired.sourceRelativePath)!;
   assert.equal(preFixEngineSource.includes(newlyRequired.patchable), true);
   assert.equal(preFixEngineSource.includes(newlyRequired.patched), false);
+  const cliSources = new Map<string, string>();
+  for (const sourceRelativePath of new Set(cliPatches.map((candidate) => candidate.sourceRelativePath))) {
+    cliSources.set(
+      sourceRelativePath,
+      cliPatches
+        .filter((candidate) => candidate.sourceRelativePath === sourceRelativePath)
+        .map((candidate) =>
+          candidate.id === resumeTransferPatch.id ? predecessorResumeTransferPatch : candidate.patched
+        )
+        .join("\n")
+    );
+  }
   const syntheticExecutionFiles = [
-    ...evidence.verifiedControl.executionFiles.map((file) =>
-      file.snapshotPath === dependencyManifest.snapshotPath
-        ? {
-            ...file,
-            contents: Buffer.from(`${JSON.stringify(refreshedDependencyMap, null, 2)}\n`, "utf8")
-          }
-        : file
-    ),
+    ...evidence.verifiedControl.executionFiles.map((file) => {
+      if (file.snapshotPath === dependencyManifest.snapshotPath) {
+        return {
+          ...file,
+          contents: Buffer.from(`${JSON.stringify(refreshedDependencyMap, null, 2)}\n`, "utf8")
+        };
+      }
+      return file;
+    }),
     {
       sourcePath: path.join(project, ".synthetic-runner", "package.json"),
-      snapshotPath: `${packageSnapshotPath}/package.json`,
+      snapshotPath: `${enginePackageSnapshotPath}/package.json`,
       contents: Buffer.from(`${JSON.stringify({ name: "@smthrs/engine", version: SMITHERS_VERSION })}\n`, "utf8")
     },
     ...[...engineSources].map(([sourceRelativePath, contents]) => ({
       sourcePath: path.join(project, ".synthetic-runner", ...sourceRelativePath.split("/")),
-      snapshotPath: `${packageSnapshotPath}/${sourceRelativePath}`,
+      snapshotPath: `${enginePackageSnapshotPath}/${sourceRelativePath}`,
+      contents: Buffer.from(contents, "utf8")
+    })),
+    {
+      sourcePath: path.join(project, ".synthetic-cli", "package.json"),
+      snapshotPath: `${cliPackageSnapshotPath}/package.json`,
+      contents: Buffer.from(`${JSON.stringify({ name: "@smthrs/cli", version: SMITHERS_VERSION })}\n`, "utf8")
+    },
+    ...[...cliSources].map(([sourceRelativePath, contents]) => ({
+      sourcePath: path.join(project, ".synthetic-cli", ...sourceRelativePath.split("/")),
+      snapshotPath: `${cliPackageSnapshotPath}/${sourceRelativePath}`,
       contents: Buffer.from(contents, "utf8")
     }))
   ].sort((left, right) =>
@@ -18648,6 +18712,10 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(refreshedEngine);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patched), true);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patchable), false);
+  const refreshedCliResume = rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === cliResumeSourcePath);
+  assert.ok(refreshedCliResume);
+  assert.equal(refreshedCliResume.contents.toString("utf8").includes(resumeTransferPatch.patched), true);
+  assert.equal(refreshedCliResume.contents.toString("utf8").includes(predecessorResumeTransferPatch), false);
 
   const prepared = prepareControllerGeneration(evidence.layout, syntheticPreFix, rebuilt, {
     workflowRunId: evidence.smithersRunId,
