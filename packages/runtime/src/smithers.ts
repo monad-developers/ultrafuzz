@@ -64,7 +64,12 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
-import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
+import {
+  assertControllerSourceDigest,
+  inspectControllerSource,
+  loadPackagedControllerSource,
+  type PackagedControllerSource
+} from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
@@ -1312,7 +1317,7 @@ export function refreshedSmithersControllerSnapshot(input: {
     })
     .map((task) => task.attemptId)
     .sort();
-  const source = inspectControllerSource(projectRoot);
+  const source = loadPackagedControllerSource();
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.layout.runId,
@@ -1341,7 +1346,7 @@ export function refreshedSmithersControllerSnapshot(input: {
   };
 
   const executionFiles = replaceBunStartupControlsForControllerRefresh(input.layout, effective.executionFiles);
-  replaceStockAgentFiles(projectRoot, executionFiles);
+  replaceStockAgentFiles(source, executionFiles);
   const dependencyMap = refreshedControllerDependencyMap(executionFiles);
   replaceInternalModuleFiles(executionFiles, dependencyMap, input.original.executionFiles);
   applyRefreshedSmithersCompatibilityPatches(executionFiles, dependencyMap);
@@ -1371,22 +1376,19 @@ function executionFileSourcePath(snapshot: VerifiedWorkflowControlSnapshot, snap
 }
 
 function replaceStockAgentFiles(
-  projectRoot: string,
+  source: PackagedControllerSource,
   files: Array<WorkflowExecutionControlFile & { contents: Buffer }>
 ): void {
   const prefix = ".smithers/agents/";
   const sealed = files.filter((file) => file.snapshotPath.startsWith(prefix));
-  const agentsRoot = path.join(projectRoot, ".smithers", "agents");
-  const current = walkExecutionFiles(agentsRoot).map((sourcePath) => ({
-    sourcePath,
-    snapshotPath: `${prefix}${relativeExecutionPath(agentsRoot, sourcePath)}`
+  const current = source.files.map((file) => ({
+    snapshotPath: `${prefix}${file.name}`,
+    contents: file.contents
   }));
   assertSameControllerPathSet(sealed, current, "stock controller adapters");
-  const byPath = new Map(current.map((file) => [file.snapshotPath, file.sourcePath]));
+  const byPath = new Map(current.map((file) => [file.snapshotPath, file.contents]));
   for (const file of sealed) {
-    const sourcePath = byPath.get(file.snapshotPath)!;
-    file.sourcePath = sourcePath;
-    file.contents = readRegularFileSnapshot(sourcePath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    file.contents = Buffer.from(byPath.get(file.snapshotPath)!);
   }
 }
 

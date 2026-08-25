@@ -15110,7 +15110,7 @@ test("syncRun marks task-output validation failures for terminal disposition", a
 });
 
 test(
-  "authenticated controller refresh re-finalizes only the original finished verifier output and is idempotent",
+  "authenticated controller refresh and failed retry re-finalize only the original finished verifier output",
   { concurrency: false },
   async () => {
     const fixture = await controllerFalseFailureFixture("success");
@@ -15120,6 +15120,7 @@ test(
       runId: fixture.runId,
       refreshController: true,
       refinalizeControllerFailures: true,
+      retryFailed: true,
       env: fixture.env
     });
 
@@ -15147,6 +15148,9 @@ test(
     assert.equal(result[0]?.status, "succeeded");
     assert.equal(result[0]?.payload.operation_id, intent[0]?.payload.operation_id);
     assert.equal(result[0]?.payload.marker_sha256, intent[0]?.payload.marker_sha256);
+    const lifecycleInvocation = durable.find((event) => event.event_type === "workflow-lifecycle-invoking");
+    assert.equal(lifecycleInvocation?.payload.retry_failed, true);
+    assert.ok(durable.indexOf(result[0]!) < durable.indexOf(lifecycleInvocation!));
 
     const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
     assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
@@ -18656,6 +18660,40 @@ test("controller refresh preserves run authority and retains both immutable gene
       [before.controlGeneration, after.controllerGeneration].sort()
     );
   }
+});
+
+test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-packaged-adapters";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+  if (!before.ok) return;
+
+  const projectPiPath = path.join(project, ".smithers", "agents", "pi.ts");
+  const unexpectedProjectAdapter = path.join(project, ".smithers", "agents", "unexpected.ts");
+  const untrustedProjectBytes = "export const projectOwnedAdapter = true;\n";
+  fs.writeFileSync(projectPiPath, untrustedProjectBytes, "utf8");
+  fs.writeFileSync(unexpectedProjectAdapter, "export const unexpected = true;\n", "utf8");
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
+  if (!after.ok) return;
+  assert.notEqual(after.controllerGeneration, before.controlGeneration);
+  assert.notEqual(
+    fs.readFileSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "pi.ts"), "utf8"),
+    untrustedProjectBytes
+  );
+  assert.equal(fs.existsSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "unexpected.ts")), false);
+  assert.equal(fs.readFileSync(projectPiPath, "utf8"), untrustedProjectBytes);
+  assert.equal(fs.existsSync(unexpectedProjectAdapter), true);
 });
 
 test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
