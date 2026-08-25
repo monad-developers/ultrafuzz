@@ -1516,19 +1516,16 @@ function assertTaskMatchesPlannedNode(
     throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} does not match its planned model fanout`);
   }
 
-  const expectedDependencies = node.depends_on.flatMap((dependencyId) => {
+  const expectedDependencyNodes = node.depends_on.flatMap((dependencyId) => {
     const dependency = graphNodes.get(dependencyId);
     if (dependency === undefined)
       throw new Error(`planned-graph dependency ${JSON.stringify(dependencyId)} is missing`);
-    if (
-      dependency.dynamic !== null &&
-      dependency.dynamic !== undefined &&
-      node.dynamic_dependencies?.includes(dependencyId)
-    ) {
+    if (dependency.dynamic?.status === "pending" && node.dynamic_dependencies?.includes(dependencyId)) {
       return [];
     }
-    return plannedAttemptIds(dependency);
+    return [dependency];
   });
+  const expectedDependencies = expectedDependencyNodes.flatMap(plannedAttemptIds);
   assertSameStringSet(
     task.dependencies.filter((dependency) => dependency !== "meta-start"),
     expectedDependencies,
@@ -1536,18 +1533,10 @@ function assertTaskMatchesPlannedNode(
   );
   assertSameStringSet(
     task.metadata.dependencies.concreteNodeIds.filter((dependency) => dependency !== "__start__"),
-    node.depends_on,
+    expectedDependencyNodes.map((dependency) => dependency.id),
     `Smithers task ${JSON.stringify(task.attemptId)} planned dependency nodes`
   );
-  const expectedWorkflowDependencies = node.depends_on.flatMap((dependencyId) => {
-    const dependency = graphNodes.get(dependencyId)!;
-    if (
-      dependency.dynamic !== null &&
-      dependency.dynamic !== undefined &&
-      node.dynamic_dependencies?.includes(dependencyId)
-    ) {
-      return [];
-    }
+  const expectedWorkflowDependencies = expectedDependencyNodes.flatMap((dependency) => {
     return dependency.kind === "agentic" ? plannedAttemptIds(dependency).map((attemptId) => `verify:${attemptId}`) : [];
   });
   assertSameStringSet(

@@ -428,6 +428,100 @@ test("rejects missing graph coverage, extra tasks, and graph dependency drift", 
   );
 });
 
+test("planned-graph joins omit unresolved dynamic dependencies but retain ordinary dependency checks", () => {
+  const pendingGraph = graph();
+  const baseNode = pendingGraph.nodes[0]!;
+  pendingGraph.nodes.push({
+    ...structuredClone(baseNode),
+    id: "fanout",
+    logical_id: "fanout",
+    display_name: "fanout",
+    depends_on: ["producer"],
+    artifact_dir: "artifacts/fanout",
+    dynamic: {
+      from: { node: "producer", path: "$.items" },
+      key: "id",
+      node_id: "dynamic:item:{{ item.id }}",
+      status: "pending",
+      generated_node_ids: []
+    },
+    workflow: undefined
+  });
+  pendingGraph.nodes.push({
+    ...structuredClone(baseNode),
+    id: "join",
+    logical_id: "join",
+    display_name: "join",
+    depends_on: ["fanout"],
+    dynamic_dependencies: ["fanout"],
+    artifact_dir: "artifacts/join",
+    workflow: { node_id: "node:join", task_node_ids: ["node:join"] }
+  });
+  const join = task({
+    attemptId: "join",
+    concreteNodeId: "join",
+    logicalNodeId: "join",
+    dependencies: [],
+    dependencySmithersNodeIds: []
+  });
+  const pendingManifest = manifest([task(), join]);
+
+  assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(pendingManifest, pendingGraph));
+
+  const materializedGraph = structuredClone(pendingGraph);
+  const materializedGroup = materializedGraph.nodes.find((node) => node.id === "fanout")!;
+  materializedGroup.dynamic!.status = "expanded";
+  materializedGroup.dynamic!.generated_node_ids = ["generated"];
+  const materializedJoinNode = materializedGraph.nodes.find((node) => node.id === "join")!;
+  materializedJoinNode.depends_on = ["generated"];
+  materializedGraph.nodes.push({
+    ...structuredClone(baseNode),
+    id: "generated",
+    logical_id: "generated",
+    display_name: "generated",
+    depends_on: [],
+    artifact_dir: "artifacts/generated",
+    workflow: { node_id: "node:generated", task_node_ids: ["node:generated"] }
+  });
+  const generated = task({
+    attemptId: "generated",
+    concreteNodeId: "generated",
+    logicalNodeId: "generated",
+    dependencies: [],
+    dependencySmithersNodeIds: []
+  });
+  const materializedJoin = structuredClone(join);
+  materializedJoin.dependencies = ["generated"];
+  materializedJoin.dependencySmithersNodeIds = ["verify:generated"];
+  materializedJoin.metadata.dependencies = {
+    concreteNodeIds: ["generated"],
+    attemptIds: ["generated"],
+    smithersNodeIds: ["verify:generated"]
+  };
+  const materializedManifest = manifest([task(), generated, materializedJoin]);
+  assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(materializedManifest, materializedGraph));
+
+  const staleExpandedGraph = structuredClone(materializedGraph);
+  staleExpandedGraph.nodes.find((node) => node.id === "join")!.depends_on = ["fanout"];
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(manifest([task(), generated, join]), staleExpandedGraph),
+    /planned dependency attempts/u
+  );
+
+  const ordinaryDriftGraph = structuredClone(pendingGraph);
+  ordinaryDriftGraph.nodes.find((node) => node.id === "join")!.depends_on.push("producer");
+  const ordinaryDriftManifest = structuredClone(pendingManifest);
+  const driftedJoin = ordinaryDriftManifest.tasks.find((entry) => entry.attemptId === "join")!;
+  driftedJoin.dependencies = ["producer"];
+  driftedJoin.dependencySmithersNodeIds = ["verify:producer"];
+  driftedJoin.metadata.dependencies.attemptIds = ["producer"];
+  driftedJoin.metadata.dependencies.smithersNodeIds = ["verify:producer"];
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(ordinaryDriftManifest, ordinaryDriftGraph),
+    /planned dependency nodes/u
+  );
+});
+
 test("planned-graph joins retain reference dependencies without inventing workflow tasks for them", () => {
   const referenceArtifactDir = "/runs/run-1/artifacts/reference-input";
   const referenceDependency = task({
