@@ -76,9 +76,26 @@ export async function renderGeneratedWorkflow(input: {
   allOutputsAvailable?: boolean;
 }): Promise<RenderedTask[]> {
   const source = fs.readFileSync(input.workflowPath, "utf8");
-  const runtimeModule = /const runtimeModule = process\.env\.ULTRAFUZZ_RUNTIME_MODULE \?\? "([^"]+)"/u.exec(source);
+  // #779 rooted the module fallbacks in the workflow's own snapshot: the template now renders
+  // `new URL("<relative>", import.meta.url).href` instead of an absolute string literal, so the
+  // harness reconstructs the same href by resolving that relative path against the workflow file.
+  const runtimeModule =
+    /const runtimeModule =\s*process\.env\.ULTRAFUZZ_RUNTIME_MODULE \?\?\s*new URL\("([^"]+)", import\.meta\.url\)\.href;/u.exec(
+      source
+    );
   if (runtimeModule === null) throw new Error("generated workflow does not resolve a runtime module");
-  const stubs = writeHarnessStubs(runtimeModule[1]!);
+  // Fixture snapshots do not materialize the modules/ tree the fallback points into; the harness
+  // supplies the workspace's real modules through the template's primary path, the environment
+  // overrides, exactly as a controller that forwards its environment does.
+  const harnessRequire = createRequire(import.meta.url);
+  const realRuntimeModuleHref = pathToFileURL(
+    path.resolve(fileURLToPath(import.meta.url), "..", "..", "..", "dist", "index.js")
+  ).href;
+  const realArtifactsModuleHref = pathToFileURL(harnessRequire.resolve("@ultrafuzz/artifacts")).href;
+  const realModalModuleHref = pathToFileURL(
+    path.resolve(fileURLToPath(import.meta.url), "..", "..", "..", "..", "modal", "dist", "index.js")
+  ).href;
+  const stubs = writeHarnessStubs(realRuntimeModuleHref);
 
   const transpiled = ts.transpileModule(source, {
     fileName: input.workflowPath,
@@ -125,10 +142,15 @@ export async function renderGeneratedWorkflow(input: {
   const previousCwd = process.cwd();
   const previousWorker = process.env.ULTRAFUZZ_CLOUD_WORKER;
   const previousRuntime = process.env.ULTRAFUZZ_RUNTIME_MODULE;
+  const previousArtifacts = process.env.ULTRAFUZZ_ARTIFACTS_MODULE;
+  const previousModal = process.env.ULTRAFUZZ_MODAL_MODULE;
   const previousPersistedWorkflow = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
   process.chdir(input.cwd);
   if (input.workflowInput.cloud_worker === true) process.env.ULTRAFUZZ_CLOUD_WORKER = "1";
-  if (input.forbidDynamicMaterialization === true) process.env.ULTRAFUZZ_RUNTIME_MODULE = stubs.runtimeGuard;
+  process.env.ULTRAFUZZ_RUNTIME_MODULE =
+    input.forbidDynamicMaterialization === true ? stubs.runtimeGuard : realRuntimeModuleHref;
+  process.env.ULTRAFUZZ_ARTIFACTS_MODULE = realArtifactsModuleHref;
+  process.env.ULTRAFUZZ_MODAL_MODULE = realModalModuleHref;
   if (isHarnessExecutionSnapshotWorkflow(input.workflowPath)) {
     process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = input.workflowPath;
   }
@@ -155,6 +177,8 @@ export async function renderGeneratedWorkflow(input: {
     process.chdir(previousCwd);
     restoreEnv("ULTRAFUZZ_CLOUD_WORKER", previousWorker);
     restoreEnv("ULTRAFUZZ_RUNTIME_MODULE", previousRuntime);
+    restoreEnv("ULTRAFUZZ_ARTIFACTS_MODULE", previousArtifacts);
+    restoreEnv("ULTRAFUZZ_MODAL_MODULE", previousModal);
     restoreEnv("ULTRAFUZZ_WORKFLOW_PERSISTED_PATH", previousPersistedWorkflow);
     fs.rmSync(harnessPath, { force: true });
   }
