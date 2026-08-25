@@ -1612,6 +1612,14 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     controllerRefreshMetadata.workflow?.control_generation
   );
 
+  const unsafeRefinalization = await cli(
+    project,
+    ["resume", runData.run_id, "--refinalize-controller-failures", "--json"],
+    env
+  );
+  assert.equal(unsafeRefinalization.code, 1);
+  assert.match(unsafeRefinalization.stderr + unsafeRefinalization.stdout, /requires resume --refresh-controller/u);
+
   const fork = await cli(
     project,
     [

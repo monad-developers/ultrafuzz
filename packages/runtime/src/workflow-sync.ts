@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -363,6 +364,378 @@ export interface WorkflowSynchronizationControl {
   allowMissingWorkflowRun?: boolean;
 }
 
+export interface ControllerFailureRefinalizationInput {
+  projectRoot: string;
+  layout: RunLayout;
+  graph: PlannedGraph;
+  tasks: StoredWorkflowTask[];
+  workflowRunId: string;
+  workflowLinkId: string;
+  controlGeneration: string;
+  controllerGeneration: string;
+  env: Record<string, string | undefined>;
+}
+
+export type ControllerFailureRefinalizationResult =
+  { ok: true; refinalized: number; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] };
+
+type ControllerRefinalizationIntentPayload = Extract<
+  AppendEventInput,
+  { eventType: "node-controller-refinalization-intent" }
+>["payload"];
+
+/**
+ * Re-run controller-only finalization without resetting or re-executing the Smithers task.
+ *
+ * This is deliberately separate from ordinary synchronization. Global terminal
+ * immutability remains the default; the only admitted exception is an explicit
+ * operation authenticated by a newly committed controller generation and the
+ * exact verifier result that originally finished in the linked workflow run.
+ */
+export async function refinalizeControllerFailures(
+  input: ControllerFailureRefinalizationInput
+): Promise<ControllerFailureRefinalizationResult> {
+  const reject = (error: unknown, code = "WORKFLOW_CONTROLLER_REFINALIZATION_REJECTED") => ({
+    ok: false as const,
+    diagnostics: [diagnosticFromError(error, "artifact-contracts", code)]
+  });
+  try {
+    const linked = await readLinkedWorkflowEvidence(input.projectRoot, input.layout.runId);
+    if (!linked.ok) {
+      throw new Error(linked.diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+    }
+    if (
+      path.resolve(linked.layout.root) !== path.resolve(input.layout.root) ||
+      linked.smithersRunId !== input.workflowRunId ||
+      linked.workflowLinkId !== input.workflowLinkId ||
+      linked.controlGeneration !== input.controlGeneration ||
+      linked.controllerGeneration !== input.controllerGeneration
+    ) {
+      throw new Error("controller re-finalization authority does not match the current authenticated workflow link");
+    }
+    const authenticatedGraph = assertSealedPlannedGraph(parseStrictJsonBytes(linked.verifiedControl.contents.graph));
+    const authenticatedTaskDocument = parseSmithersTaskManifestBytes(linked.verifiedControl.contents.tasks);
+    const authenticatedTasks = authenticatedTaskDocument.tasks;
+    assertSmithersTaskManifestMatchesPlannedGraph(authenticatedTaskDocument, authenticatedGraph);
+    if (!isDeepStrictEqual(input.graph, authenticatedGraph) || !isDeepStrictEqual(input.tasks, authenticatedTasks)) {
+      throw new Error("controller re-finalization plan does not match the authenticated workflow control");
+    }
+    const inspectionEnvironment = linkedWorkflowExecutionEnvironment(linked, input.env);
+    if (input.controllerGeneration === input.controlGeneration) {
+      throw new Error("controller failure re-finalization requires a newly authenticated controller generation");
+    }
+    const replay = replayEvents(input.layout, Number.MAX_SAFE_INTEGER);
+    if (replay.malformedRecords > 0) {
+      throw new Error("controller re-finalization event history contains malformed records");
+    }
+    const records = replay.records;
+    const refreshEvents = records.filter((record) => {
+      if (record.event_type !== "workflow-controller-generation-recorded") return false;
+      return (
+        record.payload.workflow_run_id === input.workflowRunId &&
+        record.payload.workflow_link_id === input.workflowLinkId &&
+        record.payload.control_generation === input.controlGeneration &&
+        record.payload.controller_generation === input.controllerGeneration
+      );
+    });
+    if (refreshEvents.length !== 1) {
+      throw new Error("current controller generation does not have one exact authenticated refresh record");
+    }
+
+    const eventsSnapshot = await runSmithersInspectionCommand({
+      args: ["events", input.workflowRunId, "--limit", "100000", "--json"],
+      projectRoot: input.projectRoot,
+      env: inspectionEnvironment
+    });
+    if (!eventsSnapshot.ok) {
+      throw new Error(workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED").message);
+    }
+    const workflowEvents = parseWorkflowEvents(eventsSnapshot.stdout, input.workflowRunId);
+    const terminalAttempts = terminalWorkflowAttempts(workflowEvents);
+    const resultsByOperation = new Map<
+      string,
+      Extract<(typeof records)[number], { event_type: "node-controller-refinalization-result" }>
+    >();
+    const intentsByOperation = new Map<
+      string,
+      Extract<(typeof records)[number], { event_type: "node-controller-refinalization-intent" }>
+    >();
+    for (const record of records) {
+      if (record.event_type === "node-controller-refinalization-intent") {
+        if (intentsByOperation.has(record.payload.operation_id)) {
+          throw new Error("controller re-finalization history repeats an operation intent");
+        }
+        intentsByOperation.set(record.payload.operation_id, record);
+      } else if (record.event_type === "node-controller-refinalization-result") {
+        if (resultsByOperation.has(record.payload.operation_id)) {
+          throw new Error("controller re-finalization history repeats a terminal operation result");
+        }
+        resultsByOperation.set(record.payload.operation_id, record);
+      }
+    }
+    for (const operationId of resultsByOperation.keys()) {
+      if (!intentsByOperation.has(operationId)) {
+        throw new Error("controller re-finalization result has no durable operation intent");
+      }
+    }
+    let refinalized = 0;
+    let observedCompletedOperation = false;
+
+    const graphNodes = new Map(authenticatedGraph.nodes.map((node) => [node.id, node]));
+    const tasksByAttempt = new Map(authenticatedTasks.map((task) => [task.attemptId, task]));
+    for (const task of tasksInDependencyOrder(authenticatedTasks)) {
+      const node = graphNodes.get(task.concreteNodeId);
+      if (node === undefined) continue;
+      const previous = readRunState(input.layout).nodes[task.attemptId];
+      const priorAttempt = eligibleControllerFalseFailureAttempt(previous, task, input.workflowRunId);
+      const incompleteIntent = [...intentsByOperation.values()].find(
+        (record) =>
+          record.node_id === task.attemptId &&
+          record.payload.workflow_run_id === input.workflowRunId &&
+          record.payload.workflow_link_id === input.workflowLinkId &&
+          record.payload.control_generation === input.controlGeneration &&
+          record.payload.controller_generation === input.controllerGeneration &&
+          record.payload.verifier_task_id === task.verifierSmithersNodeId &&
+          !resultsByOperation.has(record.payload.operation_id)
+      );
+      const completed = [...resultsByOperation.values()].filter(
+        (record) =>
+          record.node_id === task.attemptId &&
+          record.status === "succeeded" &&
+          record.payload.workflow_run_id === input.workflowRunId &&
+          record.payload.workflow_link_id === input.workflowLinkId &&
+          record.payload.control_generation === input.controlGeneration &&
+          record.payload.controller_generation === input.controllerGeneration
+      );
+      if (completed.length > 1) {
+        throw new Error(`controller re-finalization has ambiguous terminal history for ${task.attemptId}`);
+      }
+      const completedResult = completed[0];
+      const verifierAttempt =
+        priorAttempt ?? incompleteIntent?.payload.verifier_attempt ?? completedResult?.payload.verifier_attempt;
+      if (verifierAttempt === undefined) {
+        continue;
+      }
+      if (priorAttempt === undefined && previous?.status !== "succeeded") {
+        throw new Error(`interrupted controller re-finalization state is invalid for ${task.attemptId}`);
+      }
+
+      const matchingAttempts = terminalAttempts.filter(
+        (attempt) =>
+          attempt.nodeId === task.verifierSmithersNodeId &&
+          attempt.retry === verifierAttempt &&
+          attempt.outcome === "succeeded"
+      );
+      if (matchingAttempts.length !== 1) {
+        throw new Error(`linked workflow does not contain one exact finished verifier attempt for ${task.attemptId}`);
+      }
+      const verifierIteration = matchingAttempts[0]!.iteration;
+      const verifierSnapshot = await runSmithersInspectionCommand({
+        args: [
+          "node",
+          task.verifierSmithersNodeId,
+          "-r",
+          input.workflowRunId,
+          "-i",
+          String(verifierIteration),
+          "--format",
+          "json",
+          "--full-output"
+        ],
+        projectRoot: input.projectRoot,
+        env: inspectionEnvironment
+      });
+      const verifierOutput = parseFinishedVerifierOutput(verifierSnapshot, {
+        workflowRunId: input.workflowRunId,
+        verifierTaskId: task.verifierSmithersNodeId,
+        verifierIteration,
+        verifierAttempt
+      });
+      const publicationAuthority = captureVerifierPublicationAuthority(input.layout, node, task);
+      const markerSha256 = sha256Bytes(publicationAuthority.markerBytes);
+      if (
+        verifierOutput.verificationMarkerSha256 !== markerSha256 ||
+        verifierOutput.verificationMarkerSizeBytes !== publicationAuthority.markerBytes.byteLength
+      ) {
+        throw new Error(
+          `verifier-returned marker digest or size does not match durable marker bytes for ${task.attemptId}`
+        );
+      }
+      if (!isDeepStrictEqual(verifierOutput.artifacts, publicationAuthority.marker.artifacts)) {
+        throw new Error(`verifier-returned artifact bindings do not match the durable marker for ${task.attemptId}`);
+      }
+      const primary = publicationAuthority.marker.artifacts.find((artifact) => artifact.primary)?.path;
+      if (primary === undefined || verifierOutput.primaryArtifact !== primary) {
+        throw new Error(`verifier-returned primary artifact does not match the durable marker for ${task.attemptId}`);
+      }
+      const authorityWithoutOperation = {
+        workflow_run_id: input.workflowRunId,
+        workflow_link_id: input.workflowLinkId,
+        control_generation: input.controlGeneration,
+        controller_generation: input.controllerGeneration,
+        verifier_task_id: task.verifierSmithersNodeId,
+        verifier_iteration: verifierIteration,
+        verifier_attempt: verifierAttempt,
+        marker_sha256: markerSha256,
+        marker_size_bytes: publicationAuthority.markerBytes.byteLength,
+        prior_status: "failed" as const
+      };
+      const operationId = crypto
+        .createHash("sha256")
+        .update(
+          JSON.stringify([
+            "ultrafuzz.controller-refinalization.v1",
+            input.layout.runId,
+            task.attemptId,
+            authorityWithoutOperation.workflow_run_id,
+            authorityWithoutOperation.workflow_link_id,
+            authorityWithoutOperation.control_generation,
+            authorityWithoutOperation.controller_generation,
+            authorityWithoutOperation.verifier_task_id,
+            authorityWithoutOperation.verifier_iteration,
+            authorityWithoutOperation.verifier_attempt,
+            authorityWithoutOperation.marker_sha256,
+            authorityWithoutOperation.marker_size_bytes,
+            authorityWithoutOperation.prior_status
+          ]),
+          "utf8"
+        )
+        .digest("hex");
+      const authority: ControllerRefinalizationIntentPayload = {
+        operation_id: operationId,
+        ...authorityWithoutOperation
+      };
+      const existingIntent = intentsByOperation.get(operationId);
+      if (existingIntent !== undefined && !isDeepStrictEqual(existingIntent.payload, authority)) {
+        throw new Error(`controller re-finalization intent was replayed with changed authority for ${task.attemptId}`);
+      }
+      const existingResult = resultsByOperation.get(operationId);
+      if (existingResult !== undefined) {
+        const outputContracts = recordField(previous?.provenance, "output_contracts");
+        const workflow = recordField(previous?.provenance, "workflow");
+        if (
+          existingResult.status === "succeeded" &&
+          existingResult.payload.result === "succeeded" &&
+          existingResult.payload.failure_code === undefined &&
+          existingResult.payload.artifact_manifest_sha256 !== undefined &&
+          existingIntent?.node_id === task.attemptId &&
+          controllerRefinalizationResultMatchesIntent(existingResult.payload, existingIntent.payload) &&
+          previous?.status === "succeeded" &&
+          outputContracts?.artifact_manifest_sha256 === existingResult.payload.artifact_manifest_sha256 &&
+          workflow?.run_id === input.workflowRunId &&
+          workflow.task_id === task.verifierSmithersNodeId &&
+          workflow.agent_task_id === task.smithersNodeId &&
+          workflow.verifier_task_id === task.verifierSmithersNodeId &&
+          workflow.attempt === verifierAttempt &&
+          controllerRefinalizationResultMatchesIntent(existingResult.payload, authority)
+        ) {
+          loadFinalizedNodeOutputSnapshot({
+            runRoot: input.layout.root,
+            logicalNodeId: task.logicalNodeId,
+            attemptId: task.attemptId
+          });
+          observedCompletedOperation = true;
+          continue;
+        }
+        throw new Error(`controller re-finalization operation is already terminal for ${task.attemptId}`);
+      }
+      if (existingIntent === undefined) {
+        appendEvent(input.layout, {
+          eventType: "node-controller-refinalization-intent",
+          nodeId: task.attemptId,
+          status: "running",
+          payload: authority
+        });
+      }
+
+      const finalization = await finalizeTerminalTask({
+        layout: input.layout,
+        node,
+        task,
+        workflowRunId: input.workflowRunId,
+        evidence: {
+          status: "succeeded",
+          workflowState: "finished",
+          attempt: verifierAttempt,
+          finishedAt: previous?.finished_at
+        },
+        evidenceSource: "verifier",
+        tasksByAttempt,
+        control: {}
+      });
+      const manifestSha256 = finalization.provenance.output_contracts?.artifact_manifest_sha256;
+      if (finalization.status !== "succeeded" || manifestSha256 === undefined) {
+        appendEvent(input.layout, {
+          eventType: "node-controller-refinalization-result",
+          nodeId: task.attemptId,
+          status: "failed",
+          payload: {
+            ...authority,
+            result: "rejected",
+            failure_code: "CONTROLLER_REFINALIZATION_REJECTED"
+          }
+        });
+        return {
+          ok: false,
+          diagnostics: [
+            ...finalization.diagnostics,
+            {
+              code: "WORKFLOW_CONTROLLER_REFINALIZATION_REJECTED",
+              message: `current controller gates rejected the authenticated verifier output for ${task.attemptId}`,
+              severity: "error",
+              source: "artifact-contracts"
+            }
+          ]
+        };
+      }
+      assertVerifierPublicationAuthorityCurrent(input.layout, publicationAuthority);
+      const current = readRunState(input.layout).nodes[task.attemptId];
+      if (current === undefined) throw new Error(`durable node state disappeared for ${task.attemptId}`);
+      const patch = {
+        status: "succeeded" as const,
+        retry_count: current.retry_count,
+        timed_out: false,
+        ...(current.started_at === undefined ? {} : { started_at: current.started_at }),
+        ...(current.finished_at === undefined ? {} : { finished_at: current.finished_at }),
+        last_error: undefined,
+        provenance: {
+          ...withoutSupersededFailure(withoutTerminalDisposition(current.provenance), "succeeded", finalization),
+          workflow: {
+            run_id: input.workflowRunId,
+            task_id: task.verifierSmithersNodeId,
+            agent_task_id: task.smithersNodeId,
+            verifier_task_id: task.verifierSmithersNodeId,
+            state: "finished" as const,
+            attempt: verifierAttempt
+          },
+          ...finalization.provenance
+        }
+      };
+      if (nodePatchChanges(current, patch)) {
+        updateNodeState(input.layout, task.attemptId, patch);
+      }
+      assertVerifierPublicationAuthorityCurrent(input.layout, publicationAuthority);
+      appendEvent(input.layout, {
+        eventType: "node-controller-refinalization-result",
+        nodeId: task.attemptId,
+        status: "succeeded",
+        payload: {
+          ...authority,
+          result: "succeeded",
+          artifact_manifest_sha256: manifestSha256
+        }
+      });
+      refinalized += 1;
+    }
+    if (refinalized === 0 && !observedCompletedOperation) {
+      throw new Error("no eligible immutable controller false failures were found");
+    }
+    return { ok: true, refinalized, diagnostics: [] };
+  } catch (error) {
+    return reject(error);
+  }
+}
+
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "succeeded",
   "failed",
@@ -401,6 +774,192 @@ interface VerifierPublicationAuthoritySnapshot {
   artifactDir: string;
   publications: ReadonlyMap<string, VerifierPublicationSnapshot>;
   admittedDependencyAttemptIds: readonly string[];
+}
+
+function eligibleControllerFalseFailureAttempt(
+  previous: NodeState | undefined,
+  task: StoredWorkflowTask,
+  workflowRunId: string
+): number | undefined {
+  if (previous?.status !== "failed") return undefined;
+  const provenance = executionNodeProvenance(previous.provenance);
+  const disposition = recordField(provenance, "terminal_disposition");
+  if (
+    disposition === undefined ||
+    assertTerminalDispositionDocument(disposition).kind !== "task-output-validation-failure"
+  ) {
+    return undefined;
+  }
+  const contracts = recordField(provenance, "output_contracts");
+  const failure = recordField(provenance, "failure");
+  const workflow = recordField(provenance, "workflow");
+  const attempt = numberField(workflow, "attempt");
+  if (
+    contracts?.ok !== false ||
+    failure?.category !== "artifact-contract" ||
+    failure.causal_task_id !== task.verifierSmithersNodeId ||
+    failure.causal_failure_category !== "artifact-contract" ||
+    !Array.isArray(failure.dependent_task_ids) ||
+    failure.dependent_task_ids.length !== 0 ||
+    workflow?.run_id !== workflowRunId ||
+    workflow.task_id !== task.verifierSmithersNodeId ||
+    workflow.agent_task_id !== task.smithersNodeId ||
+    workflow.verifier_task_id !== task.verifierSmithersNodeId ||
+    (workflow.state !== undefined && workflow.state !== "finished") ||
+    attempt === undefined ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1
+  ) {
+    throw new Error(`immutable controller failure authority is incomplete for ${task.attemptId}`);
+  }
+  return attempt;
+}
+
+function controllerRefinalizationResultMatchesIntent(
+  result: Extract<AppendEventInput, { eventType: "node-controller-refinalization-result" }>["payload"],
+  intent: ControllerRefinalizationIntentPayload
+): boolean {
+  return (
+    result.operation_id === intent.operation_id &&
+    result.workflow_run_id === intent.workflow_run_id &&
+    result.workflow_link_id === intent.workflow_link_id &&
+    result.control_generation === intent.control_generation &&
+    result.controller_generation === intent.controller_generation &&
+    result.verifier_task_id === intent.verifier_task_id &&
+    result.verifier_iteration === intent.verifier_iteration &&
+    result.verifier_attempt === intent.verifier_attempt &&
+    result.marker_sha256 === intent.marker_sha256 &&
+    result.marker_size_bytes === intent.marker_size_bytes &&
+    result.prior_status === intent.prior_status
+  );
+}
+
+function parseFinishedVerifierOutput(
+  snapshot: SmithersCommandSnapshot,
+  expected: {
+    workflowRunId: string;
+    verifierTaskId: string;
+    verifierIteration: number;
+    verifierAttempt: number;
+  }
+): {
+  artifacts: ArtifactVerificationEntry[];
+  primaryArtifact: string;
+  verificationMarkerSha256: string;
+  verificationMarkerSizeBytes: number;
+} {
+  if (!snapshot.ok || snapshot.json === undefined) {
+    throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_ATTEMPT_INSPECT_FAILED").message);
+  }
+  const envelope = exactStoredRecord(snapshot.json, "verifier node detail envelope", ["ok", "data", "meta"], []);
+  if (envelope.ok !== true) throw new Error("verifier node detail envelope did not report success");
+  const meta = exactStoredRecord(envelope.meta, "verifier node detail metadata", ["command", "duration"], ["cta"]);
+  if (meta.command !== "node") throw new Error("verifier node detail metadata does not identify the node command");
+  requiredStoredString(meta.duration, "verifier node detail metadata duration");
+  const detail = exactStoredRecord(
+    envelope.data,
+    "verifier node detail",
+    [
+      "node",
+      "status",
+      "durationMs",
+      "attemptsSummary",
+      "attempts",
+      "toolCalls",
+      "tokenUsage",
+      "scorers",
+      "output",
+      "approval",
+      "limits"
+    ],
+    []
+  );
+  const node = exactStoredRecord(
+    detail.node,
+    "verifier node detail node",
+    ["runId", "nodeId", "iteration", "state", "lastAttempt", "updatedAtMs", "outputTable", "label"],
+    []
+  );
+  if (
+    node.runId !== expected.workflowRunId ||
+    node.nodeId !== expected.verifierTaskId ||
+    requiredStoredCount(node.iteration, "verifier node iteration") !== expected.verifierIteration ||
+    node.state !== "finished" ||
+    detail.status !== "finished" ||
+    requiredStoredCount(node.lastAttempt, "verifier node last attempt") !== expected.verifierAttempt
+  ) {
+    throw new Error("verifier node detail does not match the exact linked finished attempt");
+  }
+  if (!Array.isArray(detail.attempts)) throw new Error("verifier node attempts must be an array");
+  const attempts = detail.attempts.map((value, index) =>
+    exactStoredRecord(
+      value,
+      `verifier node attempt ${index + 1}`,
+      [
+        "runId",
+        "nodeId",
+        "iteration",
+        "attempt",
+        "state",
+        "startedAtMs",
+        "finishedAtMs",
+        "durationMs",
+        "error",
+        "errorDetail",
+        "tokenUsage",
+        "toolCalls",
+        "meta",
+        "responseText",
+        "cached",
+        "jjPointer",
+        "jjCwd"
+      ],
+      []
+    )
+  );
+  const matching = attempts.filter(
+    (attempt) =>
+      attempt.runId === expected.workflowRunId &&
+      attempt.nodeId === expected.verifierTaskId &&
+      attempt.iteration === expected.verifierIteration &&
+      attempt.attempt === expected.verifierAttempt
+  );
+  if (
+    matching.length !== 1 ||
+    matching[0]!.state !== "finished" ||
+    matching[0]!.finishedAtMs === null ||
+    matching[0]!.error !== null
+  ) {
+    throw new Error("verifier node attempt is missing, unfinished, failed, or ambiguous");
+  }
+  const output = exactStoredRecord(
+    detail.output,
+    "verifier node output",
+    ["validated", "raw", "source", "cacheKey"],
+    []
+  );
+  if ((output.source !== "cache" && output.source !== "output-table") || !isRecord(output.validated)) {
+    throw new Error("finished verifier has no authenticated validated output");
+  }
+  const validated = exactStoredRecord(
+    output.validated,
+    "verifier validated output",
+    ["artifacts", "primary_artifact", "verification_marker_sha256", "verification_marker_size_bytes"],
+    []
+  );
+  if (!Array.isArray(validated.artifacts)) throw new Error("verifier validated artifacts must be an array");
+  const markerSha256 = requiredStoredString(validated.verification_marker_sha256, "verifier validation marker digest");
+  if (!/^[0-9a-f]{64}$/u.test(markerSha256)) throw new Error("verifier validation marker digest is invalid");
+  const markerSize = requiredStoredCount(validated.verification_marker_size_bytes, "verifier validation marker size");
+  if (markerSize < 1 || markerSize > MAX_VERIFIER_AUTHORITY_BYTES) {
+    throw new Error("verifier validation marker size is outside the authenticated bound");
+  }
+  return {
+    artifacts: validated.artifacts as ArtifactVerificationEntry[],
+    primaryArtifact: requiredStoredString(validated.primary_artifact, "verifier primary artifact"),
+    verificationMarkerSha256: markerSha256,
+    verificationMarkerSizeBytes: markerSize
+  };
 }
 
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {

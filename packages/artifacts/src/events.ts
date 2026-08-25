@@ -59,6 +59,8 @@ export const EVENT_RECORD_TYPES = [
   "node-synced",
   "node-artifacts-verified",
   "node-artifacts-missing",
+  "node-controller-refinalization-intent",
+  "node-controller-refinalization-result",
   "findings-validated",
   "artifact-manifest-written",
   "materialize-selection",
@@ -238,6 +240,26 @@ const nodeArtifactsPayloadSchema = z.strictObject({
   output_contracts: z.array(outputContractSchema).min(1),
   missing: z.array(nonEmptyStringSchema)
 });
+const controllerRefinalizationAuthoritySchema = {
+  operation_id: sha256Schema,
+  workflow_run_id: nonEmptyStringSchema,
+  workflow_link_id: workflowLinkIdSchema,
+  control_generation: sha256Schema,
+  controller_generation: sha256Schema,
+  verifier_task_id: nonEmptyStringSchema,
+  verifier_iteration: nonNegativeSafeIntegerSchema,
+  verifier_attempt: nonNegativeSafeIntegerSchema,
+  marker_sha256: sha256Schema,
+  marker_size_bytes: nonNegativeSafeIntegerSchema,
+  prior_status: z.literal("failed")
+} as const;
+const controllerRefinalizationIntentPayloadSchema = z.strictObject(controllerRefinalizationAuthoritySchema);
+const controllerRefinalizationResultPayloadSchema = z.strictObject({
+  ...controllerRefinalizationAuthoritySchema,
+  result: z.enum(["succeeded", "rejected"]),
+  artifact_manifest_sha256: sha256Schema.optional(),
+  failure_code: z.literal("CONTROLLER_REFINALIZATION_REJECTED").optional()
+});
 const findingsValidatedPayloadSchema = z.strictObject({
   count: nonNegativeSafeIntegerSchema.optional(),
   path: nonEmptyStringSchema
@@ -403,6 +425,16 @@ export const eventRecordSchema = z.discriminatedUnion("event_type", [
   nodeEventVariant("node-synced", nodeStatusSchema, nodeSyncedPayloadSchema),
   nodeEventVariant("node-artifacts-verified", z.literal("succeeded"), nodeArtifactsPayloadSchema),
   nodeEventVariant("node-artifacts-missing", z.literal("failed"), nodeArtifactsPayloadSchema),
+  nodeEventVariant(
+    "node-controller-refinalization-intent",
+    z.literal("running"),
+    controllerRefinalizationIntentPayloadSchema
+  ),
+  nodeEventVariant(
+    "node-controller-refinalization-result",
+    z.enum(["succeeded", "failed"]),
+    controllerRefinalizationResultPayloadSchema
+  ),
   nodeEventVariant("findings-validated", z.enum(["succeeded", "failed"]), findingsValidatedPayloadSchema),
   nodeEventVariant("artifact-manifest-written", z.literal("succeeded"), artifactManifestWrittenPayloadSchema),
   runEventVariant("materialize-selection", z.enum(["dry-run", "succeeded"]), materializeSelectionPayloadSchema),
@@ -651,6 +683,70 @@ const eventRecordJsonSchemaDefinitions = {
     properties: {
       output_contracts: { type: "array", minItems: 1, items: { $ref: "#/$defs/outputContract" } },
       missing: { type: "array", items: { $ref: "#/$defs/nonEmptyString" } }
+    }
+  },
+  controllerRefinalizationIntentPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "operation_id",
+      "workflow_run_id",
+      "workflow_link_id",
+      "control_generation",
+      "controller_generation",
+      "verifier_task_id",
+      "verifier_iteration",
+      "verifier_attempt",
+      "marker_sha256",
+      "marker_size_bytes",
+      "prior_status"
+    ],
+    properties: {
+      operation_id: { $ref: "#/$defs/sha256" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      controller_generation: { $ref: "#/$defs/sha256" },
+      verifier_task_id: { $ref: "#/$defs/nonEmptyString" },
+      verifier_iteration: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      verifier_attempt: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      marker_sha256: { $ref: "#/$defs/sha256" },
+      marker_size_bytes: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      prior_status: { const: "failed" }
+    }
+  },
+  controllerRefinalizationResultPayload: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "operation_id",
+      "workflow_run_id",
+      "workflow_link_id",
+      "control_generation",
+      "controller_generation",
+      "verifier_task_id",
+      "verifier_iteration",
+      "verifier_attempt",
+      "marker_sha256",
+      "marker_size_bytes",
+      "prior_status",
+      "result"
+    ],
+    properties: {
+      operation_id: { $ref: "#/$defs/sha256" },
+      workflow_run_id: { $ref: "#/$defs/nonEmptyString" },
+      workflow_link_id: { $ref: "#/$defs/workflowLinkId" },
+      control_generation: { $ref: "#/$defs/sha256" },
+      controller_generation: { $ref: "#/$defs/sha256" },
+      verifier_task_id: { $ref: "#/$defs/nonEmptyString" },
+      verifier_iteration: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      verifier_attempt: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      marker_sha256: { $ref: "#/$defs/sha256" },
+      marker_size_bytes: { $ref: "#/$defs/nonNegativeSafeInteger" },
+      prior_status: { const: "failed" },
+      result: { enum: ["succeeded", "rejected"] },
+      artifact_manifest_sha256: { $ref: "#/$defs/sha256" },
+      failure_code: { const: "CONTROLLER_REFINALIZATION_REJECTED" }
     }
   },
   findingsValidatedPayload: {
@@ -956,6 +1052,18 @@ export const eventRecordJsonSchema = {
     eventRecordJsonSchemaVariant("run-recovered", { const: "succeeded" }, "runRecoveredPayload"),
     eventRecordJsonSchemaVariant("node-synced", { enum: NODE_STATE_STATUSES }, "nodeSyncedPayload", true),
     eventRecordJsonSchemaVariant("node-artifacts-verified", { const: "succeeded" }, "nodeArtifactsPayload", true),
+    eventRecordJsonSchemaVariant(
+      "node-controller-refinalization-intent",
+      { const: "running" },
+      "controllerRefinalizationIntentPayload",
+      true
+    ),
+    eventRecordJsonSchemaVariant(
+      "node-controller-refinalization-result",
+      { enum: ["succeeded", "failed"] },
+      "controllerRefinalizationResultPayload",
+      true
+    ),
     eventRecordJsonSchemaVariant("node-artifacts-missing", { const: "failed" }, "nodeArtifactsPayload", true),
     eventRecordJsonSchemaVariant(
       "findings-validated",
