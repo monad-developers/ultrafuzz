@@ -23,10 +23,13 @@ it("repeatedly extracts a synthetic archive without stalling Bun callbacks", asy
     for (let index = 0; index < 2_000; index += 1) {
       const destination = path.join(root, `destination-${String(index).padStart(5, "0")}`);
       fs.mkdirSync(destination);
+      // The watchdog here guards against a genuine stall, not tight latency: on a loaded shared
+      // CI runner a single scheduler pause routinely exceeds 500ms across 2,000 iterations and
+      // failed the whole test (main run 32840972777). 5s per iteration still catches real stalls.
       await extractSafeTarArchive(archive, destination, {
         gzip: false,
         label: "synthetic repeated fixture",
-        idleTimeoutMs: 500
+        idleTimeoutMs: 5_000
       });
       expect(fs.readFileSync(path.join(destination, "alpha.txt"), "utf8")).toBe("alpha\n");
       expect(fs.readFileSync(path.join(destination, "empty.txt"), "utf8")).toBe("");
