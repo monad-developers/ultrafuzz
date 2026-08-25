@@ -35,6 +35,53 @@ test("exports the workspace handoff helpers to generated workflows", () => {
   assert.equal(typeof runtime.applyWorkspacePatch, "function");
 });
 
+test("excludes a vendored Solidity dependency tree but keeps tracked lib edits", () => {
+  const root = fixture();
+  try {
+    const baseline = captureWorkspaceTree(root);
+    // An agent told to install dependencies inside the worktree vendors them
+    // under lib/. Third-party sources legitimately carry credential-shaped text,
+    // so capturing them fails the artifact secret gate and kills the node.
+    mkdirSync(path.join(root, "lib", "vendor", "forge-std", "src"), { recursive: true });
+    writeFileSync(
+      path.join(root, "lib", "vendor", "forge-std", "src", "StdChains.sol"),
+      'ChainData("Sepolia", 11155111, "https://sepolia.infura.io/v3/0123456789abcdefghijklmnop")\n'
+    );
+    writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzSmoke.t.sol"]
+    );
+    assert.doesNotMatch(captured.patch, /StdChains\.sol/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("still captures an edit to a tracked file under lib", () => {
+  const root = fixture();
+  try {
+    // Untracked-only: excluding a TRACKED lib path would be silent data loss,
+    // since staging runs after read-tree and the baseline blob would survive.
+    mkdirSync(path.join(root, "lib", "tracked-dep"), { recursive: true });
+    writeFileSync(path.join(root, "lib", "tracked-dep", "Dep.sol"), "contract Dep {}\n");
+    execFileSync("git", ["add", "-A"], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "track dep"], { cwd: root });
+    const baseline = captureWorkspaceTree(root);
+    writeFileSync(path.join(root, "lib", "tracked-dep", "Dep.sol"), "contract Dep { uint256 x; }\n");
+
+    const captured = captureWorkspacePatch(root, baseline);
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["lib/tracked-dep/Dep.sol"]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("captures tracked and untracked setup changes relative to the dependency baseline", () => {
   const root = fixture();
   try {
