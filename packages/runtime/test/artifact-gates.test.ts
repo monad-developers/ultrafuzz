@@ -846,6 +846,150 @@ function authenticatedSnapshotsForNode(
   };
 }
 
+function deferredDynamicTemplateNode(sourceNodeId: string): PlannedGraphNode {
+  return {
+    ...plannedNode(["dynamic-result.md"]),
+    id: "dynamic-goal-template",
+    logical_id: "dynamic-goal-template",
+    display_name: "Dynamic goal template",
+    depends_on: [sourceNodeId],
+    artifact_dir: "artifacts/dynamic-goal-template",
+    prompt_id: "dynamic-goal-template",
+    prompt_path: "strategies/dynamic-goal-template.md",
+    dynamic: {
+      from: { node: sourceNodeId, path: "report.json" },
+      key: "goals",
+      node_id: "dynamic:goal:{{ item.id }}",
+      status: "pending"
+    }
+  };
+}
+
+function authorityCoverageReportFixture(runId: string): {
+  layout: ReturnType<typeof createRunLayout>;
+  reportNode: PlannedGraphNode;
+  reportTask: SmithersTaskManifestTask;
+} {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId });
+  const reportNode = {
+    ...plannedNode(["report.md", "report.json"]),
+    id: "final-report",
+    logical_id: "final-report",
+    display_name: "Final report",
+    artifact_dir: "artifacts/final-report",
+    prompt_id: "final-report",
+    prompt_path: "report/final-report.md"
+  };
+  writeArtifact(layout, reportNode.id, "report.md", "# Report\n");
+  writeArtifact(layout, reportNode.id, "report.json", JSON.stringify(currentReport(layout.runId)));
+  return { layout, reportNode, reportTask: sealedTaskForNode(layout, reportNode) };
+}
+
+test("sealed task coverage excludes a deferred dynamic template before expansion", () => {
+  const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-deferred-template-coverage");
+  const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  writePlannedGraph(layout, [reportNode, templateNode]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id, {
+    task: reportTask,
+    tasks: [reportTask]
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("sealed task coverage retains materialized dynamic nodes after expansion", () => {
+  const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-generated-dynamic-coverage");
+  const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  const generatedNode: PlannedGraphNode = {
+    ...templateNode,
+    id: "dynamic-goal-goal-a",
+    logical_id: templateNode.logical_id,
+    display_name: "Dynamic goal template: goal-a",
+    artifact_dir: "artifacts/dynamic-goal-goal-a",
+    dynamic: undefined,
+    dynamic_generated: {
+      group_node_id: templateNode.id,
+      source_node_id: reportNode.id,
+      source_attempt_id: reportNode.id,
+      expansion_key: "goal-a",
+      item_sha256: "a".repeat(64),
+      storage_id: "dynamic-goal-goal-a",
+      manifest_path: `dynamic-expansions/${templateNode.id}.json`
+    }
+  };
+  const generatedTask = sealedTaskForNode(layout, generatedNode, [reportTask]);
+  writePlannedGraph(layout, [reportNode, templateNode, generatedNode]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id, {
+    task: reportTask,
+    tasks: [reportTask, generatedTask]
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("sealed task coverage still rejects a missing concrete task beside a deferred template", () => {
+  const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-missing-concrete-coverage");
+  const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  const concreteNode = {
+    ...plannedNode(["concrete.md"]),
+    id: "concrete-analysis",
+    logical_id: "concrete-analysis",
+    display_name: "Concrete analysis",
+    artifact_dir: "artifacts/concrete-analysis",
+    prompt_id: "concrete-analysis",
+    prompt_path: "strategies/concrete-analysis.md"
+  };
+  writePlannedGraph(layout, [reportNode, templateNode, concreteNode]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id, {
+    task: reportTask,
+    tasks: [reportTask]
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        'sealed Smithers task coverage does not match the exact planned set; missing: "concrete-analysis"'
+      )
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("sealed task coverage still rejects an unexpected concrete task beside a deferred template", () => {
+  const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-unexpected-concrete-coverage");
+  const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  const unexpectedNode = {
+    ...plannedNode(["unexpected.md"]),
+    id: "unexpected-analysis",
+    logical_id: "unexpected-analysis",
+    display_name: "Unexpected analysis",
+    artifact_dir: "artifacts/unexpected-analysis",
+    prompt_id: "unexpected-analysis",
+    prompt_path: "strategies/unexpected-analysis.md"
+  };
+  const unexpectedTask = sealedTaskForNode(layout, unexpectedNode);
+  writePlannedGraph(layout, [reportNode, templateNode]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id, {
+    task: reportTask,
+    tasks: [reportTask, unexpectedTask]
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        'sealed Smithers task coverage does not match the exact planned set; unexpected: "unexpected-analysis"'
+      )
+    ),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
 function finalizeArtifactNode(
   layout: ReturnType<typeof createRunLayout>,
   nodeId: string,
