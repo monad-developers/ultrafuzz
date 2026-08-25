@@ -95,6 +95,7 @@ const {
   restoreWorkspaceTreeWithIndexLockRecovery,
   smithersTaskAgentId,
   targetIdentity,
+  topologyRuntimeBudgetForTimeout,
   topologyRuntimeContextForTimeout,
   validateWorkspacePatchCapture,
   verifyThreatModelVulnerabilityDatabaseCapabilities,
