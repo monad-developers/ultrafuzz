@@ -516,7 +516,12 @@ function capturePrerequisiteManifestAuthority(
       const declaredPrerequisiteAttemptIds = new Set(task.dependencies);
       const isRootConsumer = task.attemptId === sealedAttempt.authority.task.attemptId;
       const rootAdmitted = new Set(sealedAttempt.authority.admittedDependencyAttemptIds ?? []);
-      const expectedRootPrerequisites = task.dependencies.filter((attemptId) => rootAdmitted.has(attemptId));
+      // Controller manifests canonicalize prerequisite authority by attempt ID.
+      // The sealed task declaration retains compiler dependency order, which
+      // is authenticated independently and need not be lexical.
+      const expectedRootPrerequisites = task.dependencies
+        .filter((attemptId) => rootAdmitted.has(attemptId))
+        .sort((left, right) => left.localeCompare(right));
       if (isRootConsumer) {
         if (
           expectedRootPrerequisites.length !== prerequisiteAttemptIds.length ||
