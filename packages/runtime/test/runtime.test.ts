@@ -12731,6 +12731,53 @@ test("compatibility patcher rewrites every described workaround", async () => {
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
     );
+    fs.writeFileSync(resumeTransfer.source, current, "utf8");
+  }
+  {
+    const processAnchor = sources.find(({ patch }) => patch.id === "process_snapshot_anchor");
+    assert.ok(processAnchor);
+    const [predecessor, nested] = processAnchor.patch.predecessors ?? [];
+    assert.ok(predecessor);
+    assert.ok(nested);
+    assert.equal(processAnchor.patch.predecessors?.length, 2);
+    const current = fs.readFileSync(processAnchor.source, "utf8");
+    assert.equal(current.split(processAnchor.patch.patched).length, 2);
+
+    fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, predecessor), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
+    assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
+    assert.equal(migratedPredecessor.includes(nested), false);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+
+    fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedNested = fs.readFileSync(processAnchor.source, "utf8");
+    assert.equal(migratedNested.split(processAnchor.patch.patched).length, 2);
+    assert.equal(migratedNested.includes(nested), false);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+
+    const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
+    assert.notEqual(mutatedNested, nested);
+    assert.equal(mutatedNested.includes(processAnchor.patch.patched), true);
+    fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /process-owned execution snapshot implementation is incompatible/u
+    );
+
+    const unknownPredecessor = predecessor.replace('"--preserve-symlinks"', '"--unregistered-startup-flag"');
+    assert.notEqual(unknownPredecessor, predecessor);
+    fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, unknownPredecessor), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /process-owned execution snapshot implementation is incompatible/u
+    );
+    fs.writeFileSync(processAnchor.source, current, "utf8");
   }
   {
     const delegation = sources.find(({ patch }) => patch.id === "local_delegation");
@@ -13740,6 +13787,24 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
       `${label} no longer contains exactly one copy of the patched upstream shape; ` +
         `re-check whether Smithers ${SMITHERS_VERSION} fixed this itself`
     );
+    const predecessors = patch.predecessors ?? [];
+    assert.equal(new Set(predecessors).size, predecessors.length, `${label} repeats a predecessor replacement`);
+    for (const predecessor of predecessors) {
+      assert.notEqual(predecessor, patch.patchable, `${label} predecessor duplicates pristine source`);
+      assert.notEqual(predecessor, patch.patched, `${label} predecessor duplicates the current replacement`);
+      assert.equal(
+        patch.patched.includes(predecessor),
+        false,
+        `${label} current replacement contains a predecessor and cannot be classified unambiguously`
+      );
+    }
+    for (const marker of patch.patchedFamilyMarkers ?? []) {
+      assert.equal(patch.upstreamAbsent.includes(marker), true, `${label} family marker is not absent upstream`);
+      assert.equal(patch.patched.includes(marker), true, `${label} current replacement omits its family marker`);
+      for (const predecessor of predecessors) {
+        assert.equal(predecessor.includes(marker), true, `${label} predecessor omits its family marker`);
+      }
+    }
     for (const absent of patch.upstreamAbsent) {
       assert.equal(
         contents.includes(absent),
@@ -18603,10 +18668,18 @@ test("controller refresh authenticates newly required sealed runner patches and 
   const resumeTransferPatch = SMITHERS_COMPATIBILITY_PATCHES.find(
     (candidate) => candidate.id === "resume_snapshot_transfer"
   );
+  const processAnchorPatch = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (candidate) => candidate.id === "process_snapshot_anchor"
+  );
   assert.ok(resumeTransferPatch);
+  assert.ok(processAnchorPatch);
   const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
   assert.equal(resumeTransferPatch.predecessors?.length, 1);
+  const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
+  assert.ok(predecessorProcessAnchorPatch);
+  assert.ok(nestedProcessAnchorPatch);
+  assert.equal(processAnchorPatch.predecessors?.length, 2);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
   assert.ok(newlyRequired);
   const engineSequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
@@ -18676,9 +18749,11 @@ test("controller refresh authenticates newly required sealed runner patches and 
       sourceRelativePath,
       cliPatches
         .filter((candidate) => candidate.sourceRelativePath === sourceRelativePath)
-        .map((candidate) =>
-          candidate.id === resumeTransferPatch.id ? predecessorResumeTransferPatch : candidate.patched
-        )
+        .map((candidate) => {
+          if (candidate.id === resumeTransferPatch.id) return predecessorResumeTransferPatch;
+          if (candidate.id === processAnchorPatch.id) return predecessorProcessAnchorPatch;
+          return candidate.patched;
+        })
         .join("\n")
     );
   }
@@ -18731,6 +18806,99 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(refreshedCliResume);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(resumeTransferPatch.patched), true);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(predecessorResumeTransferPatch), false);
+  const cliIndexSourcePath = `${cliPackageSnapshotPath}/${processAnchorPatch.sourceRelativePath}`;
+  const refreshedCliIndex = rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === cliIndexSourcePath);
+  assert.ok(refreshedCliIndex);
+  assert.equal(refreshedCliIndex.contents.toString("utf8").split(processAnchorPatch.patched).length, 2);
+  assert.equal(refreshedCliIndex.contents.toString("utf8").includes(predecessorProcessAnchorPatch), false);
+  assert.equal(refreshedCliIndex.contents.toString("utf8").includes(nestedProcessAnchorPatch), false);
+
+  const nestedCliSource = {
+    ...syntheticPreFix,
+    executionFiles: syntheticPreFix.executionFiles.map((file) => {
+      if (file.snapshotPath !== cliIndexSourcePath) return file;
+      const predecessorContents = file.contents.toString("utf8");
+      assert.equal(predecessorContents.split(predecessorProcessAnchorPatch).length, 2);
+      return {
+        ...file,
+        contents: Buffer.from(
+          predecessorContents.replace(predecessorProcessAnchorPatch, nestedProcessAnchorPatch),
+          "utf8"
+        )
+      };
+    })
+  };
+  const repairedNested = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: nestedCliSource,
+    config
+  });
+  const repairedCliIndex = repairedNested.snapshot.executionFiles.find(
+    (file) => file.snapshotPath === cliIndexSourcePath
+  );
+  assert.ok(repairedCliIndex);
+  assert.equal(repairedCliIndex.contents.toString("utf8").split(processAnchorPatch.patched).length, 2);
+  assert.equal(repairedCliIndex.contents.toString("utf8").includes(nestedProcessAnchorPatch), false);
+
+  const mutatedNestedProcessAnchorPatch = nestedProcessAnchorPatch.replace(
+    '"--preserve-symlinks"',
+    '"--mutated-outer-startup-flag"'
+  );
+  assert.notEqual(mutatedNestedProcessAnchorPatch, nestedProcessAnchorPatch);
+  assert.equal(mutatedNestedProcessAnchorPatch.includes(processAnchorPatch.patched), true);
+  const mutatedNestedCliSource = {
+    ...syntheticPreFix,
+    executionFiles: syntheticPreFix.executionFiles.map((file) => {
+      if (file.snapshotPath !== cliIndexSourcePath) return file;
+      return {
+        ...file,
+        contents: Buffer.from(
+          file.contents.toString("utf8").replace(predecessorProcessAnchorPatch, mutatedNestedProcessAnchorPatch),
+          "utf8"
+        )
+      };
+    })
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: mutatedNestedCliSource,
+        config
+      }),
+    /authenticated controller runner process_snapshot_anchor implementation is incompatible/u
+  );
+
+  const unknownProcessAnchorPatch = predecessorProcessAnchorPatch.replace(
+    '"--preserve-symlinks"',
+    '"--unregistered-startup-flag"'
+  );
+  assert.notEqual(unknownProcessAnchorPatch, predecessorProcessAnchorPatch);
+  const unknownCliSource = {
+    ...syntheticPreFix,
+    executionFiles: syntheticPreFix.executionFiles.map((file) => {
+      if (file.snapshotPath !== cliIndexSourcePath) return file;
+      return {
+        ...file,
+        contents: Buffer.from(
+          file.contents.toString("utf8").replace(predecessorProcessAnchorPatch, unknownProcessAnchorPatch),
+          "utf8"
+        )
+      };
+    })
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: unknownCliSource,
+        config
+      }),
+    /authenticated controller runner process_snapshot_anchor implementation is incompatible/u
+  );
 
   const mixedCliSource = {
     ...syntheticPreFix,

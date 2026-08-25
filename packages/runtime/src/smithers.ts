@@ -318,8 +318,8 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
   "process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));";
 const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
 const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
-const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
-const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
+const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
 
 // Ultrafuzz invokes this process through a descriptor held by its controller.
 // Each detached descendant receives that directory atomically as fd 3, opens a
@@ -496,6 +496,15 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
 }
 
 anchorUltrafuzzExecutionSnapshotForProcess();`;
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH.replace(
+  '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
+  '"--no-addons", "--preserve-symlinks-main"'
+);
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH =
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH.replace(
+    SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
+    SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH
+  );
 const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `            launchPostFailureAutopsy({
               failedRunId: result.runId,
               workflowPath: resolvedWorkflowPath,
@@ -786,6 +795,8 @@ export interface SmithersCompatibilityPatch {
   readonly patched: string;
   /** Exact earlier replacements that can be upgraded to `patched`. */
   readonly predecessors?: readonly string[];
+  /** Patch-family markers that must not survive outside an exact replacement. */
+  readonly patchedFamilyMarkers?: readonly string[];
   /**
    * Text that must be ABSENT from the pinned source for the workaround to still
    * be warranted. An anchor alone is a weak signal: it can be one generic line
@@ -832,6 +843,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
     predecessors: [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+    patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
   {
@@ -874,6 +886,11 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
     patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
+    predecessors: [
+      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
+      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH
+    ],
+    patchedFamilyMarkers: ["anchorUltrafuzzExecutionSnapshotForProcess"],
     upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
   },
   {
@@ -1580,7 +1597,8 @@ function applyRefreshedSmithersCompatibilityPatches(
         patch.patchable,
         patch.patched,
         `authenticated controller runner ${patch.id}`,
-        patch.predecessors
+        patch.predecessors,
+        patch.patchedFamilyMarkers
       ),
       "utf8"
     );
@@ -2806,7 +2824,13 @@ function inspectSmithersCompatibilityPatches(
     const candidateRoots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
     if (candidateRoots.length === 1) {
       const source = path.join(candidateRoots[0]!, ...patch.sourceRelativePath.split("/"));
-      postures[patch.id] = patchPosture(source, patch.patched, patch.patchable, patch.predecessors);
+      postures[patch.id] = patchPosture(
+        source,
+        patch.patched,
+        patch.patchable,
+        patch.predecessors,
+        patch.patchedFamilyMarkers
+      );
       continue;
     }
     // Two roots make the next run hard-fail in `applySmithersCompatibilityPatches`,
@@ -2844,7 +2868,8 @@ function patchPosture(
   sourcePath: string,
   patched: string,
   patchable: string,
-  predecessors: readonly string[] = []
+  predecessors: readonly string[] = [],
+  patchedMarkers: readonly string[] = []
 ): SmithersPatchPosture {
   if (!fs.existsSync(sourcePath)) {
     return "unknown";
@@ -2856,7 +2881,7 @@ function patchPosture(
     // An unreadable source must degrade, not throw out of `doctor`.
     return "unknown";
   }
-  return classifyRequiredSmithersPatch(contents, patchable, patched, predecessors).posture;
+  return classifyRequiredSmithersPatch(contents, patchable, patched, predecessors, patchedMarkers).posture;
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {
@@ -4369,7 +4394,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     { mode: 0o500 }
   );
   let cliContents = fs.readFileSync(cliSource, "utf8");
-  for (const [source, patched, label] of [
+  for (const [source, patched, label, predecessors, patchedMarkers] of [
     [
       SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE,
       SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH,
@@ -4381,7 +4406,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
-      "process-owned execution snapshot"
+      "process-owned execution snapshot",
+      [
+        SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
+        SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH
+      ],
+      ["anchorUltrafuzzExecutionSnapshotForProcess"]
     ],
     [SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE, SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH, "manifest-conflict relaunch"],
     [SMITHERS_CLI_POST_FAILURE_PATH_SOURCE, SMITHERS_CLI_POST_FAILURE_PATH_PATCH, "post-failure workflow path"],
@@ -4394,7 +4424,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE, SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH, "fork workflow path"],
     [SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE, SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH, "fork workflow metadata"]
   ] as const) {
-    cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label);
+    cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label, predecessors, patchedMarkers);
   }
   writeFileDurable(cliSource, cliContents);
   const resumeDetachedContents = fs.readFileSync(resumeDetachedSource, "utf8");
@@ -4405,7 +4435,8 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
       "detached resume execution snapshot transfer",
-      [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH]
+      [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+      ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
     )
   );
 
@@ -4503,9 +4534,10 @@ function applyRequiredSmithersPatch(
   source: string,
   patched: string,
   label: string,
-  predecessors: readonly string[] = []
+  predecessors: readonly string[] = [],
+  patchedMarkers: readonly string[] = []
 ): string {
-  const state = classifyRequiredSmithersPatch(contents, source, patched, predecessors);
+  const state = classifyRequiredSmithersPatch(contents, source, patched, predecessors, patchedMarkers);
   if (state.posture === "applied") return contents;
   if (state.posture === "incompatible") {
     throw new Error(`pinned workflow runner ${label} implementation is incompatible`);
@@ -4522,29 +4554,39 @@ function classifyRequiredSmithersPatch(
   contents: string,
   source: string,
   patched: string,
-  predecessors: readonly string[]
+  predecessors: readonly string[],
+  patchedMarkers: readonly string[]
 ): RequiredSmithersPatchState {
+  // Check exact predecessors first: a known malformed predecessor can contain
+  // the whole current replacement after an earlier nested-anchor migration.
+  const matchingPredecessors = predecessors.filter((predecessor) => contents.includes(predecessor));
+  if (matchingPredecessors.length > 0) {
+    const predecessor = matchingPredecessors[0]!;
+    const remainder = contents.replace(predecessor, "");
+    if (
+      matchingPredecessors.length !== 1 ||
+      contents.split(predecessor).length !== 2 ||
+      remainder.includes(patched) ||
+      remainder.includes(source)
+    ) {
+      return { posture: "incompatible" };
+    }
+    return { posture: "missing", replacement: predecessor };
+  }
   if (contents.includes(patched)) {
+    const remainder = contents.replace(patched, "");
     if (
       contents.split(patched).length !== 2 ||
       predecessors.some((predecessor) => contents.includes(predecessor)) ||
-      contents.replace(patched, "").includes(source)
+      remainder.includes(source) ||
+      patchedMarkers.some((marker) => remainder.includes(marker))
     ) {
       return { posture: "incompatible" };
     }
     return { posture: "applied" };
   }
-  const matchingPredecessors = predecessors.filter((predecessor) => contents.includes(predecessor));
-  if (matchingPredecessors.length > 0) {
-    const predecessor = matchingPredecessors[0]!;
-    if (
-      matchingPredecessors.length !== 1 ||
-      contents.split(predecessor).length !== 2 ||
-      contents.replace(predecessor, "").includes(source)
-    ) {
-      return { posture: "incompatible" };
-    }
-    return { posture: "missing", replacement: predecessor };
+  if (patchedMarkers.some((marker) => contents.includes(marker))) {
+    return { posture: "incompatible" };
   }
   return contents.split(source).length === 2
     ? { posture: "missing", replacement: source }
