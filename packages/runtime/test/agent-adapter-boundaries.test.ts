@@ -140,7 +140,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "832ad1ab5cb3a34be312d9cd416c6eab32877d952c5681d4867571a9db08feea",
+    classifiedSourceSha256: "fd45b0f770f71bdbc1c97c9b78bde23d5ab22b2f7b747e44d4895bf336123f91",
     responsibilities: ["output-interpretation"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1629"]
   },
@@ -218,7 +218,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 175,
     maxSyntaxNodes: 1_000,
     purpose: "adapter",
-    sourceSha256: "832ad1ab5cb3a34be312d9cd416c6eab32877d952c5681d4867571a9db08feea"
+    sourceSha256: "fd45b0f770f71bdbc1c97c9b78bde23d5ab22b2f7b747e44d4895bf336123f91"
   },
   "provider-home.tsx": {
     maxLines: 75,

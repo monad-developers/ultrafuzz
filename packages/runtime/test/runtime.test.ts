@@ -518,11 +518,9 @@ async function loadGeneratedPiAgent(project: string): Promise<{
   createPiAgent(options?: Record<string, unknown>): {
     opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
     createOutputInterpreter(): {
-      onStdoutLine?: (line: string) =>
-        | { type?: string; answer?: string }
-        | Array<{ type?: string; answer?: string }>
-        | null
-        | undefined;
+      onStdoutLine?: (
+        line: string
+      ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
     };
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command: string;
@@ -572,11 +570,9 @@ async function loadGeneratedPiAgent(project: string): Promise<{
     createPiAgent(options?: Record<string, unknown>): {
       opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
       createOutputInterpreter(): {
-        onStdoutLine?: (line: string) =>
-          | { type?: string; answer?: string }
-          | Array<{ type?: string; answer?: string }>
-          | null
-          | undefined;
+        onStdoutLine?: (
+          line: string
+        ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
       };
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command: string;

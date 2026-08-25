@@ -71,9 +71,7 @@ function isPiTerminalAssistantLine(line: string): boolean {
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 function applyPiTerminalAnswer<T>(events: T, terminalEvents: unknown): T {
