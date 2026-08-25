@@ -451,16 +451,42 @@ export const goalPlanSchema = z
      * recomputing the rule (#364). Equal to `counts.dynamic_goals` by construction -- both are
      * checked against `goalPlanExpansionFacts`, which computes it once.
      */
-    expected_child_count: z.number().int().nonnegative(),
+    expected_child_count: z.number().int().nonnegative().optional(),
     /** Equal to `counts.threats`; see `expected_child_count`. */
-    threat_count: z.number().int().nonnegative(),
+    threat_count: z.number().int().nonnegative().optional(),
     /** Equal to `counts.applicable_classes`; see `expected_child_count`. */
-    applicable_class_count: z.number().int().nonnegative(),
+    applicable_class_count: z.number().int().nonnegative().optional(),
     /** The `run.max_dynamic_nodes` limit this plan was produced under. */
-    max_dynamic_nodes: z.number().int().positive(),
-    goal_lanes: z.array(goalLaneSchema).min(1)
+    max_dynamic_nodes: z.number().int().positive().optional(),
+    goal_lanes: z.array(goalLaneSchema).min(1).optional()
   })
   .superRefine((value, context) => {
+    // The five fields below are populated by recordGoalPlanExpansionFacts after
+    // the agent returns, so they are optional: an agent that omits them, as its
+    // prompt instructs, must still pass `ultrafuzz json validate`. Requiring
+    // them made the instruction and the validation command mutually
+    // unsatisfiable, and the agent could not have supplied max_dynamic_nodes
+    // correctly in any case -- it is a run setting the prompt never states.
+    //
+    // When they ARE present the plan must agree with itself. Four of the five
+    // are derivable from this document, so `ultrafuzz artifact validate` can
+    // catch a miscount in-session, while the agent can still fix it, instead of
+    // failing the node afterwards.
+    const derived = [
+      value.expected_child_count,
+      value.threat_count,
+      value.applicable_class_count,
+      value.max_dynamic_nodes,
+      value.goal_lanes
+    ];
+    const present = derived.filter((entry) => entry !== undefined).length;
+    if (present > 0 && present < derived.length) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "goal plan must carry all of expected_child_count, threat_count, applicable_class_count, max_dynamic_nodes and goal_lanes, or none of them"
+      });
+    }
     addDuplicateIssues(value.threat_goals, "threat_goals", context);
     addDuplicateIssues(value.class_goals, "class_goals", context);
     addDuplicateIssues(value.applicability_decisions, "applicability_decisions", context, "class_id");
@@ -520,7 +546,7 @@ export const goalPlanSchema = z
     // friends were added by it, but they are the same arithmetic over the same goals: computing it
     // twice is the drift hazard #364 chose option (a) to avoid, so the pre-existing `counts` block is
     // derived from these facts rather than restating `threat_goals.length + class_goals.length`.
-    const facts = goalPlanExpansionFacts(value);
+    const facts = goalPlanExpansionFacts({ ...value, max_dynamic_nodes: value.max_dynamic_nodes ?? 1 });
     const expected = {
       threats: facts.threat_count,
       applicable_classes: facts.applicable_class_count,
@@ -536,18 +562,22 @@ export const goalPlanSchema = z
     }
 
     for (const field of ["expected_child_count", "threat_count", "applicable_class_count"] as const) {
-      if (value[field] !== facts[field]) {
+      if (value[field] !== undefined && value[field] !== facts[field]) {
         context.addIssue({ code: "custom", path: [field], message: `${field} must equal ${String(facts[field])}` });
       }
     }
-    if (value.expected_child_count > value.max_dynamic_nodes) {
+    if (
+      value.expected_child_count !== undefined &&
+      value.max_dynamic_nodes !== undefined &&
+      value.expected_child_count > value.max_dynamic_nodes
+    ) {
       context.addIssue({
         code: "custom",
         path: ["expected_child_count"],
         message: `Plan expects ${String(value.expected_child_count)} dynamic children, exceeding max_dynamic_nodes=${String(value.max_dynamic_nodes)}`
       });
     }
-    if (!sameJson(value.goal_lanes, facts.goal_lanes)) {
+    if (value.goal_lanes !== undefined && !sameJson(value.goal_lanes, facts.goal_lanes)) {
       context.addIssue({
         code: "custom",
         path: ["goal_lanes"],
