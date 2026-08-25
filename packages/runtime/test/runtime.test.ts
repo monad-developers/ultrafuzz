@@ -10219,6 +10219,27 @@ testWhen(process.platform !== "win32")(
   }
 );
 
+test("startRun persists a bounded eval run id verbatim in the submitted workflow input", async () => {
+  // The persisted smithers/input.json bytes are the exact --input the workflow
+  // runner byte-validates against the generated workflow's compiled
+  // z.literal(run id) at detached-launch preflight. The speculative redaction
+  // heuristics flag the eval lane's bounded run ids (ci-<run_id>-…-<hex16>) as
+  // secrets; rewriting the id to "<redacted>" failed every eval submission as
+  // INVALID_INPUT (#899).
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const boundedEvalRunId = "ci-32878286998-1-smoke-ultrafuzz-benc-346bb576f2a1a2e3";
+
+  const run = await startRun({ projectRoot: project, runId: boundedEvalRunId, env: fakeSmithersEnv(project) });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const persisted = fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8");
+  assert.doesNotMatch(persisted, /<redacted>/u);
+  const smithersInput = JSON.parse(persisted) as { ultrafuzz_run_id?: string };
+  assert.equal(smithersInput.ultrafuzz_run_id, boundedEvalRunId);
+});
+
 test("startRun compiles normal Smithers tasks, persists provenance, and submits through Smithers CLI", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
