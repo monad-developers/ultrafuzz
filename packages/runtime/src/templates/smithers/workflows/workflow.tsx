@@ -198,6 +198,18 @@ const CLOUD_WORKER_INPUT_KEYS = [
 ] as const;
 
 /**
+ * Every envelope key is nullish rather than optional. The same input-table
+ * projection that forces one flat object also materializes a column for every
+ * key in `shape`, and a column the submission never set reads back as SQL
+ * `null`, not as `undefined`. `.optional()` accepts only `undefined`, so a
+ * local dispatch -- which leaves all five cloud-worker keys unset -- came back
+ * carrying explicit nulls and failed its own re-validation before the first
+ * task ever rendered. Absence is therefore `undefined` *or* `null` everywhere
+ * below, including in the envelope-discrimination filters.
+ */
+const isAbsent = (value: unknown): boolean => value === undefined || value === null;
+
+/**
  * One closed object rather than a union of the local and cloud-worker envelopes.
  * The workflow runner projects this schema into its input table by walking
  * `shape`, and a union exposes no shape to walk, so a union fails every detached
@@ -207,25 +219,25 @@ const CLOUD_WORKER_INPUT_KEYS = [
  */
 const inputSchema = z
   .strictObject({
-    schema_version: z.literal("ultrafuzz.smithers.workflow.v4").optional(),
+    schema_version: z.literal("ultrafuzz.smithers.workflow.v4").nullish(),
     // Not `run_id`: the workflow runner reserves that column for its own run
     // identity, and a colliding field corrupts its input primary key.
-    ultrafuzz_run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__).optional(),
-    tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS).optional(),
-    cloud_worker: z.literal(true).optional(),
-    task_id: z.string().min(1).max(4_096).optional(),
-    attempt_id: z.string().min(1).max(4_096).optional(),
+    ultrafuzz_run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__).nullish(),
+    tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS).nullish(),
+    cloud_worker: z.literal(true).nullish(),
+    task_id: z.string().min(1).max(4_096).nullish(),
+    attempt_id: z.string().min(1).max(4_096).nullish(),
     execution_generation: z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)
-      .optional(),
-    selected_task: z.json().optional(),
-    operator_prompt: z.string().optional(),
-    operator_input: operatorInputSchema.optional()
+      .nullish(),
+    selected_task: z.json().nullish(),
+    operator_prompt: z.string().nullish(),
+    operator_input: operatorInputSchema.nullish()
   })
   .superRefine((value, ctx) => {
-    const localKeys = LOCAL_WORKFLOW_INPUT_KEYS.filter((key) => value[key] !== undefined);
-    const cloudKeys = CLOUD_WORKER_INPUT_KEYS.filter((key) => value[key] !== undefined);
+    const localKeys = LOCAL_WORKFLOW_INPUT_KEYS.filter((key) => !isAbsent(value[key]));
+    const cloudKeys = CLOUD_WORKER_INPUT_KEYS.filter((key) => !isAbsent(value[key]));
     if (cloudKeys.length > 0) {
       if (localKeys.length > 0) {
         ctx.addIssue({
@@ -241,12 +253,12 @@ const inputSchema = z
             "cloud worker input requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task"
         });
       }
-      if (value.tasks !== undefined && value.tasks.length > 0) {
+      if (!isAbsent(value.tasks) && (value.tasks?.length ?? 0) > 0) {
         ctx.addIssue({ code: "custom", message: "cloud worker input must not carry outer task entries" });
       }
       return;
     }
-    if (value.schema_version === undefined || value.ultrafuzz_run_id === undefined || value.tasks === undefined) {
+    if (isAbsent(value.schema_version) || isAbsent(value.ultrafuzz_run_id) || isAbsent(value.tasks)) {
       ctx.addIssue({
         code: "custom",
         message: "local workflow input requires schema_version, ultrafuzz_run_id, and tasks"
