@@ -127,11 +127,10 @@ test(
         "--no-env-file",
         "--no-install",
         "--no-addons",
-        "--preserve-symlinks",
         "--preserve-symlinks-main"
       ];
-      assert.deepEqual(anchor.argumentPrefix.slice(0, 7), expected);
-      assert.equal(anchor.argumentPrefix[7], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`);
+      assert.deepEqual(anchor.argumentPrefix.slice(0, 6), expected);
+      assert.equal(anchor.argumentPrefix[6], `--preload=${env.ULTRAFUZZ_BUN_MODULE_CONFINEMENT}`);
     } finally {
       anchor.close();
     }
