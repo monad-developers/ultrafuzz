@@ -12759,6 +12759,16 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(migratedNested.includes(nested), false);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
 
+    const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
+    assert.notEqual(mutatedNested, nested);
+    assert.equal(mutatedNested.includes(processAnchor.patch.patched), true);
+    fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /process-owned execution snapshot implementation is incompatible/u
+    );
+
     const unknownPredecessor = predecessor.replace('"--preserve-symlinks"', '"--unregistered-startup-flag"');
     assert.notEqual(unknownPredecessor, predecessor);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, unknownPredecessor), "utf8");
@@ -13787,6 +13797,13 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
         false,
         `${label} current replacement contains a predecessor and cannot be classified unambiguously`
       );
+    }
+    for (const marker of patch.patchedFamilyMarkers ?? []) {
+      assert.equal(patch.upstreamAbsent.includes(marker), true, `${label} family marker is not absent upstream`);
+      assert.equal(patch.patched.includes(marker), true, `${label} current replacement omits its family marker`);
+      for (const predecessor of predecessors) {
+        assert.equal(predecessor.includes(marker), true, `${label} predecessor omits its family marker`);
+      }
     }
     for (const absent of patch.upstreamAbsent) {
       assert.equal(
@@ -18823,6 +18840,36 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(repairedCliIndex);
   assert.equal(repairedCliIndex.contents.toString("utf8").split(processAnchorPatch.patched).length, 2);
   assert.equal(repairedCliIndex.contents.toString("utf8").includes(nestedProcessAnchorPatch), false);
+
+  const mutatedNestedProcessAnchorPatch = nestedProcessAnchorPatch.replace(
+    '"--preserve-symlinks"',
+    '"--mutated-outer-startup-flag"'
+  );
+  assert.notEqual(mutatedNestedProcessAnchorPatch, nestedProcessAnchorPatch);
+  assert.equal(mutatedNestedProcessAnchorPatch.includes(processAnchorPatch.patched), true);
+  const mutatedNestedCliSource = {
+    ...syntheticPreFix,
+    executionFiles: syntheticPreFix.executionFiles.map((file) => {
+      if (file.snapshotPath !== cliIndexSourcePath) return file;
+      return {
+        ...file,
+        contents: Buffer.from(
+          file.contents.toString("utf8").replace(predecessorProcessAnchorPatch, mutatedNestedProcessAnchorPatch),
+          "utf8"
+        )
+      };
+    })
+  };
+  assert.throws(
+    () =>
+      refreshedSmithersControllerSnapshot({
+        projectRoot: project,
+        layout: evidence.layout,
+        original: mutatedNestedCliSource,
+        config
+      }),
+    /authenticated controller runner process_snapshot_anchor implementation is incompatible/u
+  );
 
   const unknownProcessAnchorPatch = predecessorProcessAnchorPatch.replace(
     '"--preserve-symlinks"',

@@ -795,6 +795,8 @@ export interface SmithersCompatibilityPatch {
   readonly patched: string;
   /** Exact earlier replacements that can be upgraded to `patched`. */
   readonly predecessors?: readonly string[];
+  /** Patch-family markers that must not survive outside an exact replacement. */
+  readonly patchedFamilyMarkers?: readonly string[];
   /**
    * Text that must be ABSENT from the pinned source for the workaround to still
    * be warranted. An anchor alone is a weak signal: it can be one generic line
@@ -841,6 +843,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
     predecessors: [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+    patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
   {
@@ -887,6 +890,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH
     ],
+    patchedFamilyMarkers: ["anchorUltrafuzzExecutionSnapshotForProcess"],
     upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
   },
   {
@@ -1594,7 +1598,7 @@ function applyRefreshedSmithersCompatibilityPatches(
         patch.patched,
         `authenticated controller runner ${patch.id}`,
         patch.predecessors,
-        patch.upstreamAbsent
+        patch.patchedFamilyMarkers
       ),
       "utf8"
     );
@@ -2825,7 +2829,7 @@ function inspectSmithersCompatibilityPatches(
         patch.patched,
         patch.patchable,
         patch.predecessors,
-        patch.upstreamAbsent
+        patch.patchedFamilyMarkers
       );
       continue;
     }
@@ -4570,10 +4574,12 @@ function classifyRequiredSmithersPatch(
     return { posture: "missing", replacement: predecessor };
   }
   if (contents.includes(patched)) {
+    const remainder = contents.replace(patched, "");
     if (
       contents.split(patched).length !== 2 ||
       predecessors.some((predecessor) => contents.includes(predecessor)) ||
-      contents.replace(patched, "").includes(source)
+      remainder.includes(source) ||
+      patchedMarkers.some((marker) => remainder.includes(marker))
     ) {
       return { posture: "incompatible" };
     }
