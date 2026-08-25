@@ -31,6 +31,67 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       env: workflowControlChildEnvironment({ ...this.opts.env, ...command.env })
     };
   }
+
+  override createOutputInterpreter(): ReturnType<SmithersPiAgent["createOutputInterpreter"]> {
+    const interpreter = super.createOutputInterpreter();
+    let terminalInterpreter: ReturnType<SmithersPiAgent["createOutputInterpreter"]> | undefined;
+    return {
+      ...interpreter,
+      onStdoutLine: (line) => {
+        // A fresh Smithers interpreter sees only the latest authoritative
+        // assistant message and subsequent deltas. Reusing it as an oracle
+        // avoids duplicating Pi's evolving text-block extraction contract.
+        if (isPiTerminalAssistantLine(line)) terminalInterpreter = super.createOutputInterpreter();
+        const terminalEvents = terminalInterpreter?.onStdoutLine?.(line);
+        return applyPiTerminalAnswer(interpreter.onStdoutLine?.(line), terminalEvents);
+      },
+      onExit: (result) => {
+        const terminalEvents = terminalInterpreter?.onExit?.(result);
+        return applyPiTerminalAnswer(interpreter.onExit?.(result), terminalEvents);
+      }
+    };
+  }
+}
+
+function isPiTerminalAssistantLine(line: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(line.trim());
+    const payload = objectRecord(parsed);
+    if (payload?.type === "message_end" || payload?.type === "turn_end") {
+      return objectRecord(payload.message)?.role === "assistant";
+    }
+    if (payload?.type === "agent_end" && Array.isArray(payload.messages)) {
+      return payload.messages.some((message) => objectRecord(message)?.role === "assistant");
+    }
+  } catch {
+    // The wrapped interpreter remains authoritative for malformed/non-JSON
+    // lines and preserves Smithers' existing behavior.
+  }
+  return false;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function applyPiTerminalAnswer<T>(events: T, terminalEvents: unknown): T {
+  const terminalValues = Array.isArray(terminalEvents) ? terminalEvents : [terminalEvents];
+  const terminalCompletion = terminalValues
+    .map((value) => objectRecord(value))
+    .find((event) => event?.type === "completed");
+  if (!terminalCompletion || events == null) return events;
+  for (const value of Array.isArray(events) ? events : [events]) {
+    const event = objectRecord(value);
+    if (event?.type !== "completed") continue;
+    if (typeof terminalCompletion.answer === "string" && terminalCompletion.answer.length > 0) {
+      event.answer = terminalCompletion.answer;
+    } else {
+      delete event.answer;
+    }
+  }
+  return events;
 }
 
 export function createPiAgent(options: PiTaskOptions = {}): SmithersPiAgent {
