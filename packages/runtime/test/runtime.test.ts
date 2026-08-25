@@ -13121,6 +13121,22 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
       "utf8"
     );
     fs.writeFileSync(path.join(ambientDependencyRoot, "index.js"), 'export default "ambient-package";\n', "utf8");
+    // Decoys under the probe's working directory: #794 shipped broken because its probe ran with
+    // cwd inside the sealed root, so a cwd-fallback resolution passed by coincidence. If sealed
+    // imports ever consult the cwd again, they find these and the value assertions fail.
+    fs.writeFileSync(path.join(outsideRoot, "sealed-helper.mjs"), 'export const value = "cwd-decoy";\n', "utf8");
+    const decoyDependencyRoot = path.join(outsideRoot, "node_modules", "sealed-package");
+    fs.mkdirSync(decoyDependencyRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(decoyDependencyRoot, "package.json"),
+      `${JSON.stringify({ name: "sealed-package", main: "index.cjs" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(decoyDependencyRoot, "index.cjs"),
+      'module.exports = { packageValue: "cwd-decoy" };\n',
+      "utf8"
+    );
     fs.mkdirSync(path.join(root, "node_modules"), { recursive: true });
     fs.symlinkSync(
       path.relative(path.join(root, "node_modules"), dependencyRoot),
@@ -13175,7 +13191,9 @@ process.stdout.write(JSON.stringify({ sealed: sealed.default, ambientRejected, r
         `--preload=${path.join(controls, "bun-module-confinement.js")}`,
         scriptPath
       ],
-      { encoding: "utf8", cwd: root }
+      // The working directory deliberately sits outside the sealed root, where the decoys live:
+      // resolution must come from the sealed module's own tree, never from the cwd.
+      { encoding: "utf8", cwd: outsideRoot }
     );
 
     assert.equal(probe.status, 0, probe.stderr);
