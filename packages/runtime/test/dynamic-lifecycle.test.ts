@@ -35,17 +35,9 @@ import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
   schema_version: "ultrafuzz.data-governance-policy.v1",
   sensitivity: "public",
-  source_destinations: [
-    "model:anthropic",
-    "model:codex-route-7cb3cbc344a51b9df15967a7982030649706e28ea6123993a5f78e9d4270ffc7",
-    "model:openai"
-  ],
+  source_destinations: ["model:anthropic", "model:openai"],
   artifact_destinations: [],
-  destination_policies: [
-    "model:anthropic",
-    "model:codex-route-7cb3cbc344a51b9df15967a7982030649706e28ea6123993a5f78e9d4270ffc7",
-    "model:openai"
-  ].map((destination) => ({
+  destination_policies: ["model:anthropic", "model:openai"].map((destination) => ({
     destination,
     processor: "test",
     region: "local",
@@ -222,6 +214,7 @@ function lifecycleEnvironment(project: string): {
         PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         SMITHERS_BIN: smithers,
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-provider-homes-")),
         ULTRAFUZZ_PRICING_CATALOG_URL: "off"
       },
       smithers,
