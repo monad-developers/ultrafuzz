@@ -13103,15 +13103,34 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
     fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n", "utf8");
     fs.writeFileSync(path.join(controls, "bun-module-confinement.js"), BUN_MODULE_CONFINEMENT_SOURCE, "utf8");
     fs.writeFileSync(path.join(root, "sealed-helper.mjs"), 'export const value = "sealed";\n', "utf8");
+    const sealedDependency = path.join(root, "node_modules", "sealed-dep");
+    fs.mkdirSync(sealedDependency, { recursive: true });
+    fs.writeFileSync(
+      path.join(sealedDependency, "package.json"),
+      '{"name":"sealed-dep","version":"1.0.0","type":"module","main":"index.js"}\n',
+      "utf8"
+    );
+    fs.writeFileSync(path.join(sealedDependency, "index.js"), 'export default "sealed-dep";\n', "utf8");
     fs.writeFileSync(
       path.join(root, "sealed.tsx"),
-      'import { value } from "./sealed-helper.mjs"; const typed: string = value; export default typed;\n',
+      'import { value } from "./sealed-helper.mjs"; import dependency from "sealed-dep"; const typed: string = `${value}:${dependency}`; export default typed;\n',
       "utf8"
     );
 
     const outsideRoot = tempProject();
     const ambientPath = path.join(outsideRoot, "ambient.mjs");
     fs.writeFileSync(ambientPath, 'export default "ambient";\n', "utf8");
+    // A decoy under the probe's working directory proves sealed imports resolve
+    // from the sealed module's own directory rather than the ambient cwd.
+    const decoyDependency = path.join(outsideRoot, "node_modules", "sealed-dep");
+    fs.mkdirSync(decoyDependency, { recursive: true });
+    fs.writeFileSync(
+      path.join(decoyDependency, "package.json"),
+      '{"name":"sealed-dep","version":"1.0.0","type":"module","main":"index.js"}\n',
+      "utf8"
+    );
+    fs.writeFileSync(path.join(decoyDependency, "index.js"), 'export default "ambient-dep";\n', "utf8");
+    fs.writeFileSync(path.join(outsideRoot, "sealed-helper.mjs"), 'export const value = "ambient-helper";\n', "utf8");
 
     const scriptPath = path.join(root, "second-descriptor-probe.mjs");
     fs.writeFileSync(
@@ -13153,11 +13172,19 @@ process.stdout.write(JSON.stringify({ sealed: sealed.default, ambientRejected, r
         `--preload=${path.join(controls, "bun-module-confinement.js")}`,
         scriptPath
       ],
-      { encoding: "utf8", cwd: root }
+      // The working directory deliberately sits outside the sealed root: Bun
+      // resolves plugin-namespace imports against the cwd instead of the
+      // importing module, so a cwd inside the sealed root would let these
+      // imports resolve by coincidence instead of through the sealed resolver.
+      { encoding: "utf8", cwd: outsideRoot }
     );
 
     assert.equal(probe.status, 0, probe.stderr);
-    assert.deepEqual(JSON.parse(probe.stdout), { sealed: "sealed", ambientRejected: true, reusedRejected: true });
+    assert.deepEqual(JSON.parse(probe.stdout), {
+      sealed: "sealed:sealed-dep",
+      ambientRejected: true,
+      reusedRejected: true
+    });
   }
 );
 
