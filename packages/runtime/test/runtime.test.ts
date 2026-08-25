@@ -517,6 +517,11 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
 async function loadGeneratedPiAgent(project: string): Promise<{
   createPiAgent(options?: Record<string, unknown>): {
     opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+    createOutputInterpreter(): {
+      onStdoutLine?: (
+        line: string
+      ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
+    };
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command: string;
       args: string[];
@@ -564,6 +569,11 @@ async function loadGeneratedPiAgent(project: string): Promise<{
   const piModule = (await import(pathToFileURL(path.join(fixture, "pi.mjs")).href)) as {
     createPiAgent(options?: Record<string, unknown>): {
       opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+      createOutputInterpreter(): {
+        onStdoutLine?: (
+          line: string
+        ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
+      };
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command: string;
         args: string[];
@@ -6170,6 +6180,62 @@ bunAdapterTest(
       assert.equal(agent.opts.sessionDir, path.join(configDir, "sessions"));
       assert.equal(agent.opts.env.PI_TELEMETRY, "0");
       assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
+
+      // A text-free terminal assistant message is authoritative. Smithers
+      // otherwise retains the earlier delta and presents progress narration as
+      // the answer, which can poison a caller's structured-output repair pass.
+      const textFreeInterpreter = agent.createOutputInterpreter();
+      textFreeInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "intermediate progress" }
+        })
+      );
+      textFreeInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read", arguments: { path: "example" } }]
+          }
+        })
+      );
+      const textFreeCompletion = textFreeInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "agent_end",
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "toolCall", name: "read", arguments: { path: "example" } }]
+            }
+          ]
+        })
+      );
+      const textFreeCompleted = Array.isArray(textFreeCompletion)
+        ? textFreeCompletion.find((event) => event.type === "completed")
+        : textFreeCompletion;
+      assert.equal(textFreeCompleted?.type, "completed");
+      assert.equal(Object.hasOwn(textFreeCompleted ?? {}, "answer"), false);
+
+      // A later terminal assistant message with text still replaces any
+      // earlier progress and is returned unchanged.
+      const textInterpreter = agent.createOutputInterpreter();
+      textInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "intermediate progress" }
+        })
+      );
+      const textCompletion = textInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "agent_end",
+          messages: [{ role: "assistant", content: [{ type: "text", text: "final answer" }] }]
+        })
+      );
+      const textCompleted = Array.isArray(textCompletion)
+        ? textCompletion.find((event) => event.type === "completed")
+        : textCompletion;
+      assert.equal(textCompleted?.answer, "final answer");
 
       // Profile reasoning maps onto pi's existing --thinking level.
       const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
