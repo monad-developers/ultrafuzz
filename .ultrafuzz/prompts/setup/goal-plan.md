@@ -102,21 +102,10 @@ by the pinned schema. Copy every modeled threat and catalog class into the
 corresponding plan collections, record every applicability decision, retain the
 selected source-record identities, and include the fixed roaming goal.
 
-Do not write `expected_child_count`, `threat_count`, `applicable_class_count`,
-`max_dynamic_nodes`, or `goal_lanes` -- omit those five keys entirely. Ultrafuzz
-derives them after you return, from the plan you wrote plus the run's configured
-dynamic-node limit, and fails closed if a value you wrote disagrees with what it
-derives.
-
-The canonical schema marks those five keys optional, so a plan that omits them
-validates. Do not compute them. `max_dynamic_nodes` is a run setting this prompt
-never states, so you cannot know it, and `expected_child_count` counts threat and
-class goals only and excludes the roaming goal -- a plan that is internally
-consistent can still disagree with the derivation and fail closed.
-
-If you do write them, the contract checks each one against the plan you wrote and
-rejects a value that disagrees, so run the validation command and correct any
-value it reports rather than leaving it for the run to reject later.
+Omit `expected_child_count`, `threat_count`, `applicable_class_count`,
+`max_dynamic_nodes`, and `goal_lanes`. The schema marks them optional, so a plan
+without them validates. Ultrafuzz derives them after you return, and one of them,
+`max_dynamic_nodes`, is a run setting this prompt never states.
 
 `modeled_threat_ids` must exactly equal the IDs in the upstream threat model;
 class goals may reference only those IDs.
