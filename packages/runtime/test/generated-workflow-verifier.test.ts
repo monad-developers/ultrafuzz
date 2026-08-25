@@ -139,6 +139,63 @@ test("generated workflow input is an exact current-only envelope with bounded JS
   assert.match(template, /const inputSchema = z\n {2}\.strictObject\(\{/u);
 });
 
+test("generated workflow input accepts the nulls its input table reads back for keys a dispatch never set", () => {
+  // The runner tables this schema by walking `shape`, so every declared key
+  // becomes a column and a column the submission never set reads back as SQL
+  // null, not as undefined. Declaring the envelope keys `.optional()` -- which
+  // accepts undefined only -- therefore made a local dispatch, which by
+  // definition leaves all five cloud-worker keys unset, fail its own
+  // re-validation in parseWorkflowInput before the first task ever rendered.
+  const inputSchema = loadGeneratedWorkflowInputSchema();
+  const localThroughTheInputTable = {
+    schema_version: "ultrafuzz.smithers.workflow.v4",
+    ultrafuzz_run_id: "run-1",
+    tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
+    cloud_worker: null,
+    task_id: null,
+    attempt_id: null,
+    execution_generation: null,
+    selected_task: null,
+    operator_prompt: null,
+    operator_input: null
+  };
+  assert.equal(
+    inputSchema.safeParse(localThroughTheInputTable).success,
+    true,
+    "a local dispatch read back through the input table carries explicit nulls for every cloud-worker key"
+  );
+  const cloudThroughTheInputTable = {
+    cloud_worker: true,
+    task_id: "node:one",
+    attempt_id: "one",
+    execution_generation: "base",
+    selected_task: {},
+    schema_version: null,
+    ultrafuzz_run_id: null,
+    tasks: null,
+    operator_prompt: null,
+    operator_input: null
+  };
+  assert.equal(
+    inputSchema.safeParse(cloudThroughTheInputTable).success,
+    true,
+    "a cloud dispatch read back through the input table carries explicit nulls for every local key"
+  );
+
+  // Null is absence, never a stand-in for a key the selected envelope requires,
+  // and a null-filled local input must not read as a cloud dispatch.
+  for (const invalid of [
+    { ...localThroughTheInputTable, tasks: null },
+    { ...localThroughTheInputTable, schema_version: null },
+    { ...localThroughTheInputTable, ultrafuzz_run_id: null },
+    { ...cloudThroughTheInputTable, selected_task: null },
+    { ...cloudThroughTheInputTable, execution_generation: null },
+    { ...cloudThroughTheInputTable, schema_version: "ultrafuzz.smithers.workflow.v4" }
+  ]) {
+    assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
+  }
+});
+
 test("the workflow runner can project the generated workflow input into its input table", async () => {
   // The runner tables this schema by walking `shape` while it creates the
   // workflow, so a shapeless schema such as a union fails preflight on every
