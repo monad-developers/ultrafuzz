@@ -116,6 +116,34 @@ test("generated workflow input is an exact current-only envelope with bounded JS
   };
   assert.equal(inputSchema.safeParse(cloud).success, true);
 
+  const sqlHydratedLocal = {
+    ...local,
+    cloud_worker: null,
+    task_id: null,
+    attempt_id: null,
+    execution_generation: null,
+    selected_task: null,
+    operator_prompt: null,
+    operator_input: null
+  };
+  assert.equal(inputSchema.safeParse(sqlHydratedLocal).success, true);
+  const sqlHydratedCloud = {
+    ...cloud,
+    schema_version: null,
+    ultrafuzz_run_id: null,
+    tasks: null,
+    operator_prompt: null,
+    operator_input: null
+  };
+  assert.equal(inputSchema.safeParse(sqlHydratedCloud).success, true);
+
+  for (const key of ["cloud_worker", "task_id", "attempt_id", "execution_generation", "selected_task"] as const) {
+    assert.equal(inputSchema.safeParse({ ...sqlHydratedCloud, [key]: null }).success, false, key);
+  }
+  for (const key of ["schema_version", "ultrafuzz_run_id", "tasks"] as const) {
+    assert.equal(inputSchema.safeParse({ ...sqlHydratedLocal, [key]: null }).success, false, key);
+  }
+
   for (const invalid of [
     { ...local, unexpected: true },
     { ...local, schema_version: "ultrafuzz.smithers.workflow.v1" },
