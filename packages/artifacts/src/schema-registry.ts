@@ -190,6 +190,15 @@ export function readRegularFileSnapshot(filePath: string, maxBytes: number): Buf
       before.size !== after.size ||
       before.mtimeNs !== after.mtimeNs ||
       before.ctimeNs !== after.ctimeNs ||
+      // An atomic path replacement leaves this descriptor on the original
+      // inode, so dev/ino/size are all still identical and the only other
+      // evidence is a ctime bump -- which the kernel records at timestamp
+      // granularity, not instruction granularity. Open, read, rename and fstat
+      // routinely complete inside a single tick on a fast disk, and the
+      // replacement then went undetected. The unlink that rename performs drops
+      // the original inode's link count to zero, which is exact and carries no
+      // dependence on the clock.
+      before.nlink !== after.nlink ||
       after.size !== BigInt(offset)
     ) {
       throw new Error(`file changed while it was read: ${filePath}`);

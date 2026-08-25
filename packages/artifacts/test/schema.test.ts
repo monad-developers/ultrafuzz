@@ -2129,7 +2129,7 @@ test("planned graph v4 validates whole documents and executes every registered d
     primary: true
   };
   const preUpgradeValidatorBuild =
-    "ultrafuzz-json-validator.v1:77b2461a78ff8a1e942a70d473460dab54158e204dba791e818717cc9674a6d4";
+    "ultrafuzz-json-validator.v1:028be3251e9ac213ad6e1c037d8da47c9d903e8be563c8f4fa2149839565bcab";
   assert.equal(VALIDATOR_BUILD_IDENTITY, preUpgradeValidatorBuild);
   const historicalBundle = structuredClone(graph);
   historicalBundle.nodes = [

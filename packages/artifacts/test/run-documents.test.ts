@@ -431,30 +431,51 @@ test("a malformed present document fails differently from a genuinely missing do
   assert.throws(() => readRunMetadataDocument(missingPath), /cannot open regular file/u);
 });
 
+/**
+ * The race is run repeatedly on purpose.
+ *
+ * A rename over the path leaves the open descriptor on the original inode, so dev, ino and size are
+ * all unchanged and the only evidence besides the link count is the ctime bump from the unlink --
+ * which the kernel records at timestamp granularity, not instruction granularity. Open, read, rename
+ * and fstat routinely complete inside a single tick, and a single attempt then proves nothing: before
+ * the link count was compared, one attempt passed roughly a fifth of the time on a fast disk purely
+ * by losing the race. Every attempt in the loop must be caught, which no longer depends on the clock.
+ */
+const ATOMIC_REPLACEMENT_ATTEMPTS = 24;
+
 test("a runtime document read rejects an atomic path replacement during its snapshot", (t) => {
   const root = temporaryDirectory();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const sourcePath = path.join(root, "source-run.json");
-  const replacementPath = path.join(root, "replacement.json");
   const original = canonicalSourceRun();
   const replacement = canonicalSourceRun({ run_id: "run-replacement" });
-  writeSourceRunDocument(sourcePath, original);
-  writeSourceRunDocument(replacementPath, replacement);
 
   const originalReadSync = fs.readSync;
-  let replaced = false;
+  let sourcePath = "";
+  let pendingReplacement: string | undefined;
   t.mock.method(fs, "readSync", ((...args: unknown[]) => {
     const bytesRead = Reflect.apply(originalReadSync, fs, args) as number;
-    if (!replaced && bytesRead > 0) {
-      replaced = true;
+    if (pendingReplacement !== undefined && bytesRead > 0) {
+      const replacementPath = pendingReplacement;
+      pendingReplacement = undefined;
       fs.renameSync(replacementPath, sourcePath);
     }
     return bytesRead;
   }) as typeof fs.readSync);
 
-  assert.throws(() => readSourceRunDocument(sourcePath, original.run_id), /file changed while it was read/u);
-  assert.equal(replaced, true);
-  assert.deepEqual(readSourceRunDocument(sourcePath, replacement.run_id), replacement);
+  for (let attempt = 0; attempt < ATOMIC_REPLACEMENT_ATTEMPTS; attempt += 1) {
+    sourcePath = path.join(root, `source-run-${attempt}.json`);
+    const replacementPath = path.join(root, `replacement-${attempt}.json`);
+    writeSourceRunDocument(sourcePath, original);
+    writeSourceRunDocument(replacementPath, replacement);
+    pendingReplacement = replacementPath;
+    assert.throws(
+      () => readSourceRunDocument(sourcePath, original.run_id),
+      /file changed while it was read/u,
+      `attempt ${attempt}`
+    );
+    assert.equal(pendingReplacement, undefined, `attempt ${attempt} must have replaced the path mid-read`);
+    assert.deepEqual(readSourceRunDocument(sourcePath, replacement.run_id), replacement, `attempt ${attempt}`);
+  }
 });
 
 test("runtime document reads detect same-file mutation and refuse symlinks", (t) => {
