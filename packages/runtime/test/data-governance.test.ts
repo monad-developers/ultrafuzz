@@ -522,3 +522,43 @@ test("target identity rejects Git content filters before execution", () => {
   assert.throws(() => targetIdentity(root), /Git content filters are forbidden/u);
   assert.equal(fs.existsSync(marker), false);
 });
+
+test("Codex CLI bookkeeping in config.toml does not change the acknowledged route", () => {
+  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-codex-route-"));
+  fs.mkdirSync(path.join(homes, ".codex"));
+  const configPath = path.join(homes, ".codex", "config.toml");
+  // What the Codex CLI writes on its own: model selection, marketplace
+  // refresh timestamps, plugin toggles, and project trust levels. None of it
+  // can redirect traffic, and the CLI rewrites it on invocation, so it must
+  // not participate in the disclosure route digest (#908).
+  fs.writeFileSync(
+    configPath,
+    [
+      'model = "gpt-5.6-luna"',
+      'model_reasoning_effort = "high"',
+      "",
+      "[marketplaces.openai-bundled]",
+      'last_updated = "2026-08-25T13:35:06Z"',
+      'source_type = "local"',
+      "",
+      '[plugins."sites@openai-bundled"]',
+      "enabled = true",
+      "",
+      '[projects."/home/operator"]',
+      'trust_level = "trusted"',
+      ""
+    ].join("\n")
+  );
+  assert.equal(modelDestination("CodexAgent", config, { HOME: homes }), "model:openai");
+
+  // Routing declarations still pin (and, after acknowledgement, still fail
+  // closed): a provider selection or endpoint makes the digest reappear.
+  for (const routing of [
+    'model_provider = "private"\n',
+    '[model_providers.private]\nbase_url = "https://gateway.example/v1"\n',
+    'base_url = "https://gateway.example/v1"\n'
+  ]) {
+    fs.writeFileSync(configPath, routing);
+    assert.match(modelDestination("CodexAgent", config, { HOME: homes }), /^model:codex-route-/u);
+  }
+});
