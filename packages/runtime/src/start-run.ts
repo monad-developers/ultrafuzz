@@ -6,6 +6,7 @@ import {
   appendEvent,
   assertRunPlanDocument,
   assertPlannedGraph,
+  assertPlannedGraphSemantics,
   assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   NODE_PROVENANCE_FAILURE_CATEGORIES,
@@ -18,6 +19,7 @@ import {
   readRunState,
   sensitiveEnvironmentValues,
   updateRunStatus,
+  validatePlannedGraph,
   validateSafeId,
   writeJsonDurable,
   writeRunMetadataDocument,
@@ -28,6 +30,7 @@ import {
   type RunRecoveryProvenance,
   type RunLayout,
   type AppendEventInput,
+  type PlannedGraphDocument,
   type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
 import { parseResolvedConfigJsonBytes, validateAgentConfigs, type ResolvedConfig } from "@ultrafuzz/config";
@@ -72,6 +75,7 @@ import {
   acquireWorkflowControlLock,
   acquireWorkflowLifecycleLock,
   materializeWorkflowExecutionSnapshot,
+  sealedBunStartupControlDrift,
   sealWorkflowControlFiles,
   verifyWorkflowControlSnapshot,
   workflowControlPaths,
@@ -1045,10 +1049,15 @@ function parseSealedTaskManifestForObserver(contents: Readonly<{ graph: Buffer; 
   document: SmithersTaskManifestDocument;
   divergences: readonly string[];
 } {
-  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(contents.graph));
+  const sealedGraph = parseSealedPlannedGraphForObserver(contents.graph);
   const document = parseSmithersTaskManifestBytes(contents.tasks);
+  if (sealedGraph.divergences.length > 0) {
+    // The graph no longer re-derives, so the cross-document gate below would only restate that in a
+    // second, less specific message. Report the cause once.
+    return { document, divergences: sealedGraph.divergences };
+  }
   try {
-    assertSmithersTaskManifestMatchesPlannedGraph(document, graph);
+    assertSmithersTaskManifestMatchesPlannedGraph(document, sealedGraph.graph);
   } catch (error) {
     return {
       document,
@@ -1058,6 +1067,48 @@ function parseSealedTaskManifestForObserver(contents: Readonly<{ graph: Buffer; 
     };
   }
   return { document, divergences: [] };
+}
+
+/**
+ * `assertSealedPlannedGraph` does two different jobs behind one name. The first is structural: the
+ * bytes must validate against the planned-graph schema, and nothing can report on a document that is
+ * not a planned graph at all. The second, `assertPlannedGraphSemantics`, re-derives the graph against
+ * *this build* — it looks every output contract up in the running process's artifact-contract registry
+ * and insists the digests, schema IDs and validator build recorded at compile time still match what
+ * this checkout produces.
+ *
+ * That second job is not a property of the run; it is a property of the tree observing the run. An
+ * operator whose checkout has moved on since the run was submitted -- a rebased branch, a newer
+ * release, a contract whose schema was revised -- gets `planned graph output schema binding changed`
+ * and loses `status` for a run that is otherwise intact and possibly still executing. That is the same
+ * failure as issue #866, one throw further along the same read-only path: the run is fine, the
+ * observer's registry disagrees, and the operator is the one punished. `packages/artifacts`'s own
+ * semantic-gate collects exactly this condition as an issue rather than raising it, so the softer
+ * reading already exists in the codebase.
+ *
+ * Execution must still refuse: running a node whose output contract no longer matches the registry
+ * that will validate its artifacts would produce evidence nothing can check. So the downgrade is
+ * observer-only, and schema invalidity stays fatal for everyone.
+ */
+function parseSealedPlannedGraphForObserver(graphBytes: Buffer): {
+  graph: PlannedGraphDocument;
+  divergences: readonly string[];
+} {
+  const value = parseStrictJsonBytes(graphBytes);
+  // Structural, so not tolerated. `assertSealedPlannedGraph` raises the canonical schema message.
+  if (!validatePlannedGraph(value).ok) return { graph: assertSealedPlannedGraph(value), divergences: [] };
+  const graph = value as PlannedGraphDocument;
+  try {
+    assertPlannedGraphSemantics(graph, { allowHistoricalSchemaBundle: true });
+  } catch (error) {
+    return {
+      graph,
+      divergences: [
+        `sealed planned graph no longer re-derives against this build's artifact contracts: ${error instanceof Error ? error.message : String(error)}`
+      ]
+    };
+  }
+  return { graph, divergences: [] };
 }
 
 async function persistSmithersEvidence(
@@ -1260,6 +1311,10 @@ export async function readLinkedWorkflowEvidence(
       ? parseSealedTaskManifestForObserver(verifiedControl.contents)
       : { document: parseSealedTaskManifest(verifiedControl.contents), divergences: [] as readonly string[] };
     const taskDocument = sealedTaskManifest.document;
+    // Every downgrade this function performs is reported on one channel, next to the digest
+    // divergences `verifyWorkflowControlSnapshot` collected, so `getRunHealth` degrades through the
+    // single path it already has and a caller has one place to look.
+    const observerDivergences: string[] = [...sealedTaskManifest.divergences];
     const compiledRunId = workflow.compiled_run_id;
     if (
       typeof compiledRunId !== "string" ||
@@ -1271,6 +1326,10 @@ export async function readLinkedWorkflowEvidence(
     const controller = effectiveControllerGeneration(layout, verifiedControl, {
       allowPending: options.allowPendingControllerRefresh === true
     });
+    const startupControlDrift = tolerateDivergence
+      ? sealedBunStartupControlDrift(controller.snapshot.executionFiles)
+      : undefined;
+    if (startupControlDrift !== undefined) observerDivergences.push(startupControlDrift);
     const executionSnapshot =
       options.deferExecutionSnapshotForControllerRefresh === true
         ? undefined
@@ -1278,7 +1337,8 @@ export async function readLinkedWorkflowEvidence(
             projectRoot: resolvedProjectRoot,
             layout,
             snapshot: controller.snapshot,
-            authorizedGenerations: controller.authorizedGenerations
+            authorizedGenerations: controller.authorizedGenerations,
+            ...(startupControlDrift === undefined ? {} : { tolerateStartupControlDrift: true })
           });
     const expectedWorkflowFields: Record<string, string> = {
       path: projectRelativePath(resolvedProjectRoot, verifiedControl.paths.workflowPath),
@@ -1342,15 +1402,10 @@ export async function readLinkedWorkflowEvidence(
       controlGeneration: verifiedControl.generation,
       controllerGeneration: controller.controllerGeneration,
       workflowLinkId: activeWorkflowLink.link_id,
-      // A re-derivation mismatch is reported on the same channel as a digest divergence so callers
-      // need one place to look, and so `getRunHealth` degrades through the path it already has.
       verifiedControl:
-        sealedTaskManifest.divergences.length === 0
+        observerDivergences.length === 0
           ? verifiedControl
-          : {
-              ...verifiedControl,
-              divergences: [...verifiedControl.divergences, ...sealedTaskManifest.divergences]
-            },
+          : { ...verifiedControl, divergences: [...verifiedControl.divergences, ...observerDivergences] },
       controllerSnapshot: controller.snapshot,
       ...(executionSnapshot === undefined
         ? {}
