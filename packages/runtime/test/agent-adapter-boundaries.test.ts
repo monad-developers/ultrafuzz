@@ -103,7 +103,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
   "environment.tsx": {
-    classifiedSourceSha256: "067fbb00ac6418af8f52e8e48f8d30d69549611a6815f98cb9dbcb9bbee4ca71",
+    classifiedSourceSha256: "7e14b4765af1fc7f53a9fd8483e169a9dac2beb62f0c8893ab80df19b15f45e5",
     responsibilities: [],
     upstreamIssues: []
   },
@@ -186,9 +186,9 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   },
   "environment.tsx": {
     maxLines: 425,
-    maxSyntaxNodes: 2_209,
+    maxSyntaxNodes: 2_258,
     purpose: "data-governance",
-    sourceSha256: "067fbb00ac6418af8f52e8e48f8d30d69549611a6815f98cb9dbcb9bbee4ca71"
+    sourceSha256: "7e14b4765af1fc7f53a9fd8483e169a9dac2beb62f0c8893ab80df19b15f45e5"
   },
   "index.tsx": {
     maxLines: 30,
