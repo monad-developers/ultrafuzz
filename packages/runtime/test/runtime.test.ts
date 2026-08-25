@@ -1734,6 +1734,7 @@ function fakeLifecycleSmithersEnv(
   input: {
     inspect: unknown;
     resumeInspect?: unknown;
+    replacementInspect?: unknown;
     failInspectOnInvocation?: number;
     events?: string;
     tokenEvents?: string;
@@ -1751,6 +1752,7 @@ function fakeLifecycleSmithersEnv(
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const resumeInspectPath = path.join(project, "fake-smithers-resume-inspect.json");
+  const replacementInspectPath = path.join(project, "fake-smithers-replacement-inspect.json");
   const inspectCountPath = path.join(project, "fake-smithers-inspect-count");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
   const tokenEventsPath =
@@ -1765,6 +1767,9 @@ function fakeLifecycleSmithersEnv(
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   if (input.resumeInspect !== undefined) {
     fs.writeFileSync(resumeInspectPath, `${JSON.stringify(input.resumeInspect, null, 2)}\n`, "utf8");
+  }
+  if (input.replacementInspect !== undefined) {
+    fs.writeFileSync(replacementInspectPath, `${JSON.stringify(input.replacementInspect, null, 2)}\n`, "utf8");
   }
   fs.writeFileSync(inspectCountPath, "0\n", "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
@@ -1863,6 +1868,13 @@ function fakeLifecycleSmithersEnv(
             "    fi"
           ]),
       ...(input.inspectMarkerPath === undefined ? [] : [`    touch ${shellQuote(input.inspectMarkerPath)}`]),
+      ...(input.replacementInspect === undefined
+        ? []
+        : [
+            '    case "$2" in',
+            `      ufz-recovery-*) cat ${shellQuote(replacementInspectPath)}; exit 0 ;;`,
+            "    esac"
+          ]),
       `    cat ${shellQuote(inspectPath)}`,
       "    ;;",
       "  node)",
@@ -2049,6 +2061,22 @@ function workflowInspect(input: {
     meta: {
       command: "inspect",
       duration: "1ms"
+    }
+  };
+}
+
+function workflowTimeline(workflowRunId: string, frameNumbers: readonly number[]): unknown {
+  return {
+    timeline: {
+      runId: workflowRunId,
+      branch: null,
+      frames: frameNumbers.map((frameNo) => ({
+        frameNo,
+        createdAtMs: frameNo + 1,
+        contentHash: crypto.createHash("sha256").update(String(frameNo)).digest("hex"),
+        forks: []
+      })),
+      children: []
     }
   };
 }
@@ -21334,7 +21362,8 @@ test("resume reopens a terminal failed workflow with only pending ready work", a
       status: "running",
       state: "running",
       steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
-    })
+    }),
+    timeline: workflowTimeline(workflowRunId, [2, 4])
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -21371,6 +21400,8 @@ test("resume reopens a terminal failed workflow with only pending ready work", a
   assert.equal(reopened.finished_at, undefined);
   assert.ok(Date.parse(reopened.workflow_deadline_at ?? "") > resumedAfter);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /timeline ultrafuzz-terminal-pending-ready-resume --json/u);
+  assert.match(commands, /rewind ultrafuzz-terminal-pending-ready-resume 2 --yes --json/u);
   assert.doesNotMatch(commands, /^(?:timetravel|fork|replay) /mu);
   assert.match(
     commands,
@@ -21381,6 +21412,199 @@ test("resume reopens a terminal failed workflow with only pending ready work", a
   const active = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
   assert.equal(active.status, "running");
   assert.equal(active.nodes["project-discovery"]?.status, "running");
+});
+
+test("resume transfers a zero-frame terminal pending workflow to a deterministic replacement", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "terminal-pending-zero-frame";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const replacementRunId = `ufz-recovery-${crypto.createHash("sha256").update(workflowRunId).digest("hex").slice(0, 32)}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "workflow ended before its first task frame" },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    timeline: workflowTimeline(workflowRunId, []),
+    replacementInspect: workflowInspect({
+      workflowRunId: replacementRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 16,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.equal(resumed.value?.workflow_run_id, replacementRunId);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`timeline ${workflowRunId} --json`, "u"));
+  assert.doesNotMatch(commands, /^rewind /mu);
+  assert.match(commands, new RegExp(`^up .* --detach --run-id ${replacementRunId} .*--max-concurrency 16`, "mu"));
+  assert.doesNotMatch(commands, new RegExp(`--resume ${workflowRunId}`, "u"));
+  const state = readRunState(layoutForRunRoot(run.value!.run_root));
+  assert.equal(state.status, "running");
+  assert.equal(state.provenance?.workflow.runId, replacementRunId);
+  assert.equal(state.provenance?.workflow.compiledRunId, workflowRunId);
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string; smithers_run_id?: string };
+  assert.equal(recovery.recovery, "terminal-pending-replacement");
+  assert.equal(recovery.smithers_run_id, replacementRunId);
+});
+
+test("resume adopts the deterministic zero-frame replacement after an interrupted product link", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "terminal-pending-existing-replacement";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const replacementRunId = `ufz-recovery-${crypto.createHash("sha256").update(workflowRunId).digest("hex").slice(0, 32)}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    timeline: workflowTimeline(workflowRunId, []),
+    replacementInspect: workflowInspect({
+      workflowRunId: replacementRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal((await syncRun({ projectRoot: project, runId, env })).ok, true);
+  env.SMITHERS_FAKE_RUN_EXISTS = "1";
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 16,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, replacementRunId);
+  const upCommands = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .split("\n")
+    .filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 2, JSON.stringify(upCommands));
+  assert.doesNotMatch(upCommands[0]!, /--resume/u);
+  assert.match(upCommands[1]!, new RegExp(`--resume ${replacementRunId} --run-id ${replacementRunId}`, "u"));
+  assert.match(upCommands[1]!, /--max-concurrency 16/u);
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string };
+  assert.equal(recovery.recovery, "terminal-pending-replacement-adopted");
+});
+
+test("resume adopts an active deterministic replacement without submitting a duplicate", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "terminal-pending-active-replacement";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const replacementRunId = `ufz-recovery-${crypto.createHash("sha256").update(workflowRunId).digest("hex").slice(0, 32)}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    timeline: workflowTimeline(workflowRunId, []),
+    replacementInspect: workflowInspect({
+      workflowRunId: replacementRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal((await syncRun({ projectRoot: project, runId, env })).ok, true);
+  env.SMITHERS_FAKE_RUN_EXISTS = "1";
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 16,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, replacementRunId);
+  assert.equal(resumed.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const upCommands = commands.split("\n").filter((command) => command.startsWith("up "));
+  assert.equal(upCommands.length, 1, JSON.stringify(upCommands));
+  assert.doesNotMatch(upCommands[0]!, /--resume/u);
+  assert.match(commands, new RegExp(`inspect ${replacementRunId} --format json --full-output`, "u"));
+  const state = readRunState(layoutForRunRoot(run.value!.run_root));
+  assert.equal(state.provenance?.workflow.runId, replacementRunId);
+  const recovery = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "recovery-submission.json"), "utf8")
+  ) as { recovery?: string };
+  assert.equal(recovery.recovery, "terminal-pending-replacement-adopted");
+});
+
+test("resume rejects a foreign zero-frame timeline before replacing the workflow", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "terminal-pending-foreign-timeline";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    timeline: workflowTimeline("different-workflow-run", [])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal((await syncRun({ projectRoot: project, runId, env })).ok, true);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.match(resumed.diagnostics[0]?.message ?? "", /timeline belongs to a different workflow run/u);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`timeline ${workflowRunId} --json`, "u"));
+  assert.doesNotMatch(commands, /^(?:rewind|up) /mu);
 });
 
 test("forced retry resume renews a stale terminal deadline without duplicating an active workflow", async () => {
@@ -21525,7 +21749,7 @@ test("resume renews a stale unfinished run without synthesizing a task reset", a
   );
 });
 
-test("resume continues a run-level render failure in place without a no-op rewind", async () => {
+test("resume rewinds a run-level render failure to the preceding frame", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21537,7 +21761,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
       error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
       steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
     }),
-    timeline: { timeline: { frames: [{ frameNo: 2 }, { frameNo: 4 }] } }
+    timeline: workflowTimeline("ultrafuzz-render-recovery-run", [2, 4])
   });
   const run = await startRun({ projectRoot: project, runId: "render-recovery-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -21555,9 +21779,9 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  // A jump to the latest frame returns early upstream, so reading the timeline and rewinding to it
-  // spends two subprocesses per recovery generation and mutates nothing.
-  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
+  assert.match(commands, /timeline ultrafuzz-render-recovery-run --json/u);
+  assert.match(commands, /rewind ultrafuzz-render-recovery-run 2 --yes --json/u);
+  assert.doesNotMatch(commands, /retry-task/u);
   assert.match(
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u

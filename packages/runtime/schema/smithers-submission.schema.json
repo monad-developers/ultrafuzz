@@ -13,7 +13,7 @@
       "$ref": "#/$defs/nonEmptyString"
     },
     "recovery": {
-      "const": "missing-workflow-run"
+      "enum": ["missing-workflow-run", "terminal-pending-replacement", "terminal-pending-replacement-adopted"]
     },
     "command": {
       "type": "array",

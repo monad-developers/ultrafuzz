@@ -203,7 +203,7 @@ export interface CloudExecutionGenerationDocument {
 export interface SmithersSubmissionDocument {
   schema_version: typeof SMITHERS_SUBMISSION_SCHEMA_VERSION;
   smithers_run_id: string;
-  recovery?: "missing-workflow-run";
+  recovery?: "missing-workflow-run" | "terminal-pending-replacement" | "terminal-pending-replacement-adopted";
   command: readonly string[];
   stdout: string;
   stderr: string;

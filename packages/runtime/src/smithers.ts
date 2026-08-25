@@ -135,6 +135,8 @@ const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
+// `smithers up` exits 4 with code RUN_EXISTS when a non-resume submission names an existing run.
+const SMITHERS_RUN_EXISTS_EXIT_CODE = 4;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
@@ -3062,6 +3064,128 @@ export async function runSmithersLifecycleCommand(input: {
       }
       preResumeStderr = resetStderr.join("\n");
     }
+    const terminalPendingWork =
+      failedTasks.length === 0 &&
+      input.retryFailed === true &&
+      input.resetNode === undefined &&
+      currentInspection.runState === "failed" &&
+      currentInspection.nodes.some((node) => node.state === "pending");
+    if (terminalPendingWork) {
+      const timeline = await execSmithersCli({
+        args: ["timeline", input.smithersRunId, "--json"],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
+      });
+      const frameNumbers = currentSmithersTimelineFrameNumbers(jsonField(timeline.stdout).json, input.smithersRunId);
+      const precedingFrame = frameNumbers.length < 2 ? undefined : frameNumbers.at(-2);
+      if (precedingFrame !== undefined) {
+        // Rewinding to the latest frame is a no-op upstream: only a preceding
+        // frame clears the terminal aggregate and re-pends later work.
+        const rewind = await execSmithersCli({
+          args: ["rewind", input.smithersRunId, String(precedingFrame), "--yes", "--json"],
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        });
+        preResumeStderr = [preResumeStderr, timeline.stderr, rewind.stderr]
+          .filter((value) => value.length > 0)
+          .join("\n");
+      } else {
+        const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
+        const inputJson = workflowRelaunchInputJson();
+        const submissionArgs = (adoptExisting: boolean): string[] => [
+          "up",
+          input.workflowPath,
+          "--detach",
+          ...(adoptExisting ? ["--resume", replacementRunId] : []),
+          "--run-id",
+          replacementRunId,
+          ...(adoptExisting ? ["--force"] : []),
+          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          "--root",
+          input.projectRoot,
+          ...workflowLogDirArgs(),
+          "--input",
+          inputJson,
+          "--format",
+          "json",
+          ...supervisorCommandArgs(input.controllerLeaseSeconds)
+        ];
+        let submission = await execSmithersCli({
+          args: submissionArgs(false),
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces,
+          acceptedExitCodes: [SMITHERS_RUN_EXISTS_EXIT_CODE]
+        });
+        let recovery: "terminal-pending-replacement" | "terminal-pending-replacement-adopted" =
+          "terminal-pending-replacement";
+        let adoptedRunning = false;
+        if (submission.exitCode !== 0) {
+          if (!smithersOutputRejectsExistingRun(submission)) {
+            throw new Error(
+              `replacement workflow submission failed: ${submission.stderr.trim() || submission.stdout.trim() || `exit ${submission.exitCode}`}`
+            );
+          }
+          const existingInspection = await runSmithersInspectionCommand({
+            args: ["inspect", replacementRunId, "--format", "json", "--full-output"],
+            projectRoot: input.projectRoot,
+            env: input.env,
+            environmentVariableNames: input.environmentVariableNames
+          });
+          if (!existingInspection.ok) {
+            throw new Error(
+              `replacement workflow inspection failed during adoption: ${existingInspection.error ?? (existingInspection.stderr.trim() || "unknown error")}`
+            );
+          }
+          const existing = parseCurrentSmithersInspect(existingInspection, replacementRunId);
+          if (smithersRunStateIsActive(existing)) {
+            submission = {
+              stdout: existingInspection.stdout,
+              stderr: existingInspection.stderr,
+              command: existingInspection.command,
+              exitCode: 0
+            };
+            adoptedRunning = true;
+          } else {
+            // A prior controller may have submitted the deterministic replacement
+            // and died before committing the product-run link. Resume that exact
+            // run rather than minting another lineage.
+            submission = await execSmithersCli({
+              args: submissionArgs(true),
+              projectRoot: input.projectRoot,
+              env: input.env,
+              environmentVariableNames: input.environmentVariableNames,
+              keepWorkspaces: input.keepWorkspaces
+            });
+          }
+          recovery = "terminal-pending-replacement-adopted";
+        }
+        writeRuntimeDocument(
+          path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"),
+          SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+          {
+            schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+            smithers_run_id: replacementRunId,
+            recovery,
+            command: submission.command,
+            stdout: redactedEvidenceText(submission.stdout),
+            stderr: redactedEvidenceText(submission.stderr),
+            submitted_at: new Date().toISOString()
+          },
+          "Smithers terminal-pending recovery submission evidence"
+        );
+        return {
+          ...submission,
+          workflowRunId: replacementRunId,
+          ...(adoptedRunning ? { alreadyRunning: true } : {})
+        };
+      }
+    }
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&
@@ -3401,6 +3525,110 @@ function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: s
     failedTasks.set(`${entry.nodeId}::0`, { nodeId: entry.nodeId, iteration: 0 });
   }
   return [...failedTasks.values()];
+}
+
+function currentSmithersTimelineFrameNumbers(value: unknown, expectedWorkflowRunId: string): number[] {
+  if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["timeline"]) || !isObjectRecord(value.timeline)) {
+    throw new Error("Smithers timeline output must use the exact current envelope");
+  }
+  const timeline = value.timeline;
+  assertCurrentInspectObjectKeys(
+    timeline,
+    ["runId", "branch", "frames", "children"],
+    ["runId", "branch", "controls", "frames", "children"],
+    "Smithers timeline"
+  );
+  if (requiredCurrentInspectString(timeline.runId, "Smithers timeline runId") !== expectedWorkflowRunId) {
+    throw new Error("Smithers timeline belongs to a different workflow run");
+  }
+  if (timeline.branch !== null) {
+    if (
+      !isObjectRecord(timeline.branch) ||
+      !hasExactObjectKeys(timeline.branch, [
+        "runId",
+        "parentRunId",
+        "parentFrameNo",
+        "branchLabel",
+        "forkDescription",
+        "createdAtMs"
+      ])
+    ) {
+      throw new Error("Smithers timeline branch must use the exact current shape");
+    }
+    if (
+      requiredCurrentInspectString(timeline.branch.runId, "Smithers timeline branch runId") !== expectedWorkflowRunId
+    ) {
+      throw new Error("Smithers timeline branch belongs to a different workflow run");
+    }
+    requiredCurrentInspectString(timeline.branch.parentRunId, "Smithers timeline branch parentRunId");
+    requiredCurrentInspectCount(timeline.branch.parentFrameNo, "Smithers timeline branch parentFrameNo");
+    requiredNullableCurrentTimelineString(timeline.branch.branchLabel, "Smithers timeline branch branchLabel");
+    requiredNullableCurrentTimelineString(timeline.branch.forkDescription, "Smithers timeline branch forkDescription");
+    requiredCurrentInspectCount(timeline.branch.createdAtMs, "Smithers timeline branch createdAtMs");
+  }
+  if (timeline.controls !== undefined) {
+    if (!Array.isArray(timeline.controls)) throw new Error("Smithers timeline controls must be an array when present");
+    for (const [index, value] of timeline.controls.entries()) {
+      const label = `Smithers timeline control ${index + 1}`;
+      if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["seq", "type", "timestampMs", "payload"])) {
+        throw new Error(`${label} must use the exact current shape`);
+      }
+      requiredCurrentInspectCount(value.seq, `${label}.seq`);
+      const type = requiredCurrentInspectString(value.type, `${label}.type`);
+      if (!type.startsWith("OneshotSteer") && !type.startsWith("OneshotRestart")) {
+        throw new Error(`${label}.type is not a current timeline control event`);
+      }
+      requiredCurrentInspectCount(value.timestampMs, `${label}.timestampMs`);
+      if (!isObjectRecord(value.payload)) throw new Error(`${label}.payload must be an object`);
+    }
+  }
+  if (!Array.isArray(timeline.children) || timeline.children.length !== 0) {
+    throw new Error("flat Smithers timeline must not contain child runs");
+  }
+  if (!Array.isArray(timeline.frames)) {
+    throw new Error("Smithers timeline frames must be an array");
+  }
+  const frameNumbers = timeline.frames.map((value, index) => {
+    const label = `Smithers timeline frame ${index + 1}`;
+    if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["frameNo", "createdAtMs", "contentHash", "forks"])) {
+      throw new Error(`${label} must use the exact current shape`);
+    }
+    const frameNo = requiredCurrentInspectCount(value.frameNo, `${label}.frameNo`);
+    requiredCurrentInspectCount(value.createdAtMs, `${label}.createdAtMs`);
+    requiredCurrentInspectString(value.contentHash, `${label}.contentHash`);
+    if (!Array.isArray(value.forks)) throw new Error(`${label}.forks must be an array`);
+    const forkRunIds = value.forks.map((fork, forkIndex) => {
+      const forkLabel = `${label} fork ${forkIndex + 1}`;
+      if (!isObjectRecord(fork) || !hasExactObjectKeys(fork, ["runId", "branchLabel", "forkDescription"])) {
+        throw new Error(`${forkLabel} must use the exact current shape`);
+      }
+      const runId = requiredCurrentInspectString(fork.runId, `${forkLabel}.runId`);
+      requiredNullableCurrentTimelineString(fork.branchLabel, `${forkLabel}.branchLabel`);
+      requiredNullableCurrentTimelineString(fork.forkDescription, `${forkLabel}.forkDescription`);
+      return runId;
+    });
+    if (new Set(forkRunIds).size !== forkRunIds.length) throw new Error(`${label} repeats a fork runId`);
+    return frameNo;
+  });
+  if (new Set(frameNumbers).size !== frameNumbers.length) {
+    throw new Error("Smithers timeline repeats a frame number");
+  }
+  if (frameNumbers.some((frame, index) => index > 0 && frame <= frameNumbers[index - 1]!)) {
+    throw new Error("Smithers timeline frame numbers are not strictly increasing");
+  }
+  return frameNumbers;
+}
+
+function requiredNullableCurrentTimelineString(value: unknown, label: string): string | null {
+  return value === null ? null : requiredCurrentInspectString(value, label);
+}
+
+function smithersOutputRejectsExistingRun(snapshot: { stdout: string; stderr: string }): boolean {
+  return [snapshot.stdout, snapshot.stderr].some((value) => value.includes("RUN_EXISTS"));
+}
+
+function compatibleRecoveryRunId(value: string): string {
+  return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
 export function parseCurrentSmithersInspect(
