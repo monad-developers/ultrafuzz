@@ -29,8 +29,22 @@ const PI_TEXT_FREE_TERMINAL_SUMMARY = JSON.stringify({
 export class CompatiblePiAgent extends SmithersPiAgent {
   override async buildCommand(params: PiCommandParams): Promise<PiCommand> {
     const command: PiCommand = await super.buildCommand(params);
+    let args = command.args;
+    let stdin = command.stdin;
+    if (params.prompt.length > 0) {
+      if (args.at(-1) !== params.prompt) {
+        throw new Error("Smithers PiAgent did not emit the prompt as its exact trailing argument");
+      }
+      // Pi print mode natively reads a non-TTY prompt from stdin. Keeping the
+      // prompt out of argv avoids POSIX per-argument limits (and process-list
+      // disclosure) while preserving every Smithers-generated flag verbatim.
+      args = args.slice(0, -1);
+      stdin = params.prompt;
+    }
     return {
       ...command,
+      args,
+      ...(stdin === undefined ? {} : { stdin }),
       // Pi calls its newline-delimited event mode `json`. Smithers' plain
       // `json` output format scans the complete intact transcript and can
       // select an earlier tool payload instead of the terminal interpreter

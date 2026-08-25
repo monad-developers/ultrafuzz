@@ -525,6 +525,7 @@ async function loadGeneratedPiAgent(project: string): Promise<{
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command: string;
       args: string[];
+      stdin?: string;
       env?: Record<string, string>;
       outputFormat?: string;
     }>;
@@ -577,6 +578,7 @@ async function loadGeneratedPiAgent(project: string): Promise<{
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command: string;
         args: string[];
+        stdin?: string;
         env?: Record<string, string>;
         outputFormat?: string;
       }>;
@@ -6152,9 +6154,9 @@ bunAdapterTest(
         "--model",
         "openai/gpt-mini-latest",
         "--session-dir",
-        path.join(configDir, "sessions"),
-        "find a bug"
+        path.join(configDir, "sessions")
       ]);
+      assert.equal(command.stdin, "find a bug");
 
       // The acceptance criterion: no credential value anywhere in argv, and no
       // `--api-key` flag, because the adapter never sets Smithers' `apiKey`.
@@ -6163,7 +6165,38 @@ bunAdapterTest(
         command.args.some((argument) => argument.includes(credential)),
         false
       );
+      assert.equal(command.stdin?.includes(credential), false);
       assert.equal((agent.opts as { apiKey?: string }).apiKey, undefined);
+
+      // Structured-output repair includes the malformed response in the next
+      // prompt. Keep a response larger than Linux's common 128 KiB per-argument
+      // ceiling entirely out of argv while preserving the ordinary flag list.
+      const sensitivePromptMarker = "synthetic-sensitive-prompt-marker";
+      const oversizedCorrectionPrompt = [
+        "The prior response did not match the required schema. Correct it:\n",
+        sensitivePromptMarker,
+        "\n",
+        "malformed-output-".repeat(9_000)
+      ].join("");
+      assert.ok(Buffer.byteLength(oversizedCorrectionPrompt, "utf8") > 128 * 1024);
+      const oversizedCommand = await agent.buildCommand({
+        prompt: oversizedCorrectionPrompt,
+        cwd: project,
+        options: {}
+      });
+      assert.deepEqual(oversizedCommand.args, command.args);
+      assert.equal(oversizedCommand.stdin, oversizedCorrectionPrompt);
+      assert.equal(oversizedCommand.args.includes(oversizedCorrectionPrompt), false);
+      assert.equal(
+        oversizedCommand.args.some((argument) => argument.includes(sensitivePromptMarker)),
+        false
+      );
+      assert.equal(
+        oversizedCommand.args.some((argument) => argument.includes(credential)),
+        false
+      );
+      assert.equal(oversizedCommand.stdin.includes(credential), false);
+      assert.deepEqual(oversizedCommand.env, command.env);
 
       // The credential reaches the child only through the environment, and that
       // environment went through workflowControlChildEnvironment: every
