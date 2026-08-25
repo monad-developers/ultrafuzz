@@ -18,7 +18,7 @@ import {
   parsePublicEvalDiagnostics,
   publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { containsSensitiveSecrets } from "@ultrafuzz/security";
 import { projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import {
@@ -225,7 +225,11 @@ function assertPublicBenchmarkFileContainsNoSecrets(
     throw new Error(`public benchmark file contains an injected secret value: ${bundlePath}`);
   }
   const text = contents.toString("utf8");
-  if (redactSecretsInText(text) !== text) {
+  // "positive-only": this gate FAILS on a hit and cannot rewrite the file, so
+  // the speculative heuristics must stay off — the high-entropy pass flags
+  // the bundle's own `ci-<run_id>-…` run ids and volume names as secrets
+  // (#883), exactly the class the artifacts secret gate excludes (#819).
+  if (containsSensitiveSecrets(text, [], "positive-only")) {
     throw new Error(`public benchmark file contains secret-like content: ${bundlePath}`);
   }
 }
