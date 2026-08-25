@@ -630,6 +630,11 @@ const TAB = 0x09;
  *
  * Bytes throughout: `-z` output is `<mode> <object> <stage>\t<path>` with no quoting, and Git paths
  * need not be UTF-8. The path begins after the FIRST tab; a later tab belongs to the path itself.
+ *
+ * `--stage` rather than `--format=%(objectmode)`, which needs Git 2.38 and is not promised by every
+ * sandbox image. It costs about 53 bytes of prefix per tracked entry against `runGitBuffer`'s 32 MB
+ * ceiling, so a repository would need roughly 600k tracked files before the listing alone approached
+ * it -- and the runtime-root pathspecs already prune the wide directories that get near that.
  */
 function trackedStageablePaths(raw: Buffer): Buffer[] {
   const paths: Buffer[] = [];
