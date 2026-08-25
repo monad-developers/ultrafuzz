@@ -489,25 +489,38 @@ export function verifyWorkflowControlSnapshot(
     if (taskDocument.dynamic_groups.length === 0) {
       throw new Error("sealed workflow graph or task plan changed without a compiled dynamic group");
     }
-    const materialized = verifyDynamicRuntimeMaterialization({
-      runId: layout.runId,
-      projectRoot,
-      runRoot: layout.root,
-      graphPath: paths.graphPath,
-      tasksPath: paths.tasksPath,
-      baseGraphPath: baseGraph.verifiedPath,
-      baseTasksPath: baseTasks.verifiedPath,
-      baseTasks: taskDocument.tasks as CompiledSmithersTask[],
-      groups: taskDocument.dynamic_groups as CompiledSmithersDynamicGroup[]
-    });
-    runtimeStateNodeIds = [
-      ...new Set(
-        [
-          ...materialized.graph.nodes.map((node) => node.id),
-          ...materialized.tasks.flatMap((task) => [task.attemptId, task.metadata.node.storageId])
-        ].filter((nodeId): nodeId is string => nodeId !== undefined)
-      )
-    ];
+    // Re-deriving the published expansion is an admission check: it decides whether the mutable
+    // runtime graph and task plan may be *scheduled from*. A run whose expansion stopped part-way --
+    // a group whose manifest exists but whose prompts were never rendered, which is what a killed
+    // controller leaves behind -- fails it, and failing it took `status` with it. Reading is not
+    // scheduling: the counts an observer reports come from the workflow runner, not from this graph.
+    // So an observer records that the expansion no longer re-derives and reports the run; execution
+    // callers still take the throw from `reportDivergence`.
+    try {
+      const materialized = verifyDynamicRuntimeMaterialization({
+        runId: layout.runId,
+        projectRoot,
+        runRoot: layout.root,
+        graphPath: paths.graphPath,
+        tasksPath: paths.tasksPath,
+        baseGraphPath: baseGraph.verifiedPath,
+        baseTasksPath: baseTasks.verifiedPath,
+        baseTasks: taskDocument.tasks as CompiledSmithersTask[],
+        groups: taskDocument.dynamic_groups as CompiledSmithersDynamicGroup[]
+      });
+      runtimeStateNodeIds = [
+        ...new Set(
+          [
+            ...materialized.graph.nodes.map((node) => node.id),
+            ...materialized.tasks.flatMap((task) => [task.attemptId, task.metadata.node.storageId])
+          ].filter((nodeId): nodeId is string => nodeId !== undefined)
+        )
+      ];
+    } catch (error) {
+      reportDivergence(
+        `published dynamic runtime controls no longer re-derive from their sealed base: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
   // Deriving the bindings re-runs the compiler's cross-document gates over the control files, so it
   // can fail outright rather than merely disagree with the seal — a graph and a task plan that no
@@ -751,6 +764,28 @@ function fsyncOpenedSnapshotDirectory(directory: OpenedSnapshotDirectory): void 
 }
 
 /**
+ * Reports Bun startup controls that were sealed by a build other than this one.
+ *
+ * The equality check inside `materializeWorkflowExecutionSnapshot` is a build-version check, not an
+ * integrity check. The sealed controls are already digest-verified against the run's own seal, and
+ * they are the controls the run's live controller has been executing since it started, so an operator
+ * whose checkout has moved on cannot observe a run that is working perfectly well. The only supported
+ * remedy, `resume --refresh-controller`, is a mutation requiring execution authority an observer does
+ * not have and must not need in order to read (issues #674 and #866). Observers report the drift and
+ * read the run; execution still refuses it.
+ */
+export function sealedBunStartupControlDrift(
+  files: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
+): string | undefined {
+  const sealed = new Map(files.map((file) => [file.snapshotPath, file.contents]));
+  const drifted = Object.keys(BUN_STARTUP_CONTROLS).filter(
+    (controlPath) => !sealed.get(controlPath)?.equals(BUN_STARTUP_CONTROLS[controlPath]!)
+  );
+  if (drifted.length === 0) return undefined;
+  return `sealed Bun startup controls were produced by a different build than this one: ${drifted.join(", ")}`;
+}
+
+/**
  * Publishes one immutable execution tree per control generation. The snapshot
  * is retained with the run and reused by start, lifecycle, and inspection
  * commands, avoiding the retained-snapshot transaction machinery used by the
@@ -766,12 +801,18 @@ export function materializeWorkflowExecutionSnapshot(input: {
    * successors without making arbitrary directories executable.
    */
   authorizedGenerations?: readonly string[];
+  /**
+   * Read-only callers set this after reporting `sealedBunStartupControlDrift`, so a checkout that has
+   * moved on since the run was sealed can still observe it. Execution callers leave it unset.
+   */
+  tolerateStartupControlDrift?: boolean;
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
-  for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS))
-    if (!expectedFiles.get(controlPath)?.equals(contents))
-      throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
+  if (input.tolerateStartupControlDrift !== true)
+    for (const [controlPath, contents] of Object.entries(BUN_STARTUP_CONTROLS))
+      if (!expectedFiles.get(controlPath)?.equals(contents))
+        throw new Error("workflow execution snapshot is missing its sealed Bun startup controls");
   if (expectedFiles.has(workflowRelativePath)) {
     throw new Error("workflow execution snapshot collides with its generated workflow");
   }

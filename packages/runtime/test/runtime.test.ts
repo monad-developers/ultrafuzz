@@ -106,7 +106,8 @@ import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-executio
 import {
   BUN_MODULE_CONFINEMENT_SOURCE,
   materializeWorkflowExecutionSnapshot,
-  replaceBunStartupControlsForControllerRefresh
+  replaceBunStartupControlsForControllerRefresh,
+  sealedBunStartupControlDrift
 } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
@@ -10833,6 +10834,107 @@ test("a sealed manifest that stops re-deriving leaves status readable while exec
       .find((task) => task.attemptId === "final-report")!
       .metadata.dependencies.concreteNodeIds.includes("optional-specialist"),
     false
+  );
+});
+
+test("a planned graph that stops matching this build's contracts leaves status readable", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-contract-binding-status";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // `assertSealedPlannedGraph` looks every output contract up in the *running process's* artifact
+  // registry and insists the schema identity recorded at compile time still matches. That is a
+  // property of the tree doing the observing, not of the run: an operator whose checkout has moved on
+  // since the run was submitted loses `status` for a run that is intact and possibly still executing
+  // (issue #866). Rewriting the recorded schema digest reproduces exactly that disagreement without
+  // needing two builds.
+  const graphPath = path.join(run.value!.run_root, "graph.json");
+  const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
+    nodes: { outputs: { path: string; schema_sha256?: string }[] }[];
+  };
+  const output = graph.nodes.flatMap((node) => node.outputs).find((candidate) => candidate.path === "findings.json");
+  assert.ok(output, "fixture has no schema-bound output to diverge");
+  output!.schema_sha256 = "a".repeat(64);
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+
+  // A node whose output contract no longer matches the registry that will validate its artifacts must
+  // not be scheduled, so execution stays closed.
+  const strict = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(strict.ok, false);
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
+  if (observed.ok) {
+    assert.ok(
+      observed.verifiedControl.divergences.some((divergence) =>
+        /sealed planned graph no longer re-derives against this build's artifact contracts: planned graph output schema binding changed for "findings\.json"/u.test(
+          divergence
+        )
+      ),
+      JSON.stringify(observed.verifiedControl.divergences)
+    );
+  }
+
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, runId);
+  const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
+  assert.ok(
+    diverged.some((diagnostic) => /output schema binding changed/u.test(diagnostic.message)),
+    JSON.stringify(health.diagnostics)
+  );
+  assert.ok(diverged.every((diagnostic) => diagnostic.severity === "warning"));
+  assert.equal(
+    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID").length,
+    0,
+    JSON.stringify(health.diagnostics)
+  );
+  assert.equal(
+    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED").length,
+    1,
+    JSON.stringify(health.diagnostics)
+  );
+});
+
+test("sealed Bun startup controls from another build are reported, not equated", () => {
+  // The equality check in `materializeWorkflowExecutionSnapshot` compares the run's sealed controls
+  // against a constant compiled into whichever build is looking. Every digest in the seal can verify
+  // while that comparison fails, which is what an operator on a newer checkout hits, so the condition
+  // has to be reportable rather than only throwable.
+  const current = [
+    {
+      sourcePath: "/seal/bun-module-confinement.js",
+      snapshotPath: "controls/bun-module-confinement.js",
+      contents: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE)
+    },
+    { sourcePath: "/seal/bun-empty.env", snapshotPath: "controls/bun-empty.env", contents: Buffer.from("\n") },
+    { sourcePath: "/seal/bunfig.toml", snapshotPath: "controls/bunfig.toml", contents: Buffer.from("\n") }
+  ];
+  assert.equal(sealedBunStartupControlDrift(current), undefined);
+
+  const drifted = current.map((file) =>
+    file.snapshotPath === "controls/bun-module-confinement.js"
+      ? { ...file, contents: Buffer.from(`${BUN_MODULE_CONFINEMENT_SOURCE}\n// an older release\n`) }
+      : file
+  );
+  assert.equal(
+    sealedBunStartupControlDrift(drifted),
+    "sealed Bun startup controls were produced by a different build than this one: controls/bun-module-confinement.js"
+  );
+  // A control the seal does not carry at all is drift too, not a silent pass.
+  assert.match(
+    sealedBunStartupControlDrift(current.filter((file) => file.snapshotPath !== "controls/bunfig.toml")) ?? "",
+    /controls\/bunfig\.toml/u
   );
 });
 

@@ -568,6 +568,47 @@ function readLedger(fixture: DynamicFixture): Array<Record<string, unknown>> {
   return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+test("a half-published dynamic expansion stays readable while execution stays closed", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-unreadable-expansion" });
+  const generated = fixture.generatedTasks[0]!;
+  assert.ok(generated.renderedPromptPath);
+  const before = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+
+  // Re-deriving the published expansion is an admission check for scheduling, and a controller killed
+  // mid-expansion leaves exactly this behind: the manifest is written but a lane's rendered prompt is
+  // not. One campaign run was permanently unobservable for this reason while `status` treated the
+  // check as fatal (issue #866).
+  fs.rmSync(generated.renderedPromptPath!);
+
+  const strict = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(strict.ok, false);
+  if (!strict.ok) {
+    assert.equal(strict.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.match(strict.diagnostics[0]?.message ?? "", /runtime rendered prompt is missing/u);
+  }
+  const synchronized = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synchronized.ok, false);
+
+  const observed = await readLinkedWorkflowEvidence(fixture.project, fixture.runId, {
+    tolerateControlDivergence: true
+  });
+  assert.equal(observed.ok, true, "diagnostics" in observed ? JSON.stringify(observed.diagnostics) : "");
+  if (observed.ok) {
+    assert.ok(
+      observed.verifiedControl.divergences.some((divergence) =>
+        /published dynamic runtime controls no longer re-derive from their sealed base: runtime rendered prompt is missing/u.test(
+          divergence
+        )
+      ),
+      JSON.stringify(observed.verifiedControl.divergences)
+    );
+  }
+
+  // Reporting must never re-publish the missing prompt on the observer's behalf.
+  assert.equal(fs.existsSync(generated.renderedPromptPath!), false);
+});
+
 test("controller refresh preserves the sealed dynamic base after runtime materialization", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-controller-refresh" });
   const generated = fixture.generatedTasks[0]!;
