@@ -1,4 +1,14 @@
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync
+} from "node:fs";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
@@ -162,6 +172,37 @@ function expectTaskLocalArtifactAuthority(rendered: string, input: PromptRenderI
 }
 
 describe("prompt rendering", () => {
+  it("renders output-contract guidance from the packaged layout with no repository above it", async () => {
+    // This branch copies the prompt tree to dist/assets/prompts. A sealed
+    // execution snapshot places the package at modules/@ultrafuzz/prompts/dist,
+    // where "../../../" reaches modules/ rather than a repository root, so the
+    // repository fallback cannot rescue a resolver that looks anywhere else.
+    // Together those two facts took a run down at WORKFLOW_RENDER_FAILED the
+    // first time it re-rendered mid-run.
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-packaged-prompts-"));
+    tmpDirs.push(tmp);
+    const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+    const distRoot = path.join(tmp, "modules", "@ultrafuzz", "prompts", "dist");
+    mkdirSync(path.dirname(distRoot), { recursive: true });
+    cpSync(path.join(repoRoot, "packages", "prompts", "dist"), distRoot, { recursive: true });
+    mkdirSync(path.join(tmp, "node_modules"), { recursive: true });
+    symlinkSync(
+      realpathSync(path.join(repoRoot, "node_modules", "yaml")),
+      path.join(tmp, "node_modules", "yaml"),
+      "dir"
+    );
+    expect(existsSync(path.resolve(distRoot, "../../../.ultrafuzz"))).toBe(false);
+
+    const packaged = (await import(
+      `${pathToFileURL(path.join(distRoot, "render.js")).href}?packaged-layout=${Date.now()}`
+    )) as { renderPrompt: typeof renderPrompt };
+    const input = baseRenderInput(tmp);
+    input.prompt = `${input.prompt}\n{{coverage_evidence_markdown_projection}}`;
+
+    const rendered = packaged.renderPrompt(input).renderedMarkdown;
+    expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
+  });
+
   it("renders output-contract guidance and prompt partials from an installed package layout", async () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-installed-prompts-"));
     tmpDirs.push(tmp);
