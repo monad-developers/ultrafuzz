@@ -761,7 +761,10 @@ function sameStringSequence(left: readonly string[], right: readonly string[]): 
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): OpenedSnapshotDirectory {
+function openWorkflowExecutionSnapshotsDirectory(
+  layout: RunLayout,
+  options: { observeOnly?: boolean } = {}
+): OpenedSnapshotDirectory {
   const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
   assertNoSymlinkComponents(layout.root, smithersRoot, "workflow control directory");
   const smithersLexical = fs.lstatSync(smithersRoot);
@@ -791,6 +794,9 @@ function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): OpenedSnaps
     const snapshotsRoot = safeResolveInside(smithersRoot, "execution-snapshots", "workflow execution snapshots");
     const snapshotsAccess = path.join(smithersAccess, "execution-snapshots");
     if (!pathEntryExists(snapshotsAccess)) {
+      if (options.observeOnly === true) {
+        throw new Error("workflow execution snapshots are not published");
+      }
       fs.mkdirSync(snapshotsAccess, { recursive: false, mode: 0o700 });
       if (smithersDescriptor !== undefined) fs.fsyncSync(smithersDescriptor);
     }
@@ -814,7 +820,11 @@ function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): OpenedSnaps
       if (!opened.isDirectory() || opened.dev !== accessed.dev || opened.ino !== accessed.ino) {
         throw new Error("workflow execution snapshots changed while they were opened");
       }
-      if (descriptor !== undefined) fs.fchmodSync(descriptor, 0o700);
+      if (options.observeOnly === true) {
+        if ((opened.mode & 0o777) !== 0o700 || (lexical.mode & 0o777) !== 0o700) {
+          throw new Error("workflow execution snapshots root has unsafe permissions");
+        }
+      } else if (descriptor !== undefined) fs.fchmodSync(descriptor, 0o700);
       else fs.chmodSync(snapshotsAccess, 0o700);
       assertExactDirectoryIdentity(snapshotsRoot, opened.dev, opened.ino, "workflow execution snapshots");
       const descriptorPath =
@@ -1010,6 +1020,8 @@ export function materializeWorkflowExecutionSnapshot(input: {
    * moved on since the run was sealed can still observe it. Execution callers leave it unset.
    */
   tolerateStartupControlDrift?: boolean;
+  /** Authenticate an existing immutable publication without cleanup or publication side effects. */
+  observeOnly?: boolean;
 }): MaterializedWorkflowExecutionSnapshot {
   const workflowRelativePath = path.posix.join(".smithers/workflows", path.basename(input.snapshot.paths.workflowPath));
   const expectedFiles = new Map(input.snapshot.executionFiles.map((file) => [file.snapshotPath, file.contents]));
@@ -1023,7 +1035,9 @@ export function materializeWorkflowExecutionSnapshot(input: {
   expectedFiles.set(workflowRelativePath, input.snapshot.contents.workflow);
   const dependencyMap = parseWorkflowExecutionDependencyMap(input.snapshot.executionFiles);
   const expectedLinks = dependencyLinks(dependencyMap);
-  const snapshots = openWorkflowExecutionSnapshotsDirectory(input.layout);
+  const snapshots = openWorkflowExecutionSnapshotsDirectory(input.layout, {
+    ...(input.observeOnly === true ? { observeOnly: true } : {})
+  });
   const snapshotsRoot = snapshots.lexicalPath;
   const snapshotRoot = path.join(snapshotsRoot, input.snapshot.generation);
   let snapshotDescriptor: number | undefined;
@@ -1033,13 +1047,18 @@ export function materializeWorkflowExecutionSnapshot(input: {
       input.snapshot.generation
     );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
-    reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
+    if (input.observeOnly !== true) {
+      reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
+    }
     const snapshotAccessPath = path.join(snapshots.accessPath, input.snapshot.generation);
     const snapshotAlreadyExists = pathEntryExists(snapshotAccessPath);
     const existingAuthorizedGenerations = authorizedGenerations.filter((generation) =>
       pathEntryExists(path.join(snapshots.accessPath, generation))
     );
     assertSnapshotRootEntries(snapshots, existingAuthorizedGenerations);
+    if (!snapshotAlreadyExists && input.observeOnly === true) {
+      throw new Error("workflow execution snapshot is not published");
+    }
     if (!snapshotAlreadyExists) {
       publishWorkflowExecutionSnapshot(
         snapshots,

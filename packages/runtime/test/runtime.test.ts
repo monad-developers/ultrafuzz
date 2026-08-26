@@ -106,6 +106,7 @@ import {
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import {
+  acquireWorkflowControlLock,
   BUN_MODULE_CONFINEMENT_SOURCE,
   materializeWorkflowExecutionSnapshot,
   replaceBunStartupControlsForControllerRefresh,
@@ -11089,6 +11090,51 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
     fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
     /status ultrafuzz-health-run --window 5 --format json --full-output/
   );
+});
+
+test("getRunHealth stays readable while execution holds the workflow control lock", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "concurrent-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root, run.value!.run_id);
+  const linkJournalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const linkJournalBefore = fs.readFileSync(linkJournalPath);
+  const release = await acquireWorkflowControlLock(layout);
+  let released = false;
+  let timeout: NodeJS.Timeout | undefined;
+  const healthPromise = getRunHealth({ projectRoot: project, runId: run.value!.run_id, env });
+  try {
+    const winner = await Promise.race([
+      healthPromise.then(() => "health" as const),
+      new Promise<"timeout">((resolve) => {
+        timeout = setTimeout(() => resolve("timeout"), 10_000);
+      })
+    ]);
+    assert.equal(winner, "health", "status waited on the execution-only workflow control lock");
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    await release();
+    released = true;
+  }
+  assert.equal(released, true);
+  const health = await healthPromise;
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, run.value!.run_id);
+  assert.deepEqual(fs.readFileSync(linkJournalPath), linkJournalBefore);
+
+  const snapshotsRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots");
+  const parkedSnapshotsRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots.parked");
+  fs.renameSync(snapshotsRoot, parkedSnapshotsRoot);
+  try {
+    const missingPublication = await readLinkedWorkflowEvidence(project, run.value!.run_id, { observeOnly: true });
+    assert.equal(missingPublication.ok, false);
+    assert.equal(fs.existsSync(snapshotsRoot), false, "observer recreated missing snapshot storage");
+  } finally {
+    fs.renameSync(parkedSnapshotsRoot, snapshotsRoot);
+  }
 });
 
 test("getRunHealth reports a terminal product status while workflow health is live", async () => {
