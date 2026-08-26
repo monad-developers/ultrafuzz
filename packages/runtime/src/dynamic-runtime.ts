@@ -26,6 +26,7 @@ import { projectArtifactSchemaDir } from "./init.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask, SmithersTaskMetadata } from "./smithers.js";
 import type { PlannedGraph, PlannedGraphNode } from "./types.js";
 import { sha256Stable } from "./utils.js";
+import { assertRenderedPromptValidatorCommands, producerSchemaBackedOutputCount } from "./prompt-validator-command.js";
 
 export const DYNAMIC_RUNTIME_SCHEMA_VERSION = "ultrafuzz.dynamic-runtime.v1" as const;
 
@@ -478,6 +479,11 @@ function renderReadyRuntimePrompts(input: {
       },
       resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
     });
+    assertRenderedPromptValidatorCommands({
+      attemptId: task.attemptId,
+      outputContractMarkdown: result.outputContractMarkdown,
+      schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
+    });
     const promptPath = path.join(artifactDir, "prompt.rendered.md");
     assertPathInside(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
@@ -551,7 +557,8 @@ function promptGraphContext(
           contract: output.contract,
           primary: output.primary,
           description: definition.description,
-          ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample })
+          ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample }),
+          ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file })
         };
       }),
       artifactDirs: unique([...(previous?.artifactDirs ?? []), ...taskArtifactDirs])

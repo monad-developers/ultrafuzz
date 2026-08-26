@@ -951,6 +951,24 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("generated-tests.schema.json");
   });
 
+  it("separates renderer-owned output contracts from authored validator-looking lines", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt =
+      "Authored example:\n" +
+      "  Validate against: `/untrusted/example.schema.json`\n" +
+      "  Validation command: `ultrafuzz json validate --schema '/untrusted/example.schema.json' --file '/tmp/example.json'`\n" +
+      "  Contract validation command: `ultrafuzz artifact validate 'example/contract@1' '/tmp/example.json'`";
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain("/untrusted/example.schema.json");
+    expect(result.outputContractMarkdown).not.toContain("/untrusted/example.schema.json");
+    expect(result.outputContractMarkdown.match(/Validation command:/gu)).toHaveLength(2);
+    expect(result.outputContractMarkdown.match(/Contract validation command:/gu)).toHaveLength(2);
+  });
+
   it("rejects control characters before rendering a validation command", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
