@@ -13095,6 +13095,75 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
+// Regression coverage for the #858 busy loop itself: the stock idempotency
+// probe walks the run's ENTIRE event history through the primary key for
+// every fresh event (O(events) page reads per insert, quadratic per run),
+// which starves the controller at dynamic fan-out scale. The patched probe
+// must resolve through the covering index instead. Query-plan assertions are
+// deterministic, so the test stays fast at a bounded synthetic size.
+test("patched event insert probe seeks the covering index instead of walking the run's event history", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { DatabaseSync } = await import("node:sqlite");
+  const indexPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "event_probe_index");
+  assert.ok(indexPatch);
+  const indexStatement = /`(CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx[^`]+)`/u.exec(
+    indexPatch.patched
+  )?.[1];
+  assert.ok(indexStatement, "the DDL patch must add the probe-covering index");
+  for (const id of ["event_probe_transaction", "event_probe_precheck", "event_probe_fallback", "event_probe_turn"]) {
+    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === id);
+    assert.ok(patch);
+    assert.match(patch.patched, /FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx/u);
+  }
+
+  const db = new DatabaseSync(":memory:");
+  db.exec(
+    `CREATE TABLE _smithers_events (
+       run_id TEXT NOT NULL,
+       seq INTEGER NOT NULL,
+       timestamp_ms INTEGER NOT NULL,
+       type TEXT NOT NULL,
+       payload_json TEXT NOT NULL,
+       PRIMARY KEY (run_id, seq)
+     )`
+  );
+  const insert = db.prepare(
+    "INSERT INTO _smithers_events (run_id, seq, timestamp_ms, type, payload_json) VALUES (?, ?, ?, ?, ?)"
+  );
+  for (let seq = 0; seq < 512; seq += 1) {
+    insert.run("run-858", seq, 1_787_000_000_000 + seq, "NodeStarted", JSON.stringify({ seq, pad: "x".repeat(64) }));
+  }
+  const stockProbe = `SELECT seq
+     FROM _smithers_events
+     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
+     ORDER BY seq DESC LIMIT 1`;
+  const patchedProbe = `SELECT seq
+     FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
+     ORDER BY seq DESC LIMIT 1`;
+  const planDetails = (statement: string): string =>
+    (db.prepare(`EXPLAIN QUERY PLAN ${statement}`).all("run-858", 1, "NodeStarted", "{}") as { detail?: string }[])
+      .map((row) => row.detail ?? "")
+      .join("\n");
+  // Stock hazard: only the (run_id, seq) primary key is available, so the
+  // probe visits every event row the run has ever written.
+  const stockPlan = planDetails(stockProbe);
+  assert.match(stockPlan, /sqlite_autoindex__smithers_events_1 \(run_id=\?\)/u);
+  db.exec(indexStatement);
+  const patchedPlan = planDetails(patchedProbe);
+  assert.match(patchedPlan, /_smithers_events_insert_probe_idx \(run_id=\? AND timestamp_ms=\? AND type=\?\)/u);
+  // The hint changes the access path, never the answer: an identical
+  // re-emitted event still resolves to its original seq, and a fresh event
+  // still probes empty.
+  const existingPayload = JSON.stringify({ seq: 17, pad: "x".repeat(64) });
+  const patched = db.prepare(patchedProbe);
+  const existing = patched.get("run-858", 1_787_000_000_017, "NodeStarted", existingPayload) as
+    { seq?: number | bigint } | undefined;
+  assert.equal(Number(existing?.seq), 17);
+  assert.equal(patched.get("run-858", 1_799_000_000_000, "NodeStarted", existingPayload), undefined);
+  db.close();
+});
+
 test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const resolveFromPinnedRunner = createRequire(
