@@ -20,6 +20,7 @@ import { test, testWhen } from "./runtime-test-shard.js";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  appendNodeAttempts,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
@@ -32,6 +33,8 @@ import {
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
+  manifestDigest,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -1795,6 +1798,42 @@ function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string 
   };
 }
 
+const TEST_SMITHERS_DEFAULT_LIFECYCLE_EVENT_TYPES = new Set([
+  "RunStarted",
+  "RunStatusChanged",
+  "RunStateChanged",
+  "RunFinished",
+  "RunFailed",
+  "RunCancelled",
+  "RunContinuedAsNew",
+  "RunHijackRequested",
+  "RunHijacked",
+  "OneshotSteerQueued",
+  "OneshotSteerDelivered",
+  "OneshotSteerAcknowledged",
+  "OneshotSteerFailed",
+  "OneshotRestartRequested",
+  "OneshotRestartLaunched",
+  "OneshotRestartFailed",
+  "RunAutoResumed",
+  "RunAutoResumeSkipped",
+  "RunForked",
+  "AgentTraceSummary",
+  "NodePending",
+  "NodeStarted",
+  "NodeFinished",
+  "NodeFailed",
+  "NodeCancelled",
+  "NodeSkipped",
+  "NodeRetrying",
+  "NodeWaitingApproval",
+  "NodeWaitingTimer",
+  "ApprovalRequested",
+  "ApprovalGranted",
+  "ApprovalAutoApproved",
+  "ApprovalDenied"
+]);
+
 function fakeLifecycleSmithersEnv(
   project: string,
   input: {
@@ -1812,6 +1851,7 @@ function fakeLifecycleSmithersEnv(
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
     enforceWorkflowChangeAcceptance?: boolean;
     failWorkflowChangeAdmissionOnce?: boolean;
+    emulatePatchedLifecycleFilter?: boolean;
   }
 ): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
@@ -1834,7 +1874,19 @@ function fakeLifecycleSmithersEnv(
     fs.writeFileSync(resumeInspectPath, `${JSON.stringify(input.resumeInspect, null, 2)}\n`, "utf8");
   }
   fs.writeFileSync(inspectCountPath, "0\n", "utf8");
-  fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
+  const lifecycleEvents =
+    input.emulatePatchedLifecycleFilter === true
+      ? (input.events ?? "")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .filter((line) => {
+            const event = JSON.parse(line) as { type?: unknown };
+            return typeof event.type === "string" && TEST_SMITHERS_DEFAULT_LIFECYCLE_EVENT_TYPES.has(event.type);
+          })
+          .join("\n") + "\n"
+      : (input.events ?? "");
+  fs.writeFileSync(eventsPath, lifecycleEvents, "utf8");
   if (input.tokenEvents !== undefined) fs.writeFileSync(tokenEventsPath, input.tokenEvents, "utf8");
   fs.writeFileSync(
     timelinePath,
@@ -13365,6 +13417,15 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
     assert.ok(relaunch);
     assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
+    const lifecycle = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "lifecycle_trace_summary");
+    assert.ok(lifecycle);
+    const patchableTypes = new Set([...lifecycle.patchable.matchAll(/"([A-Za-z]+)"/gu)].map((match) => match[1]!));
+    const patchedTypes = [...lifecycle.patched.matchAll(/"([A-Za-z]+)"/gu)].map((match) => match[1]!);
+    assert.deepEqual(
+      patchedTypes.filter((type) => !patchableTypes.has(type)),
+      ["AgentTraceSummary"],
+      "the observability compatibility patch must expose only the bounded trace summary event"
+    );
     assert.throws(
       () => bindSmithersExecutableCapability({}, stockRunner),
       /delegate controller authority to target code/u
@@ -18376,6 +18437,123 @@ test("syncRun accepts a superseded unadmitted success with exact sealed trace au
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     false
   );
+});
+
+test("syncRun replays bounded production lifecycle history with ledgered and trace-authorized supersessions", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-production-supersession-history";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const history: Parameters<typeof workflowEvents>[1] = [{ type: "RunStarted" }, { type: "NodeStarted", nodeId }];
+  const occurrences: Array<{
+    index: number;
+    startedSequence: number;
+    finishedSequence: number;
+    outcome: "failed" | "succeeded";
+  }> = [];
+  let startedSequence = 1;
+  for (let index = 0; index < 104; index += 1) {
+    const summarySequence = history.length;
+    history.push({
+      type: "AgentTraceSummary",
+      nodeId,
+      extra: {
+        iteration: 0,
+        attempt: 1,
+        summary: {
+          runId: workflowRunId,
+          nodeId,
+          iteration: 0,
+          attempt: 1,
+          traceStartedAtMs: base + startedSequence * 100 + 10,
+          traceFinishedAtMs: base + summarySequence * 100,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          model: "gpt-5.5"
+        }
+      }
+    });
+    // A high-volume agent event category remains excluded by the patched
+    // lifecycle query; only the compact immutable summary is admitted.
+    history.push({ type: "AgentTraceEvent", nodeId, extra: { message: `noise-${index}` } });
+    const outcome = index < 60 ? "failed" : "succeeded";
+    const finishedSequence = history.length;
+    history.push(
+      outcome === "failed"
+        ? { type: "NodeFailed", nodeId, error: { message: `historical failure ${index}` } }
+        : { type: "NodeFinished", nodeId }
+    );
+    occurrences.push({ index, startedSequence, finishedSequence, outcome });
+    history.push({ type: "RunStarted" }, { type: "NodeStarted", nodeId });
+    startedSequence = history.length - 1;
+  }
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, history),
+    emulatePatchedLifecycleFilter: true
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  appendNodeAttempts(
+    layout,
+    occurrences.slice(0, 79).map((occurrence) => ({
+      workflowRunId,
+      controlGeneration: evidence.controlGeneration,
+      nodeId: "project-discovery",
+      strategyAttemptId: "project-discovery",
+      iteration: 0,
+      attempt: 1,
+      startedEventSequence: occurrence.startedSequence,
+      sourceEventSequence: occurrence.finishedSequence,
+      startedAt: new Date(base + occurrence.startedSequence * 100).toISOString(),
+      finishedAt: new Date(base + occurrence.finishedSequence * 100).toISOString(),
+      outcome: occurrence.outcome,
+      inputManifestDigest: manifestDigest("historical-input"),
+      ...(occurrence.outcome === "succeeded"
+        ? { outputManifestDigest: manifestDigest(`historical-output-${occurrence.index}`) }
+        : {
+            failureCategory: "executor-error" as const,
+            failureMessage: `historical failure ${occurrence.index}`
+          }),
+      agent: {
+        chain_index: 0,
+        profile_id: "default",
+        agent_ref: "codex",
+        model_name: "gpt-5.5",
+        role: "primary" as const,
+        selection: "observed" as const
+      }
+    }))
+  );
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 79);
+  const lifecycleOutput = fs.readFileSync(env.SMITHERS_FAKE_EVENTS!, "utf8");
+  assert.equal(
+    lifecycleOutput
+      .trim()
+      .split("\n")
+      .filter((line) => (JSON.parse(line) as { type?: unknown }).type === "AgentTraceSummary").length,
+    104
+  );
+  assert.doesNotMatch(lifecycleOutput, /"type":"AgentTraceEvent"/u);
+  const commandLog = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commandLog, /events .* --limit 100000 --json/u);
+  assert.doesNotMatch(commandLog, /--raw|--type agent/u);
 });
 
 test("syncRun rejects a superseded unadmitted success without exact trace authority", async () => {

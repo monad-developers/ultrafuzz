@@ -585,6 +585,13 @@ const SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH = `            workflowPath: per
               persistedForkWorkflowPath,
             ),
             entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+const SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE = `  "RunAutoResumeSkipped",
+  "RunForked",
+  "NodePending",`;
+const SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH = `  "RunAutoResumeSkipped",
+  "RunForked",
+  "AgentTraceSummary",
+  "NodePending",`;
 // Smithers executes through the descriptor path but persists the stable lexical
 // generation path. Every durable path/hash sink must keep those identities
 // separate or the next lifecycle command inherits a dead /proc path.
@@ -809,6 +816,7 @@ export type SmithersCompatibilityPatchId =
   | "replay_workflow_metadata"
   | "fork_workflow_path"
   | "fork_workflow_metadata"
+  | "lifecycle_trace_summary"
   | "engine_workflow_path"
   | "engine_durability_metadata"
   | "engine_run_metadata"
@@ -983,6 +991,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
     patched: SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
     upstreamAbsent: []
+  },
+  {
+    id: "lifecycle_trace_summary",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/observability-helpers.js",
+    patchable: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE,
+    patched: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH,
+    upstreamAbsent: ['"AgentTraceSummary"']
   },
   {
     id: "engine_workflow_path",
@@ -4511,10 +4527,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const runnerSource = path.join(runnerRoots[0]!, ...SMITHERS_BIN_PATH.split("/"));
   const packageJson = path.join(packageRoot, "package.json");
   const cliSource = path.join(packageRoot, "src", "index.js");
+  const observabilitySource = path.join(packageRoot, "src", "observability-helpers.js");
   const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
   assertRegularFileInside(nodeModules, runnerSource, "installed Smithers public entrypoint");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
+  assertRegularFileInside(nodeModules, observabilitySource, "installed Smithers observability implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
   const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
   if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
@@ -4564,6 +4582,15 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label, predecessors, patchedMarkers);
   }
   writeFileDurable(cliSource, cliContents);
+  writeFileDurable(
+    observabilitySource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(observabilitySource, "utf8"),
+      SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE,
+      SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH,
+      "lifecycle trace summary visibility"
+    )
+  );
   const resumeDetachedContents = fs.readFileSync(resumeDetachedSource, "utf8");
   writeFileDurable(
     resumeDetachedSource,
