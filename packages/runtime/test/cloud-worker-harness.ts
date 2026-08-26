@@ -267,7 +267,7 @@ function writeHarnessStubs(runtimeModuleUrl: string): {
         '    Parallel: component("Parallel"),',
         '    Sandbox: component("Sandbox"),',
         "    smithers: (definition) => definition,",
-        '    outputs: { task: { __output: "task" }, preparation: { __output: "preparation" }, verification: { __output: "verification" } }',
+        '    outputs: { agentProcess: { __output: "agentProcess" }, preparation: { __output: "preparation" }, verification: { __output: "verification" } }',
         "  };",
         "}",
         ""
