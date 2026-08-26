@@ -8664,7 +8664,7 @@ test("producer prompt preflight rejects a missing concrete validator command", (
     () =>
       assertRenderedPromptValidatorCommands({
         attemptId: "schema-producer",
-        renderedMarkdown:
+        outputContractMarkdown:
           "  Validate against: `/trusted/findings.schema.json`\n" +
           "  Contract validation command: `ultrafuzz artifact validate 'ultrafuzz/findings@2' '/artifacts/findings.json'`\n",
         schemaBackedOutputCount: 1
@@ -8674,7 +8674,7 @@ test("producer prompt preflight rejects a missing concrete validator command", (
   assert.doesNotThrow(() =>
     assertRenderedPromptValidatorCommands({
       attemptId: "backtick-path-producer",
-      renderedMarkdown:
+      outputContractMarkdown:
         "  Validate against: ``/trusted/with`tick/findings.schema.json``\n" +
         "  Validation command: `` ultrafuzz json validate --schema '/trusted/with`tick/findings.schema.json' --file '/artifacts/findings.json' ``\n" +
         "  Contract validation command: `` ultrafuzz artifact validate 'ultrafuzz/findings@2' '/artifacts/findings.json' ``\n",

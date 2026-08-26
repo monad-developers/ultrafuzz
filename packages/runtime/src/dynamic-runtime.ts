@@ -481,7 +481,7 @@ function renderReadyRuntimePrompts(input: {
     });
     assertRenderedPromptValidatorCommands({
       attemptId: task.attemptId,
-      renderedMarkdown: result.renderedMarkdown,
+      outputContractMarkdown: result.outputContractMarkdown,
       schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
     });
     const promptPath = path.join(artifactDir, "prompt.rendered.md");

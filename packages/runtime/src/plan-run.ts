@@ -1029,7 +1029,7 @@ function renderPromptsForPlan(input: {
       }
       assertRenderedPromptValidatorCommands({
         attemptId: attempt.attemptId,
-        renderedMarkdown: result.renderedMarkdown,
+        outputContractMarkdown: result.outputContractMarkdown,
         schemaBackedOutputCount: producerSchemaBackedOutputCount(expandedNode.outputs)
       });
       writeRenderedPrompt(result);

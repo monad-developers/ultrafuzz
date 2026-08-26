@@ -27,10 +27,10 @@ export function producerSchemaBackedOutputCount(outputs: readonly { path: string
  */
 export function assertRenderedPromptValidatorCommands(input: {
   attemptId: string;
-  renderedMarkdown: string;
+  outputContractMarkdown: string;
   schemaBackedOutputCount: number;
 }): void {
-  const lines = input.renderedMarkdown.split("\n");
+  const lines = input.outputContractMarkdown.split("\n");
   const actual = {
     schema: lines.filter((line) => line.startsWith(VALIDATOR_COMMAND_PREFIXES.schema)).length,
     json: lines.filter(
