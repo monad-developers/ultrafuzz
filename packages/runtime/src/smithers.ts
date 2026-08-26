@@ -751,6 +751,47 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           );
         }`;
 
+// Every event the engine persists first runs an idempotency probe that
+// filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
+// The table's only index is its (run_id, seq) primary key, and the probe's
+// `ORDER BY seq DESC LIMIT 1` makes the planner walk that key newest-first,
+// so a FRESH event — the overwhelmingly common case — reads every prior
+// event row for the run, payloads included, before concluding there is no
+// duplicate. Per-event cost is therefore linear in the run's event history
+// and total cost quadratic in event count; at dynamic fan-out scale the
+// controller's main thread saturates in these page reads (issue #858: ~300%
+// CPU, frozen stream.ndjson, starved node-timeout timers, idle agents).
+// The fix is one covering index plus an INDEXED BY hint at each probe site:
+// the hint is required because the planner otherwise still prefers the
+// primary key for the ORDER BY even when the index exists.
+const SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE = `const EXTRA_INDEX_STATEMENTS = [
+  \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
+const SMITHERS_DB_EVENT_PROBE_INDEX_PATCH = `const EXTRA_INDEX_STATEMENTS = [
+  \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx ON _smithers_events (run_id, timestamp_ms, type)\`,
+  \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
+const SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE = `                   FROM _smithers_events
+                   WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?`;
+const SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH = `                   FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+                   WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?`;
+const SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE = `               FROM _smithers_events
+               WHERE run_id = ?
+                 AND timestamp_ms = ?`;
+const SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH = `               FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+               WHERE run_id = ?
+                 AND timestamp_ms = ?`;
+const SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE = `                           FROM _smithers_events
+                           WHERE run_id = ?
+                             AND timestamp_ms = ?`;
+const SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH = `                           FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+                           WHERE run_id = ?
+                             AND timestamp_ms = ?`;
+const SMITHERS_DB_EVENT_PROBE_TURN_SOURCE = `                               FROM _smithers_events
+                               WHERE run_id = ?
+                                 AND timestamp_ms = ?`;
+const SMITHERS_DB_EVENT_PROBE_TURN_PATCH = `                               FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+                               WHERE run_id = ?
+                                 AND timestamp_ms = ?`;
+
 export type SmithersCompatibilityPatchId =
   | "local_delegation"
   | "detached_snapshot_transfer"
@@ -780,7 +821,12 @@ export type SmithersCompatibilityPatchId =
   | "workflow_hash_collect"
   | "workflow_hash_entry"
   | "workflow_hash_recursion"
-  | "workflow_hash_public";
+  | "workflow_hash_public"
+  | "event_probe_index"
+  | "event_probe_transaction"
+  | "event_probe_precheck"
+  | "event_probe_fallback"
+  | "event_probe_turn";
 
 export interface SmithersCompatibilityPatch {
   /** Stable name this patch is reported under by `doctor`. */
@@ -1052,6 +1098,47 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
     patched: SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
     upstreamAbsent: []
+  },
+  {
+    id: "event_probe_index",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/schema-migrations.js",
+    patchable: SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE,
+    patched: SMITHERS_DB_EVENT_PROBE_INDEX_PATCH,
+    // Upstream creating its own probe-covering events index retires the family.
+    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+  },
+  {
+    id: "event_probe_transaction",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/adapter.js",
+    patchable: SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE,
+    patched: SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH,
+    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+  },
+  {
+    id: "event_probe_precheck",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/adapter.js",
+    patchable: SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE,
+    patched: SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH,
+    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+  },
+  {
+    id: "event_probe_fallback",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/adapter.js",
+    patchable: SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE,
+    patched: SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH,
+    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+  },
+  {
+    id: "event_probe_turn",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/adapter.js",
+    patchable: SMITHERS_DB_EVENT_PROBE_TURN_SOURCE,
+    patched: SMITHERS_DB_EVENT_PROBE_TURN_PATCH,
+    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
   }
 ];
 
@@ -4370,18 +4457,22 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const cliRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/cli");
   const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/scheduler");
   const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/engine");
+  const dbRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/db");
   // Unit-test installers intentionally provide only the public runner shim, so a
   // tree with none of these packages is tolerated. A registry installation always
-  // carries all three, so a tree holding some but not all of them is a broken
+  // carries all of them, so a tree holding some but not all of them is a broken
   // install: fail instead of silently skipping the resume-durability patches and
   // letting the run proceed unpatched. The caller repairs this by reinstalling.
-  if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0) return;
+  if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0 && dbRoots.length === 0) return;
   if (runnerRoots.length !== 1) throw new Error("pinned workflow runner resolved an incomplete public entrypoint");
   if (cliRoots.length !== 1) {
     throw new Error("pinned workflow runner resolved an incomplete CLI implementation");
   }
   if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
     throw new Error("pinned workflow runner resolved an incomplete resume implementation");
+  }
+  if (dbRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete event-store implementation");
   }
   const packageRoot = cliRoots[0]!;
   const runnerSource = path.join(runnerRoots[0]!, ...SMITHERS_BIN_PATH.split("/"));
@@ -4540,6 +4631,44 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     }
   }
   writeFileDurable(engineSource, engineContents);
+
+  const dbRoot = dbRoots[0]!;
+  const dbPackageJson = path.join(dbRoot, "package.json");
+  const dbSchemaMigrationsSource = path.join(dbRoot, "src", "schema-migrations.js");
+  const dbAdapterSource = path.join(dbRoot, "src", "adapter.js");
+  assertRegularFileInside(nodeModules, dbPackageJson, "installed Smithers event-store package metadata");
+  assertRegularFileInside(nodeModules, dbSchemaMigrationsSource, "installed Smithers event-store schema migrations");
+  assertRegularFileInside(nodeModules, dbAdapterSource, "installed Smithers event-store implementation");
+  const dbMetadata = readPackageManagerOwnedManifestEnvelope(
+    dbPackageJson,
+    "installed Smithers event-store package manifest"
+  );
+  if (optionalPackageManifestString(dbMetadata, "version", dbPackageJson) !== SMITHERS_VERSION) {
+    throw new Error(`installed Smithers event-store package version must be ${SMITHERS_VERSION}`);
+  }
+  writeFileDurable(
+    dbSchemaMigrationsSource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(dbSchemaMigrationsSource, "utf8"),
+      SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE,
+      SMITHERS_DB_EVENT_PROBE_INDEX_PATCH,
+      "event insert probe index"
+    )
+  );
+  let dbAdapterContents = fs.readFileSync(dbAdapterSource, "utf8");
+  for (const [source, patched, label] of [
+    [
+      SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE,
+      SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH,
+      "transactional event insert probe"
+    ],
+    [SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE, SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH, "event insert probe pre-check"],
+    [SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE, SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH, "fallback event insert probe"],
+    [SMITHERS_DB_EVENT_PROBE_TURN_SOURCE, SMITHERS_DB_EVENT_PROBE_TURN_PATCH, "turn-serialized event insert probe"]
+  ] as const) {
+    dbAdapterContents = applyRequiredSmithersPatch(dbAdapterContents, source, patched, label);
+  }
+  writeFileDurable(dbAdapterSource, dbAdapterContents);
 }
 
 function applyRequiredSmithersPatch(

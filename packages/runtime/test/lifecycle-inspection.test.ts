@@ -1375,9 +1375,11 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   }
   const wholeFilePostures = ["incompatible", "unknown", "applied"] as const;
   const singleSources = [...bySource.entries()].filter(([, patches]) => patches.length === 1);
+  // Every whole-file posture must be exercised at least once; additional
+  // single-workaround sources cycle back through the rotation.
   assert.ok(
-    singleSources.length <= wholeFilePostures.length,
-    "extend the whole-file posture rotation to cover every single-workaround source"
+    singleSources.length >= wholeFilePostures.length,
+    "not enough single-workaround sources to exercise every whole-file posture"
   );
   const expected: Record<string, string> = {};
   let singleIndex = 0;
@@ -1385,7 +1387,7 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
     fs.mkdirSync(path.dirname(source), { recursive: true });
     if (patches.length === 1) {
       const patch = patches[0]!;
-      const posture = wholeFilePostures[singleIndex]!;
+      const posture = wholeFilePostures[singleIndex % wholeFilePostures.length]!;
       singleIndex += 1;
       if (posture === "applied") fs.writeFileSync(source, `${patch.patched}\n`, "utf8");
       if (posture === "incompatible") fs.writeFileSync(source, "export const unrelated = 1;\n", "utf8");
