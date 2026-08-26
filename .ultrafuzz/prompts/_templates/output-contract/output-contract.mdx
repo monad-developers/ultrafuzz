@@ -18,4 +18,4 @@ For every schema-backed JSON artifact:
 8. The validation command never modifies the artifact.
 9. Contract validation covers document-local semantics only. Host semantic and context verification still runs after you finish.
 
-After completing the work and writing every required artifact, return only the structured task result requested by the runtime. The runtime's output schema alone owns that response's keys, types, and envelope. Put a concise description of the completed work and written artifacts in its schema-defined summary value. Do not add Markdown fences, introductory text, explanations, or any content outside the structured result, and do not omit the result when the work succeeds.
+After completing the work and writing every required artifact, the declared artifacts are the task result. Any terminal response is informational only: it has no required schema and does not replace writing or validating the artifacts.

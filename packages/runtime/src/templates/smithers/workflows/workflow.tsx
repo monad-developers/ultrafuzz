@@ -266,8 +266,8 @@ const inputSchema = z
     }
   });
 
-const taskOutput = z.strictObject({
-  summary: z.string().min(1)
+const agentProcessOutput = z.strictObject({
+  completed: z.literal(true)
 });
 
 const preparationOutput = z.strictObject({
@@ -319,7 +319,7 @@ const unreachableCommitCountCommand =
 
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
-  task: taskOutput,
+  agentProcess: agentProcessOutput,
   preparation: preparationOutput,
   verification: verificationOutput
 });
@@ -3025,9 +3025,10 @@ function artifactAwareAgent(
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
     ...(agent.tools === undefined ? {} : { tools: agent.tools }),
     ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
-    ...(agent.supportsNativeStructuredOutput === undefined
-      ? {}
-      : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
+    // The wrapper, not the model, owns the Smithers output row. Advertising
+    // native structured output prevents Smithers from adding a JSON contract
+    // to the model prompt or opening correction turns for terminal telemetry.
+    supportsNativeStructuredOutput: true,
     ...(typeof continuationAgent.cliEngine === "string" ? { cliEngine: continuationAgent.cliEngine } : {}),
     ...(typeof continuationAgent.hijackEngine === "string" ? { hijackEngine: continuationAgent.hijackEngine } : {}),
     ...(agent.parseFileChanges === undefined ? {} : { parseFileChanges: agent.parseFileChanges.bind(agent) }),
@@ -3043,7 +3044,9 @@ function artifactAwareAgent(
               if (executionAgent.preflight === undefined) {
                 throw new Error("agent factory changed its preflight capability");
               }
-              return await executionAgent.preflight(args);
+              const preflightArgs = { ...args };
+              Reflect.deleteProperty(preflightArgs, "outputSchema");
+              return await executionAgent.preflight(preflightArgs);
             } catch (error) {
               throw freshNormalizedAgentFailure(error);
             }
@@ -3096,8 +3099,8 @@ function artifactAwareAgent(
       if (firstGenerationForAttempt && reportOutputs !== undefined) {
         materializeFinalReportPromptAuthority(task, authoritativeFinalReportCoverage(task), execution);
       }
-      // Smithers schema correction calls remain part of this same attempt and
-      // already carry the original authoritative prompt in their conversation.
+      // Any repeated generation call remains part of this same Smithers
+      // attempt and already carries the original authoritative prompt.
       const attemptArgs = firstGenerationForAttempt
         ? authoritativeFinalReportPromptAuthorityArgs(task, authoritativeFinalReportRunMetadataArgs(task, retryArgs))
         : retryArgs;
@@ -3105,12 +3108,21 @@ function artifactAwareAgent(
         executionAgent ??= admittedAgent();
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportPromptAuthorityUnchanged(task);
-        const result = await executionAgent.generate(attemptArgs);
+        // Smithers requires a durable object output for every task, but an
+        // agent's substantive output is the declared artifact set. Keep the
+        // workflow-owned process marker away from the underlying adapter so
+        // arbitrary or absent terminal text cannot become a second contract.
+        const unstructuredArgs = { ...attemptArgs };
+        Reflect.deleteProperty(unstructuredArgs, "outputSchema");
+        const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
-        return result;
+        return {
+          ...(result !== null && typeof result === "object" ? result : {}),
+          _output: { completed: true }
+        };
       } catch (error) {
         try {
           assertDependencyArtifactAdmissionCurrent(task);
@@ -8325,14 +8337,14 @@ function requireCompleteDynamicStrategyOutputTuple(task: (typeof taskSpecs)[numb
 
 function finalizeAndVerifyArtifacts(
   task: (typeof taskSpecs)[number],
-  agentTaskOutput: z.infer<typeof taskOutput> | undefined
+  agentProcess: z.infer<typeof agentProcessOutput> | undefined
 ): z.infer<typeof verificationOutput> {
   // The model session has already returned. Only explicitly runtime-owned
-  // artifacts and exact-byte companions may be materialized here. This task is
-  // always configured with zero retries so a missing or malformed agent-owned
-  // output is terminal and can never reopen or replay model work.
+  // artifacts and exact-byte companions may be materialized here. The process
+  // marker is emitted by artifactAwareAgent only after generation succeeds; a
+  // failed or killed process therefore cannot publish verified artifacts.
   clearArtifactVerificationMarker(task);
-  if (!taskOutput.safeParse(agentTaskOutput).success) {
+  if (!agentProcessOutput.safeParse(agentProcess).success) {
     throw new Error(`artifact-contract failure: agent task did not succeed ${task.attemptId}`);
   }
   prepareArtifactMirror(task, {
@@ -9075,7 +9087,7 @@ export default smithers((ctx) => {
   if (!cloudWorker) {
     recordGoalSearchCoverage(
       taskSpecs,
-      (nodeId) => ctx.outputMaybe(outputs.task, { nodeId }) !== undefined,
+      (nodeId) => ctx.outputMaybe(outputs.agentProcess, { nodeId }) !== undefined,
       (nodeId) => ctx.outputMaybe(outputs.verification, { nodeId }) !== undefined
     );
   }
@@ -9147,7 +9159,7 @@ export default smithers((ctx) => {
                     agent_credential_env: task.execution.agentCredentialEnv,
                     ...(operatorPromptInput === undefined ? {} : { operator_prompt: operatorPromptInput })
                   }}
-                  output={outputs.task}
+                  output={outputs.agentProcess}
                   dependsOn={task.dependsOn}
                   continueOnFail={task.continueOnFail}
                   allowNetwork
@@ -9163,7 +9175,7 @@ export default smithers((ctx) => {
                   output={outputs.verification}
                   dependsOn={[task.id]}
                   needs={{ agent: task.id }}
-                  deps={{ agent: outputs.task }}
+                  deps={{ agent: outputs.agentProcess }}
                   depsOptional
                   continueOnFail={task.continueOnFail}
                   retries={0}
@@ -9203,7 +9215,7 @@ export default smithers((ctx) => {
               </Task>
               <Task
                 id={task.id}
-                output={outputs.task}
+                output={outputs.agentProcess}
                 agent={agentForTask(task, fullTaskPrompt)}
                 dependsOn={[task.preparationId]}
                 continueOnFail={task.continueOnFail}
@@ -9220,7 +9232,7 @@ export default smithers((ctx) => {
                 output={outputs.verification}
                 dependsOn={[task.id]}
                 needs={{ agent: task.id }}
-                deps={{ agent: outputs.task }}
+                deps={{ agent: outputs.agentProcess }}
                 depsOptional
                 continueOnFail={task.continueOnFail}
                 retries={0}
