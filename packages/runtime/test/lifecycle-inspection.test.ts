@@ -592,6 +592,17 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
       smithersEventLine({
         seq: 2,
         timestampMs: 1_700_000_060_000,
+        type: "AgentTraceSummary",
+        payload: {
+          nodeId: "node:project-discovery",
+          iteration: 0,
+          attempt: 1,
+          agentId: "fixture-agent"
+        }
+      }),
+      smithersEventLine({
+        seq: 3,
+        timestampMs: 1_700_000_120_000,
         type: "NodeCancelled",
         payload: {
           nodeId: "node:project-discovery",
@@ -608,12 +619,15 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
   assert.equal(events.ok, true, JSON.stringify(events.diagnostics));
   assert.equal(events.value?.limit, 50);
   assert.equal(events.value?.truncated, false);
-  assert.equal(events.value?.events.length, 2);
+  assert.equal(events.value?.events.length, 3);
   assert.equal(events.value?.events[0]?.category, "NodeStarted");
   assert.equal(events.value?.events[0]?.node_id, "node:project-discovery");
   assert.equal(events.value?.events[0]?.attempt, 1);
   assert.equal(events.value?.events[0]?.timestamp, new Date(1_700_000_000_000).toISOString());
-  assert.equal(events.value?.events[1]?.detail, "workflow runner finished the run");
+  assert.equal(events.value?.events[1]?.category, "AgentTraceSummary");
+  assert.equal(events.value?.events[1]?.node_id, "node:project-discovery");
+  assert.equal(events.value?.events[1]?.detail, null);
+  assert.equal(events.value?.events[2]?.detail, "workflow runner finished the run");
   assertNoEngineBranding(events.value);
   const log = smithersLog(project);
   assert.match(log, new RegExp(`events ${WORKFLOW_RUN_ID} --limit 50 --json`, "u"));
