@@ -613,14 +613,21 @@ function parseIdentityFile(value: unknown, expectedPath: string): TrustedCliClos
   return { path: expectedPath, sha256: value.sha256, executable: false };
 }
 
+// Confinement has to be enforced on whichever runtime executes the closure.
+// Node.js gets synchronous loader hooks; Bun has no `registerHooks`, so it gets
+// the same sealed-module plugin shape used for the workflow controller. Bun
+// hands `onLoad` the realpath-resolved path, so the negative-lookahead filter
+// covers both the lexical and the resolved check the Node hooks perform. Either
+// way an unsupported runtime fails closed instead of running unconfined.
 function trustedCliModuleConfinementSource(): string {
   return `"use strict";
 const fs = require("node:fs");
 const path = require("node:path");
-const { registerHooks } = require("node:module");
 const { fileURLToPath } = require("node:url");
-const closureRoot = fs.realpathSync(__dirname);
+const lexicalRoot = path.resolve(__dirname);
+const closureRoot = fs.realpathSync(lexicalRoot);
 const reject = (value) => { throw new Error("trusted CLI module resolved outside its content-addressed closure: " + value); };
+const confined = (value) => value === closureRoot || value.startsWith(closureRoot + path.sep);
 const assertConfined = (value) => {
   if (typeof value !== "string") reject(String(value));
   if (value.startsWith("node:")) return;
@@ -631,20 +638,36 @@ const assertConfined = (value) => {
     lexical = path.resolve(fileURLToPath(value));
     resolved = fs.realpathSync(lexical);
   } catch { reject(value); }
-  if (lexical !== closureRoot && !lexical.startsWith(closureRoot + path.sep)) reject(value);
-  if (resolved !== closureRoot && !resolved.startsWith(closureRoot + path.sep)) reject(value);
+  if (!confined(lexical)) reject(value);
+  if (!confined(resolved)) reject(value);
 };
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    const result = nextResolve(specifier, context);
-    assertConfined(result.url);
-    return result;
-  },
-  load(url, context, nextLoad) {
-    assertConfined(url);
-    return nextLoad(url, context);
-  }
-});
+if (process.versions.bun) {
+  const { plugin } = require("bun");
+  if (typeof plugin !== "function") throw new Error("trusted CLI module confinement is unavailable on this runtime");
+  const escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join("");
+  const allowed = [lexicalRoot, closureRoot].map(escape).join("|");
+  const outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+");
+  plugin({
+    name: "ultrafuzz-trusted-cli-closure",
+    setup(build) {
+      build.onLoad({ filter: outside, namespace: "file" }, (args) => reject(args.path));
+    }
+  });
+} else {
+  const { registerHooks } = require("node:module");
+  if (typeof registerHooks !== "function") throw new Error("trusted CLI module confinement is unavailable on this runtime");
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const result = nextResolve(specifier, context);
+      assertConfined(result.url);
+      return result;
+    },
+    load(url, context, nextLoad) {
+      assertConfined(url);
+      return nextLoad(url, context);
+    }
+  });
+}
 `;
 }
 
