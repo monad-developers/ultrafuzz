@@ -131,12 +131,6 @@ Other workspace modes are outside the product contract.
 `max_parallel_agents` is the only concurrency limit the runtime enforces. It
 bounds every task the workflow submits, not only agent tasks.
 
-`max_parallel_nodes` was removed. It never reached the scheduler, so it had no
-effect on how a run executed. This is a breaking change: the loader rejects
-unknown keys, so a config that still sets `max_parallel_nodes` now fails to load
-with a `CONFIG_UNKNOWN_FIELD` error. Delete the key. The
-`ULTRAFUZZ_MAX_PARALLEL_NODES` environment override was removed with it.
-
 `max_dynamic_nodes` limits total generated nodes, not concurrently active
 nodes. Dynamic work still uses `max_parallel_agents`; exceeding the generation
 limit fails the run instead of silently dropping items. The selected value is
