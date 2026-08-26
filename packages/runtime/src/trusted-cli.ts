@@ -633,8 +633,11 @@ if (child.error) throw child.error;
 if (child.signal) process.kill(process.pid, child.signal);
 process.exitCode = child.status === null ? 1 : child.status;
 `;
+  // The dispatcher body is CommonJS. `-e` code is an ES module, where a direct
+  // `eval` does not inherit the injected `require` binding on every runtime
+  // (Bun in particular), so hand `require` to the body explicitly instead.
   const encodedDispatch = Buffer.from(source.trimStart(), "utf8").toString("base64");
-  const dispatch = `eval(Buffer.from(${JSON.stringify(encodedDispatch)}, "base64").toString("utf8"))`;
+  const dispatch = `new Function("require", Buffer.from(${JSON.stringify(encodedDispatch)}, "base64").toString("utf8"))(require)`;
   if (windows) {
     if (encodedDispatch.length > 30_000) throw new Error("trusted CLI Windows dispatcher exceeds environment limit");
     const chunks = encodedDispatch.match(/.{1,3000}/gu) ?? [];
@@ -649,7 +652,7 @@ process.exitCode = child.status === null ? 1 : child.status;
     const escapedNode = nodePath.replaceAll("%", "%%").replaceAll('"', '""');
     const escapedLauncher = canonicalLauncherPath.replaceAll("%", "%%").replaceAll('"', '""');
     lines.push(
-      `"${escapedNode}" --no-global-search-paths -e "eval(Buffer.from(process.env.ULTRAFUZZ_TRUSTED_DISPATCH,'base64').toString('utf8'))" "${escapedLauncher}" %*`,
+      `"${escapedNode}" --no-global-search-paths -e "new Function('require', Buffer.from(process.env.ULTRAFUZZ_TRUSTED_DISPATCH,'base64').toString('utf8'))(require)" "${escapedLauncher}" %*`,
       ""
     );
     return lines.join("\r\n");

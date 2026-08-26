@@ -268,6 +268,10 @@ test("trusted CLI launchers quote POSIX spaces and keep Windows command lines bo
   });
   assert.match(posix, /unset NODE_OPTIONS NODE_PATH/u);
   assert.match(posix, /exec '\/opt\/Node Runtime\/bin\/node'/u);
+  // The dispatcher body is CommonJS, and `-e` code is an ES module whose direct
+  // `eval` does not inherit an injected `require` on every runtime.
+  assert.match(posix, /new Function\("require", Buffer\.from\(/u);
+  assert.doesNotMatch(posix, /-e 'eval\(/u);
 
   const windows = renderTrustedCliLauncherForTests({
     metadataPath: "C:\\Run Root\\trusted-cli.json",
