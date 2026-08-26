@@ -599,6 +599,32 @@ default = "mock"
     );
   });
 
+  it("rejects the removed run.max_parallel_nodes key outright", () => {
+    const parsed = parseProjectConfigToml(`
+[run]
+max_parallel_agents = 4
+max_parallel_nodes = 32
+`);
+    // Breaking change: the loader is strict about unknown keys, so a config that still
+    // sets the removed key fails to load rather than being silently ignored.
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "CONFIG_UNKNOWN_FIELD",
+        severity: "error",
+        path: ["run", "max_parallel_nodes"]
+      })
+    ]);
+  });
+
+  it("no longer honours ULTRAFUZZ_MAX_PARALLEL_NODES", () => {
+    const resolved = resolveConfig({ env: { ULTRAFUZZ_MAX_PARALLEL_NODES: "64" } });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.run).not.toHaveProperty("maxParallelNodes");
+    expect(resolved.value.run.maxParallelAgents).toBe(4);
+  });
+
   it("validates Codex agent auth configuration", () => {
     const parsed = parseProjectConfigToml(`
 [agents.CodexAgent]

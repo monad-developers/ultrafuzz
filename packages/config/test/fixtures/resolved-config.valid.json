@@ -3,14 +3,13 @@
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
-    "catalogDigest": "f9988e5776a50b524c23edfa3a17ba474cc90fb029454798f40b69849c2bf33a",
+    "catalogDigest": "534bb02aec33bbe4251a721e8ca1abfbb3bb1f36f1c81722be7ab7af319def7d",
     "settings": {},
     "effectiveSettings": {
       "strategy_loops": 1,
       "dynamic_strategies_enumerator": 3,
       "same_agent_attempts": 3,
       "max_parallel_agents": 4,
-      "max_parallel_nodes": 8,
       "default_timeout_seconds": 3600,
       "workflow_deadline_seconds": 86400,
       "invariant_testing_smoke_timeout_seconds": 600,
@@ -24,7 +23,6 @@
       "invariant_testing_fuzzer_timeout_seconds": "default",
       "invariant_testing_smoke_timeout_seconds": "default",
       "max_parallel_agents": "default",
-      "max_parallel_nodes": "default",
       "same_agent_attempts": "default",
       "strategy_loops": "default",
       "triage_panel_size": "default",
@@ -40,7 +38,6 @@
   "run": {
     "outputDir": ".ultrafuzz/runs",
     "maxParallelAgents": 4,
-    "maxParallelNodes": 8,
     "maxDynamicNodes": 2048,
     "keepWorkspaces": false,
     "forgeGuardEnabled": true,

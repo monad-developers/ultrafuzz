@@ -42,7 +42,6 @@ const PROJECT_KEYS = ["repo", "name"] as const;
 const RUN_KEYS = [
   "output_dir",
   "max_parallel_agents",
-  "max_parallel_nodes",
   "max_dynamic_nodes",
   "keep_workspaces",
   "forge_guard_enabled",
@@ -198,13 +197,6 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "integer",
         assign: (value) => {
           runConfig.maxParallelAgents = value;
-        }
-      },
-      {
-        key: "max_parallel_nodes",
-        type: "integer",
-        assign: (value) => {
-          runConfig.maxParallelNodes = value;
         }
       },
       {

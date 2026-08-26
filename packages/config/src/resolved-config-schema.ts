@@ -37,7 +37,6 @@ const AUDIT_PROFILE_SETTING_NAMES = [
   "dynamic_strategies_enumerator",
   "same_agent_attempts",
   "max_parallel_agents",
-  "max_parallel_nodes",
   "default_timeout_seconds",
   "workflow_deadline_seconds",
   "invariant_testing_smoke_timeout_seconds",
@@ -62,7 +61,6 @@ const auditProfileSettingsSchema = z
     dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
-    max_parallel_nodes: positiveIntegerSchema.optional(),
     default_timeout_seconds: timeoutSecondsSchema.optional(),
     workflow_deadline_seconds: timeoutSecondsSchema.optional(),
     invariant_testing_smoke_timeout_seconds: timeoutSecondsSchema.optional(),
@@ -289,7 +287,6 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
       .object({
         outputDir: projectLocalPathSchema,
         maxParallelAgents: positiveIntegerSchema,
-        maxParallelNodes: positiveIntegerSchema,
         maxDynamicNodes: positiveIntegerSchema,
         keepWorkspaces: z.boolean(),
         forgeGuardEnabled: z.boolean(),
