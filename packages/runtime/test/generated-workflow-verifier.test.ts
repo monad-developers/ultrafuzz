@@ -210,15 +210,25 @@ test("the workflow runner can project the generated workflow input into its inpu
   assert.notEqual(zodToTable("ultrafuzz_workflow_input", inputSchema, { isInput: true }), undefined);
 });
 
+type ArtifactAwareAgentFixture = {
+  cliEngine?: string;
+  hijackEngine?: string;
+  parseFileChanges?(rawEvent: unknown): unknown[] | undefined;
+  checkpointCapabilities?: readonly unknown[];
+  checkpointFormats?: readonly unknown[];
+  preflight?(args: unknown): Promise<unknown>;
+  generate(args: unknown): Promise<unknown>;
+};
+
 function loadArtifactAwareAgent(
   options: { onAuthorityCheck?: () => void; onReset?: () => void; onSourceVerify?: () => void } = {}
 ): (
   task: unknown,
   chainIndex: number,
   originalPrompt: string,
-  agent: { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> },
-  admittedAgent?: () => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> }
-) => { preflight?(args: unknown): Promise<unknown>; generate(args: unknown): Promise<unknown> } {
+  agent: ArtifactAwareAgentFixture,
+  admittedAgent?: () => ArtifactAwareAgentFixture
+) => ArtifactAwareAgentFixture {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function artifactAwareAgent");
   const helperEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", helperStart);
@@ -263,6 +273,21 @@ function loadArtifactAwareAgent(
     () => undefined,
     () => undefined
   ) as ReturnType<typeof loadArtifactAwareAgent>;
+}
+
+function loadSmithersCorrectionResumeSession(): (agent: unknown, meta: Record<string, unknown>) => string | undefined {
+  const require = createRequire(import.meta.url);
+  const smithersRequire = createRequire(require.resolve("smthrs"));
+  const enginePath = smithersRequire.resolve("@smthrs/engine/engine");
+  const source = fs.readFileSync(enginePath, "utf8");
+  const helperStart = source.indexOf("function resolveCorrectionResumeSession");
+  const helperEnd = source.indexOf("\n}\n", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  return new Function(`${source.slice(helperStart, helperEnd + 2)}; return resolveCorrectionResumeSession;`)() as (
+    agent: unknown,
+    meta: Record<string, unknown>
+  ) => string | undefined;
 }
 
 type NormalizedAgentFailure = Error & { code?: string; details?: Record<string, unknown> };
@@ -7332,6 +7357,60 @@ test("generated Smithers pinned source proof rejects any previously published by
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("artifact-aware agents preserve Smithers continuation and checkpoint capabilities", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const capturedResumeSession = "captured-session-929";
+  const attemptMeta: Record<string, unknown> = {};
+  const checkpointCapabilities = [{ codec: "fixture", versions: [1], modes: ["resume", "fork"] }] as const;
+  const checkpointFormats = [{ codec: "fixture", versions: [1] }] as const;
+  const sourceAgent: ArtifactAwareAgentFixture = {
+    cliEngine: "pi",
+    hijackEngine: "fallback-fixture",
+    checkpointCapabilities,
+    checkpointFormats,
+    parseFileChanges(this: { cliEngine?: string }, rawEvent: unknown): unknown[] {
+      return [{ path: `${this.cliEngine}:${String(rawEvent)}` }];
+    },
+    async generate(args: unknown): Promise<unknown> {
+      const call = args as Record<string, unknown>;
+      calls.push(call);
+      if (calls.length === 1) {
+        const onEvent = call.onEvent as ((event: Record<string, unknown>) => unknown) | undefined;
+        await onEvent?.({ type: "started", engine: "pi", resume: capturedResumeSession });
+      }
+      return { text: "ok" };
+    }
+  };
+  const wrapped = loadArtifactAwareAgent()({ agentChain: [{}] }, 0, "prompt", sourceAgent);
+
+  assert.equal(wrapped.cliEngine, "pi");
+  assert.equal(wrapped.hijackEngine, "fallback-fixture");
+  assert.equal(wrapped.checkpointCapabilities, checkpointCapabilities);
+  assert.equal(wrapped.checkpointFormats, checkpointFormats);
+  assert.deepEqual(wrapped.parseFileChanges?.("change"), [{ path: "pi:change" }]);
+
+  await wrapped.generate({
+    prompt: "prompt",
+    taskContext: { attempt: 1 },
+    onEvent: (event: Record<string, unknown>) => {
+      attemptMeta.agentEngine = event.engine;
+      attemptMeta.agentResume = event.resume;
+    }
+  });
+  const correctionResumeSession = loadSmithersCorrectionResumeSession()(wrapped, attemptMeta);
+  assert.equal(correctionResumeSession, capturedResumeSession);
+
+  const correctionMessages = [{ role: "user", content: "return corrected JSON" }];
+  await wrapped.generate({
+    prompt: "schema correction",
+    messages: correctionMessages,
+    resumeSession: correctionResumeSession,
+    taskContext: { attempt: 1 }
+  });
+  assert.equal(calls[1]?.resumeSession, capturedResumeSession);
+  assert.equal(calls[1]?.messages, correctionMessages);
 });
 
 test("agent retries are error-agnostic fresh generations with Smithers' effective prompt", async () => {
