@@ -3874,6 +3874,61 @@ test("bounded final reports close over every authenticated deduped finding", () 
     tampered.status === "failed" &&
       tampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
   );
+
+  // A promoted row must author its severity assessment even when the dedupe
+  // row already carried preliminary values (#931); every evidence field stays
+  // byte-preserved.
+  const promotedSourceFinding = {
+    ...finding,
+    impact: "Low",
+    likelihood: "Low",
+    impact_rationale: "Preliminary impact rationale from the strategy stage.",
+    likelihood_rationale: "Preliminary likelihood rationale from the strategy stage."
+  };
+  const promotedContext = {
+    artifactSet: {
+      severityClassifiedFindings: null,
+      dedupedFindings: [promotedSourceFinding],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const promotedRow = {
+    ...promotedSourceFinding,
+    id: "M-01",
+    title: "[M-01] - Finding A",
+    triage_classification: "true-positive",
+    impact: "High",
+    likelihood: "Medium",
+    impact_rationale: "Authored source-backed impact rationale.",
+    likelihood_rationale: "Authored source-backed likelihood rationale.",
+    severity: "Medium",
+    severity_rationale: "High impact with medium likelihood maps to Medium.",
+    lifecycle: {
+      ...lifecycle,
+      triage_classification: "true-positive",
+      triage_reason: "The source-backed precondition is reachable.",
+      canonical_severity: "Medium",
+      final_disposition: "promoted"
+    }
+  };
+  assert.equal(
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [promotedRow], non_production_outcomes: [] },
+      context: promotedContext
+    }).status,
+    "passed"
+  );
+  const promotedTamperedEvidence = structuredClone(promotedRow);
+  promotedTamperedEvidence.summary = "Rewritten promoted summary.";
+  const promotedTampered = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [promotedTamperedEvidence], non_production_outcomes: [] },
+    context: promotedContext
+  });
+  assert.equal(promotedTampered.status, "failed");
+  assert.ok(
+    promotedTampered.status === "failed" &&
+      promotedTampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
+  );
 });
 
 test("differential reconciliation diagnostics expose exact expected machine-derived values", () => {
