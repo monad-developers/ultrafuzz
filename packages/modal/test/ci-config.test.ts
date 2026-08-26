@@ -877,7 +877,7 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseValidation?.if).toBe("github.event_name != 'pull_request'");
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
-      "max-parallel": 7,
+      "max-parallel": 8,
       matrix: {
         include: [
           {
@@ -924,10 +924,19 @@ describe("public Modal benchmark configuration", () => {
             build_modal_dependencies: true
           },
           {
-            lane: "cli-typecheck",
-            description: "CLI tests, benchmark history, and workspace typecheck",
-            gates: "cli,benchmark-history,workspace-typecheck",
-            timeout_minutes: 30
+            lane: "cli",
+            description: "CLI package tests",
+            gates: "cli",
+            timeout_minutes: 75,
+            build_release_reporter: true
+          },
+          {
+            lane: "benchmark-history-typecheck",
+            description: "Benchmark history charts and workspace typecheck",
+            gates: "benchmark-history,workspace-typecheck",
+            timeout_minutes: 45,
+            build_release_reporter: true,
+            build_cli: true
           }
         ]
       }
@@ -942,8 +951,18 @@ describe("public Modal benchmark configuration", () => {
     const releaseReporterBuild = releaseValidation?.steps.find(
       (step) => step.name === "Build release reporter dependencies"
     );
-    expect(releaseReporterBuild?.if).toBe("matrix.lane == 'cli-typecheck'");
+    expect(releaseReporterBuild?.if).toBe("matrix.build_release_reporter == true");
     expect(releaseReporterBuild?.run).toBe("pnpm --filter @ultrafuzz/artifacts... build");
+    // The split benchmark-history lane no longer shares a job with the `cli` gate,
+    // so it has to build the CLI closure that `benchmark:check:prebuilt` executes.
+    const cliLaneBuild = releaseValidation?.steps.find((step) => step.name === "Build CLI lane dependencies");
+    expect(cliLaneBuild?.if).toBe("matrix.build_cli == true");
+    expect(cliLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/cli... build");
+    const laneGateIds = (releaseValidation?.strategy?.matrix.include ?? []).flatMap((entry) => entry.gates.split(","));
+    expect(new Set(laneGateIds).size, "release validation lanes must not repeat a gate").toBe(laneGateIds.length);
+    expect(laneGateIds).toContain("cli");
+    expect(laneGateIds).toContain("benchmark-history");
+    expect(laneGateIds).toContain("workspace-typecheck");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
     expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);

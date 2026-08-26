@@ -80,7 +80,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
-      max-parallel: 7
+      max-parallel: 8
       matrix:
         include:
           - lane: package-gates
@@ -113,10 +113,17 @@ jobs:
             gates: runtime-4
             timeout_minutes: 75
             build_modal_dependencies: true
-          - lane: cli-typecheck
-            description: CLI tests, benchmark history, and workspace typecheck
-            gates: cli,benchmark-history,workspace-typecheck
-            timeout_minutes: 30
+          - lane: cli
+            description: CLI package tests
+            gates: cli
+            timeout_minutes: 75
+            build_release_reporter: true
+          - lane: benchmark-history-typecheck
+            description: Benchmark history charts and workspace typecheck
+            gates: benchmark-history,workspace-typecheck
+            timeout_minutes: 45
+            build_release_reporter: true
+            build_cli: true
     env:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
@@ -149,8 +156,16 @@ jobs:
         run: pnpm --filter @ultrafuzz/modal... build
 
       - name: Build release reporter dependencies
-        if: matrix.lane == 'cli-typecheck'
+        if: matrix.build_release_reporter == true
         run: pnpm --filter @ultrafuzz/artifacts... build
+
+      # The benchmark-history gate runs `benchmark:check:prebuilt`, which executes
+      # packages/cli/dist/index.js without building it. It used to share a job with
+      # the `cli` gate, whose own test script built the CLI closure first. Now that
+      # the lanes are split, this lane has to build that closure itself.
+      - name: Build CLI lane dependencies
+        if: matrix.build_cli == true
+        run: pnpm --filter @ultrafuzz/cli... build
 
       - name: Validate release lane
         run: >-
