@@ -6443,21 +6443,22 @@ test("generated local and cloud prompt relocation rebases task-local authority p
     destinationPath: string
   ) => string;
 
-  const sourceRoot = "/tmp/controller-a's-project";
-  const localRoot = "/tmp/local-b's-project";
-  const cloudRoot = "/workspace/cloud-b's-project";
+  const sourceRoot = "/tmp/controller-a's-`project";
+  const localRoot = "/tmp/local-b's-`project";
+  const cloudRoot = "/workspace/cloud-b's-`project";
   const sourceArtifactDir = `${sourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
   const sourceWorkspace = `${sourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`;
   const sourceAuthority = `${sourceWorkspace}/.ultrafuzz/authorities/task-0.json`;
   const sourceSchema = `${sourceWorkspace}/.ultrafuzz/schemas/findings.schema.json`;
   const encodedSourceRoot = sourceRoot.replaceAll("'", `'"'"'`);
+  const commandSpan = (command: string): string => (command.includes("`") ? `\`\` ${command} \`\`` : `\`${command}\``);
   const rendered = [
     `- Path: \`${sourceArtifactDir}/findings.json\``,
     `- Artifact authority: \`${sourceAuthority}\``,
     `  Validate against: \`${sourceSchema}\``,
-    `  Validation command: \`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``,
-    `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``,
-    `  Task-context validation command: \`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0'\``
+    `  Validation command: ${commandSpan(`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'`)}`,
+    `  Contract validation command: ${commandSpan(`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'`)}`,
+    `  Task-context validation command: ${commandSpan(`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0'`)}`
   ].join("\n");
   assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
 
