@@ -2464,6 +2464,59 @@ async function controllerFalseFailureFixture(label: string): Promise<{
   return { project, runId, workflowRunId, runRoot, markerPath, env };
 }
 
+async function genuineVerifierFailureFixture(label: string): Promise<{
+  project: string;
+  runId: string;
+  workflowRunId: string;
+  runRoot: string;
+  env: Record<string, string | undefined>;
+}> {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = `controller-refinalization-genuine-failure-${label}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "verifier rejected the task output" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        error: { message: "verifier rejected the task output" }
+      },
+      { type: "RunFailed" }
+    ])
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "failed");
+  const runRoot = launched.value!.run_root;
+  const state = readRunState(layoutForRunRoot(runRoot, runId));
+  const node = state.nodes["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.equal((node?.provenance as { workflow?: { state?: string } })?.workflow?.state, "failed");
+  assert.deepEqual((node?.provenance as { terminal_disposition?: unknown })?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
+  return { project, runId, workflowRunId, runRoot, env };
+}
+
 const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
 const REPORT_VOCABULARY_PROMPT_REFERENCES = "\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}\n";
 
@@ -15372,6 +15425,74 @@ test("controller re-finalization cannot weaken ordinary resume immutability with
   assert.equal(rejected.ok, false);
   assert.equal(rejected.diagnostics[0]?.code, "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH");
 });
+
+test(
+  "controller re-finalization leaves a genuine failed verifier for retry and rejects a standalone no-op",
+  { concurrency: false },
+  async () => {
+    const fixture = await genuineVerifierFailureFixture("standalone");
+    const before = readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"];
+
+    const rejected = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      env: fixture.env
+    });
+
+    assert.equal(rejected.ok, false);
+    assert.match(JSON.stringify(rejected.diagnostics), /no eligible immutable controller false failures/u);
+    assert.doesNotMatch(JSON.stringify(rejected.diagnostics), /failure authority is incomplete/u);
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
+    assert.equal(
+      replayEvents(layout).records.some(
+        (event) =>
+          event.event_type === "node-controller-refinalization-intent" ||
+          event.event_type === "node-controller-refinalization-result"
+      ),
+      false
+    );
+  }
+);
+
+test(
+  "atomic controller re-finalization permits zero eligible nodes before retrying genuine verifier failures",
+  { concurrency: false },
+  async () => {
+    const fixture = await genuineVerifierFailureFixture("atomic-retry");
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const before = readRunState(layout).nodes["project-discovery"];
+
+    const resumed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      retryFailed: true,
+      env: fixture.env
+    });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
+    const records = replayEvents(layout).records;
+    assert.equal(
+      records.some(
+        (event) =>
+          event.event_type === "node-controller-refinalization-intent" ||
+          event.event_type === "node-controller-refinalization-result"
+      ),
+      false
+    );
+    assert.ok(
+      records.some((event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true)
+    );
+    const commands = fs.readFileSync(fixture.env.SMITHERS_FAKE_LOG!, "utf8");
+    assert.match(commands, /^timetravel .* --node-id verify:project-discovery .* --force(?: |$)/mu);
+    assert.match(commands, /^up .* --resume ultrafuzz-controller-refinalization-genuine-failure-atomic-retry(?: |$)/mu);
+  }
+);
 
 test(
   "controller re-finalization rejects stale identities, unfinished verifier evidence, and modified publications",
