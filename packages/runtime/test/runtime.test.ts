@@ -20956,6 +20956,47 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   );
 });
 
+test("resume retries a failed artifact verifier from its agent producer and dependent closure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "failed-artifact-verifier-retry";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "the artifact verifier rejected agent-owned output" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+  assert.doesNotMatch(commands, /^timetravel .* --node-id verify:project-discovery /mu);
+  assert.doesNotMatch(
+    commands,
+    /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
+    "the producer retry must also reset its zero-retry verifier and downstream dependents"
+  );
+});
+
 test("retry recovery survives an interrupted submission projection and rejects superseding same-link attempts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

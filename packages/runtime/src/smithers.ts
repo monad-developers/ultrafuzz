@@ -3182,6 +3182,7 @@ export async function runSmithersLifecycleCommand(input: {
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
+        const producerTask = retryProducerForFailedVerifier(currentInspection, failedTask);
         const resetResult = await execSmithersCli({
           args: [
             "timetravel",
@@ -3189,10 +3190,14 @@ export async function runSmithersLifecycleCommand(input: {
             "--run-id",
             input.smithersRunId,
             "--node-id",
-            failedTask.nodeId,
+            producerTask?.nodeId ?? failedTask.nodeId,
             "--iteration",
-            String(failedTask.iteration),
-            "--no-deps",
+            String(producerTask?.iteration ?? failedTask.iteration),
+            // Generated verifiers deliberately have zero automatic retries. An
+            // explicit retry must reopen their agent-owned artifact producer,
+            // and Smithers must reset its verifier/dependents with it. Ordinary
+            // failed tasks retain the narrow, node-only reset used before.
+            ...(producerTask === undefined ? ["--no-deps"] : []),
             "--force",
             "--format",
             "json"
@@ -3545,6 +3550,17 @@ function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: s
     failedTasks.set(`${entry.nodeId}::0`, { nodeId: entry.nodeId, iteration: 0 });
   }
   return [...failedTasks.values()];
+}
+
+function retryProducerForFailedVerifier(
+  inspect: CurrentSmithersInspect,
+  failedTask: { nodeId: string; iteration: number }
+): { nodeId: string; iteration: number } | undefined {
+  if (!failedTask.nodeId.startsWith("verify:")) return undefined;
+  const producerNodeId = `node:${failedTask.nodeId.slice("verify:".length)}`;
+  const producer = inspect.nodes.find((node) => node.nodeId === producerNodeId);
+  if (producer === undefined) return undefined;
+  return { nodeId: producer.nodeId, iteration: failedTask.iteration };
 }
 
 export function parseCurrentSmithersInspect(
