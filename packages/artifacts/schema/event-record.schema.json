@@ -237,6 +237,68 @@
           "$ref": "#/$defs/safeId"
         },
         "event_type": {
+          "const": "node-controller-refinalization-intent"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "const": "running"
+        },
+        "payload": {
+          "$ref": "#/$defs/controllerRefinalizationIntentPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
+          "const": "node-controller-refinalization-result"
+        },
+        "node_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "status": {
+          "enum": ["succeeded", "failed"]
+        },
+        "payload": {
+          "$ref": "#/$defs/controllerRefinalizationResultPayload"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "event_id", "timestamp", "run_id", "event_type", "node_id", "status", "payload"],
+      "properties": {
+        "schema_version": {
+          "const": "ultrafuzz.event-record.v2"
+        },
+        "event_id": {
+          "$ref": "#/$defs/eventId"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "run_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "event_type": {
           "const": "node-artifacts-missing"
         },
         "node_id": {
@@ -1161,6 +1223,120 @@
           "items": {
             "$ref": "#/$defs/nonEmptyString"
           }
+        }
+      }
+    },
+    "controllerRefinalizationIntentPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation",
+        "controller_generation",
+        "verifier_task_id",
+        "verifier_iteration",
+        "verifier_attempt",
+        "marker_sha256",
+        "marker_size_bytes",
+        "prior_status"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verifier_task_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "verifier_iteration": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "verifier_attempt": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "marker_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "marker_size_bytes": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "prior_status": {
+          "const": "failed"
+        }
+      }
+    },
+    "controllerRefinalizationResultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "workflow_run_id",
+        "workflow_link_id",
+        "control_generation",
+        "controller_generation",
+        "verifier_task_id",
+        "verifier_iteration",
+        "verifier_attempt",
+        "marker_sha256",
+        "marker_size_bytes",
+        "prior_status",
+        "result"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/sha256"
+        },
+        "workflow_run_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "workflow_link_id": {
+          "$ref": "#/$defs/workflowLinkId"
+        },
+        "control_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "controller_generation": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verifier_task_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "verifier_iteration": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "verifier_attempt": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "marker_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "marker_size_bytes": {
+          "$ref": "#/$defs/nonNegativeSafeInteger"
+        },
+        "prior_status": {
+          "const": "failed"
+        },
+        "result": {
+          "enum": ["succeeded", "rejected"]
+        },
+        "artifact_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "failure_code": {
+          "const": "CONTROLLER_REFINALIZATION_REJECTED"
         }
       }
     },

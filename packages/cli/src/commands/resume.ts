@@ -21,6 +21,9 @@ export default class Resume extends Command {
     "reset-node": Flags.string({ summary: "Retry one failed workflow node and its dependents before resuming" }),
     "refresh-controller": Flags.boolean({
       summary: "Authenticate a compatible controller-only refresh before resuming the same workflow run"
+    }),
+    "refinalize-controller-failures": Flags.boolean({
+      summary: "Re-finalize eligible immutable controller false failures after an authenticated refresh"
     })
   };
 
@@ -34,6 +37,7 @@ export default class Resume extends Command {
       force: flags.force,
       retryFailed: flags["retry-failed"],
       refreshController: flags["refresh-controller"],
+      refinalizeControllerFailures: flags["refinalize-controller-failures"],
       resetNode: flags["reset-node"],
       env: cliIo().env
     });

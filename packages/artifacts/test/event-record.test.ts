@@ -105,6 +105,44 @@ const validVariantFixtures: Record<string, Record<string, unknown>> = Object.fro
     ),
     event("node-artifacts-verified", "succeeded", { output_contracts: [outputContract], missing: [] }, "node-1"),
     event("node-artifacts-missing", "failed", { output_contracts: [outputContract], missing: ["report.md"] }, "node-1"),
+    event(
+      "node-controller-refinalization-intent",
+      "running",
+      {
+        operation_id: SHA256,
+        workflow_run_id: "workflow-1",
+        workflow_link_id: LINK_ID,
+        control_generation: SHA256,
+        controller_generation: SHA256,
+        verifier_task_id: "node:node-1:verify",
+        verifier_iteration: 0,
+        verifier_attempt: 1,
+        marker_sha256: SHA256,
+        marker_size_bytes: 128,
+        prior_status: "failed"
+      },
+      "node-1"
+    ),
+    event(
+      "node-controller-refinalization-result",
+      "succeeded",
+      {
+        operation_id: SHA256,
+        workflow_run_id: "workflow-1",
+        workflow_link_id: LINK_ID,
+        control_generation: SHA256,
+        controller_generation: SHA256,
+        verifier_task_id: "node:node-1:verify",
+        verifier_iteration: 0,
+        verifier_attempt: 1,
+        marker_sha256: SHA256,
+        marker_size_bytes: 128,
+        prior_status: "failed",
+        result: "succeeded",
+        artifact_manifest_sha256: SHA256
+      },
+      "node-1"
+    ),
     event("findings-validated", "succeeded", { path: "artifacts/node-1/findings.json", count: 1 }, "node-1"),
     event(
       "artifact-manifest-written",
@@ -224,7 +262,7 @@ function assertParity(value: unknown, expected: boolean, label: string): void {
 }
 
 test("event-record v2 enumerates every production event as a closed Ajv/Zod union", () => {
-  assert.equal(EVENT_RECORD_TYPES.length, 25);
+  assert.equal(EVENT_RECORD_TYPES.length, 27);
   assert.deepEqual(Object.keys(validVariantFixtures).sort(), [...EVENT_RECORD_TYPES].sort());
 
   for (const eventType of EVENT_RECORD_TYPES) {
