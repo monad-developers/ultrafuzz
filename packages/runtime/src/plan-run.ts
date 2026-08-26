@@ -97,6 +97,7 @@ import {
   VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
   type MaterializedVulnerabilityDatabaseCatalog
 } from "./vulnerability-database.js";
+import { assertRenderedPromptValidatorCommands, producerSchemaBackedOutputCount } from "./prompt-validator-command.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
@@ -428,6 +429,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     renderedPrompts = renderPromptsForPlan({
       catalog,
       graph,
+      expandedGraph,
       layout,
       projectRoot,
       resolvedConfig: resolved.config,
@@ -951,13 +953,14 @@ function toPlannedGraphNode(
 function renderPromptsForPlan(input: {
   catalog: PromptCatalog;
   graph: PlannedGraph;
+  expandedGraph: ExpandedGraph;
   layout: PlanRunValue["layout"];
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
   vulnerabilityDatabasePath: string;
 }): RenderedPromptPlan[] {
-  const logicalNodes = promptLogicalNodes(input.graph, input.layout);
+  const logicalNodes = promptLogicalNodes(input.expandedGraph, input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
   const invariantPrioritySelection = invariantPropertyPrioritySelection(
     input.resolvedConfig.invariants.propertyPriorityThreshold
@@ -1020,6 +1023,15 @@ function renderPromptsForPlan(input: {
           artifactSchemaDir: projectArtifactSchemaDir(input.projectRoot)
         }
       });
+      const expandedNode = input.expandedGraph.nodes.find((candidate) => candidate.id === node.id);
+      if (expandedNode === undefined) {
+        throw new Error(`planned prompt node ${node.id} is missing from the expanded graph`);
+      }
+      assertRenderedPromptValidatorCommands({
+        attemptId: attempt.attemptId,
+        outputContractMarkdown: result.outputContractMarkdown,
+        schemaBackedOutputCount: producerSchemaBackedOutputCount(expandedNode.outputs)
+      });
       writeRenderedPrompt(result);
       rendered.push({
         node_id: node.id,
@@ -1068,15 +1080,24 @@ function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], inpu
   });
 }
 
-function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {
+function promptLogicalNodes(
+  expandedGraph: ExpandedGraph,
+  plannedGraph: PlannedGraph,
+  layout: PlanRunValue["layout"]
+): PromptGraphNode[] {
   const nodes = new Map<string, PromptGraphNode>();
-  for (const node of graph.nodes) {
+  const expandedNodeById = new Map(expandedGraph.nodes.map((node) => [node.id, node]));
+  for (const node of plannedGraph.nodes) {
+    const expandedNode = expandedNodeById.get(node.id);
+    if (expandedNode === undefined) {
+      throw new Error(`planned prompt node ${node.id} is missing from the expanded graph`);
+    }
     const previous = nodes.get(node.logical_id);
     const dependencies = Array.from(
       new Set([
         ...(previous?.dependsOn ?? []),
         ...node.depends_on
-          .map((dependency) => graph.nodes.find((candidate) => candidate.id === dependency)?.logical_id)
+          .map((dependency) => plannedGraph.nodes.find((candidate) => candidate.id === dependency)?.logical_id)
           .filter((dependency): dependency is string => dependency !== undefined && dependency !== node.logical_id)
       ])
     ).sort();
@@ -1090,7 +1111,7 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
       id: node.logical_id,
       kind: previous?.kind === "reference" ? "reference" : node.kind,
       dependsOn: dependencies,
-      outputs: node.outputs.map((output) => {
+      outputs: expandedNode.outputs.map((output) => {
         const definition = artifactContractDefinition(output.contract);
         return {
           path: output.path,
@@ -1098,7 +1119,7 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
           primary: output.primary,
           description: definition.description,
           ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample }),
-          ...(output.schema_file === undefined ? {} : { schemaFile: output.schema_file })
+          ...(output.schemaFile === undefined ? {} : { schemaFile: output.schemaFile })
         };
       }),
       artifactDirs,

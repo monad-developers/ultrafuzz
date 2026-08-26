@@ -165,6 +165,8 @@ export interface PromptRenderInput {
 
 export interface PromptRenderResult {
   renderedMarkdown: string;
+  /** Renderer-owned output-contract suffix, excluding authored prompt text. */
+  outputContractMarkdown: string;
   renderedPromptPath: string;
   variablesUsed: string[];
   artifactReferences: PromptArtifactReference[];
@@ -428,10 +430,12 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     consumed = occurrence.end;
   }
   rendered += unescapePromptTemplateLiterals(body.slice(consumed));
-  rendered = appendOutputContract(rendered, input, graph.current);
+  const outputContract = appendOutputContract(rendered, input, graph.current);
+  rendered = outputContract.renderedMarkdown;
 
   return {
     renderedMarkdown: rendered,
+    outputContractMarkdown: outputContract.outputContractMarkdown,
     renderedPromptPath: path.join(input.node.artifactDir, RENDERED_PROMPT_FILE),
     variablesUsed: Array.from(new Set(variablesUsed)).sort(),
     artifactReferences,
@@ -451,7 +455,11 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
   };
 }
 
-function appendOutputContract(rendered: string, input: PromptRenderInput, current: PromptGraphNode): string {
+function appendOutputContract(
+  rendered: string,
+  input: PromptRenderInput,
+  current: PromptGraphNode
+): { renderedMarkdown: string; outputContractMarkdown: string } {
   // Workspace patches are captured from the complete post-agent worktree by
   // the runtime. They remain declared in the graph for validation and
   // dependency handoff, but must not be presented as files for the agent to
@@ -463,7 +471,7 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       output.path !== "vulnerability-db-manifest.json"
   );
   if (outputs.length === 0) {
-    return rendered;
+    return { renderedMarkdown: rendered, outputContractMarkdown: "" };
   }
 
   const schemaDirectory = taskSchemaDirectory(input);
@@ -527,7 +535,11 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .join("\n")
   });
 
-  return `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${contract.trimEnd()}\n`;
+  const outputContractMarkdown = `${contract.trimEnd()}\n`;
+  return {
+    renderedMarkdown: `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${outputContractMarkdown}`,
+    outputContractMarkdown
+  };
 }
 
 function validationCommand(schemaPath: string, artifactPath: string): string {
