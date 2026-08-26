@@ -18256,6 +18256,69 @@ test("controller refresh sources stock adapters from the packaged closure instea
   assert.equal(fs.existsSync(unexpectedProjectAdapter), true);
 });
 
+test("controller refresh sources internal modules from the invoking package closure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-invoking-modules";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+
+  const invokingRuntimeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@ultrafuzz/runtime"))));
+  const staleRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-runtime-"));
+  fs.copyFileSync(path.join(invokingRuntimeRoot, "package.json"), path.join(staleRuntimeRoot, "package.json"));
+  for (const directory of ["dist", "schema"]) {
+    const source = path.join(invokingRuntimeRoot, directory);
+    if (fs.existsSync(source)) fs.cpSync(source, path.join(staleRuntimeRoot, directory), { recursive: true });
+  }
+  const artifactGatesRelativePath = path.join("dist", "artifact-gates.js");
+  const staleArtifactGatesPath = path.join(staleRuntimeRoot, artifactGatesRelativePath);
+  fs.appendFileSync(staleArtifactGatesPath, "\n// stale compatible launch installation\n", "utf8");
+  const staleArtifactGates = fs.readFileSync(staleArtifactGatesPath);
+  const currentArtifactGates = fs.readFileSync(path.join(invokingRuntimeRoot, artifactGatesRelativePath));
+  assert.notDeepEqual(staleArtifactGates, currentArtifactGates);
+
+  const runtimeSnapshotPrefix = "modules/@ultrafuzz/runtime/";
+  const launchFromStaleInstallation = {
+    ...evidence.verifiedControl,
+    executionFiles: evidence.verifiedControl.executionFiles.map((file) =>
+      file.snapshotPath.startsWith(runtimeSnapshotPrefix)
+        ? {
+            ...file,
+            sourcePath: path.join(staleRuntimeRoot, ...file.snapshotPath.slice(runtimeSnapshotPrefix.length).split("/"))
+          }
+        : file
+    )
+  };
+
+  const refreshed = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: launchFromStaleInstallation,
+    config
+  });
+  const refreshedArtifactGates = refreshed.snapshot.executionFiles.find(
+    (file) => file.snapshotPath === `${runtimeSnapshotPrefix}dist/artifact-gates.js`
+  );
+  assert.ok(refreshedArtifactGates);
+  assert.deepEqual(refreshedArtifactGates.contents, currentArtifactGates);
+  assert.notDeepEqual(refreshedArtifactGates.contents, staleArtifactGates);
+  assert.equal(
+    path.dirname(path.dirname(refreshedArtifactGates.sourcePath)),
+    invokingRuntimeRoot,
+    "refreshed source provenance must identify the invoking package installation"
+  );
+});
+
 test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
