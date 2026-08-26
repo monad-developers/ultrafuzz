@@ -404,7 +404,7 @@ export async function listRunSnapshots(input: WorkflowRunQueryInput) {
 
 export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
@@ -457,7 +457,7 @@ export async function watchWorkflowEvents(
   input: WorkflowEventsQueryInput & { intervalSeconds?: number; onEvent: (event: WorkflowLifecycleEvent) => void }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
