@@ -575,6 +575,41 @@ function readLedger(fixture: DynamicFixture): Array<Record<string, unknown>> {
   return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+test("runtime-materialized dynamic producer prompts retain validator commands", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-validator-commands", modelFanout: true });
+  assert.ok(fixture.generatedTasks.length > 1);
+  for (const task of fixture.generatedTasks) {
+    assert.ok(task.renderedPromptPath);
+    const rendered = fs.readFileSync(task.renderedPromptPath, "utf8");
+    const schemaPath = path.join(task.workspacePath, ".ultrafuzz", "schemas", "findings.schema.json");
+    const artifactPath = path.join(task.artifactDir, "findings.json");
+    assert.equal(rendered.split("\n").filter((line) => line.startsWith("  Validate against: ")).length, 1);
+    assert.equal(
+      rendered.split("\n").filter((line) => line.startsWith("  Validation command: `ultrafuzz json validate --schema "))
+        .length,
+      1
+    );
+    assert.equal(
+      rendered
+        .split("\n")
+        .filter((line) => line.startsWith("  Contract validation command: `ultrafuzz artifact validate ")).length,
+      1
+    );
+    assert.ok(
+      rendered.includes(
+        `  Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${artifactPath}'\``
+      ),
+      rendered
+    );
+    assert.ok(
+      rendered.includes(
+        `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${artifactPath}'\``
+      ),
+      rendered
+    );
+  }
+});
+
 test("a half-published dynamic expansion stays readable while execution stays closed", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-unreadable-expansion" });
   const generated = fixture.generatedTasks[0]!;
