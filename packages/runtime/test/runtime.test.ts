@@ -15489,7 +15489,12 @@ test(
       records.some((event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true)
     );
     const commands = fs.readFileSync(fixture.env.SMITHERS_FAKE_LOG!, "utf8");
-    assert.match(commands, /^timetravel .* --node-id verify:project-discovery .* --force(?: |$)/mu);
+    // An explicit retry of a zero-retry generated verifier reopens its
+    // agent-owned artifact producer and lets Smithers reset the verifier with
+    // its dependents (#926), so the genuine verifier failure surfaces here as a
+    // producer timetravel rather than a verifier-only reset.
+    assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+    assert.doesNotMatch(commands, /^timetravel .* --node-id verify:project-discovery /mu);
     assert.match(commands, /^up .* --resume ultrafuzz-controller-refinalization-genuine-failure-atomic-retry(?: |$)/mu);
   }
 );
