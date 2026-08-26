@@ -18,7 +18,6 @@ export interface AuditProfileSettings {
   dynamic_strategies_enumerator?: DynamicStrategiesEnumerator;
   same_agent_attempts?: number;
   max_parallel_agents?: number;
-  max_parallel_nodes?: number;
   default_timeout_seconds?: number;
   workflow_deadline_seconds?: number;
   invariant_testing_smoke_timeout_seconds?: number;
@@ -72,7 +71,6 @@ const settingsSchema = z
     dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
-    max_parallel_nodes: positiveIntegerSchema.optional(),
     default_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),
     workflow_deadline_seconds: positiveIntegerSchema.max(86_400).optional(),
     invariant_testing_smoke_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),

@@ -116,7 +116,7 @@ A compatible config MUST support:
 - `schema_version`
 - `dynamic_strategies_enumerator`
 - `[project] repo`
-- `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
+- `[run] output_dir`, `max_parallel_agents`,
   `max_dynamic_nodes`, `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and
@@ -430,12 +430,22 @@ identity in run metadata. The workflow engine is an implementation choice.
 
 Before model work, a schema-backed producer MUST receive a host-managed
 Ultrafuzz launcher ahead of target-controlled `PATH` entries. Local runs MUST
-bind the launcher to the planned CLI bytes, validator build, and schema-bundle
-digest in run-owned metadata. Modal MUST provide the equivalent root-owned,
+bind the launcher to a content-addressed, read-only closure containing the
+planned CLI bytes and every transitive package, plus the validator build and
+schema-bundle digest in run-owned metadata. The launcher MUST verify that
+closure before dispatch, clear ambient Node loader/search injection, and reject
+every non-builtin module whose lexical or physical resolution escapes the
+closure. Ordinary artifact and schema data reads remain outside this module
+boundary. Modal MUST provide the equivalent root-owned,
 read-only entrypoint. Both environments MUST run a real known-valid fixture and
 verify the returned schema ID, schema digest, bundle digest, and validator build;
-`command -v` alone is insufficient. A missing, tampered, or stale launcher is a
-setup failure and MUST NOT be silently repaired on resume.
+`command -v` alone is insufficient. A missing, tampered, or stale launcher or
+closure is a setup failure and MUST NOT be silently repaired on ordinary
+resume. Only an authenticated controller refresh MAY publish a replacement or
+migrate a valid legacy launcher, and the candidate MUST pass the sealed
+launch-generation identity preflight before it is published or selected.
+Refreshed controller code MUST NOT substitute its newer validator packages for
+that launch identity.
 
 Before or at launch, each run MUST persist:
 
@@ -449,7 +459,7 @@ Before or at launch, each run MUST persist:
 - `events.jsonl`
 - `attempts.jsonl`
 - `plan.json`
-- `trusted-cli.json` and a run-owned trusted launcher for schema-backed producers
+- `trusted-cli.json`, a run-owned trusted launcher, and content-addressed trusted CLI closures for schema-backed producers
 - immutable rendered prompt snapshots under `prompt-snapshots/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`

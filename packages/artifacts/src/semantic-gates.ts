@@ -1012,6 +1012,19 @@ const BOUNDED_REPORT_LIFECYCLE_OWNED_FIELDS = new Set([
   "final_disposition"
 ]);
 
+// The fields bounded classification mode instructs the final report to author
+// for every promoted row, in addition to the report-owned id and title (#931).
+const BOUNDED_REPORT_PROMOTED_AUTHORED_FIELDS = new Set([
+  "id",
+  "title",
+  "impact",
+  "likelihood",
+  "impact_rationale",
+  "likelihood_rationale",
+  "severity",
+  "severity_rationale"
+]);
+
 function reportBoundedDedupePreservationIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const upstreamValue = context.artifactSet!.dedupedFindings;
   const ledgerValue = context.artifactSet!.findingLifecycleLedger;
@@ -1228,7 +1241,24 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
     }
 
     for (const field of Object.keys(finding)) {
-      if (expectedDisposition === "promoted" && (field === "id" || field === "title")) continue;
+      // Bounded classification mode instructs the report to author every
+      // promoted row's severity assessment — impact, likelihood, their
+      // rationales, the matrix severity, and its rationale — alongside the
+      // report-owned id and title, so a dedupe row that already carries any
+      // of those fields can never byte-equal its promoted report row (#931).
+      // The authored severity itself stays independently validated: the
+      // enriched lifecycle's canonical_severity must equal the row severity
+      // and the issues list must stay stable-sorted High, Medium, then Low.
+      if (expectedDisposition === "promoted" && BOUNDED_REPORT_PROMOTED_AUTHORED_FIELDS.has(field)) continue;
+      // Bounded classification mode instructs the report to enrich the dedupe
+      // lifecycle record in place and to choose the row's classification, so a
+      // dedupe row that itself carries `lifecycle` or `triage_classification`
+      // can never byte-equal its enriched report row — every compliant report
+      // failed this loop (#911). Both fields already have dedicated
+      // enrichment-aware validation above: the lifecycle record is compared
+      // against the authenticated ledger with the exact owned-field set, and
+      // the row classification must equal the enriched lifecycle record's.
+      if (field === "lifecycle" || field === "triage_classification") continue;
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)

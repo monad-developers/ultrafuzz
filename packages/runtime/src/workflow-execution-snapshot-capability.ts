@@ -57,6 +57,16 @@ type CapableEnvironment = Record<string, string | undefined> & {
   [WORKFLOW_EXECUTION_SNAPSHOT_CAPABILITY]?: Readonly<WorkflowExecutionSnapshotIdentity>;
 };
 
+interface ProtectedTreeAttestation {
+  changeTokens: readonly string[];
+}
+
+// The identity object is a process-private capability that survives the
+// controlled environment clones used throughout one lifecycle. A reloaded or
+// rebound identity is a different WeakMap key and must authenticate every byte
+// independently before it can use metadata-only command-boundary checks.
+const protectedTreeAttestations = new WeakMap<Readonly<WorkflowExecutionSnapshotIdentity>, ProtectedTreeAttestation>();
+
 export interface WorkflowExecutionSnapshotAnchor {
   assertCurrent(): void;
   rewriteControllerValue(value: string): string;
@@ -206,7 +216,20 @@ export function acquireWorkflowExecutionSnapshotAnchor(
         identity.snapshotInode,
         "workflow execution snapshot"
       );
-      assertProtectedTreeCurrent(identity, snapshotAccessPath, snapshotDescriptor);
+      const attestation = protectedTreeAttestations.get(identity);
+      if (attestation === undefined) {
+        // Bracket the content digest with exact change tokens. This prevents a
+        // mutation racing the initial digest from being blessed as the cached
+        // baseline, including same-size writes whose mtime is restored.
+        const before = assertProtectedTreeCurrent(identity, snapshotAccessPath, snapshotDescriptor);
+        assertProtectedTreeCurrent(identity, snapshotAccessPath, snapshotDescriptor, digestDescriptor);
+        const after = assertProtectedTreeCurrent(identity, snapshotAccessPath, snapshotDescriptor);
+        assertMatchingChangeTokens(before, after);
+        protectedTreeAttestations.set(identity, Object.freeze({ changeTokens: Object.freeze(after) }));
+        return;
+      }
+      const current = assertProtectedTreeCurrent(identity, snapshotAccessPath, snapshotDescriptor);
+      assertMatchingChangeTokens(attestation.changeTokens, current);
     };
     assertCurrent();
     return {
@@ -303,8 +326,9 @@ function validIdentityNumber(value: unknown): value is number {
 function assertProtectedTreeCurrent(
   identity: Readonly<WorkflowExecutionSnapshotIdentity>,
   accessRoot: string,
-  rootDescriptor: number | undefined
-): void {
+  rootDescriptor: number | undefined,
+  digest: ((descriptor: number) => string) | undefined = undefined
+): string[] {
   const entries = new Map(identity.protectedEntries.map((entry) => [entry.relativePath, entry]));
   const expectedChildren = new Map<string, string[]>();
   for (const entry of identity.protectedEntries) {
@@ -375,9 +399,39 @@ function assertProtectedTreeCurrent(
       }
       continue;
     }
-    assertProtectedFileCurrent(accessPath, lexicalPath, entry);
+    assertProtectedFileCurrent(accessPath, lexicalPath, entry, digest);
   }
   assertDirectories();
+  return captureProtectedTreeChangeTokens(identity, accessRoot, rootDescriptor);
+}
+
+function captureProtectedTreeChangeTokens(
+  identity: Readonly<WorkflowExecutionSnapshotIdentity>,
+  accessRoot: string,
+  rootDescriptor: number | undefined
+): string[] {
+  return identity.protectedEntries.map((entry) => {
+    const accessPath = protectedEntryPath(accessRoot, entry.relativePath);
+    const lexicalPath = protectedEntryPath(identity.root, entry.relativePath);
+    const access =
+      entry.relativePath === "" && rootDescriptor !== undefined
+        ? fs.fstatSync(rootDescriptor, { bigint: true })
+        : fs.lstatSync(accessPath, { bigint: true });
+    const lexical = fs.lstatSync(lexicalPath, { bigint: true });
+    return `${entry.relativePath}\0${protectedEntryChangeToken(access)}\0${protectedEntryChangeToken(lexical)}`;
+  });
+}
+
+function protectedEntryChangeToken(stat: fs.BigIntStats): string {
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs]
+    .map((value) => value.toString())
+    .join(":");
+}
+
+function assertMatchingChangeTokens(expected: readonly string[], current: readonly string[]): void {
+  if (expected.length !== current.length || expected.some((token, index) => token !== current[index])) {
+    throw new Error("workflow execution snapshot changed at the controller command boundary");
+  }
 }
 
 function protectedEntryPath(root: string, relative: string): string {
@@ -409,7 +463,8 @@ function assertProtectedEntryStats(
 function assertProtectedFileCurrent(
   accessPath: string,
   lexicalPath: string,
-  expected: WorkflowExecutionSnapshotProtectedFile
+  expected: WorkflowExecutionSnapshotProtectedFile,
+  digest: ((descriptor: number) => string) | undefined
 ): void {
   const descriptor = fs.openSync(accessPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
@@ -421,7 +476,7 @@ function assertProtectedFileCurrent(
         `workflow execution snapshot file changed at the controller command boundary: ${expected.relativePath}`
       );
     }
-    const sha256 = digestDescriptor(descriptor);
+    const sha256 = digest?.(descriptor);
     const completedAccess = fs.lstatSync(accessPath);
     const completedLexical = fs.lstatSync(lexicalPath);
     assertProtectedEntryStats(completedAccess, completedLexical, expected);
@@ -432,7 +487,7 @@ function assertProtectedFileCurrent(
       (completedAccess.mode & 0o222) !== 0 ||
       completedAccess.size !== opened.size ||
       completedAccess.mode !== opened.mode ||
-      sha256 !== expected.sha256
+      (sha256 !== undefined && sha256 !== expected.sha256)
     ) {
       throw new Error(
         `workflow execution snapshot file changed at the controller command boundary: ${expected.relativePath}`

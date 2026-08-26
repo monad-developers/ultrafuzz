@@ -236,7 +236,6 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
   return {
     outputDir: required(run.outputDir, "run.output_dir", filePath),
     maxParallelAgents: required(run.maxParallelAgents, "run.max_parallel_agents", filePath),
-    maxParallelNodes: required(run.maxParallelNodes, "run.max_parallel_nodes", filePath),
     maxDynamicNodes: required(run.maxDynamicNodes, "run.max_dynamic_nodes", filePath),
     keepWorkspaces: required(run.keepWorkspaces, "run.keep_workspaces", filePath),
     forgeGuardEnabled: required(run.forgeGuardEnabled, "run.forge_guard_enabled", filePath),

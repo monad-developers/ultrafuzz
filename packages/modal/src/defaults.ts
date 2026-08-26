@@ -37,7 +37,6 @@ export const MODAL_BENCHMARK_SANDBOX_RESOURCES = {
   memoryLimitMiB: 65_536
 } as const;
 export const DEFAULT_MODAL_MAX_PARALLEL_AGENTS = 16;
-export const DEFAULT_MODAL_MAX_PARALLEL_NODES = 32;
 
 export type ModelProvider = "openai" | "anthropic" | "deepseek" | "kimi" | "openrouter";
 export type ModelAuthMode = "api-key" | "subscription";

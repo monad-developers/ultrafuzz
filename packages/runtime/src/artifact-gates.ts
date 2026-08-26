@@ -3086,8 +3086,15 @@ function semanticAttemptDeclarations(
 }
 
 function plannedAttemptIdsForAuthority(node: PlannedGraphNode): string[] {
-  if (node.model_fanout.length <= 1) return [node.id];
-  return node.model_fanout.map((model) => `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`);
+  const artifactIdentity = node.dynamic_generated?.storage_id ?? node.id;
+  if (node.model_fanout.length === 0) return [artifactIdentity];
+  return node.model_fanout.map(
+    (model) =>
+      model.attempt_id ??
+      (node.model_fanout.length <= 1
+        ? artifactIdentity
+        : `${artifactIdentity}__model_${model.model_index}__attempt_${model.attempt_index}`)
+  );
 }
 
 function assertExactStringSet(actual: readonly string[], expected: readonly string[], label: string): void {

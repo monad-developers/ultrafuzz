@@ -22,7 +22,6 @@ repo = "."
 [run]
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
-max_parallel_nodes = 8
 max_dynamic_nodes = 2048
 keep_workspaces = false
 forge_guard_enabled = true
@@ -117,7 +116,6 @@ empty path components, and dot components fail validation.
 | --------------------------- | ------- | --------------------------------------------------------------------------- |
 | `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
 | `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
-| `max_parallel_nodes`        | integer | Positive graph planning parallelism limit.                                  |
 | `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.        |
 | `keep_workspaces`           | boolean | Retain successful-run node workspaces instead of reaping them.              |
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
@@ -129,6 +127,9 @@ empty path components, and dot components fail validation.
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
 
 Other workspace modes are outside the product contract.
+
+`max_parallel_agents` is the only concurrency limit the runtime enforces. It
+bounds every task the workflow submits, not only agent tasks.
 
 `max_dynamic_nodes` limits total generated nodes, not concurrently active
 nodes. Dynamic work still uses `max_parallel_agents`; exceeding the generation
@@ -348,7 +349,6 @@ rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 | Variable                        | Effect                                                                            |
 | ------------------------------- | --------------------------------------------------------------------------------- |
 | `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`.                          |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.                           |
 | `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |
 | `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.                                      |
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.                                       |

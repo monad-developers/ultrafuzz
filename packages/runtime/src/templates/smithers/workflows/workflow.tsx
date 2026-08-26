@@ -2914,6 +2914,11 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
   return selected.length === 1 ? selected[0] : selected;
 }
 
+type SmithersContinuationAgent = AgentLike & {
+  cliEngine?: string;
+  hijackEngine?: string;
+};
+
 function artifactAwareAgent(
   task: (typeof taskSpecs)[number],
   chainIndex: number,
@@ -2923,6 +2928,7 @@ function artifactAwareAgent(
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   let executionAgent: AgentLike | undefined;
+  const continuationAgent = agent as SmithersContinuationAgent;
   const configuredModel = task.agentChain[chainIndex]?.modelName;
   const credentialEnvironmentNames = [
     ...(task.execution?.agentCredentialEnv ?? []),
@@ -3022,6 +3028,11 @@ function artifactAwareAgent(
     ...(agent.supportsNativeStructuredOutput === undefined
       ? {}
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
+    ...(typeof continuationAgent.cliEngine === "string" ? { cliEngine: continuationAgent.cliEngine } : {}),
+    ...(typeof continuationAgent.hijackEngine === "string" ? { hijackEngine: continuationAgent.hijackEngine } : {}),
+    ...(agent.parseFileChanges === undefined ? {} : { parseFileChanges: agent.parseFileChanges.bind(agent) }),
+    ...(agent.checkpointCapabilities === undefined ? {} : { checkpointCapabilities: agent.checkpointCapabilities }),
+    ...(agent.checkpointFormats === undefined ? {} : { checkpointFormats: agent.checkpointFormats }),
     ...(agent.preflight === undefined
       ? {}
       : {

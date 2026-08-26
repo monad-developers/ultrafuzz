@@ -30,7 +30,7 @@ import {
   prepareControllerGeneration,
   verifyCommittedControllerGenerationAuthority
 } from "../src/workflow-controller-generation.js";
-import { materializeWorkflowExecutionSnapshot } from "../src/workflow-integrity.js";
+import { materializeWorkflowExecutionSnapshot, verifySealedTaskManifestSnapshot } from "../src/workflow-integrity.js";
 
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
   schema_version: "ultrafuzz.data-governance-policy.v1",
@@ -226,7 +226,8 @@ function lifecycleEnvironment(project: string): {
 }
 
 function fakeUltrafuzzCliEntrypoint(project: string): string {
-  const entrypoint = path.join(project, "validator-cli.mjs");
+  const packageRoot = path.join(project, ".fake-ultrafuzz-cli");
+  const entrypoint = path.join(packageRoot, "dist", "index.mjs");
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
   const preflightResponse = {
@@ -248,6 +249,12 @@ function fakeUltrafuzzCliEntrypoint(project: string): string {
       truncated: false
     }
   };
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "fake-ultrafuzz-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
   fs.chmodSync(entrypoint, 0o500);
   return entrypoint;
@@ -721,6 +728,95 @@ test("controller refresh preserves the sealed dynamic base after runtime materia
   assert.equal(authority.controllerGeneration, secondPrepared.controllerGeneration);
   assert.equal(authority.semanticFingerprint, firstRefresh.semanticFingerprint);
 });
+
+test(
+  "verified-output authority authenticates dynamic execution bytes once per live lifecycle",
+  { concurrency: false },
+  async () => {
+    const fixture = await createDynamicFixture({ runId: "dynamic-verified-output-snapshot-cache" });
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+
+    const largest = evidence.verifiedControl.executionFiles.reduce((selected, file) =>
+      file.contents.byteLength > selected.contents.byteLength ? file : selected
+    );
+    assert.ok(largest.contents.byteLength > 0);
+    const snapshotRoot = path.join(evidence.layout.root, "smithers", "execution-snapshots", evidence.controlGeneration);
+    const largestPath = path.join(snapshotRoot, ...largest.snapshotPath.split("/"));
+
+    // Change and restore only the directory metadata so the next lookup must perform one fresh
+    // byte authentication. Later lookups can then prove that the live generation is reused.
+    const snapshotMode = fs.statSync(snapshotRoot).mode & 0o777;
+    fs.chmodSync(snapshotRoot, 0o700);
+    fs.chmodSync(snapshotRoot, snapshotMode);
+
+    const openDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
+    const readDescriptor = Object.getOwnPropertyDescriptor(fs, "readSync")!;
+    const closeDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const originalCloseSync = fs.closeSync;
+    const tracked = new Set<number>();
+    let authenticatedBytes = 0;
+    Object.defineProperty(fs, "openSync", {
+      ...openDescriptor,
+      value: (...args: unknown[]) => {
+        const descriptor = Reflect.apply(originalOpenSync, fs, args) as number;
+        if (path.resolve(String(args[0])) === largestPath) tracked.add(descriptor);
+        return descriptor;
+      }
+    });
+    Object.defineProperty(fs, "readSync", {
+      ...readDescriptor,
+      value: (...args: unknown[]) => {
+        const bytesRead = Reflect.apply(originalReadSync, fs, args) as number;
+        if (tracked.has(Number(args[0]))) authenticatedBytes += bytesRead;
+        return bytesRead;
+      }
+    });
+    Object.defineProperty(fs, "closeSync", {
+      ...closeDescriptor,
+      value: (...args: unknown[]) => {
+        tracked.delete(Number(args[0]));
+        return Reflect.apply(originalCloseSync, fs, args) as void;
+      }
+    });
+    try {
+      for (let lookup = 0; lookup < 5; lookup += 1) {
+        verifySealedTaskManifestSnapshot(evidence.layout);
+      }
+    } finally {
+      Object.defineProperty(fs, "closeSync", closeDescriptor);
+      Object.defineProperty(fs, "readSync", readDescriptor);
+      Object.defineProperty(fs, "openSync", openDescriptor);
+    }
+    assert.equal(
+      authenticatedBytes,
+      largest.contents.byteLength,
+      "protected execution bytes should be read once, not once per finalized-output lookup"
+    );
+
+    const original = Buffer.from(largest.contents);
+    const originalStat = fs.statSync(largestPath);
+    const replacement = Buffer.alloc(original.byteLength, original[0] === 0x78 ? 0x79 : 0x78);
+    fs.chmodSync(largestPath, 0o600);
+    fs.writeFileSync(largestPath, replacement);
+    fs.utimesSync(largestPath, originalStat.atime, originalStat.mtime);
+    fs.chmodSync(largestPath, originalStat.mode & 0o777);
+    try {
+      assert.throws(
+        () => verifySealedTaskManifestSnapshot(evidence.layout),
+        /sealed workflow execution file changed/u,
+        "a same-size mutation with restored mtime must invalidate the cache and fail closed"
+      );
+    } finally {
+      fs.chmodSync(largestPath, 0o600);
+      fs.writeFileSync(largestPath, original);
+      fs.chmodSync(largestPath, originalStat.mode & 0o777);
+    }
+  }
+);
 
 test("dynamic child success is resumable, idempotent, provenance-safe, and opens its strict join", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-success" });

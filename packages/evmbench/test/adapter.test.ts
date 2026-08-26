@@ -301,7 +301,6 @@ function baseConfig(): string {
     "[run]",
     'output_dir = ".ultrafuzz/runs"',
     "max_parallel_agents = 4",
-    "max_parallel_nodes = 8",
     "default_timeout_seconds = 1800",
     "workflow_deadline_seconds = 86400",
     "",

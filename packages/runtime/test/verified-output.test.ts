@@ -296,9 +296,12 @@ test("post-finalization property fan-in remains readable through sealed fanout a
     boundOutput("handoffs/canonical-properties.json", "ultrafuzz/properties@2", true),
     boundOutput("handoffs/canonical-properties.md", "ultrafuzz/nonempty-markdown@1", false)
   ];
+  // Keep the sealed dependency declaration deliberately out of lexical order.
+  // Artifact manifests canonicalize prerequisite rows lexically, so verified
+  // readers must compare the same canonical representation.
   const lensAttemptIds = [
-    "property-specification-recon__model_0__attempt_0",
-    "property-specification-recon__model_1__attempt_0"
+    "property-specification-recon__model_1__attempt_0",
+    "property-specification-recon__model_0__attempt_0"
   ];
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
@@ -333,20 +336,20 @@ test("post-finalization property fan-in remains readable through sealed fanout a
         loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
         model_fanout: [
           {
-            model_profile_id: "lens-a",
-            agent_ref: "CodexAgent",
-            model_name: "gpt-test-a",
-            reasoning_effort: "high",
-            model_index: 0,
-            loop_index: 0,
-            attempt_index: 0
-          },
-          {
             model_profile_id: "lens-b",
             agent_ref: "CodexAgent",
             model_name: "gpt-test-b",
             reasoning_effort: "high",
             model_index: 1,
+            loop_index: 0,
+            attempt_index: 0
+          },
+          {
+            model_profile_id: "lens-a",
+            agent_ref: "CodexAgent",
+            model_name: "gpt-test-a",
+            reasoning_effort: "high",
+            model_index: 0,
             loop_index: 0,
             attempt_index: 0
           }
@@ -433,14 +436,14 @@ test("post-finalization property fan-in remains readable through sealed fanout a
       }
     ]
   });
-  for (const [modelIndex, attemptId] of lensAttemptIds.entries()) {
+  for (const attemptId of lensAttemptIds) {
     finalizeNodeOutputs(
       layout,
       graph.nodes[1]!,
       attemptId,
       { [lensOutput.path]: lensDocument },
       ["project-discovery"],
-      modelIndex
+      Number(/__model_(\d+)__/u.exec(attemptId)?.[1])
     );
   }
   finalizeNodeOutputs(
@@ -495,7 +498,7 @@ test("post-finalization property fan-in remains readable through sealed fanout a
   const originalManifestBytes = fs.readFileSync(faninManifestPath);
   assert.deepEqual(
     originalManifest.prerequisite_manifests.map((entry) => entry.node_id),
-    lensAttemptIds
+    [...lensAttemptIds].sort((left, right) => left.localeCompare(right))
   );
   const alternateAttemptId = "property-specification-recon__model_2__attempt_0";
   writeFileDurable(path.join(layout.artifactsDir, alternateAttemptId, lensOutput.path), lensDocument);
@@ -534,6 +537,10 @@ test("post-finalization property fan-in remains readable through sealed fanout a
     {
       label: "substituted",
       prerequisites: [alternatePrerequisite, originalManifest.prerequisite_manifests[1]!]
+    },
+    {
+      label: "reordered",
+      prerequisites: [...originalManifest.prerequisite_manifests].reverse()
     }
   ] as const;
   for (const variant of prerequisiteVariants) {

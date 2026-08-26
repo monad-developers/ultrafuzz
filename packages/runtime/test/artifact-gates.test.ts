@@ -815,7 +815,8 @@ function smithersTaskForNode(input: {
 function sealedTaskForNode(
   layout: ReturnType<typeof createRunLayout>,
   node: PlannedGraphNode,
-  dependencies: readonly SmithersTaskManifestTask[] = []
+  dependencies: readonly SmithersTaskManifestTask[] = [],
+  attemptId = node.id
 ): SmithersTaskManifestTask {
   const dependencyArtifactDirs = [
     ...new Set(dependencies.flatMap((dependency) => [...dependency.dependencyArtifactDirs, dependency.artifactDir]))
@@ -823,7 +824,7 @@ function sealedTaskForNode(
   return smithersTaskForNode({
     layout,
     node,
-    attemptId: node.id,
+    attemptId,
     dependencies: dependencies.map((dependency) => dependency.attemptId),
     dependencyArtifactDirs
   });
@@ -901,12 +902,27 @@ test("sealed task coverage excludes a deferred dynamic template before expansion
 test("sealed task coverage retains materialized dynamic nodes after expansion", () => {
   const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-generated-dynamic-coverage");
   const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  const generatedNodeId = "dynamic:goal:goal-a";
+  const generatedStorageId = "dynamic-goal-goal-a";
   const generatedNode: PlannedGraphNode = {
     ...templateNode,
-    id: "dynamic-goal-goal-a",
+    id: generatedNodeId,
     logical_id: templateNode.logical_id,
     display_name: "Dynamic goal template: goal-a",
-    artifact_dir: "artifacts/dynamic-goal-goal-a",
+    artifact_dir: `artifacts/${generatedStorageId}`,
+    artifact_dirs: [`artifacts/${generatedStorageId}`],
+    model_fanout: [
+      {
+        attempt_id: generatedStorageId,
+        model_profile_id: "default",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
     dynamic: undefined,
     dynamic_generated: {
       group_node_id: templateNode.id,
@@ -914,19 +930,139 @@ test("sealed task coverage retains materialized dynamic nodes after expansion", 
       source_attempt_id: reportNode.id,
       expansion_key: "goal-a",
       item_sha256: "a".repeat(64),
-      storage_id: "dynamic-goal-goal-a",
+      storage_id: generatedStorageId,
       manifest_path: `dynamic-expansions/${templateNode.id}.json`
     }
   };
-  const generatedTask = sealedTaskForNode(layout, generatedNode, [reportTask]);
-  writePlannedGraph(layout, [reportNode, templateNode, generatedNode]);
+  const generatedTask = sealedTaskForNode(layout, generatedNode, [reportTask], generatedStorageId);
+  const consumerNode: PlannedGraphNode = {
+    ...plannedNode(["properties/current-lens.json"]),
+    id: "current-property-lens",
+    logical_id: "current-property-lens",
+    display_name: "Current property lens",
+    depends_on: [generatedNodeId],
+    artifact_dir: "artifacts/current-property-lens",
+    prompt_id: "current-property-lens",
+    prompt_path: "properties/current-property-lens.md"
+  };
+  writeArtifact(
+    layout,
+    consumerNode.id,
+    "properties/current-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "dynamic-authority-1",
+          description: "The generated authority identity remains stable.",
+          category: "state-consistency",
+          priority: "high"
+        }
+      ]
+    }),
+    "ultrafuzz/property-lens@2"
+  );
+  const consumerTask = sealedTaskForNode(layout, consumerNode, [generatedTask]);
+  writePlannedGraph(layout, [reportNode, templateNode, generatedNode, consumerNode]);
 
-  const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id, {
-    task: reportTask,
-    tasks: [reportTask, generatedTask]
+  const result = verifyRequiredArtifactsForAttempt(layout, consumerNode, consumerNode.id, {
+    task: consumerTask,
+    tasks: [reportTask, generatedTask, consumerTask]
   });
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.ok(
+    result.diagnostics.every((diagnostic) => diagnostic.code !== "PROPERTY_LENS_AUTHORITY_INVALID"),
+    JSON.stringify(result.diagnostics)
+  );
+  assert.deepEqual(generatedTask.dependencies, [reportNode.id]);
+  assert.deepEqual(consumerTask.dependencies, [generatedStorageId]);
+  assert.deepEqual(consumerTask.dependencyArtifactDirs, [
+    getNodeArtifactDir(layout, reportNode.id),
+    getNodeArtifactDir(layout, generatedStorageId)
+  ]);
+});
+
+test("sealed task coverage rejects a materialized dynamic task under its human node ID", () => {
+  const { layout, reportNode, reportTask } = authorityCoverageReportFixture("run-generated-dynamic-human-id");
+  const templateNode = deferredDynamicTemplateNode(reportNode.id);
+  const generatedNodeId = "dynamic-goal-human-a";
+  const generatedStorageId = "dynamic-goal-storage-a";
+  const generatedNode: PlannedGraphNode = {
+    ...templateNode,
+    id: generatedNodeId,
+    logical_id: templateNode.logical_id,
+    display_name: "Dynamic goal template: goal-a",
+    artifact_dir: `artifacts/${generatedStorageId}`,
+    artifact_dirs: [`artifacts/${generatedStorageId}`],
+    model_fanout: [
+      {
+        attempt_id: generatedStorageId,
+        model_profile_id: "default",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
+    dynamic: undefined,
+    dynamic_generated: {
+      group_node_id: templateNode.id,
+      source_node_id: reportNode.id,
+      source_attempt_id: reportNode.id,
+      expansion_key: "goal-a",
+      item_sha256: "a".repeat(64),
+      storage_id: generatedStorageId,
+      manifest_path: `dynamic-expansions/${templateNode.id}.json`
+    }
+  };
+  const incorrectlyIdentifiedTask = sealedTaskForNode(layout, generatedNode, [reportTask], generatedNodeId);
+  const consumerNode: PlannedGraphNode = {
+    ...plannedNode(["properties/current-lens.json"]),
+    id: "current-property-lens",
+    logical_id: "current-property-lens",
+    display_name: "Current property lens",
+    artifact_dir: "artifacts/current-property-lens",
+    prompt_id: "current-property-lens",
+    prompt_path: "properties/current-property-lens.md"
+  };
+  writeArtifact(
+    layout,
+    consumerNode.id,
+    "properties/current-lens.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v2",
+      properties: [
+        {
+          id: "dynamic-authority-1",
+          description: "The generated authority identity remains stable.",
+          category: "state-consistency",
+          priority: "high"
+        }
+      ]
+    }),
+    "ultrafuzz/property-lens@2"
+  );
+  const consumerTask = sealedTaskForNode(layout, consumerNode);
+  writePlannedGraph(layout, [reportNode, templateNode, generatedNode, consumerNode]);
+
+  const result = verifyRequiredArtifactsForAttempt(layout, consumerNode, consumerNode.id, {
+    task: consumerTask,
+    tasks: [reportTask, incorrectlyIdentifiedTask, consumerTask]
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID" &&
+        diagnostic.message.includes(`missing: ${JSON.stringify(generatedStorageId)}`) &&
+        diagnostic.message.includes(`unexpected: ${JSON.stringify(generatedNodeId)}`)
+    ),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("sealed task coverage still rejects a missing concrete task beside a deferred template", () => {

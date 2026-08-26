@@ -32,6 +32,7 @@ import {
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -86,6 +87,7 @@ import {
   pauseRun,
   prepareControllerGeneration,
   readLinkedWorkflowEvidence,
+  refinalizeControllerFailures,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
@@ -224,8 +226,15 @@ function validatorPreflightResponse(): Record<string, unknown> {
 }
 
 function fakeUltrafuzzCliEntrypoint(project: string): string {
-  const entrypoint = path.join(project, "fake-ultrafuzz-cli.mjs");
+  const packageRoot = path.join(project, ".fake-ultrafuzz-cli");
+  const entrypoint = path.join(packageRoot, "dist", "index.mjs");
   if (fs.existsSync(entrypoint)) return entrypoint;
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "fake-ultrafuzz-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(
     entrypoint,
     `process.stdout.write(${JSON.stringify(JSON.stringify(validatorPreflightResponse()))});\n`,
@@ -525,6 +534,7 @@ async function loadGeneratedPiAgent(project: string): Promise<{
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command: string;
       args: string[];
+      stdin?: string;
       env?: Record<string, string>;
       outputFormat?: string;
     }>;
@@ -577,6 +587,7 @@ async function loadGeneratedPiAgent(project: string): Promise<{
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command: string;
         args: string[];
+        stdin?: string;
         env?: Record<string, string>;
         outputFormat?: string;
       }>;
@@ -1754,6 +1765,7 @@ function fakeLifecycleSmithersEnv(
     statusEvents?: unknown;
     status?: unknown;
     why?: unknown;
+    nodeDetails?: Record<string, unknown>;
     attemptSelections?: Record<string, Record<number, { chainIndex: number; profileId: string; model: string | null }>>;
     enforceWorkflowChangeAcceptance?: boolean;
     failWorkflowChangeAdmissionOnce?: boolean;
@@ -1853,6 +1865,9 @@ function fakeLifecycleSmithersEnv(
       `${JSON.stringify({ node: { nodeId, lastAttempt: Math.max(...rows.map((row) => row.attempt)) }, attempts: rows })}\n`,
       "utf8"
     );
+  }
+  for (const [nodeId, detail] of Object.entries(input.nodeDetails ?? {})) {
+    fs.writeFileSync(path.join(nodeDetailsDirectory, `${nodeId}.json`), `${JSON.stringify(detail, null, 2)}\n`, "utf8");
   }
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-commands.log");
@@ -2278,6 +2293,235 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
   const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(markerRoot, { recursive: true });
   fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+}
+
+function finishedVerifierNodeDetail(input: {
+  workflowRunId: string;
+  verifierTaskId: string;
+  markerPath: string;
+  attempt?: number;
+  iteration?: number;
+  state?: "finished" | "failed" | "in-progress";
+  markerSha256?: string;
+  markerSizeBytes?: number;
+}): unknown {
+  const markerBytes = fs.readFileSync(input.markerPath);
+  const marker = JSON.parse(markerBytes.toString("utf8")) as {
+    artifacts: Array<Record<string, unknown> & { path?: string; primary?: boolean }>;
+  };
+  const attempt = input.attempt ?? 1;
+  const iteration = input.iteration ?? 0;
+  const state = input.state ?? "finished";
+  const startedAtMs = Date.parse("2026-07-03T00:00:01.000Z");
+  const finishedAtMs = state === "in-progress" ? null : startedAtMs + 1_000;
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd: null,
+    eventCount: 0,
+    models: [],
+    agents: []
+  };
+  const attemptRow = {
+    runId: input.workflowRunId,
+    nodeId: input.verifierTaskId,
+    iteration,
+    attempt,
+    state,
+    startedAtMs,
+    finishedAtMs,
+    durationMs: finishedAtMs === null ? null : finishedAtMs - startedAtMs,
+    error: state === "failed" ? "verification failed" : null,
+    errorDetail: null,
+    tokenUsage: usage,
+    toolCalls: [],
+    meta: null,
+    responseText: null,
+    cached: false,
+    jjPointer: null,
+    jjCwd: null
+  };
+  return {
+    ok: true,
+    data: {
+      node: {
+        runId: input.workflowRunId,
+        nodeId: input.verifierTaskId,
+        iteration,
+        state,
+        lastAttempt: attempt,
+        updatedAtMs: finishedAtMs,
+        outputTable: null,
+        label: input.verifierTaskId
+      },
+      status: state,
+      durationMs: attemptRow.durationMs,
+      attemptsSummary: {
+        total: 1,
+        failed: state === "failed" ? 1 : 0,
+        cancelled: 0,
+        succeeded: state === "finished" ? 1 : 0,
+        waiting: state === "in-progress" ? 1 : 0
+      },
+      attempts: [attemptRow],
+      toolCalls: [],
+      tokenUsage: { ...usage, byAttempt: [{ attempt, usage }] },
+      scorers: [],
+      output: {
+        validated: {
+          artifacts: marker.artifacts,
+          primary_artifact: marker.artifacts.find((artifact) => artifact.primary)?.path,
+          verification_marker_sha256:
+            input.markerSha256 ?? crypto.createHash("sha256").update(markerBytes).digest("hex"),
+          verification_marker_size_bytes: input.markerSizeBytes ?? markerBytes.byteLength
+        },
+        raw: null,
+        source: "cache",
+        cacheKey: "verified-output"
+      },
+      approval: null,
+      limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
+    },
+    meta: { command: "node", duration: "1ms" }
+  };
+}
+
+async function controllerFalseFailureFixture(label: string): Promise<{
+  project: string;
+  runId: string;
+  workflowRunId: string;
+  runRoot: string;
+  markerPath: string;
+  env: Record<string, string | undefined>;
+}> {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = `controller-refinalization-${label}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const events = workflowEvents(workflowRunId, [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "RunFinished" }
+  ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const runRoot = launched.value!.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(
+    readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status,
+    "succeeded",
+    JSON.stringify(synchronized.diagnostics)
+  );
+
+  const layout = layoutForRunRoot(runRoot, runId);
+  const state = readRunState(layout);
+  const prior = state.nodes["project-discovery"]!;
+  state.status = "failed";
+  state.nodes["project-discovery"] = {
+    ...prior,
+    status: "failed",
+    timed_out: false,
+    last_error: "controller output validation failed",
+    provenance: {
+      ...prior.provenance,
+      output_contracts: { ok: false, missing: [] },
+      failure: {
+        category: "artifact-contract",
+        causal_task_id: "verify:project-discovery",
+        causal_failure_category: "artifact-contract",
+        dependent_task_ids: []
+      },
+      terminal_disposition: {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure"
+      }
+    }
+  };
+  writeRunState(layout, state);
+  fs.rmSync(path.join(runRoot, "artifacts", "project-discovery", "artifact-manifest.json"));
+  const markerPath = path.join(runRoot, ".ultrafuzz-verification", "project-discovery.json");
+  fs.writeFileSync(
+    path.join(env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
+    `${JSON.stringify(
+      finishedVerifierNodeDetail({
+        workflowRunId,
+        verifierTaskId: "verify:project-discovery",
+        markerPath
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  return { project, runId, workflowRunId, runRoot, markerPath, env };
+}
+
+async function genuineVerifierFailureFixture(label: string): Promise<{
+  project: string;
+  runId: string;
+  workflowRunId: string;
+  runRoot: string;
+  env: Record<string, string | undefined>;
+}> {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = `controller-refinalization-genuine-failure-${label}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "verifier rejected the task output" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        error: { message: "verifier rejected the task output" }
+      },
+      { type: "RunFailed" }
+    ])
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const synchronized = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  assert.equal(synchronized.value?.status, "failed");
+  const runRoot = launched.value!.run_root;
+  const state = readRunState(layoutForRunRoot(runRoot, runId));
+  const node = state.nodes["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.equal((node?.provenance as { workflow?: { state?: string } })?.workflow?.state, "failed");
+  assert.deepEqual((node?.provenance as { terminal_disposition?: unknown })?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
+  return { project, runId, workflowRunId, runRoot, env };
 }
 
 const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
@@ -6152,9 +6396,9 @@ bunAdapterTest(
         "--model",
         "openai/gpt-mini-latest",
         "--session-dir",
-        path.join(configDir, "sessions"),
-        "find a bug"
+        path.join(configDir, "sessions")
       ]);
+      assert.equal(command.stdin, "find a bug");
 
       // The acceptance criterion: no credential value anywhere in argv, and no
       // `--api-key` flag, because the adapter never sets Smithers' `apiKey`.
@@ -6163,7 +6407,38 @@ bunAdapterTest(
         command.args.some((argument) => argument.includes(credential)),
         false
       );
+      assert.equal(command.stdin?.includes(credential), false);
       assert.equal((agent.opts as { apiKey?: string }).apiKey, undefined);
+
+      // Structured-output repair includes the malformed response in the next
+      // prompt. Keep a response larger than Linux's common 128 KiB per-argument
+      // ceiling entirely out of argv while preserving the ordinary flag list.
+      const sensitivePromptMarker = "synthetic-sensitive-prompt-marker";
+      const oversizedCorrectionPrompt = [
+        "The prior response did not match the required schema. Correct it:\n",
+        sensitivePromptMarker,
+        "\n",
+        "malformed-output-".repeat(9_000)
+      ].join("");
+      assert.ok(Buffer.byteLength(oversizedCorrectionPrompt, "utf8") > 128 * 1024);
+      const oversizedCommand = await agent.buildCommand({
+        prompt: oversizedCorrectionPrompt,
+        cwd: project,
+        options: {}
+      });
+      assert.deepEqual(oversizedCommand.args, command.args);
+      assert.equal(oversizedCommand.stdin, oversizedCorrectionPrompt);
+      assert.equal(oversizedCommand.args.includes(oversizedCorrectionPrompt), false);
+      assert.equal(
+        oversizedCommand.args.some((argument) => argument.includes(sensitivePromptMarker)),
+        false
+      );
+      assert.equal(
+        oversizedCommand.args.some((argument) => argument.includes(credential)),
+        false
+      );
+      assert.equal(oversizedCommand.stdin.includes(credential), false);
+      assert.deepEqual(oversizedCommand.env, command.env);
 
       // The credential reaches the child only through the environment, and that
       // environment went through workflowControlChildEnvironment: every
@@ -6174,6 +6449,17 @@ bunAdapterTest(
       assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
 
+      // Pi names its NDJSON CLI mode `json`, but Smithers must treat that
+      // transcript as `stream-json` so the interpreter's terminal answer wins
+      // over earlier JSON-shaped tool results.
+      const jsonCommand = await agent.buildCommand({
+        prompt: "find a bug",
+        cwd: project,
+        options: { onEvent: () => undefined }
+      });
+      assert.deepEqual(jsonCommand.args.slice(0, 3), ["--print", "--mode", "json"]);
+      assert.equal(jsonCommand.outputFormat, "stream-json");
+
       // Isolation: pi's config directory and session storage stay off the
       // operator's real home (~/.pi/agent), and install telemetry is off.
       assert.equal(agent.opts.env.PI_CODING_AGENT_DIR, configDir);
@@ -6181,9 +6467,9 @@ bunAdapterTest(
       assert.equal(agent.opts.env.PI_TELEMETRY, "0");
       assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
 
-      // A text-free terminal assistant message is authoritative. Smithers
-      // otherwise retains the earlier delta and presents progress narration as
-      // the answer, which can poison a caller's structured-output repair pass.
+      // A text-free successful terminal assistant message is authoritative.
+      // Its transport-owned summary prevents both stale progress and the
+      // lower-level whole-transcript fallback from becoming structured output.
       const textFreeInterpreter = agent.createOutputInterpreter();
       textFreeInterpreter.onStdoutLine?.(
         JSON.stringify({
@@ -6215,7 +6501,9 @@ bunAdapterTest(
         ? textFreeCompletion.find((event) => event.type === "completed")
         : textFreeCompletion;
       assert.equal(textFreeCompleted?.type, "completed");
-      assert.equal(Object.hasOwn(textFreeCompleted ?? {}, "answer"), false);
+      assert.deepEqual(JSON.parse(textFreeCompleted?.answer ?? "null"), {
+        summary: "Pi completed successfully without terminal assistant text; verify the declared artifacts."
+      });
 
       // A later terminal assistant message with text still replaces any
       // earlier progress and is returned unchanged.
@@ -8728,7 +9016,7 @@ test("audit profile selects its packaged topology and records portable provenanc
 
   const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  assert.equal(plan.value!.resolved_config.run.maxParallelNodes, 4);
+  assert.equal(plan.value!.resolved_config.run.maxParallelAgents, 4);
   assert.equal(plan.value!.resolved_config.run.workflowDeadlineSeconds, 14_400);
   assert.equal(plan.value!.resolved_config.auditProfileResolution.overriddenSettings.length, 0);
   assert.deepEqual(
@@ -13095,6 +13383,75 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
+// Regression coverage for the #858 busy loop itself: the stock idempotency
+// probe walks the run's ENTIRE event history through the primary key for
+// every fresh event (O(events) page reads per insert, quadratic per run),
+// which starves the controller at dynamic fan-out scale. The patched probe
+// must resolve through the covering index instead. Query-plan assertions are
+// deterministic, so the test stays fast at a bounded synthetic size.
+test("patched event insert probe seeks the covering index instead of walking the run's event history", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { DatabaseSync } = await import("node:sqlite");
+  const indexPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "event_probe_index");
+  assert.ok(indexPatch);
+  const indexStatement = /`(CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx[^`]+)`/u.exec(
+    indexPatch.patched
+  )?.[1];
+  assert.ok(indexStatement, "the DDL patch must add the probe-covering index");
+  for (const id of ["event_probe_transaction", "event_probe_precheck", "event_probe_fallback", "event_probe_turn"]) {
+    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === id);
+    assert.ok(patch);
+    assert.match(patch.patched, /FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx/u);
+  }
+
+  const db = new DatabaseSync(":memory:");
+  db.exec(
+    `CREATE TABLE _smithers_events (
+       run_id TEXT NOT NULL,
+       seq INTEGER NOT NULL,
+       timestamp_ms INTEGER NOT NULL,
+       type TEXT NOT NULL,
+       payload_json TEXT NOT NULL,
+       PRIMARY KEY (run_id, seq)
+     )`
+  );
+  const insert = db.prepare(
+    "INSERT INTO _smithers_events (run_id, seq, timestamp_ms, type, payload_json) VALUES (?, ?, ?, ?, ?)"
+  );
+  for (let seq = 0; seq < 512; seq += 1) {
+    insert.run("run-858", seq, 1_787_000_000_000 + seq, "NodeStarted", JSON.stringify({ seq, pad: "x".repeat(64) }));
+  }
+  const stockProbe = `SELECT seq
+     FROM _smithers_events
+     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
+     ORDER BY seq DESC LIMIT 1`;
+  const patchedProbe = `SELECT seq
+     FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
+     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
+     ORDER BY seq DESC LIMIT 1`;
+  const planDetails = (statement: string): string =>
+    (db.prepare(`EXPLAIN QUERY PLAN ${statement}`).all("run-858", 1, "NodeStarted", "{}") as { detail?: string }[])
+      .map((row) => row.detail ?? "")
+      .join("\n");
+  // Stock hazard: only the (run_id, seq) primary key is available, so the
+  // probe visits every event row the run has ever written.
+  const stockPlan = planDetails(stockProbe);
+  assert.match(stockPlan, /sqlite_autoindex__smithers_events_1 \(run_id=\?\)/u);
+  db.exec(indexStatement);
+  const patchedPlan = planDetails(patchedProbe);
+  assert.match(patchedPlan, /_smithers_events_insert_probe_idx \(run_id=\? AND timestamp_ms=\? AND type=\?\)/u);
+  // The hint changes the access path, never the answer: an identical
+  // re-emitted event still resolves to its original seq, and a fresh event
+  // still probes empty.
+  const existingPayload = JSON.stringify({ seq: 17, pad: "x".repeat(64) });
+  const patched = db.prepare(patchedProbe);
+  const existing = patched.get("run-858", 1_787_000_000_017, "NodeStarted", existingPayload) as
+    { seq?: number | bigint } | undefined;
+  assert.equal(Number(existing?.seq), 17);
+  assert.equal(patched.get("run-858", 1_799_000_000_000, "NodeStarted", existingPayload), undefined);
+  db.close();
+});
+
 test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const resolveFromPinnedRunner = createRequire(
@@ -14907,6 +15264,429 @@ test("syncRun marks task-output validation failures for terminal disposition", a
     kind: "task-output-validation-failure"
   });
 });
+
+test(
+  "authenticated controller refresh re-finalizes only the original finished verifier output and is idempotent",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("success");
+
+    const resumed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      env: fixture.env
+    });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const state = readRunState(layout);
+    const node = state.nodes["project-discovery"];
+    const provenance = node?.provenance as
+      | {
+          terminal_disposition?: unknown;
+          failure?: unknown;
+          output_contracts?: { ok?: boolean };
+        }
+      | undefined;
+    assert.equal(node?.status, "succeeded");
+    assert.equal(node?.last_error, undefined);
+    assert.equal(provenance?.terminal_disposition, undefined);
+    assert.equal(provenance?.failure, undefined);
+    assert.equal(provenance?.output_contracts?.ok, true);
+    const durable = replayEvents(layout).records;
+    const intent = durable.filter((event) => event.event_type === "node-controller-refinalization-intent");
+    const result = durable.filter((event) => event.event_type === "node-controller-refinalization-result");
+    assert.equal(intent.length, 1);
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.status, "succeeded");
+    assert.equal(result[0]?.payload.operation_id, intent[0]?.payload.operation_id);
+    assert.equal(result[0]?.payload.marker_sha256, intent[0]?.payload.marker_sha256);
+
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const repeated = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+    assert.equal(repeated.ok && repeated.refinalized, 0);
+    assert.equal(
+      replayEvents(layout).records.filter((event) => event.event_type === "node-controller-refinalization-result")
+        .length,
+      1
+    );
+    fs.appendFileSync(
+      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
+      "modified after completed re-finalization\n"
+    );
+    const changedAfterCompletion = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+    assert.equal(changedAfterCompletion.ok, false);
+    assert.match(JSON.stringify(changedAfterCompletion.diagnostics), /changed after verifier approval/u);
+  }
+);
+
+test(
+  "controller re-finalization recovers an authenticated durable intent after a crash",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("intent-recovery");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const markerBytes = fs.readFileSync(fixture.markerPath);
+    const authority = {
+      workflow_run_id: evidence.smithersRunId,
+      workflow_link_id: evidence.workflowLinkId,
+      control_generation: evidence.controlGeneration,
+      controller_generation: evidence.controllerGeneration,
+      verifier_task_id: "verify:project-discovery",
+      verifier_iteration: 0,
+      verifier_attempt: 1,
+      marker_sha256: crypto.createHash("sha256").update(markerBytes).digest("hex"),
+      marker_size_bytes: markerBytes.byteLength,
+      prior_status: "failed" as const
+    };
+    const operationId = crypto
+      .createHash("sha256")
+      .update(
+        JSON.stringify([
+          "ultrafuzz.controller-refinalization.v1",
+          fixture.runId,
+          "project-discovery",
+          authority.workflow_run_id,
+          authority.workflow_link_id,
+          authority.control_generation,
+          authority.controller_generation,
+          authority.verifier_task_id,
+          authority.verifier_iteration,
+          authority.verifier_attempt,
+          authority.marker_sha256,
+          authority.marker_size_bytes,
+          authority.prior_status
+        ]),
+        "utf8"
+      )
+      .digest("hex");
+    appendEvent(layout, {
+      eventType: "node-controller-refinalization-intent",
+      nodeId: "project-discovery",
+      status: "running",
+      payload: { operation_id: operationId, ...authority }
+    });
+
+    const recovered = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(recovered.ok && recovered.refinalized, 1);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
+    const records = replayEvents(layout).records;
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-result").length, 1);
+  }
+);
+
+test("controller re-finalization cannot weaken ordinary resume immutability without a refresh", async () => {
+  const rejected = await resumeRun({
+    projectRoot: tempProject(),
+    runId: "controller-refinalization-without-refresh",
+    refinalizeControllerFailures: true
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.diagnostics[0]?.code, "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH");
+});
+
+test(
+  "controller re-finalization leaves a genuine failed verifier for retry and rejects a standalone no-op",
+  { concurrency: false },
+  async () => {
+    const fixture = await genuineVerifierFailureFixture("standalone");
+    const before = readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"];
+
+    const rejected = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      env: fixture.env
+    });
+
+    assert.equal(rejected.ok, false);
+    assert.match(JSON.stringify(rejected.diagnostics), /no eligible immutable controller false failures/u);
+    assert.doesNotMatch(JSON.stringify(rejected.diagnostics), /failure authority is incomplete/u);
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
+    assert.equal(
+      replayEvents(layout).records.some(
+        (event) =>
+          event.event_type === "node-controller-refinalization-intent" ||
+          event.event_type === "node-controller-refinalization-result"
+      ),
+      false
+    );
+  }
+);
+
+test(
+  "atomic controller re-finalization permits zero eligible nodes before retrying genuine verifier failures",
+  { concurrency: false },
+  async () => {
+    const fixture = await genuineVerifierFailureFixture("atomic-retry");
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const before = readRunState(layout).nodes["project-discovery"];
+
+    const resumed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      refinalizeControllerFailures: true,
+      retryFailed: true,
+      env: fixture.env
+    });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
+    const records = replayEvents(layout).records;
+    assert.equal(
+      records.some(
+        (event) =>
+          event.event_type === "node-controller-refinalization-intent" ||
+          event.event_type === "node-controller-refinalization-result"
+      ),
+      false
+    );
+    assert.ok(
+      records.some((event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true)
+    );
+    const commands = fs.readFileSync(fixture.env.SMITHERS_FAKE_LOG!, "utf8");
+    // An explicit retry of a zero-retry generated verifier reopens its
+    // agent-owned artifact producer and lets Smithers reset the verifier with
+    // its dependents (#926), so the genuine verifier failure surfaces here as a
+    // producer timetravel rather than a verifier-only reset.
+    assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+    assert.doesNotMatch(commands, /^timetravel .* --node-id verify:project-discovery /mu);
+    assert.match(commands, /^up .* --resume ultrafuzz-controller-refinalization-genuine-failure-atomic-retry(?: |$)/mu);
+  }
+);
+
+test(
+  "controller re-finalization rejects stale identities, unfinished verifier evidence, and modified publications",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("authentication-rejections");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const base = {
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    };
+
+    for (const changed of [
+      { ...base, controllerGeneration: base.controlGeneration },
+      { ...base, workflowRunId: `${base.workflowRunId}-replayed` },
+      { ...base, workflowLinkId: crypto.randomUUID() },
+      { ...base, graph: { ...base.graph, nodes: [] } },
+      { ...base, tasks: [] }
+    ]) {
+      const rejected = await refinalizeControllerFailures(changed);
+      assert.equal(rejected.ok, false);
+    }
+
+    const detailPath = path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json");
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:foreign-task",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    const wrongTask = await refinalizeControllerFailures(base);
+    assert.equal(wrongTask.ok, false);
+    assert.match(JSON.stringify(wrongTask.diagnostics), /exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          attempt: 2
+        })
+      )}\n`,
+      "utf8"
+    );
+    const wrongAttempt = await refinalizeControllerFailures(base);
+    assert.equal(wrongAttempt.ok, false);
+    assert.match(JSON.stringify(wrongAttempt.diagnostics), /exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          markerSha256: "0".repeat(64)
+        })
+      )}\n`,
+      "utf8"
+    );
+    const digestMismatch = await refinalizeControllerFailures(base);
+    assert.equal(digestMismatch.ok, false);
+    assert.match(JSON.stringify(digestMismatch.diagnostics), /marker digest or size/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath,
+          state: "in-progress"
+        })
+      )}\n`,
+      "utf8"
+    );
+    const unfinished = await refinalizeControllerFailures(base);
+    assert.equal(unfinished.ok, false);
+    assert.match(JSON.stringify(unfinished.diagnostics), /unfinished|exact linked finished attempt/u);
+
+    fs.writeFileSync(
+      detailPath,
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    fs.appendFileSync(
+      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
+      "modified after verification\n"
+    );
+    const modified = await refinalizeControllerFailures(base);
+    assert.equal(modified.ok, false);
+    assert.match(JSON.stringify(modified.diagnostics), /changed after verifier approval/u);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
+    assert.equal(
+      replayEvents(layout).records.some((event) => event.event_type === "node-controller-refinalization-intent"),
+      false
+    );
+  }
+);
+
+test(
+  "controller re-finalization records a terminal rejection when current gates reproduce invalid output",
+  { concurrency: false },
+  async () => {
+    const fixture = await controllerFalseFailureFixture("invalid-output");
+    const refreshed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      refreshController: true,
+      env: fixture.env
+    });
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+    const findingsPath = path.join(fixture.runRoot, "artifacts", "project-discovery", "findings.json");
+    fs.writeFileSync(findingsPath, "{}\n", "utf8");
+    writeCurrentArtifactVerificationMarker(fixture.runRoot, "project-discovery");
+    fs.writeFileSync(
+      path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
+      `${JSON.stringify(
+        finishedVerifierNodeDetail({
+          workflowRunId: fixture.workflowRunId,
+          verifierTaskId: "verify:project-discovery",
+          markerPath: fixture.markerPath
+        })
+      )}\n`,
+      "utf8"
+    );
+    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+    if (!evidence.ok) return;
+    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
+    const rejected = await refinalizeControllerFailures({
+      projectRoot: fixture.project,
+      layout,
+      graph: readPlannedGraphDocument(layout.graphPath),
+      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
+      workflowRunId: evidence.smithersRunId,
+      workflowLinkId: evidence.workflowLinkId,
+      controlGeneration: evidence.controlGeneration,
+      controllerGeneration: evidence.controllerGeneration,
+      env: fixture.env
+    });
+
+    assert.equal(rejected.ok, false);
+    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
+    const records = replayEvents(layout).records;
+    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
+    const result = records.filter((event) => event.event_type === "node-controller-refinalization-result");
+    assert.equal(result.length, 1);
+    assert.equal(result[0]?.status, "failed");
+    assert.equal(result[0]?.payload.result, "rejected");
+  }
+);
 
 test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
   const project = tempProject();
@@ -18107,6 +18887,103 @@ test("controller refresh preserves run authority and retains both immutable gene
   }
 });
 
+test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-packaged-adapters";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+  if (!before.ok) return;
+
+  const projectPiPath = path.join(project, ".smithers", "agents", "pi.ts");
+  const unexpectedProjectAdapter = path.join(project, ".smithers", "agents", "unexpected.ts");
+  const untrustedProjectBytes = "export const projectOwnedAdapter = true;\n";
+  fs.writeFileSync(projectPiPath, untrustedProjectBytes, "utf8");
+  fs.writeFileSync(unexpectedProjectAdapter, "export const unexpected = true;\n", "utf8");
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
+  if (!after.ok) return;
+  assert.notEqual(after.controllerGeneration, before.controlGeneration);
+  assert.notEqual(
+    fs.readFileSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "pi.ts"), "utf8"),
+    untrustedProjectBytes
+  );
+  assert.equal(fs.existsSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "unexpected.ts")), false);
+  assert.equal(fs.readFileSync(projectPiPath, "utf8"), untrustedProjectBytes);
+  assert.equal(fs.existsSync(unexpectedProjectAdapter), true);
+});
+
+test("controller refresh sources internal modules from the invoking package closure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-invoking-modules";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
+
+  const invokingRuntimeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@ultrafuzz/runtime"))));
+  const staleRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-runtime-"));
+  fs.copyFileSync(path.join(invokingRuntimeRoot, "package.json"), path.join(staleRuntimeRoot, "package.json"));
+  for (const directory of ["dist", "schema"]) {
+    const source = path.join(invokingRuntimeRoot, directory);
+    if (fs.existsSync(source)) fs.cpSync(source, path.join(staleRuntimeRoot, directory), { recursive: true });
+  }
+  const artifactGatesRelativePath = path.join("dist", "artifact-gates.js");
+  const staleArtifactGatesPath = path.join(staleRuntimeRoot, artifactGatesRelativePath);
+  fs.appendFileSync(staleArtifactGatesPath, "\n// stale compatible launch installation\n", "utf8");
+  const staleArtifactGates = fs.readFileSync(staleArtifactGatesPath);
+  const currentArtifactGates = fs.readFileSync(path.join(invokingRuntimeRoot, artifactGatesRelativePath));
+  assert.notDeepEqual(staleArtifactGates, currentArtifactGates);
+
+  const runtimeSnapshotPrefix = "modules/@ultrafuzz/runtime/";
+  const launchFromStaleInstallation = {
+    ...evidence.verifiedControl,
+    executionFiles: evidence.verifiedControl.executionFiles.map((file) =>
+      file.snapshotPath.startsWith(runtimeSnapshotPrefix)
+        ? {
+            ...file,
+            sourcePath: path.join(staleRuntimeRoot, ...file.snapshotPath.slice(runtimeSnapshotPrefix.length).split("/"))
+          }
+        : file
+    )
+  };
+
+  const refreshed = refreshedSmithersControllerSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    original: launchFromStaleInstallation,
+    config
+  });
+  const refreshedArtifactGates = refreshed.snapshot.executionFiles.find(
+    (file) => file.snapshotPath === `${runtimeSnapshotPrefix}dist/artifact-gates.js`
+  );
+  assert.ok(refreshedArtifactGates);
+  assert.deepEqual(refreshedArtifactGates.contents, currentArtifactGates);
+  assert.notDeepEqual(refreshedArtifactGates.contents, staleArtifactGates);
+  assert.equal(
+    path.dirname(path.dirname(refreshedArtifactGates.sourcePath)),
+    invokingRuntimeRoot,
+    "refreshed source provenance must identify the invoking package installation"
+  );
+});
+
 test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -18881,7 +19758,7 @@ test("controller refresh relaunches an exact current missing-history run from th
   assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), true);
 });
 
-test("controller refresh rotates a rebuilt trusted CLI identity before resume", async () => {
+test("ordinary resume keeps the sealed CLI and controller refresh rotates a rebuilt closure", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -18895,8 +19772,8 @@ test("controller refresh rotates a rebuilt trusted CLI identity before resume", 
   fs.chmodSync(entrypoint, 0o500);
 
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(ordinary.ok, false);
-  assert.match(JSON.stringify(ordinary.diagnostics), /identity changed since this run was planned/u);
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  assert.equal(ordinary.value?.submitted, true);
 
   const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
@@ -20741,6 +21618,47 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   assert.match(
     fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
     /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
+  );
+});
+
+test("resume retries a failed artifact verifier from its agent producer and dependent closure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "failed-artifact-verifier-retry";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "the artifact verifier rejected agent-owned output" },
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+  assert.doesNotMatch(commands, /^timetravel .* --node-id verify:project-discovery /mu);
+  assert.doesNotMatch(
+    commands,
+    /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
+    "the producer retry must also reset its zero-retry verifier and downstream dependents"
   );
 });
 
