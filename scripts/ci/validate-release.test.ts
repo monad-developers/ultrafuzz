@@ -47,13 +47,13 @@ describe("release validation report aggregation", () => {
     const reportPath = path.join(reportRoot, "report.json");
     fs.mkdirSync(fragments);
     fs.writeFileSync(
-      path.join(fragments, "cli-typecheck.json"),
+      path.join(fragments, "cli.json"),
       `${JSON.stringify({
         schema_version: "ultrafuzz.release-validation.report.v2",
         package_id: "ultrafuzz",
         generated_at: "2026-08-13T00:00:00.000Z",
         project_root: repoRoot,
-        report_path: ".ultrafuzz/release-validation/cli-typecheck.json",
+        report_path: ".ultrafuzz/release-validation/cli.json",
         overall_status: "fail",
         commands: gateIds.map((id) => ({
           id,
