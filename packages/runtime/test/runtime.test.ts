@@ -18238,6 +18238,281 @@ test("syncRun keeps reset workflow nodes pending while the workflow is running",
   assert.equal(state.nodes?.["project-discovery"]?.finished_at, undefined);
 });
 
+test("syncRun preserves a recorded terminal occurrence when Smithers reuses its attempt number", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-reused-attempt-number";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const events = [
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    { type: "NodeFailed", nodeId, attempt: 1, error: { message: "first occurrence failed" } }
+  ];
+  const failedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, events)
+  });
+  const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const firstSync = await syncRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+
+  const attemptDetail = (state: "in-progress" | "failed") => ({
+    node: { nodeId, lastAttempt: 1 },
+    attempts: [
+      {
+        nodeId,
+        attempt: 1,
+        state,
+        meta: {
+          agentChainIndex: 0,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          agentModel: "gpt-5.5"
+        }
+      }
+    ]
+  });
+  const activeEvents = [...events, { type: "NodeStarted", nodeId, attempt: 1 }];
+  const activeEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, activeEvents),
+    nodeDetails: { [nodeId]: attemptDetail("in-progress") }
+  });
+  const interruptedSync = await syncRun({ projectRoot: project, runId, env: activeEnv });
+  assert.equal(interruptedSync.ok, true, JSON.stringify(interruptedSync.diagnostics));
+  assert.equal(interruptedSync.value?.status, "running");
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const recordedBeforeCurrentTerminal = fs.readFileSync(ledgerPath, "utf8");
+
+  const currentEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...activeEvents,
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "current occurrence failed" } }
+    ]),
+    nodeDetails: { [nodeId]: attemptDetail("failed") }
+  });
+  const currentSync = await syncRun({ projectRoot: project, runId, env: currentEnv });
+  assert.equal(currentSync.ok, true, JSON.stringify(currentSync.diagnostics));
+  const attempts = fs
+    .readFileSync(ledgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { started_event_sequence: number; source_event_sequence: number });
+  assert.equal(recordedBeforeCurrentTerminal.trim().split("\n").length, 1);
+  assert.deepEqual(
+    attempts.map((attempt) => [attempt.started_event_sequence, attempt.source_event_sequence]),
+    [
+      [0, 1],
+      [2, 3]
+    ]
+  );
+});
+
+test("syncRun accepts a superseded unadmitted success with exact sealed trace authority", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-traced-reused-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      {
+        type: "AgentTraceSummary",
+        nodeId,
+        extra: {
+          iteration: 0,
+          attempt: 1,
+          summary: {
+            runId: workflowRunId,
+            nodeId,
+            iteration: 0,
+            attempt: 1,
+            traceStartedAtMs: base + 50,
+            traceFinishedAtMs: base + 100,
+            agentId: "ultrafuzz-agent:project-discovery:0:default",
+            model: "gpt-5.5"
+          }
+        }
+      },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
+    false
+  );
+});
+
+test("syncRun rejects a superseded unadmitted success without exact trace authority", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-untraced-reused-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, false);
+  assert.deepEqual(
+    sync.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+});
+
+test("syncRun rejects an unrecorded terminal occurrence superseded by a reused attempt number", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-unrecorded-reused-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "unrecorded occurrence" } },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ]),
+    nodeDetails: {
+      [nodeId]: {
+        node: { nodeId, lastAttempt: 1 },
+        attempts: [{ nodeId, attempt: 1, state: "in-progress" }]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, false);
+  assert.deepEqual(
+    sync.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(sync.diagnostics[0]?.message ?? "", /supersedes terminal event 1 before durable attempt recording/u);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+});
+
+test("syncRun rejects duplicate active starts for one reused attempt identity", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-duplicate-active-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, false);
+  assert.deepEqual(
+    sync.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(sync.diagnostics[0]?.message ?? "", /multiple active NodeStarted events/u);
+});
+
+test("syncRun abandons an unterminated occurrence at a later run activation boundary", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-restarted-active-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+});
+
 test("syncRun records external wait reasons from workflow events", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

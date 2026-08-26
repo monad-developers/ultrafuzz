@@ -114,7 +114,7 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
-import { reconcileSmithersAttemptAgentSelection } from "./smithers-attempt-authority.js";
+import { reconcileSmithersAttemptAgentSelection, smithersTaskAgentId } from "./smithers-attempt-authority.js";
 import { isRecord } from "@ultrafuzz/artifacts";
 
 type StoredWorkflowTask = SmithersTaskManifestTask;
@@ -1738,9 +1738,26 @@ async function inspectTerminalAttemptAuthorities(input: {
   control: WorkflowSynchronizationControl;
 }): Promise<SmithersNodeAttemptAuthorities> {
   const tasksByNodeId = new Map(input.tasks.map((task) => [task.smithersNodeId, task]));
-  const pending = terminalWorkflowAttempts(input.events, { tolerateMissingStarts: true }).filter(
-    (attempt) => tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local"
+  const localTaskNodeIds = new Set(
+    input.tasks.filter((task) => task.execution.mode === "local").map((task) => task.smithersNodeId)
   );
+  const relevantEvents = input.events.filter((event) => {
+    if (event.type === "RunStarted") return true;
+    const nodeId = stringField(event.payload, "nodeId");
+    return nodeId !== undefined && localTaskNodeIds.has(nodeId);
+  });
+  const recordedTerminalSequences = recordedTerminalAttemptSequences(input.layout, input.workflowRunId);
+  const pending = terminalWorkflowAttempts(relevantEvents, {
+    tolerateMissingStarts: true,
+    recordedTerminalSequences,
+    authorizeUnrecordedSuperseded: (attempt) => {
+      const task = tasksByNodeId.get(attempt.nodeId);
+      return (
+        task !== undefined &&
+        supersededSuccessfulAttemptHasTraceAuthority(input.layout, input.workflowRunId, task, attempt, relevantEvents)
+      );
+    }
+  }).filter((attempt) => tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local");
   const grouped = new Map<string, TerminalWorkflowAttempt[]>();
   for (const attempt of pending) {
     const key = smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration);
@@ -3406,6 +3423,7 @@ async function synchronizeTasks(input: {
   const workflowStates = new Map<string, SmithersNodeState>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
+  const runActivationEvents = input.events.filter((event) => event.type === "RunStarted");
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
   const tasksByConcreteNode = new Map<string, StoredWorkflowTask[]>();
   for (const task of input.tasks) {
@@ -3506,7 +3524,9 @@ async function synchronizeTasks(input: {
         task,
         workflowRunId: input.workflowRunId,
         controlGeneration: input.controlGeneration,
-        events: eventsByNode.get(task.smithersNodeId) ?? [],
+        events: [...runActivationEvents, ...(eventsByNode.get(task.smithersNodeId) ?? [])].sort(
+          (left, right) => left.sourceEventSequence - right.sourceEventSequence
+        ),
         currentAttempt: evidence.attempt,
         currentStatus: patchStatus,
         finalization,
@@ -4510,7 +4530,12 @@ function appendTerminalTaskAttempts(input: {
   attemptAuthorities: SmithersNodeAttemptAuthorities;
   forbiddenSecretValues: readonly string[];
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
-  const terminalAttempts = terminalWorkflowAttempts(input.events);
+  const allExisting = replayNodeAttempts(input.layout).entries;
+  const terminalAttempts = terminalWorkflowAttempts(input.events, {
+    recordedTerminalSequences: recordedTerminalAttemptSequencesFromEntries(allExisting, input.workflowRunId),
+    authorizeUnrecordedSuperseded: (attempt) =>
+      supersededSuccessfulAttemptHasTraceAuthority(input.layout, input.workflowRunId, input.task, attempt, input.events)
+  });
   const state = readRunState(input.layout);
   const inputManifestDigest = manifestDigest(
     JSON.stringify({
@@ -4523,7 +4548,6 @@ function appendTerminalTaskAttempts(input: {
   );
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
-  const allExisting = replayNodeAttempts(input.layout).entries;
   const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
   const existingByIdentity = new Map(allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const));
   const sourceEntries = sourceNodeAttempts(input.layout, state.source_run_id, input.task.attemptId);
@@ -4694,14 +4718,26 @@ function nodeAttemptAgentProvenance(
 
 function terminalWorkflowAttempts(
   events: WorkflowEvent[],
-  options: { tolerateMissingStarts?: boolean } = {}
+  options: {
+    tolerateMissingStarts?: boolean;
+    recordedTerminalSequences?: ReadonlySet<number>;
+    authorizeUnrecordedSuperseded?: (attempt: TerminalWorkflowAttempt) => boolean;
+  } = {}
 ): TerminalWorkflowAttempt[] {
   const active = new Map<
     string,
     Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
   >();
-  const attempts: TerminalWorkflowAttempt[] = [];
+  const attempts = new Map<string, TerminalWorkflowAttempt>();
   for (const event of events) {
+    if (event.type === "RunStarted") {
+      // Smithers cancels stale in-progress rows before each resumed activation,
+      // but does not emit NodeCancelled for those abandoned occurrences. Keep
+      // duplicate starts fail-closed within one activation while allowing the
+      // next activation to reuse the same durable attempt number.
+      active.clear();
+      continue;
+    }
     if (event.type !== "NodeStarted" && event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
     const payload = event.payload;
     const nodeId = requiredWorkflowEventString(payload.nodeId, `${event.type} nodeId`);
@@ -4711,6 +4747,18 @@ function terminalWorkflowAttempts(
     const timestamp = new Date(event.timestampMs).toISOString();
     if (event.type === "NodeStarted") {
       if (active.has(identity)) throw new Error(`Smithers attempt ${identity} has multiple active NodeStarted events`);
+      const superseded = attempts.get(identity);
+      if (superseded !== undefined) {
+        if (
+          !options.recordedTerminalSequences?.has(superseded.finishedSequence) &&
+          options.authorizeUnrecordedSuperseded?.(superseded) !== true
+        ) {
+          throw new Error(
+            `Smithers attempt ${identity} supersedes terminal event ${superseded.finishedSequence} before durable attempt recording`
+          );
+        }
+        attempts.delete(identity);
+      }
       active.set(identity, {
         retry,
         iteration,
@@ -4728,7 +4776,7 @@ function terminalWorkflowAttempts(
       throw new Error(`Smithers terminal event has no preceding NodeStarted for ${identity}`);
     }
     active.delete(identity);
-    attempts.push({
+    attempts.set(identity, {
       ...started,
       finishedSequence: event.sourceEventSequence,
       finishedAt: timestamp,
@@ -4737,7 +4785,87 @@ function terminalWorkflowAttempts(
       ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage })
     });
   }
-  return attempts.sort((left, right) => left.finishedSequence - right.finishedSequence);
+  return [...attempts.values()].sort((left, right) => left.finishedSequence - right.finishedSequence);
+}
+
+function recordedTerminalAttemptSequences(layout: RunLayout, workflowRunId: string): ReadonlySet<number> {
+  return recordedTerminalAttemptSequencesFromEntries(replayNodeAttempts(layout).entries, workflowRunId);
+}
+
+function recordedTerminalAttemptSequencesFromEntries(
+  entries: readonly NodeAttemptLedgerEntry[],
+  workflowRunId: string
+): ReadonlySet<number> {
+  return new Set(
+    entries.filter((entry) => entry.workflow_run_id === workflowRunId).map((entry) => entry.source_event_sequence)
+  );
+}
+
+function supersededSuccessfulAttemptHasTraceAuthority(
+  layout: RunLayout,
+  workflowRunId: string,
+  task: StoredWorkflowTask,
+  attempt: TerminalWorkflowAttempt,
+  events: readonly WorkflowEvent[]
+): boolean {
+  if (attempt.outcome !== "succeeded") return false;
+  if (immutableTerminalFinalization(readRunState(layout).nodes[task.attemptId])) return false;
+  const manifestPath = path.join(getNodeArtifactDir(layout, task.attemptId), ARTIFACT_MANIFEST_FILE);
+  try {
+    fs.lstatSync(manifestPath);
+    return false;
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      (error as { code?: unknown }).code !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
+
+  const summaries = events.filter(
+    (event) =>
+      event.type === "AgentTraceSummary" &&
+      event.sourceEventSequence > attempt.startedSequence &&
+      event.sourceEventSequence < attempt.finishedSequence &&
+      event.workflowRunId === workflowRunId &&
+      event.payload.nodeId === attempt.nodeId &&
+      event.payload.iteration === attempt.iteration &&
+      event.payload.attempt === attempt.retry
+  );
+  if (summaries.length !== 1) return false;
+  const summaryEvent = summaries[0]!;
+  const summary = recordField(summaryEvent.payload, "summary");
+  if (
+    summary?.runId !== workflowRunId ||
+    summary.nodeId !== attempt.nodeId ||
+    summary.iteration !== attempt.iteration ||
+    summary.attempt !== attempt.retry
+  ) {
+    return false;
+  }
+  const traceStartedAtMs = numberField(summary, "traceStartedAtMs");
+  const traceFinishedAtMs = numberField(summary, "traceFinishedAtMs");
+  if (
+    traceStartedAtMs === undefined ||
+    traceFinishedAtMs === undefined ||
+    traceFinishedAtMs !== summaryEvent.timestampMs ||
+    traceStartedAtMs < Date.parse(attempt.startedAt) ||
+    traceFinishedAtMs > Date.parse(attempt.finishedAt)
+  ) {
+    return false;
+  }
+  const agentId = stringField(summary, "agentId");
+  const model = stringField(summary, "model");
+  if (agentId === undefined || model === undefined) return false;
+  const selections = task.agentChain
+    .map((profile, chainIndex) => ({ profile, chainIndex }))
+    .filter(({ chainIndex }) => smithersTaskAgentId(task, chainIndex) === agentId);
+  if (selections.length !== 1) return false;
+  const profile = selections[0]!.profile;
+  return profile.modelName === undefined || profile.modelName === model;
 }
 
 function terminalOutcomeForEvent(event: WorkflowEvent):
