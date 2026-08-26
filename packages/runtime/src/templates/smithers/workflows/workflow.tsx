@@ -3614,6 +3614,9 @@ function prepareArtifactMirror(
   );
   if (options.replayWorkspacePatches !== false) {
     preparationStep(task.attemptId, "assert-workspace-source-revision", () => assertWorkspaceSourceRevision(task));
+    preparationStep(task.attemptId, "restore-persisted-workspace-preparation", () =>
+      restorePersistedWorkspacePatchPreparationBeforeReplay(task, workspaceRoot, evidenceMode)
+    );
   }
   if (options.pinnedSubmodules === "verify") {
     preparationStep(task.attemptId, "verify-pinned-submodules", () =>
@@ -4075,8 +4078,37 @@ function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string
   return parsed.preparation_tree;
 }
 
-function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  const preparationTree = workspacePatchPreparationTrees.get(task.attemptId) ?? readWorkspacePatchPreparation(task);
+function restorePersistedWorkspacePatchPreparationBeforeReplay(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  evidenceMode: "create" | "require"
+): void {
+  // A reopened producer retains its durable worktree, including source authored by the previous model
+  // execution. That tree intentionally matches neither a dependency patch's base nor any dependency
+  // result, so #312's authenticated dependency-prefix skip cannot classify it. The preparation evidence
+  // is the runtime-owned pre-agent tree captured after dependency replay; restore it BEFORE replay so the
+  // strict base-tree check continues to distinguish genuine drift from a supported producer reopen.
+  //
+  // Never restore on the post-agent `require` path: that path must preserve the current model's source
+  // until `materializeWorkspacePatch` captures it. A fresh producer has no persisted evidence and remains
+  // on the existing pinned-baseline replay path.
+  if (evidenceMode !== "create") return;
+  const persistedPreparation = readWorkspacePatchPreparation(task);
+  if (persistedPreparation === undefined) return;
+  const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
+  if (expectedPreparation !== undefined && persistedPreparation !== expectedPreparation) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
+  restoreWorkspacePatchPreparation(task, workspaceRoot, persistedPreparation);
+}
+
+function restoreWorkspacePatchPreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  persistedPreparation?: string
+): void {
+  const preparationTree =
+    workspacePatchPreparationTrees.get(task.attemptId) ?? persistedPreparation ?? readWorkspacePatchPreparation(task);
   if (preparationTree === undefined) {
     throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
   }
