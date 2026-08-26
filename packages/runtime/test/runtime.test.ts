@@ -11103,7 +11103,6 @@ test("getRunHealth stays readable while execution holds the workflow control loc
   const linkJournalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
   const linkJournalBefore = fs.readFileSync(linkJournalPath);
   const release = await acquireWorkflowControlLock(layout);
-  let released = false;
   let timeout: NodeJS.Timeout | undefined;
   const healthPromise = getRunHealth({ projectRoot: project, runId: run.value!.run_id, env });
   try {
@@ -11117,9 +11116,7 @@ test("getRunHealth stays readable while execution holds the workflow control loc
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
     await release();
-    released = true;
   }
-  assert.equal(released, true);
   const health = await healthPromise;
   assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
   assert.equal(health.value?.run_id, run.value!.run_id);
