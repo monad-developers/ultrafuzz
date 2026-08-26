@@ -281,14 +281,17 @@ earlier manifest version without upgrading or converting it.
 
 The producer's rendered prompt includes safely quoted schema and contract
 validation commands per JSON output. The first validates the pinned schema; the
-second applies the registered schema plus document-local semantic gates. The
-producer runs both after the final write and corrects an exit-`1` draft before
-returning. Once the agent session returns, declared artifact bytes are
-immutable. Host validation, contextual gates, synchronization, reporting,
-dashboards, and bundles may reject the bytes or copy them exactly, but may not
-normalize, convert, repair, synthesize, reseal, or substitute another file or
-final-response payload. A missing or invalid required output is a terminal
-post-agent failure, not a model retry or compatibility fallback.
+second applies the registered schema plus document-local semantic gates.
+Generated-test producers receive a third command that checks companion files
+and the sealed run and logical-producer identities through the same contextual
+gate used by the host. The producer runs every displayed command after the
+final write and corrects an exit-`1` draft before returning. Once the agent
+session returns, declared artifact bytes are immutable. Host validation,
+contextual gates, synchronization, reporting, dashboards, and bundles may
+reject the bytes or copy them exactly, but may not normalize, convert, repair,
+synthesize, reseal, or substitute another file or final-response payload. A
+missing or invalid required output is a terminal post-agent failure, not a
+model retry or compatibility fallback.
 
 ## Findings
 

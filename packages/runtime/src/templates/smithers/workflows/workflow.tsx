@@ -1705,7 +1705,8 @@ function relocatePromptPath(prompt: string, sourcePath: string, destinationPath:
     .split("\n")
     .map((line) =>
       line.includes("Validation command: `ultrafuzz json validate ") ||
-      line.includes("Contract validation command: `ultrafuzz artifact validate ")
+      line.includes("Contract validation command: `ultrafuzz artifact validate ") ||
+      line.includes("Task-context validation command: `ultrafuzz artifact validate ")
         ? line.replaceAll(shellEscapedSource, shellEscapedDestination)
         : line.replaceAll(sourcePath, destinationPath)
     )

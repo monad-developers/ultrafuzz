@@ -8,7 +8,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `init`                    | Create project config/topology, pinned references, `.ultrafuzz/**` run surfaces, editable prompts, and workflow plumbing. |
 | `validate`                | Validate config, topology, prompts, safe paths, trust posture, and agent references.                                      |
 | `json validate`           | Validate one JSON document against a strict Draft 2020-12 schema without modifying either file.                           |
-| `artifact validate`       | Validate a declared artifact's registered schema and document-local semantic gates.                                       |
+| `artifact validate`       | Validate a declared artifact's registered schema, document-local gates, and an optional generated-test task context.      |
 | `run`                     | Plan, render prompts, launch a fuzzing workflow, and persist product evidence.                                            |
 | `references status`       | Show whether pinned references are present in the local digest-checked cache.                                             |
 | `references sync`         | Explicitly fetch pinned references into the local cache.                                                                  |
@@ -98,10 +98,13 @@ document. `--json` uses the usual `ultrafuzz.cli.result.v2` envelope.
 
 For a named output contract, run
 `ultrafuzz artifact validate <contract-id> <artifact-path>` after the structural
-schema check. It adds document-local semantic gates, but it cannot authenticate
-workspace inputs or cross-artifact/run context; the runtime checks those at
-publication. Use the contract ID and path in the rendered Output Contract and
-run `ultrafuzz artifact validate --help` for the current arguments.
+schema check. It adds document-local semantic gates. Generated-test producers
+also receive an exact task-context command with `--run-id`,
+`--logical-node-id`, and `--artifact-root`; that command checks companion files
+and the sealed run/logical-producer values while the producer can still correct
+the draft. Other host context remains runtime-owned and is checked at
+publication. Use the commands in the rendered Output Contract and run
+`ultrafuzz artifact validate --help` for the current arguments.
 
 ## Run Lifecycle
 

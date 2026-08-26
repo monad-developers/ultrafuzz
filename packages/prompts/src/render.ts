@@ -519,7 +519,16 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
                 `  Contract validation command: ${contractValidationCommand(
                   output.contract,
                   path.join(input.node.artifactDir, output.path)
-                )}`
+                )}`,
+                ...(output.contract === "ultrafuzz/generated-tests@3"
+                  ? [
+                      `  Task-context validation command: ${taskContextValidationCommand(
+                        output.contract,
+                        path.join(input.node.artifactDir, output.path),
+                        input
+                      )}`
+                    ]
+                  : [])
               ]),
           `  ${empty}`
         ].join("\n");
@@ -543,6 +552,21 @@ function validationCommand(schemaPath: string, artifactPath: string): string {
 
 function contractValidationCommand(contract: string, artifactPath: string): string {
   const command = ["ultrafuzz artifact validate", shellSingleQuote(contract), shellSingleQuote(artifactPath)].join(" ");
+  return markdownCodeSpan(command);
+}
+
+function taskContextValidationCommand(contract: string, artifactPath: string, input: PromptRenderInput): string {
+  const command = [
+    "ultrafuzz artifact validate",
+    shellSingleQuote(contract),
+    shellSingleQuote(artifactPath),
+    "--run-id",
+    shellSingleQuote(input.run.id),
+    "--logical-node-id",
+    shellSingleQuote(input.node.logicalId),
+    "--artifact-root",
+    shellSingleQuote(input.node.artifactDir)
+  ].join(" ");
   return markdownCodeSpan(command);
 }
 
