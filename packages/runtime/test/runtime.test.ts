@@ -9016,7 +9016,7 @@ test("audit profile selects its packaged topology and records portable provenanc
 
   const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  assert.equal(plan.value!.resolved_config.run.maxParallelNodes, 4);
+  assert.equal(plan.value!.resolved_config.run.maxParallelAgents, 4);
   assert.equal(plan.value!.resolved_config.run.workflowDeadlineSeconds, 14_400);
   assert.equal(plan.value!.resolved_config.auditProfileResolution.overriddenSettings.length, 0);
   assert.deepEqual(

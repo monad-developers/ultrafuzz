@@ -474,7 +474,6 @@ for prompt analysis today.
 | Variable                        | Effect                                                                            |
 | ------------------------------- | --------------------------------------------------------------------------------- |
 | `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                                 |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                                      |
 | `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                                   |
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                                      |
 | `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |

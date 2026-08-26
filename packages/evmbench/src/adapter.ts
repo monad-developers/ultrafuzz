@@ -144,7 +144,6 @@ export function applyEvmbenchProfile(configPath: string, profile: EvmbenchProfil
   serializeEvmbenchProfile(profile);
   let config = fs.readFileSync(configPath, "utf8");
   config = replaceInteger(config, "max_parallel_agents", profile.max_concurrency);
-  config = replaceInteger(config, "max_parallel_nodes", profile.max_concurrency);
   config = replaceInteger(config, "default_timeout_seconds", profile.node_timeout_seconds);
   config = replaceInteger(config, "workflow_deadline_seconds", profile.workflow_timeout_seconds);
   config = rewriteDefaultModelProfile(config, profile);

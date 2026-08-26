@@ -188,7 +188,7 @@ same_agent_attempts = 2
     const resolved = resolveConfig({
       env: {},
       projectConfig: parsed.value,
-      runtimeOverrides: { maxParallelNodes: 7 }
+      runtimeOverrides: { maxParallelAgents: 7 }
     });
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
@@ -196,21 +196,18 @@ same_agent_attempts = 2
     expect(resolved.value.topologyPath).toBe(".ultrafuzz/custom-topology.yml");
     expect(resolved.value.strategyLoops).toBe(2);
     expect(resolved.value.dynamicStrategiesEnumerator).toBe(1);
-    expect(resolved.value.run.maxParallelAgents).toBe(6);
-    expect(resolved.value.run.maxParallelNodes).toBe(7);
+    expect(resolved.value.run.maxParallelAgents).toBe(7);
     expect(resolved.value.retry.sameAgentAttempts).toBe(2);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 3 });
     expect(resolved.value.auditProfileResolution.overriddenSettings).toEqual([
       "max_parallel_agents",
-      "max_parallel_nodes",
       "same_agent_attempts",
       "strategy_loops"
     ]);
     expect(resolved.value.auditProfileResolution.effectiveSettings).toMatchObject({
       strategy_loops: 2,
       dynamic_strategies_enumerator: 1,
-      max_parallel_agents: 6,
-      max_parallel_nodes: 7,
+      max_parallel_agents: 7,
       same_agent_attempts: 2,
       triage_quorum: 2,
       triage_panel_size: 3
@@ -218,8 +215,7 @@ same_agent_attempts = 2
     expect(resolved.value.auditProfileResolution.settingOrigins).toMatchObject({
       strategy_loops: "project-config",
       dynamic_strategies_enumerator: "audit-profile",
-      max_parallel_agents: "project-config",
-      max_parallel_nodes: "runtime-override",
+      max_parallel_agents: "runtime-override",
       same_agent_attempts: "project-config",
       triage_quorum: "audit-profile",
       triage_panel_size: "audit-profile"

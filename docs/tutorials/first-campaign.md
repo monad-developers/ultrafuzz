@@ -99,9 +99,8 @@ fan-out belong in `.ultrafuzz/topology.yml`.
 ## Size Local Concurrency
 
 Normal `ultrafuzz run` campaigns execute on the local machine. The scaffolded
-local defaults are `max_parallel_agents = 4` and `max_parallel_nodes = 8`, and
-the `--max-concurrency` flag caps local workflow task submission concurrency for
-that run.
+local default is `max_parallel_agents = 4`, and the `--max-concurrency` flag
+caps local workflow task submission concurrency for that run.
 
 Choose local concurrency from the host's available CPU, memory, and target test
 cost. Modal benchmark resource numbers, including the 16-agent and 32-node

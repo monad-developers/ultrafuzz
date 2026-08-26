@@ -1,11 +1,6 @@
 import { PROJECT_CONFIG_SCHEMA_VERSION } from "@ultrafuzz/config";
 
-import {
-  DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
-  DEFAULT_MODAL_MAX_PARALLEL_NODES,
-  type ModalModelSpec,
-  type ModelProvider
-} from "./defaults.js";
+import { DEFAULT_MODAL_MAX_PARALLEL_AGENTS, type ModalModelSpec, type ModelProvider } from "./defaults.js";
 export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number, auditProfile = "default"): string {
   const selectedProfile = modelProfileToml(model);
   const dynamicStrategiesEnumerator = auditProfile === "smoke" ? "" : "dynamic_strategies_enumerator = 3\n";
@@ -23,7 +18,6 @@ repo = "."
 [run]
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = ${DEFAULT_MODAL_MAX_PARALLEL_AGENTS}
-max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
 keep_workspaces = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}

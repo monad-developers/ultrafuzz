@@ -116,7 +116,7 @@ A compatible config MUST support:
 - `schema_version`
 - `dynamic_strategies_enumerator`
 - `[project] repo`
-- `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
+- `[run] output_dir`, `max_parallel_agents`,
   `max_dynamic_nodes`, `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and

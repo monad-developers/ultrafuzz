@@ -140,7 +140,6 @@ export function serializeResolvedConfigToml(
   pushTable(lines, "run", {
     output_dir: clone.run.outputDir,
     max_parallel_agents: omitProfileSettings ? undefined : clone.run.maxParallelAgents,
-    max_parallel_nodes: omitProfileSettings ? undefined : clone.run.maxParallelNodes,
     max_dynamic_nodes: clone.run.maxDynamicNodes,
     keep_workspaces: clone.run.keepWorkspaces,
     forge_guard_enabled: clone.run.forgeGuardEnabled,
@@ -241,7 +240,6 @@ function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfil
   }
   if (settings.same_agent_attempts !== undefined) config.retry.sameAgentAttempts = settings.same_agent_attempts;
   if (settings.max_parallel_agents !== undefined) config.run.maxParallelAgents = settings.max_parallel_agents;
-  if (settings.max_parallel_nodes !== undefined) config.run.maxParallelNodes = settings.max_parallel_nodes;
   if (settings.default_timeout_seconds !== undefined) {
     config.run.defaultTimeoutSeconds = settings.default_timeout_seconds;
   }
@@ -264,7 +262,6 @@ export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfi
     dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
     same_agent_attempts: config.retry.sameAgentAttempts,
     max_parallel_agents: config.run.maxParallelAgents,
-    max_parallel_nodes: config.run.maxParallelNodes,
     default_timeout_seconds: config.run.defaultTimeoutSeconds,
     workflow_deadline_seconds: config.run.workflowDeadlineSeconds,
     invariant_testing_smoke_timeout_seconds: config.invariants.invariantTestingSmokeTimeoutSeconds,
@@ -298,7 +295,6 @@ function auditProfileSettingOrigins(
   ) as Record<string, ResolvedConfig["auditProfileResolution"]["settingOrigins"][string]>;
   applyLayerSettingOrigins(origins, input.projectConfig, "project-config");
   if (environment.ULTRAFUZZ_MAX_PARALLEL_AGENTS !== undefined) origins.max_parallel_agents = "environment";
-  if (environment.ULTRAFUZZ_MAX_PARALLEL_NODES !== undefined) origins.max_parallel_nodes = "environment";
   applyLayerSettingOrigins(origins, input.runtimeOverrides, "runtime-override");
   return Object.fromEntries(Object.entries(origins).sort(([left], [right]) => left.localeCompare(right)));
 }
@@ -315,9 +311,6 @@ function applyLayerSettingOrigins(
   if (layer.retry?.sameAgentAttempts !== undefined) origins.same_agent_attempts = origin;
   if (layer.run?.maxParallelAgents !== undefined || runtimeLayer.maxParallelAgents !== undefined) {
     origins.max_parallel_agents = origin;
-  }
-  if (layer.run?.maxParallelNodes !== undefined || runtimeLayer.maxParallelNodes !== undefined) {
-    origins.max_parallel_nodes = origin;
   }
   if (layer.run?.defaultTimeoutSeconds !== undefined) origins.default_timeout_seconds = origin;
   if (layer.run?.workflowDeadlineSeconds !== undefined) origins.workflow_deadline_seconds = origin;
@@ -632,16 +625,6 @@ function applyEnvironmentOverrides(
     },
     diagnostics
   );
-  applyIntegerEnv(
-    config,
-    env,
-    "ULTRAFUZZ_MAX_PARALLEL_NODES",
-    ["run", "max_parallel_nodes"],
-    (value) => {
-      config.run.maxParallelNodes = value;
-    },
-    diagnostics
-  );
   if (env.ULTRAFUZZ_OUTPUT_DIR !== undefined) {
     config.run.outputDir = env.ULTRAFUZZ_OUTPUT_DIR;
   }
@@ -677,9 +660,6 @@ function applyRuntimeOverrides(
   applyProjectConfigLayer(config, overrides, diagnostics, "runtime");
   if (overrides.maxParallelAgents !== undefined) {
     config.run.maxParallelAgents = overrides.maxParallelAgents;
-  }
-  if (overrides.maxParallelNodes !== undefined) {
-    config.run.maxParallelNodes = overrides.maxParallelNodes;
   }
   if (overrides.maxDynamicNodes !== undefined) {
     config.run.maxDynamicNodes = overrides.maxDynamicNodes;
@@ -954,8 +934,6 @@ function configPathSegment(segment: string): string {
       return "output_dir";
     case "maxParallelAgents":
       return "max_parallel_agents";
-    case "maxParallelNodes":
-      return "max_parallel_nodes";
     case "maxDynamicNodes":
       return "max_dynamic_nodes";
     case "forgeGuardEnabled":

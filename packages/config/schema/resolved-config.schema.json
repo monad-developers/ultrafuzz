@@ -101,7 +101,6 @@
       "required": [
         "outputDir",
         "maxParallelAgents",
-        "maxParallelNodes",
         "maxDynamicNodes",
         "keepWorkspaces",
         "forgeGuardEnabled",
@@ -117,9 +116,6 @@
           "$ref": "#/$defs/projectLocalPath"
         },
         "maxParallelAgents": {
-          "$ref": "#/$defs/positiveInteger"
-        },
-        "maxParallelNodes": {
           "$ref": "#/$defs/positiveInteger"
         },
         "maxDynamicNodes": {
@@ -508,7 +504,6 @@
         "dynamic_strategies_enumerator",
         "same_agent_attempts",
         "max_parallel_agents",
-        "max_parallel_nodes",
         "default_timeout_seconds",
         "workflow_deadline_seconds",
         "invariant_testing_smoke_timeout_seconds",
@@ -537,9 +532,6 @@
           "maximum": 100
         },
         "max_parallel_agents": {
-          "$ref": "#/$defs/positiveInteger"
-        },
-        "max_parallel_nodes": {
           "$ref": "#/$defs/positiveInteger"
         },
         "default_timeout_seconds": {
