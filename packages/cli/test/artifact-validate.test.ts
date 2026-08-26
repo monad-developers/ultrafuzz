@@ -207,6 +207,108 @@ test("artifact validate executes document-local coverage evidence gates", async 
   }
 });
 
+test("artifact validate exposes generated-test task authority before producer completion", async () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-artifact-context-"));
+  try {
+    const artifactRoot = path.join(temporary, "artifacts", "dynamic-class-goals-storage-7");
+    const companionPath = path.join(artifactRoot, "generated-tests", "Dynamic.t.sol");
+    fs.mkdirSync(path.dirname(companionPath), { recursive: true });
+    const companionBytes = Buffer.from("contract DynamicTest {}\n", "utf8");
+    fs.writeFileSync(companionPath, companionBytes);
+    const manifestPath = path.join(artifactRoot, "generated-tests.json");
+    const logicalNodeId = "class-goals";
+    const runId = "run-context";
+    const matchingProvenance = {
+      run_id: runId,
+      producer_node_id: logicalNodeId,
+      logical_node_id: logicalNodeId
+    };
+    const manifest = {
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: runId,
+      node_id: "dynamic-class-goals-storage-7",
+      framework: "foundry",
+      generated_tests: [
+        {
+          path: "generated-tests/Dynamic.t.sol",
+          size_bytes: companionBytes.byteLength,
+          sha256: sha256(companionBytes),
+          provenance: matchingProvenance
+        }
+      ],
+      support_files: [],
+      provenance: matchingProvenance
+    };
+    const writeManifest = (value: unknown): Buffer => {
+      const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+      fs.writeFileSync(manifestPath, bytes);
+      return bytes;
+    };
+    const contextualArgs = [
+      "artifact",
+      "validate",
+      "ultrafuzz/generated-tests@3",
+      manifestPath,
+      "--run-id",
+      runId,
+      "--logical-node-id",
+      logicalNodeId,
+      "--artifact-root",
+      artifactRoot,
+      "--json"
+    ];
+
+    const wrongRootBytes = writeManifest(manifest);
+    const documentLocal = await capture([
+      "artifact",
+      "validate",
+      "ultrafuzz/generated-tests@3",
+      manifestPath,
+      "--json"
+    ]);
+    assert.equal(documentLocal.code, 0);
+    const wrongRoot = await capture(contextualArgs);
+    assert.equal(wrongRoot.code, 1);
+    assert.deepEqual(fs.readFileSync(manifestPath), wrongRootBytes);
+    assert.match(wrongRoot.stdout, /generated-test-current-identity/iu);
+    assert.match(wrongRoot.stdout, /logical producer/iu);
+
+    for (const [label, candidate] of [
+      [
+        "manifest provenance",
+        { ...manifest, node_id: logicalNodeId, provenance: { ...matchingProvenance, producer_node_id: "attempt-7" } }
+      ],
+      [
+        "entry provenance",
+        {
+          ...manifest,
+          node_id: logicalNodeId,
+          generated_tests: [
+            {
+              ...manifest.generated_tests[0],
+              provenance: { ...matchingProvenance, run_id: "run-foreign" }
+            }
+          ]
+        }
+      ]
+    ] as const) {
+      const bytes = writeManifest(candidate);
+      const result = await capture(contextualArgs);
+      assert.equal(result.code, 1, label);
+      assert.deepEqual(fs.readFileSync(manifestPath), bytes, label);
+      assert.match(result.stdout, /generated-test-current-identity/iu, label);
+    }
+
+    const correctedBytes = writeManifest({ ...manifest, node_id: logicalNodeId });
+    const corrected = await capture(contextualArgs);
+    assert.equal(corrected.code, 0);
+    assert.equal(corrected.stderr, "");
+    assert.deepEqual(fs.readFileSync(manifestPath), correctedBytes);
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 async function capture(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";

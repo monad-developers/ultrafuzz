@@ -5724,6 +5724,32 @@ function generatedTestIdentityIssues(document: unknown, context: SemanticGateCon
   if (stringField(document, "node_id") !== identity.nodeId) {
     issues.push(issue("$.node_id", "Generated-test manifest node_id does not match the logical producer"));
   }
+  const provenanceValues = [
+    { path: "$.provenance", value: at(document, ["provenance"]) },
+    ...(["generated_tests", "support_files"] as const).flatMap((field) =>
+      arrayAt(document, [field]).map((entry, index) => ({
+        path: `$.${field}[${index}].provenance`,
+        value: at(entry, ["provenance"])
+      }))
+    )
+  ];
+  for (const provenance of provenanceValues) {
+    if (!isRecord(provenance.value)) continue;
+    const runId = stringField(provenance.value, "run_id");
+    if (runId !== undefined && runId !== identity.runId) {
+      issues.push(
+        issue(`${provenance.path}.run_id`, "Generated-test provenance run_id does not match the current run")
+      );
+    }
+    for (const field of ["producer_node_id", "logical_node_id"] as const) {
+      const nodeId = stringField(provenance.value, field);
+      if (nodeId !== undefined && nodeId !== identity.nodeId) {
+        issues.push(
+          issue(`${provenance.path}.${field}`, `Generated-test provenance ${field} does not match the logical producer`)
+        );
+      }
+    }
+  }
   return issues;
 }
 

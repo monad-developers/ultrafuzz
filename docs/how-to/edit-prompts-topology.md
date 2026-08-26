@@ -122,6 +122,10 @@ ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absol
 ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
 ```
 
+Generated-test outputs also receive a third, task-context command. Ultrafuzz
+fills its `--run-id`, `--logical-node-id`, and `--artifact-root` arguments from
+the sealed task; do not hard-code or override it in an editable prompt.
+
 Tell the producer to finish the file, run every displayed command, correct and
 rerun an exit-`1` draft in the same session, and return only after all commands
 exit `0`. Exit `2` means the trusted validator or schema setup failed; it is not

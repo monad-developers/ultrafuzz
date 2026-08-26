@@ -114,6 +114,7 @@ import {
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
+import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import {
@@ -2565,6 +2566,22 @@ nodes:
     REPORT_VOCABULARY_PROMPT_REFERENCES,
     "utf8"
   );
+}
+
+function renderedValidatorCommandCounts(renderedPrompt: string): {
+  schemaPaths: number;
+  jsonCommands: number;
+  contractCommands: number;
+} {
+  const lines = renderedPrompt.split("\n");
+  return {
+    schemaPaths: lines.filter((line) => line.startsWith("  Validate against: ")).length,
+    jsonCommands: lines.filter((line) => line.startsWith("  Validation command: `ultrafuzz json validate --schema "))
+      .length,
+    contractCommands: lines.filter((line) =>
+      line.startsWith("  Contract validation command: `ultrafuzz artifact validate ")
+    ).length
+  };
 }
 
 function writeOptionalSpecialistTopology(
@@ -8594,6 +8611,36 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
     /Purpose: Canonical structured findings with source-bound evidence and independent explanatory analysis\./u
   );
   assert.match(renderedPrompt, /Validation command: `ultrafuzz json validate --schema/u);
+  assert.deepEqual(renderedValidatorCommandCounts(renderedPrompt), {
+    schemaPaths: 1,
+    jsonCommands: 1,
+    contractCommands: 1
+  });
+  const expandedOutput = plan
+    .value!.expanded_graph.nodes.find((node) => node.id === "project-discovery")
+    ?.outputs.find((output) => output.path === "findings.json");
+  assert.equal(expandedOutput?.schemaFile, "findings.schema.json");
+  assert.equal("schema_file" in (expandedOutput ?? {}), false);
+  const schemaPath = path.join(
+    plan.value!.layout.workspacesDir,
+    "project-discovery",
+    ".ultrafuzz",
+    "schemas",
+    "findings.schema.json"
+  );
+  const artifactPath = path.join(plan.value!.run_root, "artifacts", "project-discovery", "findings.json");
+  assert.ok(
+    renderedPrompt.includes(
+      `  Validation command: \`ultrafuzz json validate --schema '${schemaPath}' --file '${artifactPath}'\``
+    ),
+    renderedPrompt
+  );
+  assert.ok(
+    renderedPrompt.includes(
+      `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${artifactPath}'\``
+    ),
+    renderedPrompt
+  );
   assert.match(renderedPrompt, /After your final write and before returning the node's final response/u);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
@@ -8608,6 +8655,30 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   );
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+});
+
+test("producer prompt preflight rejects a missing concrete validator command", () => {
+  assert.throws(
+    () =>
+      assertRenderedPromptValidatorCommands({
+        attemptId: "schema-producer",
+        outputContractMarkdown:
+          "  Validate against: `/trusted/findings.schema.json`\n" +
+          "  Contract validation command: `ultrafuzz artifact validate 'ultrafuzz/findings@2' '/artifacts/findings.json'`\n",
+        schemaBackedOutputCount: 1
+      }),
+    /rendered prompt for schema-producer has incomplete producer validator commands: expected 1.+found 1, 0, and 1/u
+  );
+  assert.doesNotThrow(() =>
+    assertRenderedPromptValidatorCommands({
+      attemptId: "backtick-path-producer",
+      outputContractMarkdown:
+        "  Validate against: ``/trusted/with`tick/findings.schema.json``\n" +
+        "  Validation command: `` ultrafuzz json validate --schema '/trusted/with`tick/findings.schema.json' --file '/artifacts/findings.json' ``\n" +
+        "  Contract validation command: `` ultrafuzz artifact validate 'ultrafuzz/findings@2' '/artifacts/findings.json' ``\n",
+      schemaBackedOutputCount: 1
+    })
+  );
 });
 
 test("plan renders the standard findings variable from the exact typed output declaration", async () => {
@@ -8903,7 +8974,7 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
 
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = xdgCacheHome;
-  let plan;
+  let plan: Awaited<ReturnType<typeof planRun>>;
   try {
     const validation = await validateProject({ projectRoot: project, env: {} });
     assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
@@ -8936,6 +9007,40 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
     .map((node) => node.logical_id)
     .sort();
   assert.deepEqual(dynamicIds, ["class-goals", "threat-goals"]);
+
+  // Start from the actual camelCase expanded-graph serialization shape that prompt planning consumes.
+  // Every materialized default-profile producer prompt must carry exactly one complete command trio
+  // for each agent-authored schema-backed output, including loop-expanded nodes.
+  let schemaBackedProducerPromptCount = 0;
+  let loopedSchemaBackedProducerPromptCount = 0;
+  for (const rendered of plan.value!.rendered_prompts) {
+    const expandedNode = plan.value!.expanded_graph.nodes.find((node) => node.id === rendered.node_id);
+    assert.ok(expandedNode, rendered.node_id);
+    const schemaBackedOutputs = expandedNode.outputs.filter(
+      (output) =>
+        output.schemaFile !== undefined &&
+        !["workspace.patch", "workspace-patch.json", "vulnerability-db-manifest.json"].includes(output.path)
+    );
+    assert.ok(
+      expandedNode.outputs.every((output) => !("schema_file" in output)),
+      `${expandedNode.id} must retain the canonical expanded-graph schemaFile spelling`
+    );
+    assert.deepEqual(
+      renderedValidatorCommandCounts(fs.readFileSync(rendered.rendered_prompt_path, "utf8")),
+      {
+        schemaPaths: schemaBackedOutputs.length,
+        jsonCommands: schemaBackedOutputs.length,
+        contractCommands: schemaBackedOutputs.length
+      },
+      rendered.attempt_id
+    );
+    if (schemaBackedOutputs.length > 0) {
+      schemaBackedProducerPromptCount += 1;
+      if (expandedNode.loop.count > 1) loopedSchemaBackedProducerPromptCount += 1;
+    }
+  }
+  assert.ok(schemaBackedProducerPromptCount > 0);
+  assert.ok(loopedSchemaBackedProducerPromptCount > 0);
 
   // The digest-bound planner catalog is materialized under the run root for the compiled tasks.
   const catalogPath = path.join(plan.value!.run_root, "vulnerability-db", "catalog.json");
@@ -9420,6 +9525,13 @@ test("plan renders prompt variables against attempt artifact directories for mod
   assert.ok(signalText.includes(path.join(signalFastDir, "findings.json")), signalText);
   assert.ok(signalText.includes(path.join(setupFastDir, "setup", "project-discovery.md")), signalText);
   assert.ok(signalText.includes(path.join(setupDeepDir, "setup", "project-discovery.md")), signalText);
+  for (const rendered of plan.value!.rendered_prompts) {
+    assert.deepEqual(renderedValidatorCommandCounts(fs.readFileSync(rendered.rendered_prompt_path, "utf8")), {
+      schemaPaths: 1,
+      jsonCommands: 1,
+      contractCommands: 1
+    });
+  }
 });
 
 test("compileSmithersWorkflow gates native dependencies on deterministic artifact verification", async () => {

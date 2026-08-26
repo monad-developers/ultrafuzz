@@ -2693,7 +2693,8 @@ test("generated Smithers rejects hard-linked generated-test manifests and compan
 test("generated Smithers binds generated-test manifests to the current run and logical producer", () => {
   for (const [field, value] of [
     ["run_id", "run-foreign"],
-    ["node_id", "node-foreign"]
+    ["node_id", "node-foreign"],
+    ["provenance", { producer_node_id: "node-one-attempt-1" }]
   ] as const) {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-identity-")));
     try {
@@ -6485,20 +6486,22 @@ test("generated local and cloud prompt relocation rebases task-local authority p
     destinationPath: string
   ) => string;
 
-  const sourceRoot = "/tmp/controller-a's-project";
-  const localRoot = "/tmp/local-b's-project";
-  const cloudRoot = "/workspace/cloud-b's-project";
+  const sourceRoot = "/tmp/controller-a's-`project";
+  const localRoot = "/tmp/local-b's-`project";
+  const cloudRoot = "/workspace/cloud-b's-`project";
   const sourceArtifactDir = `${sourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
   const sourceWorkspace = `${sourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`;
   const sourceAuthority = `${sourceWorkspace}/.ultrafuzz/authorities/task-0.json`;
   const sourceSchema = `${sourceWorkspace}/.ultrafuzz/schemas/findings.schema.json`;
   const encodedSourceRoot = sourceRoot.replaceAll("'", `'"'"'`);
+  const commandSpan = (command: string): string => (command.includes("`") ? `\`\` ${command} \`\`` : `\`${command}\``);
   const rendered = [
     `- Path: \`${sourceArtifactDir}/findings.json\``,
     `- Artifact authority: \`${sourceAuthority}\``,
     `  Validate against: \`${sourceSchema}\``,
-    `  Validation command: \`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``,
-    `  Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'\``
+    `  Validation command: ${commandSpan(`ultrafuzz json validate --schema '${encodedSourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/schemas/findings.schema.json' --file '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'`)}`,
+    `  Contract validation command: ${commandSpan(`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/findings.json'`)}`,
+    `  Task-context validation command: ${commandSpan(`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedSourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0'`)}`
   ].join("\n");
   assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
 
@@ -6526,6 +6529,12 @@ test("generated local and cloud prompt relocation rebases task-local authority p
     assert.ok(
       relocated.includes(
         `ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedExpectedArtifactDir}/findings.json'`
+      ),
+      `${label}: ${relocated}`
+    );
+    assert.ok(
+      relocated.includes(
+        `ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedExpectedArtifactDir}/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedExpectedArtifactDir}'`
       ),
       `${label}: ${relocated}`
     );

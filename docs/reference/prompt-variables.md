@@ -192,13 +192,19 @@ ultrafuzz json validate --schema '<trusted absolute schema path>' --file '<absol
 ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'
 ```
 
+For generated-test outputs, Ultrafuzz also appends an exact task-context
+validation command whose `--run-id`, `--logical-node-id`, and `--artifact-root`
+arguments come from the sealed task authority.
+
 After its final write and before returning, the agent must run every displayed
 command. Exit `1` means it must correct that draft and rerun the command in the
 same session; exit `2` is a tool/setup failure, not successful validation. Any
 later edit requires another validation run. Supplied schema files must not be
-edited, and neither command modifies the artifact. Contract validation covers
-document-local semantics; the host still applies named contextual gates after
-the session returns.
+edited, and no validation command modifies the artifact. Ordinary contract
+validation covers document-local semantics; generated-test task-context
+validation also checks companion files plus the sealed run and logical
+producer. The host still applies named contextual gates after the session
+returns.
 
 The schema filename, fragment-free schema ID, schema SHA-256, schema-bundle
 SHA-256, and validator build identity are fixed during planning and persisted

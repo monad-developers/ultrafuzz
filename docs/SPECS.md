@@ -385,14 +385,23 @@ Validation command: `ultrafuzz json validate --schema '<absolute schema path>' -
 Contract validation command: `ultrafuzz artifact validate '<contract-id>' '<absolute artifact path>'`
 ```
 
+For `ultrafuzz/generated-tests@3`, it MUST also render a task-context command
+whose `--run-id`, `--logical-node-id`, and `--artifact-root` values come from
+the sealed task authority:
+
+```text
+Task-context validation command: `ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '<absolute artifact path>' --run-id '<run-id>' --logical-node-id '<logical-node-id>' --artifact-root '<absolute task artifact root>'`
+```
+
 The shared prompt MUST require the producer to write the canonical document,
 run every command after its final write and before returning, correct and rerun
 an exit-`1` draft during that same session, rerun after any later change, never
 edit the supplied schema, treat exit `2` as a setup failure, and finish only
-after every command exits `0`. It MUST say that contract validation covers only
-document-local semantics, validation is non-mutating, and host
-semantic/context gates still run afterward. No validation receipt or
-message-schema extension is required.
+after every command exits `0`. It MUST say that ordinary contract validation
+covers document-local semantics, generated-test task-context validation also
+checks companion files plus the sealed run and logical producer, validation is
+non-mutating, and host semantic/context gates still run afterward. No
+validation receipt or message-schema extension is required.
 
 A deterministic workflow verification task MUST validate every agent output
 before downstream tasks become eligible. Artifact manifests MUST record output
