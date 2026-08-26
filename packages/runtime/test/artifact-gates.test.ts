@@ -2176,7 +2176,9 @@ test("required artifact gate validates generated-test manifest shape and listed 
 
   for (const [field, value] of [
     ["run_id", "run-foreign"],
-    ["node_id", "strategy-foreign"]
+    ["node_id", "strategy-foreign"],
+    ["provenance", { producer_node_id: "strategy-a-attempt-1" }],
+    ["generated_tests", [{ ...generatedEntry, provenance: { run_id: "run-foreign", logical_node_id: "strategy-a" } }]]
   ] as const) {
     fs.writeFileSync(
       manifestPath,

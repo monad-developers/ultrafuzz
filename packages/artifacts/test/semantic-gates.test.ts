@@ -2969,8 +2969,30 @@ test("every contextual registration executes real positive and negative checks",
         context: dynamicStrategyArtifactContext
       },
       "generated-test-current-identity": {
-        positive: { run_id: "run-current", node_id: "strategy-current" },
-        negative: { run_id: "run-foreign", node_id: "strategy-foreign" },
+        positive: {
+          run_id: "run-current",
+          node_id: "strategy-current",
+          provenance: {
+            run_id: "run-current",
+            producer_node_id: "strategy-current",
+            logical_node_id: "strategy-current"
+          },
+          generated_tests: [
+            {
+              provenance: {
+                run_id: "run-current",
+                producer_node_id: "strategy-current",
+                logical_node_id: "strategy-current"
+              }
+            }
+          ]
+        },
+        negative: {
+          run_id: "run-current",
+          node_id: "strategy-current",
+          provenance: { producer_node_id: "strategy-attempt-7" },
+          generated_tests: [{ provenance: { run_id: "run-foreign" } }]
+        },
         context: { artifactIdentity: { runId: "run-current", nodeId: "strategy-current" } }
       },
       "generated-test-file-integrity": {

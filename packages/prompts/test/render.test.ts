@@ -378,6 +378,9 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(
       `Contract validation command: \`ultrafuzz artifact validate 'ultrafuzz/findings@2' '${path.join(input.node.artifactDir, "findings.json")}'\``
     );
+    expect(result.renderedMarkdown).toContain(
+      `Task-context validation command: \`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${path.join(input.node.artifactDir, "generated-tests.json")}' --run-id 'run-1' --logical-node-id 'boundary-tests' --artifact-root '${input.node.artifactDir}'\``
+    );
     expect(result.renderedMarkdown).toContain(`orchestrator-supplied JSON Schema under \`${schemaDirectory}\``);
     expect(result.renderedMarkdown).toContain("It is the sole authority on JSON versions");
     expect(result.renderedMarkdown).toContain("Prompt prose may add semantic or run-context requirements");
@@ -391,6 +394,7 @@ describe("prompt rendering", () => {
       "Do not edit the schema or claim validation succeeded",
       "Finish only after every displayed validation command exits 0",
       "The validation command never modifies the artifact",
+      "task-context command additionally checks the artifact",
       "Host semantic and context verification still runs after you finish"
     ]) {
       expect(result.renderedMarkdown).toContain(guidance);
@@ -421,6 +425,35 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Never mix frameworks in one bundle");
     expect(result.renderedMarkdown).not.toContain("optional fields are `language`, `framework`");
     expect(result.renderedMarkdown).not.toContain("ultrafuzz.generated-tests.v3");
+  });
+
+  it("binds generated-test context checks to logical identity across concrete attempt shapes", () => {
+    const cases = [
+      { name: "static", logicalId: "boundary-tests", concreteId: "boundary-tests-storage" },
+      { name: "looped", logicalId: "workflow-property-based-tests", concreteId: "workflow-property-based-tests-1" },
+      {
+        name: "model fanout",
+        logicalId: "workflow-property-based-tests",
+        concreteId: "workflow-property-based-tests__model_2__attempt_4"
+      },
+      { name: "runtime dynamic", logicalId: "class-goals", concreteId: "dynamic-class-goals-storage-7" }
+    ];
+    for (const fixture of cases) {
+      const tmp = mkdtempSync(path.join(os.tmpdir(), `ufz-render-context-${fixture.name.replaceAll(" ", "-")}-`));
+      tmpDirs.push(tmp);
+      const input = baseRenderInput(tmp);
+      const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!;
+      current.id = fixture.logicalId;
+      input.node.logicalId = fixture.logicalId;
+      input.node.concreteId = fixture.concreteId;
+      input.node.artifactDir = path.join(input.run.artifactsDir, fixture.concreteId);
+      input.outputs.patchPath = path.join(input.node.artifactDir, "patch.diff");
+      const rendered = renderPrompt(input).renderedMarkdown;
+      const command = `Task-context validation command: \`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${path.join(input.node.artifactDir, "generated-tests.json")}' --run-id 'run-1' --logical-node-id '${fixture.logicalId}' --artifact-root '${input.node.artifactDir}'\``;
+
+      expect(rendered, fixture.name).toContain(command);
+      expect(rendered, fixture.name).toContain(`\`node_id\` exactly to \`${fixture.logicalId}\``);
+    }
   });
 
   it("keeps findings guidance bound to a custom declared output path", () => {
@@ -795,6 +828,9 @@ describe("prompt rendering", () => {
       expect(rendered, producer.id).toContain(`\`node_id\` exactly to \`${producer.id}\``);
       expect(rendered, producer.id).toContain(
         `Validation command: \`ultrafuzz json validate --schema '${path.join(workspacePath, ".ultrafuzz", "schemas", "generated-tests.schema.json")}' --file '${path.join(artifactDir, "generated-tests.json")}'\``
+      );
+      expect(rendered, producer.id).toContain(
+        `Task-context validation command: \`ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${path.join(artifactDir, "generated-tests.json")}' --run-id 'generated-test-render' --logical-node-id '${producer.id}' --artifact-root '${artifactDir}'\``
       );
       expect(rendered, producer.id).not.toContain("{{generated_tests_");
     }
