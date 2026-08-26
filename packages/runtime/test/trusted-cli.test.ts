@@ -47,6 +47,33 @@ function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
   return entrypoint;
 }
 
+function countingCliEntrypoint(root: string, counterPath: string): string {
+  const packageRoot = path.join(root, "counting-validator-cli");
+  const entrypoint = path.join(packageRoot, "dist", "validator-cli.mjs");
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "counting-validator-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    entrypoint,
+    [
+      'import fs from "node:fs";',
+      `fs.appendFileSync(${JSON.stringify(counterPath)}, "x");`,
+      `process.stdout.write(${JSON.stringify(JSON.stringify(preflightEnvelope()))});`,
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
+}
+
+function countCliInvocations(counterPath: string): number {
+  return fs.existsSync(counterPath) ? fs.readFileSync(counterPath, "utf8").length : 0;
+}
+
 function fakeTransitiveCli(root: string, output: string): { entrypoint: string; dependencyEntrypoint: string } {
   const cliRoot = path.join(root, "transitive-validator-cli");
   const dependencyRoot = path.join(root, "transitive-validator-build");
@@ -334,6 +361,44 @@ test("trusted CLI identity is schema-valid and target PATH entries cannot shadow
     { encoding: "utf8", env: { ...process.env, ...trusted.env, PATH: commandPath } }
   );
   assert.equal((JSON.parse(output) as { data?: { status?: string } }).data?.status, "valid");
+});
+
+test("an authenticated closure content address is preflighted once per process", () => {
+  const root = temporaryRoot();
+  const counterPath = path.join(root, "validator-cli-invocations");
+  const entrypoint = countingCliEntrypoint(root, counterPath);
+
+  const first = createRunLayout({ projectRoot: root, runId: "closure-preflight-first" });
+  const firstTrusted = prepareTrustedCliEnvironment({ layout: first, cliEntrypoint: entrypoint });
+  assert.equal(countCliInvocations(counterPath), 1);
+
+  // A second run publishes the same content address, so its closure needs no
+  // second fixture execution to be authenticated.
+  const second = createRunLayout({ projectRoot: root, runId: "closure-preflight-second" });
+  const secondTrusted = prepareTrustedCliEnvironment({ layout: second, cliEntrypoint: entrypoint });
+  assert.equal(countCliInvocations(counterPath), 1);
+
+  // Every run still executes the real fixture through its own launcher.
+  runTrustedJsonValidatorPreflight({ layout: first, trusted: firstTrusted });
+  runTrustedJsonValidatorPreflight({ layout: second, trusted: secondTrusted });
+  assert.equal(countCliInvocations(counterPath), 3);
+
+  // ... and the reused content address is still verified byte for byte.
+  const metadata = JSON.parse(fs.readFileSync(path.join(second.root, "trusted-cli.json"), "utf8")) as {
+    cli_entrypoint: string;
+  };
+  fs.chmodSync(metadata.cli_entrypoint, 0o600);
+  fs.appendFileSync(metadata.cli_entrypoint, "\n");
+  const secondLauncherPath = secondTrusted.launcherPath;
+  assert.ok(secondLauncherPath);
+  assert.throws(
+    () => assertTrustedCliLauncher({ layout: second, launcherPath: secondLauncherPath }),
+    /trusted CLI closure file/u
+  );
+  assert.throws(
+    () => prepareTrustedCliEnvironment({ layout: second, cliEntrypoint: entrypoint }),
+    /trusted CLI closure file/u
+  );
 });
 
 test("trusted CLI initialization resumes an authenticated launcher publication crash", () => {
