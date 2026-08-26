@@ -2445,6 +2445,7 @@ fs.writeFileSync(${JSON.stringify(observationPath)}, JSON.stringify({
         })
       ).resolves.toMatchObject({
         status: "finished",
+        output: { completed: true },
         remoteRunId: "sandbox-one",
         workspaceId: "run-one/attempt-one/base"
       });

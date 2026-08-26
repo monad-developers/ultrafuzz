@@ -411,7 +411,9 @@ async function runModalNodeSandbox(
     });
     return {
       status: "finished",
-      output: { summary: "cloud attempt completed and published" },
+      // The provider owns this process marker after durable result publication;
+      // model-authored terminal telemetry is not part of the Sandbox output contract.
+      output: { completed: true },
       remoteRunId: sandbox.sandboxId,
       workspaceId: result.storage_lineage,
       containerId: sandbox.sandboxId
