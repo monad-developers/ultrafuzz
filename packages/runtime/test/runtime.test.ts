@@ -18222,6 +18222,40 @@ test("controller refresh preserves run authority and retains both immutable gene
   }
 });
 
+test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-packaged-adapters";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
+  if (!before.ok) return;
+
+  const projectPiPath = path.join(project, ".smithers", "agents", "pi.ts");
+  const unexpectedProjectAdapter = path.join(project, ".smithers", "agents", "unexpected.ts");
+  const untrustedProjectBytes = "export const projectOwnedAdapter = true;\n";
+  fs.writeFileSync(projectPiPath, untrustedProjectBytes, "utf8");
+  fs.writeFileSync(unexpectedProjectAdapter, "export const unexpected = true;\n", "utf8");
+
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
+  if (!after.ok) return;
+  assert.notEqual(after.controllerGeneration, before.controlGeneration);
+  assert.notEqual(
+    fs.readFileSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "pi.ts"), "utf8"),
+    untrustedProjectBytes
+  );
+  assert.equal(fs.existsSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "unexpected.ts")), false);
+  assert.equal(fs.readFileSync(projectPiPath, "utf8"), untrustedProjectBytes);
+  assert.equal(fs.existsSync(unexpectedProjectAdapter), true);
+});
+
 test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
