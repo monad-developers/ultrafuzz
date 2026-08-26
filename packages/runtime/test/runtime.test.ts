@@ -6174,6 +6174,17 @@ bunAdapterTest(
       assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
 
+      // Pi names its NDJSON CLI mode `json`, but Smithers must treat that
+      // transcript as `stream-json` so the interpreter's terminal answer wins
+      // over earlier JSON-shaped tool results.
+      const jsonCommand = await agent.buildCommand({
+        prompt: "find a bug",
+        cwd: project,
+        options: { onEvent: () => undefined }
+      });
+      assert.deepEqual(jsonCommand.args.slice(0, 3), ["--print", "--mode", "json"]);
+      assert.equal(jsonCommand.outputFormat, "stream-json");
+
       // Isolation: pi's config directory and session storage stay off the
       // operator's real home (~/.pi/agent), and install telemetry is off.
       assert.equal(agent.opts.env.PI_CODING_AGENT_DIR, configDir);
@@ -6181,9 +6192,9 @@ bunAdapterTest(
       assert.equal(agent.opts.env.PI_TELEMETRY, "0");
       assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
 
-      // A text-free terminal assistant message is authoritative. Smithers
-      // otherwise retains the earlier delta and presents progress narration as
-      // the answer, which can poison a caller's structured-output repair pass.
+      // A text-free successful terminal assistant message is authoritative.
+      // Its transport-owned summary prevents both stale progress and the
+      // lower-level whole-transcript fallback from becoming structured output.
       const textFreeInterpreter = agent.createOutputInterpreter();
       textFreeInterpreter.onStdoutLine?.(
         JSON.stringify({
@@ -6215,7 +6226,9 @@ bunAdapterTest(
         ? textFreeCompletion.find((event) => event.type === "completed")
         : textFreeCompletion;
       assert.equal(textFreeCompleted?.type, "completed");
-      assert.equal(Object.hasOwn(textFreeCompleted ?? {}, "answer"), false);
+      assert.deepEqual(JSON.parse(textFreeCompleted?.answer ?? "null"), {
+        summary: "Pi completed successfully without terminal assistant text; verify the declared artifacts."
+      });
 
       // A later terminal assistant message with text still replaces any
       // earlier progress and is returned unchanged.
