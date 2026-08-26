@@ -83,6 +83,98 @@ test("still captures an edit to a tracked file under lib", () => {
   }
 });
 
+/**
+ * Issue #910. Task workspaces are LINKED WORKTREES, and a submodule inside one carries the `.git`
+ * pointer it inherited from the main checkout — `gitdir: ../../.git/modules/<path>`. That relative
+ * path resolves only from the main checkout; from a linked worktree, whose `.git` is
+ * `<project>/.git/worktrees/<name>`, it names nothing. Naming the tracked gitlink in the staging
+ * `git add` made Git open that repository, and `git add` fails as a whole invocation:
+ *
+ *   fatal: not a git repository: lib/forge-std/../../.git/modules/lib/forge-std
+ *
+ * A Foundry target has submodules essentially by definition, so this failed 6 of 63 verify lanes in
+ * one run and, through a lane that was not `continueOnFail`, ended a 13-hour run at 93%.
+ */
+function submoduleWorkspaceFixture(): { project: string; workspace: string; scratch: string } {
+  const scratch = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-submodule-"));
+  const dependency = path.join(scratch, "forge-std");
+  mkdirSync(dependency);
+  git(dependency, ["init", "--quiet", "--initial-branch=main"]);
+  git(dependency, ["config", "user.name", "Ultrafuzz test"]);
+  git(dependency, ["config", "user.email", "ultrafuzz@example.invalid"]);
+  writeFileSync(path.join(dependency, "Vm.sol"), "interface Vm {}\n");
+  git(dependency, ["add", "-A"]);
+  git(dependency, ["commit", "--quiet", "-m", "forge-std"]);
+
+  const project = path.join(scratch, "project");
+  mkdirSync(project);
+  git(project, ["init", "--quiet", "--initial-branch=main"]);
+  git(project, ["config", "user.name", "Ultrafuzz test"]);
+  git(project, ["config", "user.email", "ultrafuzz@example.invalid"]);
+  writeFileSync(path.join(project, "foundry.toml"), "[profile.default]\ntest = 'tests'\n");
+  git(project, ["add", "-A"]);
+  git(project, ["commit", "--quiet", "-m", "fixture"]);
+  // `protocol.file.allow` defaults to `user` since the CVE-2022-39253 fix, which refuses a local
+  // submodule source. Nothing else about the fixture depends on the transport.
+  git(project, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", dependency, "lib/forge-std"]);
+  git(project, ["commit", "--quiet", "-m", "add submodule"]);
+
+  const workspace = path.join(scratch, "workspace");
+  git(project, ["worktree", "add", "--quiet", "--detach", workspace, "HEAD"]);
+  // `git worktree add` leaves the gitlink directory empty. Reproduce the production shape exactly:
+  // the submodule content plus the `.git` pointer the main checkout holds, byte for byte.
+  const submodule = path.join(workspace, "lib", "forge-std");
+  mkdirSync(submodule, { recursive: true });
+  writeFileSync(path.join(submodule, "Vm.sol"), "interface Vm {}\n");
+  writeFileSync(path.join(submodule, ".git"), readFileSync(path.join(project, "lib", "forge-std", ".git")));
+
+  assert.match(
+    readFileSync(path.join(submodule, ".git"), "utf8"),
+    /^gitdir: \.\.\/\.\.\/\.git\/modules\/lib\/forge-std\n?$/u,
+    "fixture must reproduce the inherited relative gitdir pointer"
+  );
+  assert.throws(
+    () => git(submodule, ["rev-parse", "--git-dir"]),
+    "fixture pointer must be unresolvable from the linked worktree, as it is in production"
+  );
+  return { project, workspace, scratch };
+}
+
+test("captures a workspace patch in a linked worktree whose submodule gitdir does not resolve", () => {
+  const { workspace, scratch } = submoduleWorkspaceFixture();
+  try {
+    // Not `captureWorkspaceTree`, so the assertion lands inside `captureWorkspacePatch` itself
+    // rather than in a helper that stages the same tree.
+    const baseline = git(workspace, ["rev-parse", "HEAD^{tree}"]).trim();
+    writeFileSync(path.join(workspace, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
+
+    const captured = captureWorkspacePatch(workspace, baseline);
+
+    // The authored edit still reaches the patch: the exclusion is gitlinks, not the whole tree.
+    assert.deepEqual(
+      captured.manifest.files.map((entry) => entry.path),
+      ["UltrafuzzSmoke.t.sol"]
+    );
+    // A gitlink can never yield an applicable patch — `validateWorkspacePatchCapture` rejects mode
+    // 160000 outright — so it must not appear here either.
+    assert.doesNotMatch(captured.patch, /160000/u);
+    assert.doesNotMatch(captured.patch, /forge-std/u);
+    validateWorkspacePatchCapture(workspace, captured, ["src", "contracts"]);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("captures a workspace tree in a linked worktree whose submodule gitdir does not resolve", () => {
+  const { workspace, scratch } = submoduleWorkspaceFixture();
+  try {
+    // `applyWorkspacePatch` calls this on every replay, so it has to survive the same shape.
+    assert.match(captureWorkspaceTree(workspace), /^[0-9a-f]{40,64}$/u);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("captures tracked and untracked setup changes relative to the dependency baseline", () => {
   const root = fixture();
   try {
