@@ -886,7 +886,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         workflowLinkId: evidence.workflowLinkId,
         controlGeneration: evidence.controlGeneration,
         controllerGeneration: evidence.controllerGeneration,
-        env: lifecycleEnvironment
+        env: lifecycleEnvironment,
+        // The same authenticated lifecycle invocation will retry genuine
+        // Smithers failures after controller-only false failures are handled.
+        // Standalone re-finalization retains its explicit no-candidate error.
+        ...(retryFailedLifecycle ? { allowNoEligibleForRetry: true } : {})
       });
       if (!refinalization.ok) {
         return runtimeFailure<WorkflowLifecycleValue>(refinalization.diagnostics);

@@ -374,6 +374,8 @@ export interface ControllerFailureRefinalizationInput {
   controlGeneration: string;
   controllerGeneration: string;
   env: Record<string, string | undefined>;
+  /** Permit a zero-op only when the caller will immediately retry genuine workflow failures. */
+  allowNoEligibleForRetry?: boolean;
 }
 
 export type ControllerFailureRefinalizationResult =
@@ -727,7 +729,7 @@ export async function refinalizeControllerFailures(
       });
       refinalized += 1;
     }
-    if (refinalized === 0 && !observedCompletedOperation) {
+    if (refinalized === 0 && !observedCompletedOperation && input.allowNoEligibleForRetry !== true) {
       throw new Error("no eligible immutable controller false failures were found");
     }
     return { ok: true, refinalized, diagnostics: [] };
@@ -794,6 +796,13 @@ function eligibleControllerFalseFailureAttempt(
   const failure = recordField(provenance, "failure");
   const workflow = recordField(provenance, "workflow");
   const attempt = numberField(workflow, "attempt");
+  // An explicit non-finished verifier state is a genuine workflow failure,
+  // not a controller false failure. It carries no successful verifier output
+  // that controller-only finalization could authenticate or replay. Leave the
+  // immutable failure untouched so an atomic retry-failed resume can handle it.
+  if (workflow?.state !== undefined && workflow.state !== "finished") {
+    return undefined;
+  }
   if (
     contracts?.ok !== false ||
     failure?.category !== "artifact-contract" ||
@@ -805,7 +814,6 @@ function eligibleControllerFalseFailureAttempt(
     workflow.task_id !== task.verifierSmithersNodeId ||
     workflow.agent_task_id !== task.smithersNodeId ||
     workflow.verifier_task_id !== task.verifierSmithersNodeId ||
-    (workflow.state !== undefined && workflow.state !== "finished") ||
     attempt === undefined ||
     !Number.isSafeInteger(attempt) ||
     attempt < 1
