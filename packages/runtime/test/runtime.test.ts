@@ -6485,8 +6485,8 @@ bunAdapterTest(
       assert.equal(agent.opts.env.PI_CODING_AGENT_SESSION_DIR, undefined);
 
       // A text-free successful terminal assistant message is authoritative.
-      // Its transport-owned summary prevents both stale progress and the
-      // lower-level whole-transcript fallback from becoming structured output.
+      // It suppresses stale progress and lower-level whole-transcript fallback
+      // without fabricating a model-authored task result.
       const textFreeInterpreter = agent.createOutputInterpreter();
       textFreeInterpreter.onStdoutLine?.(
         JSON.stringify({
@@ -6518,9 +6518,7 @@ bunAdapterTest(
         ? textFreeCompletion.find((event) => event.type === "completed")
         : textFreeCompletion;
       assert.equal(textFreeCompleted?.type, "completed");
-      assert.deepEqual(JSON.parse(textFreeCompleted?.answer ?? "null"), {
-        summary: "Pi completed successfully without terminal assistant text; verify the declared artifacts."
-      });
+      assert.equal(textFreeCompleted?.answer, undefined);
 
       // A later terminal assistant message with text still replaces any
       // earlier progress and is returned unchanged.
@@ -9560,8 +9558,9 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(compiled.pinnedSubmodules, undefined);
   assert.match(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
-  assert.match(workflowSource, /const taskOutput = z\.strictObject\(\{/);
-  assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
+  assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{/);
+  assert.match(workflowSource, /completed: z\.literal\(true\)/);
+  assert.doesNotMatch(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
   assert.match(workflowSource, /smithers-display-name: Ultrafuzz native-deps/);
   assert.doesNotMatch(workflowSource, /__ULTRAFUZZ_/);
   assert.doesNotMatch(workflowSource, /const layers =/);
@@ -10786,7 +10785,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       );
     }
   }
-  assert.match(workflowSource, /const taskOutput = z\.strictObject\(/u);
+  assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{[\s\S]*?completed: z\.literal\(true\)/u);
+  assert.doesNotMatch(workflowSource, /const taskOutput|summary: z\.string\(\)\.min\(1\)/u);
   assert.match(workflowSource, /const preparationOutput = z\.strictObject\(/u);
   assert.match(workflowSource, /const verificationOutput = z\.strictObject\(/u);
   assert.doesNotMatch(workflowSource, /z\.object\(/u);
@@ -10813,7 +10813,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await executionAgent\.generate\(attemptArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?return result/u
+    /const result = await executionAgent\.generate\(unstructuredArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.doesNotMatch(
     workflowSource,

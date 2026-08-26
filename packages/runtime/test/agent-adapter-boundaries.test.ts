@@ -140,7 +140,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "a8b4ee4a16c045a15971c113ba0393cd71e5f8bd3cb662ae85a36fe9e7abdcd5",
+    classifiedSourceSha256: "39436a3e826abc604eec83de0a6c00fc4e71a1f23ee8818f1abeb40e3b174756",
     responsibilities: ["argv-construction", "output-interpretation"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/895",
@@ -221,7 +221,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 200,
     maxSyntaxNodes: 1_100,
     purpose: "adapter",
-    sourceSha256: "a8b4ee4a16c045a15971c113ba0393cd71e5f8bd3cb662ae85a36fe9e7abdcd5"
+    sourceSha256: "39436a3e826abc604eec83de0a6c00fc4e71a1f23ee8818f1abeb40e3b174756"
   },
   "provider-home.tsx": {
     maxLines: 75,

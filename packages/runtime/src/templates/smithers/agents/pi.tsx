@@ -22,9 +22,6 @@ const PI_PROVIDER = "openrouter";
 const PI_CREDENTIAL_ENV = "OPENROUTER_API_KEY";
 const PI_CONFIG_DIR = ".ultrafuzz/pi-coding-agent";
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-const PI_TEXT_FREE_TERMINAL_SUMMARY = JSON.stringify({
-  summary: "Pi completed successfully without terminal assistant text; verify the declared artifacts."
-});
 
 export class CompatiblePiAgent extends SmithersPiAgent {
   override async buildCommand(params: PiCommandParams): Promise<PiCommand> {
@@ -107,12 +104,6 @@ function applyPiTerminalAnswer<T>(events: T, terminalEvents: unknown): T {
     if (event?.type !== "completed") continue;
     if (typeof terminalCompletion.answer === "string" && terminalCompletion.answer.trim().length > 0) {
       event.answer = terminalCompletion.answer;
-    } else if (terminalCompletion.ok === true) {
-      // Agent tasks publish their substantive result through declared artifact
-      // contracts; `summary` is transport telemetry. A successful tool-only
-      // terminal message therefore gets a schema-valid transport summary so
-      // Smithers never falls back to unrelated historical NDJSON payloads.
-      event.answer = PI_TEXT_FREE_TERMINAL_SUMMARY;
     } else {
       delete event.answer;
     }

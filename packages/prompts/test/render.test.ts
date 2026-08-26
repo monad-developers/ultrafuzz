@@ -991,13 +991,12 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("severity_guess");
     expect(result.renderedMarkdown).toContain("generated_tests");
     expect(result.renderedMarkdown).toContain("write each artifact to the exact absolute path");
-    expect(result.renderedMarkdown).toContain("return only the structured task result requested by the runtime");
-    expect(result.renderedMarkdown).toContain(
-      "runtime's output schema alone owns that response's keys, types, and envelope"
-    );
-    expect(result.renderedMarkdown).toContain("schema-defined summary value");
+    expect(result.renderedMarkdown).toContain("the declared artifacts are the task result");
+    expect(result.renderedMarkdown).toContain("Any terminal response is informational only");
+    expect(result.renderedMarkdown).toContain("it has no required schema");
     expect(result.renderedMarkdown).not.toContain('{"summary":');
-    expect(result.renderedMarkdown).toContain("Do not add Markdown fences");
+    expect(result.renderedMarkdown).not.toContain("structured task result requested by the runtime");
+    expect(result.renderedMarkdown).not.toContain("schema-defined summary value");
   });
 
   it("rejects legacy ancestor collection helpers with compact-authority migrations", () => {

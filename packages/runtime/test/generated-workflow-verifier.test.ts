@@ -79,7 +79,7 @@ function generatedTestEntry(
 function loadGeneratedWorkflowInputSchema(): { safeParse(value: unknown): { success: boolean } } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const schemaStart = source.indexOf("const inputTaskSchema");
-  const schemaEnd = source.indexOf("\n\nconst taskOutput", schemaStart);
+  const schemaEnd = source.indexOf("\n\nconst agentProcessOutput", schemaStart);
   assert.ok(schemaStart >= 0, source);
   assert.ok(schemaEnd > schemaStart, source);
   const schemaSource = source
@@ -213,6 +213,7 @@ test("the workflow runner can project the generated workflow input into its inpu
 type ArtifactAwareAgentFixture = {
   cliEngine?: string;
   hijackEngine?: string;
+  supportsNativeStructuredOutput?: boolean;
   parseFileChanges?(rawEvent: unknown): unknown[] | undefined;
   checkpointCapabilities?: readonly unknown[];
   checkpointFormats?: readonly unknown[];
@@ -312,6 +313,46 @@ async function captureAgentFailure(
   }
   return assert.fail("agent failure was not propagated");
 }
+
+test("artifact-aware agents own process completion without constraining terminal responses", async () => {
+  const terminalResults: unknown[] = [
+    { text: "completed in prose" },
+    { text: '{"summary":"model-authored telemetry"}', output: { summary: "model-authored telemetry" } },
+    { text: "" },
+    undefined
+  ];
+
+  for (const terminalResult of terminalResults) {
+    const calls: Array<Record<string, unknown>> = [];
+    const preflights: Array<Record<string, unknown>> = [];
+    const underlying = {
+      supportsNativeStructuredOutput: false,
+      async preflight(args: unknown): Promise<void> {
+        preflights.push(args as Record<string, unknown>);
+      },
+      async generate(args: unknown): Promise<unknown> {
+        calls.push(args as Record<string, unknown>);
+        return terminalResult;
+      }
+    };
+    const wrapped = loadArtifactAwareAgent()({ agentChain: [{}] }, 0, "prompt", underlying);
+    const outputSchema = { description: "must never reach the model adapter" };
+
+    assert.equal(wrapped.supportsNativeStructuredOutput, true);
+    await wrapped.preflight!({ outputSchema });
+    const result = (await wrapped.generate({
+      outputSchema,
+      taskContext: { attempt: 1 }
+    })) as Record<string, unknown>;
+
+    assert.equal(Object.hasOwn(preflights[0]!, "outputSchema"), false);
+    assert.equal(Object.hasOwn(calls[0]!, "outputSchema"), false);
+    assert.deepEqual(result._output, { completed: true });
+    if (terminalResult !== null && typeof terminalResult === "object") {
+      assert.equal(result.text, (terminalResult as Record<string, unknown>).text);
+    }
+  }
+});
 
 async function withEnvironment(values: Record<string, string>, callback: () => Promise<void>): Promise<void> {
   const previous = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
@@ -6020,7 +6061,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
   }
 });
 
-test("generated verifiers require a successful upstream task output before publishing artifacts", () => {
+test("generated verifiers require the runtime-owned process marker before publishing artifacts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
   const finalizerEnd = source.indexOf("\n\nfunction verifyArtifacts", finalizerStart);
@@ -6028,12 +6069,14 @@ test("generated verifiers require a successful upstream task output before publi
   assert.ok(finalizerStart >= 0 && finalizerEnd > finalizerStart, source);
   const finalizer = source.slice(finalizerStart, finalizerEnd);
 
-  assert.match(finalizer, /agentTaskOutput: z\.infer<typeof taskOutput> \| undefined/u);
-  assert.match(finalizer, /taskOutput\.safeParse\(agentTaskOutput\)\.success/u);
-  assert.ok(finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("taskOutput.safeParse"));
-  assert.ok(finalizer.indexOf("taskOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
+  assert.match(finalizer, /agentProcess: z\.infer<typeof agentProcessOutput> \| undefined/u);
+  assert.match(finalizer, /agentProcessOutput\.safeParse\(agentProcess\)\.success/u);
+  assert.ok(
+    finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("agentProcessOutput.safeParse")
+  );
+  assert.ok(finalizer.indexOf("agentProcessOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
   assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 2);
-  assert.equal(workflow.match(/deps=\{\{ agent: outputs\.task \}\}/gu)?.length, 2);
+  assert.equal(workflow.match(/deps=\{\{ agent: outputs\.agentProcess \}\}/gu)?.length, 2);
   assert.equal(workflow.match(/depsOptional/gu)?.length, 2);
   assert.equal(workflow.match(/\{\(deps\) => finalizeAndVerifyArtifacts\(task, deps\.agent\)\}/gu)?.length, 2);
   assert.doesNotMatch(workflow, /\{\(\) => finalizeAndVerifyArtifacts\(task\)\}/u);
@@ -6555,7 +6598,9 @@ test("generated prompt authority is derived from sealed controls immediately bef
     reset,
     /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
   );
-  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(attemptArgs)"));
+  assert.ok(
+    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
+  );
   assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)/u);
   assert.match(
     agent,
@@ -6563,7 +6608,7 @@ test("generated prompt authority is derived from sealed controls immediately bef
   );
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.match(
     agent,
@@ -6710,13 +6755,16 @@ test("generated task-local prompt authority is minimized, tamper-evident, and re
         return { summary: `generation-${generation}` };
       }
     });
-    assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), { summary: "generation-1" });
+    assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), {
+      summary: "generation-1",
+      _output: { completed: true }
+    });
     assert.deepEqual(
       await wrapped.generate({
         messages: [{ role: "user", content: "correct the schema" }],
         taskContext: { attempt: 1 }
       }),
-      { summary: "generation-2" }
+      { summary: "generation-2", _output: { completed: true } }
     );
     await assert.rejects(
       () => wrapped.generate({ taskContext: { attempt: 2 } }),
@@ -6754,7 +6802,10 @@ test("generated task-local prompt authority is minimized, tamper-evident, and re
         }
       });
       if (outcome === "schema-correction") {
-        assert.deepEqual(await tamperAware.generate({ taskContext: { attempt: 1 } }), { summary: "candidate" });
+        assert.deepEqual(await tamperAware.generate({ taskContext: { attempt: 1 } }), {
+          summary: "candidate",
+          _output: { completed: true }
+        });
       }
       await assert.rejects(
         () =>
@@ -7461,7 +7512,7 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
     taskContext: { attempt: 2 }
   });
 
-  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(result, { ok: true, _output: { completed: true } });
   assert.equal(resets, 2);
   assert.equal(sourceVerifications, 2);
   assert.equal(calls[1]?.prompt, "worktree isolation\n\nthe original task prompt\n\nstructured output contract");
@@ -7700,7 +7751,10 @@ test("agent preflight and generation share one lazily admitted agent instance", 
   });
 
   await wrapped.preflight!({});
-  assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), { summary: "admitted" });
+  assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), {
+    summary: "admitted",
+    _output: { completed: true }
+  });
   assert.equal(metadataPreflights, 0);
   assert.equal(admittedFactories, 1);
   assert.equal(admittedPreflights, 1);
@@ -7727,11 +7781,11 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   assert.match(workflowSource, /const MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES = MAX_PRE_AGENT_EVIDENCE_BYTES;/u);
   assert.ok(
     agentSource.indexOf("materializeFinalReportPromptAuthority(task") <
-      agentSource.indexOf("executionAgent.generate(attemptArgs)")
+      agentSource.indexOf("executionAgent.generate(unstructuredArgs)")
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?const result = await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),
@@ -8180,7 +8234,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
   assert.match(agent, /Reflect\.deleteProperty\(freshArgs, "messages"\)/u);
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
 });
 
@@ -8246,7 +8300,7 @@ test("generated Smithers resets exact task-owned artifact contents before every 
   const agent = source.slice(agentStart, rootsStart);
   assert.match(agent, /if \(firstGenerationForAttempt\)/u);
   assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(attemptArgs)"),
+    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)"),
     agent
   );
 
@@ -8351,7 +8405,7 @@ test("generated Smithers agent boundary performs only task-local authority check
   const agent = source.slice(agentStart, agentEnd);
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*const result = await executionAgent\.generate\(attemptArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*return result/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.doesNotMatch(
     agent,
