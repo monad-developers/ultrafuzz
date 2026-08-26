@@ -146,11 +146,16 @@ cross-provider disclosure; it is not an OS isolation boundary or a promise that
 subscription credentials are inaccessible to an unrestricted local agent.
 
 Schema-backed tasks also receive a host-managed `ultrafuzz` launcher before
-target-controlled `PATH` entries. Its pinned CLI, schema-bundle, and validator
-identity are preflighted with a real fixture before model work, and every
-registered schema path is checked against its pinned digest. This keeps the
-producer and host on the same contract; it does not turn same-UID local agent
-execution into an OS security boundary.
+target-controlled `PATH` entries. The CLI and its complete transitive package
+closure are copied into a run-owned content-addressed, read-only generation;
+the launcher verifies that closure before every invocation, removes ambient Node
+loader/search injection, and rejects ESM or CommonJS modules resolved outside
+it. Module confinement does not prevent the validator from reading the artifact
+or schema paths it was asked to check. Its pinned CLI, schema-bundle, and
+validator identity are preflighted with a real fixture before model work, and
+every registered schema path is checked against its pinned digest. This keeps
+the producer and host on the same contract; it does not turn same-UID local
+agent execution into an OS security boundary.
 
 The workflow engine is installed by the controller rather than from the target
 repository. Ultrafuzz verifies the complete closure of its exact npm dependency,

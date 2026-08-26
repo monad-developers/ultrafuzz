@@ -226,8 +226,15 @@ function validatorPreflightResponse(): Record<string, unknown> {
 }
 
 function fakeUltrafuzzCliEntrypoint(project: string): string {
-  const entrypoint = path.join(project, "fake-ultrafuzz-cli.mjs");
+  const packageRoot = path.join(project, ".fake-ultrafuzz-cli");
+  const entrypoint = path.join(packageRoot, "dist", "index.mjs");
   if (fs.existsSync(entrypoint)) return entrypoint;
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "fake-ultrafuzz-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(
     entrypoint,
     `process.stdout.write(${JSON.stringify(JSON.stringify(validatorPreflightResponse()))});\n`,
@@ -19625,7 +19632,7 @@ test("controller refresh relaunches an exact current missing-history run from th
   assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), true);
 });
 
-test("controller refresh rotates a rebuilt trusted CLI identity before resume", async () => {
+test("ordinary resume keeps the sealed CLI and controller refresh rotates a rebuilt closure", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -19639,8 +19646,8 @@ test("controller refresh rotates a rebuilt trusted CLI identity before resume", 
   fs.chmodSync(entrypoint, 0o500);
 
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(ordinary.ok, false);
-  assert.match(JSON.stringify(ordinary.diagnostics), /identity changed since this run was planned/u);
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  assert.equal(ordinary.value?.submitted, true);
 
   const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));

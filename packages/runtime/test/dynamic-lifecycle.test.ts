@@ -226,7 +226,8 @@ function lifecycleEnvironment(project: string): {
 }
 
 function fakeUltrafuzzCliEntrypoint(project: string): string {
-  const entrypoint = path.join(project, "validator-cli.mjs");
+  const packageRoot = path.join(project, ".fake-ultrafuzz-cli");
+  const entrypoint = path.join(packageRoot, "dist", "index.mjs");
   const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
   const preflightResponse = {
@@ -248,6 +249,12 @@ function fakeUltrafuzzCliEntrypoint(project: string): string {
       truncated: false
     }
   };
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "fake-ultrafuzz-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(entrypoint, `process.stdout.write(${JSON.stringify(JSON.stringify(preflightResponse))});\n`, "utf8");
   fs.chmodSync(entrypoint, 0o500);
   return entrypoint;
