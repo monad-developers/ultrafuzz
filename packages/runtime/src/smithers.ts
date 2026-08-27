@@ -786,6 +786,21 @@ export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath =
       workflowPath,
       identityWorkflowPath || workflowPath,
     );`;
+// Restores exactly the two states upstream's `isTerminalState` calls terminal
+// unconditionally: `finished` and `skipped`. `failed`, `cancelled` and Smithers
+// 0.35.0's new `stalled` are deliberately NOT restored, and the omission of
+// `stalled` is the deliberate half of that rule, not an oversight from the
+// 0.35.0 bump. Upstream classes `stalled` with `failed` ("it behaves exactly
+// like `failed`, including the continueOnFail escape hatch"), and a resume's
+// whole purpose is to re-attempt what did not finish -- restoring `stalled` but
+// not `failed` would make a stalled node strictly less retryable than an
+// ordinary failure, and an operator could not tell a permanently abandoned node
+// from a hung one. The cost of re-running is bounded: 0.35.0 recomputes the
+// identical-failure streak from durable attempt rows on every failure
+// (`@smthrs/engine/src/failure-streak.js`), so a re-run stalled node re-stalls
+// on its first attempt rather than burning the whole retry budget again.
+// `resume --retry-failed` is the explicit escape hatch, and `smithersFailedTasks`
+// resets stalled nodes with the failed ones.
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
   "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),";
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
@@ -3670,7 +3685,12 @@ function smithersFailedTasks(inspect: CurrentSmithersInspect): Array<{ nodeId: s
   // workflow runs every node at iteration 0 and the node id alone identifies the
   // attempt to reset.
   for (const entry of inspect.nodes) {
-    if (entry.state !== "failed") continue;
+    // `stalled` is Smithers 0.35.0's terminal verdict for a node that livelocked
+    // on an identical error; every Ultrafuzz surface already reports it as a
+    // failed node (`statusFromWorkflowState`), so `--retry-failed` has to reset
+    // it too. Skipping it made an operator retry a silent no-op: the run
+    // reported `failed`, and the reset loop issued zero `timetravel` commands.
+    if (entry.state !== "failed" && entry.state !== "stalled") continue;
     failedTasks.set(`${entry.nodeId}::0`, { nodeId: entry.nodeId, iteration: 0 });
   }
   return [...failedTasks.values()];

@@ -27,7 +27,14 @@ export const KIMI_CODE_VERSION = "0.29.1";
 // never installed against. That makes a stale entry inert, not dangerous --
 // but it also means an entry is only useful while its release differed from the
 // current one in `smthrs` alone, which is true of 0.34.0 -> 0.35.0.
-export const MIGRATABLE_PRIOR_SMITHERS_VERSIONS = ["0.33.0", "0.34.0"] as const;
+//
+// Only versions this repository actually pinned belong here. `0.34.0` is the
+// sole `smthrs` pin ever committed (the release before it pinned
+// `smithers-orchestrator@0.32.0`, which the separate stock-0.32 migrator
+// handles), so listing anything else would make the migrator's own promise --
+// that it rewrites nothing it did not itself generate -- false for a manifest
+// Ultrafuzz never wrote.
+export const MIGRATABLE_PRIOR_SMITHERS_VERSIONS = ["0.34.0"] as const;
 
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for

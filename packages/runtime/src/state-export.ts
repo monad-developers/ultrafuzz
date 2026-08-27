@@ -703,6 +703,13 @@ function parseRunHealth(
       "inProgress",
       "pending",
       "failed",
+      // Smithers 0.35.0 initialises `stalled: 0` unconditionally, so the key is
+      // on every status document. It is folded into `failed` below rather than
+      // published as an eleventh count: Ultrafuzz has no `stalled` node status,
+      // and `statusFromWorkflowState` already maps the runner's `stalled` node
+      // state onto `failed`, so a separate bucket here would contradict every
+      // other surface that reports the same node.
+      "stalled",
       "waitingApproval",
       "waitingEvent",
       "waitingTimer",
@@ -719,11 +726,13 @@ function parseRunHealth(
   ) {
     return undefined;
   }
+  const stalled = numberField(counts, "stalled");
+  const reportedFailed = numberField(counts, "failed");
   const parsedCounts = {
     finished: numberField(counts, "finished"),
     in_progress: numberField(counts, "inProgress"),
     pending: numberField(counts, "pending"),
-    failed: numberField(counts, "failed"),
+    failed: reportedFailed === undefined || stalled === undefined ? undefined : reportedFailed + stalled,
     waiting_approval: numberField(counts, "waitingApproval"),
     waiting_event: numberField(counts, "waitingEvent"),
     waiting_timer: numberField(counts, "waitingTimer"),

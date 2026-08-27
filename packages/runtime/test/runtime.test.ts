@@ -6770,12 +6770,20 @@ default_effort = "high"
     fs.mkdirSync(path.join(sourceConfig, "sessions"));
     fs.writeFileSync(path.join(sourceConfig, "sessions", "unrelated.json"), "{}\n", "utf8");
 
-    const options = {
+    // Smithers 0.35.0's BaseCliAgent rejects any constructor option outside the
+    // agent's own allowlist, and `KimiAgent`'s allowlist carries neither the two
+    // `ultrafuzz*` keys nor `apiKey`. The generated adapter therefore splits them
+    // off before `super()`, and this test keeps the two halves apart the same way:
+    // the pinned adapter is constructed from `pinnedOptions` alone.
+    const pinnedOptions = {
       model: "kimi-k3",
       configDir: sourceConfig,
-      ultrafuzzAuthMode: "subscription",
-      ultrafuzzReasoningEffort: "max",
       extraArgs: ["--add-dir", "/workspace/extra"]
+    };
+    const options = {
+      ...pinnedOptions,
+      ultrafuzzAuthMode: "subscription",
+      ultrafuzzReasoningEffort: "max"
     };
 
     const smithersModule = (await import(
@@ -6788,7 +6796,22 @@ default_effort = "high"
         }>;
       };
     };
-    const pinnedBase = new smithersModule.KimiAgent(options);
+    // The pinned adapter must reject the Ultrafuzz-only keys, and the generated
+    // one must accept them. Together these pin the split the adapter's
+    // constructor performs: if a future release widens `CLI_AGENT_OPTION_KEYS`
+    // to admit them, the first assertion fails and the split can be retired
+    // deliberately rather than left as dead indirection.
+    assert.throws(
+      () => new smithersModule.KimiAgent(options),
+      /KimiAgent received unknown options: ultrafuzzAuthMode, ultrafuzzReasoningEffort/u
+    );
+    assert.throws(
+      () => new smithersModule.KimiAgent({ ...pinnedOptions, apiKey: "kimi-key" }),
+      /KimiAgent received unknown option: apiKey/u
+    );
+    assert.doesNotThrow(() => new KimiCode029Agent({ ...options, apiKey: "kimi-key" }));
+
+    const pinnedBase = new smithersModule.KimiAgent(pinnedOptions);
     const pinnedCommand = await pinnedBase.buildCommand({
       prompt: "Pinned Smithers contract",
       cwd: "/workspace/target",

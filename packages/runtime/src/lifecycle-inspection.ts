@@ -80,6 +80,7 @@ interface CurrentWhyDiagnosis {
   summary: string;
   generatedAtMs: number;
   blockers: CurrentWhyBlocker[];
+  warnings: string[];
   information: string[];
   currentNodeId: string | null;
 }
@@ -139,6 +140,7 @@ interface CurrentEventRecord {
 
 interface CurrentNodeTokenUsage extends JsonObject {
   inputTokens: number;
+  freshInputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
@@ -334,7 +336,11 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
       summary: publicWorkflowText(diagnosis.summary),
       current_node_id: diagnosis.currentNodeId,
       blockers: diagnosis.blockers.map(adaptBlocker),
-      notes: diagnosis.information.map(publicWorkflowText),
+      // The runner renders `warnings` and `information` in the same operator
+      // section of `why`, so they land in the same public `notes` list rather
+      // than a new field nothing downstream reads. Warnings lead, matching the
+      // runner's own ordering.
+      notes: [...diagnosis.warnings, ...diagnosis.information].map(publicWorkflowText),
       generated_at: timestampFromMs(diagnosis.generatedAtMs)
     },
     syncDiagnostics
@@ -654,6 +660,11 @@ const CURRENT_WHY_BLOCKER_KINDS = [
   "stale-task-heartbeat",
   "retry-backoff",
   "retries-exhausted",
+  // Smithers 0.35.0 raises a `stalled` blocker for every node the scheduler
+  // parked after an identical-error streak. It is a terminal failure verdict
+  // that behaves like `failed` upstream, and `why` emits it for any run with
+  // such a node, so a closed enum without it rejects the whole diagnosis.
+  "stalled",
   "stale-heartbeat",
   "engine-busy",
   "dependency-failed",
@@ -669,6 +680,9 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "RunStarted",
   "RunStatusChanged",
   "RunStateChanged",
+  // New in Smithers 0.35.0: category `run`, so `ultrafuzz events --type run`
+  // streams it, and it is what `why` turns into a durable concurrency warning.
+  "RunConcurrencySaturated",
   "RunFinished",
   "RunFailed",
   "RunCancelled",
@@ -699,6 +713,9 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "TaskHeartbeatTimeout",
   "NodeFinished",
   "NodeFailed",
+  // New in Smithers 0.35.0, and in the runner's DEFAULT_LIFECYCLE_EVENT_TYPES,
+  // so a bare `ultrafuzz events <run>` streams it without any `--type` filter.
+  "NodeStalled",
   "NodeCancelled",
   "NodeSkipped",
   "NodeRetrying",
@@ -742,9 +759,16 @@ function parseCurrentWhyDiagnosis(
   expectedWorkflowRunId: string
 ): CurrentWhyDiagnosis {
   const data = currentCommandData(snapshot, "why");
-  assertExactKeys(
+  // `warnings` is required, not optional: Smithers 0.35.0 builds it as
+  // `concurrencyWarning ? [warning] : []` and spreads it unconditionally on
+  // every one of `buildDiagnosis`'s return paths, so `[]` serializes as a
+  // present key on every diagnosis of every run. `steers` is the one genuinely
+  // conditional key -- the `why` command appends it only when the run has
+  // queued steers -- and it has been conditional since 0.34.0.
+  assertRequiredAndAllowedKeys(
     data,
-    ["runId", "status", "summary", "generatedAtMs", "blockers", "information", "currentNodeId"],
+    ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId"],
+    ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId", "steers"],
     "workflow diagnosis"
   );
   const runId = requiredString(data.runId, "workflow diagnosis runId");
@@ -758,6 +782,7 @@ function parseCurrentWhyDiagnosis(
     summary: requiredString(data.summary, "workflow diagnosis summary"),
     generatedAtMs: requiredTimestampMs(data.generatedAtMs, "workflow diagnosis generatedAtMs"),
     blockers,
+    warnings: requiredStringArray(data.warnings, "workflow diagnosis warnings", { allowEmpty: true }),
     information: requiredStringArray(data.information, "workflow diagnosis information", { allowEmpty: true }),
     currentNodeId: requiredNullableString(data.currentNodeId, "workflow diagnosis currentNodeId")
   };
@@ -1245,6 +1270,11 @@ function parseCurrentNodeTokenUsage(value: unknown, label: string): CurrentNodeT
     row,
     [
       "inputTokens",
+      // Smithers 0.35.0's `node` detail seeds `freshInputTokens` in
+      // `emptyTokenUsage()` and carries it through every parse, merge and
+      // aggregate, so it is present on the aggregate and on every
+      // `byAttempt[].usage` of every node of every run.
+      "freshInputTokens",
       "outputTokens",
       "cacheReadTokens",
       "cacheWriteTokens",
@@ -1258,6 +1288,7 @@ function parseCurrentNodeTokenUsage(value: unknown, label: string): CurrentNodeT
   );
   return {
     inputTokens: requiredCount(row.inputTokens, `${label} inputTokens`),
+    freshInputTokens: requiredCount(row.freshInputTokens, `${label} freshInputTokens`),
     outputTokens: requiredCount(row.outputTokens, `${label} outputTokens`),
     cacheReadTokens: requiredCount(row.cacheReadTokens, `${label} cacheReadTokens`),
     cacheWriteTokens: requiredCount(row.cacheWriteTokens, `${label} cacheWriteTokens`),
@@ -1278,6 +1309,7 @@ function parseCurrentAggregateTokenUsage(
     row,
     [
       "inputTokens",
+      "freshInputTokens",
       "outputTokens",
       "cacheReadTokens",
       "cacheWriteTokens",

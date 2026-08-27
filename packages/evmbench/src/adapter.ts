@@ -51,8 +51,8 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   const runRoot = path.join(auditRoot, ".ultrafuzz", "runs", runId);
   if (fs.existsSync(runRoot)) {
     const existing = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
-    assertEvmbenchVerdictCanProgress(runId, existing.verdict, existing.reason, true);
-    if (existing.verdict !== "done") {
+    assertEvmbenchVerdictCanProgress(runId, existing.verdict, existing.reason, existing.status, true);
+    if (!evmbenchRunConverged(existing.verdict, existing.status)) {
       commandData(
         "resume",
         execute([
@@ -90,8 +90,8 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   while (true) {
     const status = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
     const verdict = status.verdict;
-    if (verdict === "done") break;
-    assertEvmbenchVerdictCanProgress(runId, verdict, status.reason, false);
+    if (evmbenchRunConverged(verdict, status.status)) break;
+    assertEvmbenchVerdictCanProgress(runId, verdict, status.reason, status.status, false);
     if (!WAITABLE_VERDICTS.has(verdict)) {
       throw new Error(`Ultrafuzz run ${runId} returned an unknown status verdict: ${verdict}`);
     }
@@ -107,13 +107,37 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   return { runId, reportPath };
 }
 
+/**
+ * Whether a benchmark run has finished successfully and its report can be
+ * collected.
+ *
+ * Smithers 0.34.0 reported `degraded` on a finished run for one reason only: a
+ * loop that exhausted `maxIterations` without its `until` condition ever being
+ * satisfied. 0.35.0 added a second, ordinary reason -- a run that finished with
+ * a tolerated `continueOnFail` child failure -- and Ultrafuzz generates
+ * `continueOnFail` goal and verify lanes by design, so under 0.35.0 the
+ * majority of otherwise clean benchmark runs report `degraded`.
+ *
+ * Ultrafuzz's own aggregate run status separates the two exactly, so the
+ * benchmark keys on it instead of on the runner's verdict prose: `finalRunStatus`
+ * forces `failed` whenever `inspect.exhaustedLoops` is non-empty, and reports
+ * `succeeded` only when every blocking node succeeded. A `degraded` run whose
+ * Ultrafuzz status is `succeeded` therefore converged, with a tolerated failure
+ * the workflow was authored to tolerate; anything else is still an abort.
+ */
+function evmbenchRunConverged(verdict: EvmbenchStatusVerdict, runStatus: string): boolean {
+  if (verdict === "done") return true;
+  return verdict === "degraded" && runStatus === "succeeded";
+}
+
 function assertEvmbenchVerdictCanProgress(
   runId: string,
   verdict: EvmbenchStatusVerdict,
   reason: string,
+  runStatus: string,
   existing: boolean
 ): void {
-  if (verdict === "done") return;
+  if (evmbenchRunConverged(verdict, runStatus)) return;
   if (verdict === "degraded") throw degradedRunError(runId, reason);
   if (["failed", "cancelled", "cancel-pending", "orphaned"].includes(verdict)) {
     throw new Error(

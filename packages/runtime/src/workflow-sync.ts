@@ -5634,7 +5634,16 @@ function unattributedTerminalFailureKey(payload: unknown): string {
 }
 
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
-  return inspect.runState === "succeeded" && inspect.exhaustedLoops.length === 0;
+  // `succeeded-with-failures` is Smithers 0.35.0's ordinary terminal state for a
+  // run that tolerated a `continueOnFail` child, so it must be admitted here for
+  // the same reason `finalRunStatus` admits it. This gate arms the
+  // WORKFLOW_TASK_EVIDENCE_MISSING error, which is precisely the safety check a
+  // run with tolerated failures needs: leaving it closed would let a run finish
+  // reported `succeeded` with a task silently unaccounted for.
+  return (
+    (inspect.runState === "succeeded" || inspect.runState === "succeeded-with-failures") &&
+    inspect.exhaustedLoops.length === 0
+  );
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
@@ -5788,7 +5797,11 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
   const current = parseCurrentSmithersInspect(snapshot, expectedWorkflowRunId);
   const failedWorkflowTaskIds = new Set(current.failedChildKeys.map((key) => key.slice(0, key.lastIndexOf("::"))));
   for (const node of current.nodes) {
-    if (node.state === "failed") failedWorkflowTaskIds.add(node.nodeId);
+    // Smithers 0.35.0's `stalled` is a terminal failure verdict, so a stalled
+    // node is a failing workflow task. Omitting it made the
+    // WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE diagnostic report "unreported"
+    // for exactly the run whose failing node it was meant to name.
+    if (node.state === "failed" || node.state === "stalled") failedWorkflowTaskIds.add(node.nodeId);
   }
   return {
     runStatus: current.runStatus,
@@ -5880,10 +5893,20 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     "model",
     "agent",
     "inputTokens",
+    // Smithers 0.35.0's `normalizeTokenUsage` always populates `freshInputTokens`
+    // whenever it returns usage at all, so this key is on EVERY usage event of
+    // every 0.35.0 run regardless of model or provider. It is the uncached share
+    // of `inputTokens`, which is why the runner prices cost against it.
+    "freshInputTokens",
     "outputTokens",
     "cacheReadTokens",
     "cacheWriteTokens",
     "reasoningTokens",
+    // Present whenever the reported model is in the runner's built-in price
+    // table (`@smthrs/scorers` `modelTokenPrices`), which covers every model
+    // Ultrafuzz launches; the runner omits it rather than reporting a
+    // misleading $0 for an unpriced model, so it stays optional here.
+    "costUsd",
     "timestampMs",
     // The runner stamps a trace envelope on every event it emits. It carries no
     // accounting of its own, so refusing it only made every real run unsyncable.
@@ -5895,9 +5918,12 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
   requiredWorkflowEventString(payload.agent, `${label} agent`);
   requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
   requiredWorkflowEventCount(payload.outputTokens, `${label} outputTokens`);
-  for (const field of ["cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
+  for (const field of ["freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
     if (payload[field] !== undefined) requiredWorkflowEventCount(payload[field], `${label} ${field}`);
   }
+  // Cost is a fractional USD estimate, not a token count, so it gets the
+  // finite-non-negative bound rather than the safe-integer one.
+  if (payload.costUsd !== undefined) requiredWorkflowEventCostUsd(payload.costUsd, `${label} costUsd`);
 }
 
 function requiredWorkflowEventString(value: unknown, label: string): string {
@@ -5909,6 +5935,11 @@ function requiredWorkflowEventString(value: unknown, label: string): string {
 
 function requiredWorkflowEventCount(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function requiredWorkflowEventCostUsd(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} is invalid`);
   return value;
 }
 

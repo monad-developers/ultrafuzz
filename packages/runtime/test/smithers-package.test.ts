@@ -92,7 +92,10 @@ test("the exact 0.32 generated manifest migrates once and preserves package exte
 
 test("a superseded generated manifest migrates forward in place so a durable run keeps its run ID", () => {
   const migratable: readonly string[] = MIGRATABLE_PRIOR_SMITHERS_VERSIONS;
-  assert.deepEqual([...migratable], ["0.33.0", "0.34.0"]);
+  // Exactly the versions this repository actually pinned. `0.34.0` is the only
+  // `smthrs` pin ever committed, so a longer list would let the migrator rewrite
+  // a manifest Ultrafuzz never generated.
+  assert.deepEqual([...migratable], ["0.34.0"]);
   // A version that still migrates must not be the one launch demands, or the
   // migrator would rewrite the current document on every launch.
   assert.equal(migratable.includes(SMITHERS_VERSION), false);

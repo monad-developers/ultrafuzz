@@ -98,7 +98,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
   "deepseek.tsx": {
-    classifiedSourceSha256: "19cda147d4cf9f0cb00056c76c875087deb00d1f5c6a63116e64cb526459c396",
+    classifiedSourceSha256: "646275da83bf43d316a40390e67125241a488c2691ab130e2dfbd93fe7597ea6",
     responsibilities: ["output-interpretation", "token-accounting"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
@@ -113,7 +113,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "kimi.tsx": {
-    classifiedSourceSha256: "104e72c4fe049514a20112897c2740764629fa54e7115dfffcfd4c28e7077b07",
+    classifiedSourceSha256: "5249edcf97196b2deb0ecfadefcadbb1765cadd6c8866739f60bf8c911df0580",
     responsibilities: [
       "argv-construction",
       "filesystem-walking",
@@ -183,10 +183,13 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "a44eb5c47e6374457476a86420eca0c5ff23616fc8201637f0139d37e13b92f5"
   },
   "deepseek.tsx": {
-    maxLines: 350,
-    maxSyntaxNodes: 1_609,
+    // Raised with the 0.35.0 pin bump: the pinned BaseCliAgent now rejects
+    // unknown constructor options, so the adapter carries a thin constructor
+    // that splits the Ultrafuzz-only credential off `this.opts`.
+    maxLines: 360,
+    maxSyntaxNodes: 1_650,
     purpose: "adapter",
-    sourceSha256: "19cda147d4cf9f0cb00056c76c875087deb00d1f5c6a63116e64cb526459c396"
+    sourceSha256: "646275da83bf43d316a40390e67125241a488c2691ab130e2dfbd93fe7597ea6"
   },
   "environment.tsx": {
     maxLines: 425,
@@ -201,10 +204,11 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "ce5f94b3bf12ae40c5b59ebd587a77d1e80e532d92c785f3353d272e627d79e4"
   },
   "kimi.tsx": {
-    maxLines: 1_525,
-    maxSyntaxNodes: 8_919,
+    // Raised with the 0.35.0 pin bump, for the same reason as deepseek.tsx.
+    maxLines: 1_560,
+    maxSyntaxNodes: 9_010,
     purpose: "adapter",
-    sourceSha256: "104e72c4fe049514a20112897c2740764629fa54e7115dfffcfd4c28e7077b07"
+    sourceSha256: "5249edcf97196b2deb0ecfadefcadbb1765cadd6c8866739f60bf8c911df0580"
   },
   "opencode.tsx": {
     maxLines: 150,
