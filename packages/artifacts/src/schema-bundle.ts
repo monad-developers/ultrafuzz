@@ -7,13 +7,19 @@ import {
   readRegularFileSnapshot,
   registeredSchemaForPath
 } from "./schema-registry.js";
+import { writeFileDurable } from "./safe-paths.js";
+
+export interface MaterializePromptSchemasOptions {
+  /** Replace an older physical bundle only when a current-controller refresh explicitly requests it. */
+  replaceExisting?: boolean;
+}
 
 /**
  * Materialize the checked-in JSON schemas where an isolated task workspace
  * can read them. The package ships the source JSON files alongside dist/, so
  * this works both from the source tree and from the production image.
  */
-export function materializePromptSchemas(destination: string): string[] {
+export function materializePromptSchemas(destination: string, options: MaterializePromptSchemasOptions = {}): string[] {
   const source = artifactSchemaDirectory();
   const target = path.resolve(destination);
   assertNoSymlinkComponents(target);
@@ -40,17 +46,17 @@ export function materializePromptSchemas(destination: string): string[] {
     if (!sourceEntry.isFile() || sourceEntry.isSymbolicLink() || sourceEntry.nlink !== 1) {
       throw new Error(`prompt schema source entry is unsafe: ${sourcePath}`);
     }
+    const sourceBytes = readRegularFileSnapshot(sourcePath, 16 * 1024 * 1024);
     if (fs.existsSync(targetPath)) {
       const targetEntry = fs.lstatSync(targetPath);
       if (!targetEntry.isFile() || targetEntry.isSymbolicLink() || targetEntry.nlink !== 1) {
         throw new Error(`prompt schema destination entry is unsafe: ${targetPath}`);
       }
-      if (
-        !readRegularFileSnapshot(targetPath, 16 * 1024 * 1024).equals(
-          readRegularFileSnapshot(sourcePath, 16 * 1024 * 1024)
-        )
-      ) {
-        throw new Error(`prompt schema destination differs from checked-in source: ${targetPath}`);
+      if (!readRegularFileSnapshot(targetPath, 16 * 1024 * 1024).equals(sourceBytes)) {
+        if (options.replaceExisting !== true) {
+          throw new Error(`prompt schema destination differs from checked-in source: ${targetPath}`);
+        }
+        writeFileDurable(targetPath, sourceBytes, { mode: 0o400 });
       }
     } else {
       fs.copyFileSync(sourcePath, targetPath);
