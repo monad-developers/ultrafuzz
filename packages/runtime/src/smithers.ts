@@ -1373,6 +1373,46 @@ function currentControllerTasks(
 }
 
 /**
+ * The task manifest a refreshed controller must compile in.
+ *
+ * `<runRoot>/smithers/runtime-base-tasks.json` is the byte copy of the task
+ * manifest taken when the run was sealed, before any dynamic group expanded.
+ * The live `smithers/tasks.json` is rewritten by every materialization and so
+ * carries the generated tasks as well -- and the controller's compiled task
+ * array is precisely what the dynamic runtime takes as `baseTasks` and reserves
+ * against the next expansion. Compiling the generated tasks back into that base
+ * set reserves their own attempt IDs against the expansion that produced them,
+ * and the first materialization after the refresh dies with
+ * `DYNAMIC_NODE_ID_COLLISION` -- i.e. `resume --refresh-controller` could not
+ * restart any run past its first expansion, exactly the runs a refresh exists
+ * to rescue.
+ *
+ * `refreshedSmithersControllerSnapshot` makes the same selection out of the
+ * sealed `controls/runtime-base-tasks.json`; this is the un-sealed path's
+ * equivalent, and the two now agree on which document is authoritative.
+ *
+ * The seal writes this file only for a run that has dynamic groups, so a run
+ * without them has none and keeps compiling the live manifest, which for it is
+ * already the base set. A run with dynamic groups that has not expanded yet has
+ * the file, and its bytes equal the live manifest, so nothing changes there
+ * either.
+ */
+function currentControllerBaseTasks(
+  layout: RunLayout,
+  tasks: SmithersTaskManifestDocument
+): SmithersTaskManifestDocument {
+  const baseTasksPath = path.join(layout.root, "smithers", "runtime-base-tasks.json");
+  if (!fs.existsSync(baseTasksPath)) return tasks;
+  assertRegularFileInside(layout.root, baseTasksPath, "dynamic runtime base task manifest");
+  assertNoSymlinkComponents(layout.root, baseTasksPath, "dynamic runtime base task manifest");
+  const document = parseSealedTaskDocument(readRegularFileSnapshot(baseTasksPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES));
+  if (document.run_id !== layout.runId) {
+    throw new Error("controller refresh base task manifest does not match the run ID");
+  }
+  return document;
+}
+
+/**
  * Render the current controller beside, rather than over, the source that
  * originally launched a stopped run. Smithers records this path and its
  * workflow hash as continuation provenance; neither value authorizes resume.
@@ -1386,7 +1426,8 @@ export function renderCurrentSmithersController(input: {
   expandedGraph?: unknown;
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
-  const tasks = currentControllerTasks(input.layout, input.tasks);
+  const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
+  const tasks = currentControllerTasks(input.layout, baseTaskDocument);
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
@@ -1408,16 +1449,16 @@ export function renderCurrentSmithersController(input: {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.layout.runId,
     smithersRunId: input.smithersRunId,
-    workflowName: input.tasks.workflow_name,
+    workflowName: baseTaskDocument.workflow_name,
     tasks,
-    dynamicGroups: input.tasks.dynamic_groups ?? [],
+    dynamicGroups: baseTaskDocument.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,
     runRoot: input.layout.root,
-    ...(input.tasks.source_revision === undefined ? {} : { sourceRevision: input.tasks.source_revision }),
-    ...(input.tasks.source_ref === undefined ? {} : { sourceRef: input.tasks.source_ref }),
+    ...(baseTaskDocument.source_revision === undefined ? {} : { sourceRevision: baseTaskDocument.source_revision }),
+    ...(baseTaskDocument.source_ref === undefined ? {} : { sourceRef: baseTaskDocument.source_ref }),
     workflowPath,
     evidenceWorkflowPath: path.join(input.layout.root, "smithers", "workflow.tsx"),
     expandedGraphPath: path.join(input.layout.root, "smithers", "expanded-graph.json"),
@@ -1429,7 +1470,7 @@ export function renderCurrentSmithersController(input: {
     logsDir: path.join(input.layout.root, "smithers", "logs"),
     productionSourceRoots: input.config.permissions.productionSourceRoots,
     controllerSourceDigest: packagedController.digest,
-    ...(input.tasks.pinned_submodules === null ? {} : { pinnedSubmodules: input.tasks.pinned_submodules })
+    ...(baseTaskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: baseTaskDocument.pinned_submodules })
   };
   writePreparedWorkflowFile(
     projectRoot,

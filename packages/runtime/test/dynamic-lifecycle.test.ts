@@ -782,12 +782,14 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
   );
   assert.ok(resolvedConfig);
 
-  // `resume --refresh-controller` renders from the LIVE manifest, which carries every task the
-  // dynamic runtime materialized, while `plan.json` is written before any expansion and can never
-  // name a generated attempt. The retained-prompt rebinding therefore has no plan row to match.
+  // `resume --refresh-controller` is handed the LIVE manifest, which carries every task the dynamic
+  // runtime materialized, while `plan.json` is written before any expansion and can never name a
+  // generated attempt. The retained-prompt rebinding therefore has no plan row to match.
   const taskDocument = parseSmithersTaskManifestBytes(
     fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"))
   );
+  const baseTasksPath = path.join(fixture.runRoot, "smithers", "runtime-base-tasks.json");
+  const baseDocument = parseSmithersTaskManifestBytes(fs.readFileSync(baseTasksPath));
   const plan = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "plan.json"), "utf8")) as {
     rendered_prompts: Array<{ attempt_id: string }>;
   };
@@ -803,8 +805,8 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
   assert.ok(generatedTask?.metadata.node.dynamic);
   assert.ok((generatedTask.deferredPromptGroups ?? []).length > 0);
 
-  // The join is a PLANNED task, but it has a dynamic ancestor, so its prompt is deferred too and
-  // it is likewise absent from `plan.json`.
+  // The join is a PLANNED task, but it has a dynamic ancestor, so the runtime -- not plan time --
+  // rendered its prompt. It is likewise absent from `plan.json`.
   const deferredPlannedTask = taskDocument.tasks.find(
     (task) =>
       task.metadata.node.dynamic === undefined &&
@@ -817,6 +819,36 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
     false
   );
 
+  // A run sealed before `runtime-base-tasks.json` existed has no sealed base manifest, so the
+  // refresh still compiles the LIVE one, generated tasks and all. That fallback is the only path on
+  // which the deferred-prompt exemption is reachable, and it is what keeps such a run from throwing
+  // `persisted prompt plan does not match continuation task ...`.
+  const sealedBaseTasks = fs.readFileSync(baseTasksPath);
+  fs.rmSync(baseTasksPath);
+  const legacyWorkflow = fs.readFileSync(
+    renderCurrentSmithersController({
+      projectRoot: fixture.project,
+      layout: evidence.layout,
+      smithersRunId: evidence.smithersRunId,
+      tasks: taskDocument,
+      config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+    }),
+    "utf8"
+  );
+  assert.ok(
+    legacyWorkflow.includes(JSON.stringify(generated.attemptId)),
+    "generated attempt is absent from the controller"
+  );
+  assert.ok(
+    legacyWorkflow.includes(JSON.stringify(generated.renderedPromptPath)),
+    "generated prompt path was rebound away from its runtime location"
+  );
+  assert.ok(
+    legacyWorkflow.includes(JSON.stringify(deferredPlannedTask.renderedPromptPath)),
+    "deferred prompt path was rebound away from its runtime location"
+  );
+  fs.writeFileSync(baseTasksPath, sealedBaseTasks);
+
   const workflowPath = renderCurrentSmithersController({
     projectRoot: fixture.project,
     layout: evidence.layout,
@@ -826,14 +858,24 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
   });
   assert.ok(fs.existsSync(workflowPath));
   const workflow = fs.readFileSync(workflowPath, "utf8");
-  assert.ok(workflow.includes(JSON.stringify(generated.attemptId)), "generated attempt is absent from the controller");
+
+  // With the sealed base manifest present the refresh compiles the PRE-EXPANSION set instead, so the
+  // runtime-generated attempt is deliberately absent: the dynamic runtime re-materializes it from
+  // the group templates on the next tick, and compiling it in would reserve its own ID against that
+  // expansion. See `refreshed controller compiles the pre-expansion base task set`.
+  assert.equal(
+    workflow.includes(JSON.stringify(generated.attemptId)),
+    false,
+    "runtime-generated attempt was compiled into the refreshed controller"
+  );
   assert.ok(
-    workflow.includes(JSON.stringify(generated.renderedPromptPath)),
-    "generated prompt path was rebound away from its runtime location"
+    workflow.includes(JSON.stringify(deferredPlannedTask.attemptId)),
+    "deferred-prompt planned task is absent from the controller"
   );
 
-  // A prompt rendered at plan time must still fail closed on retained-prompt drift.
-  const plannedTask = taskDocument.tasks.find(
+  // A prompt rendered at plan time must still fail closed on retained-prompt drift. The refresh
+  // reads the sealed base manifest, so the substitution has to land there.
+  const plannedTask = baseDocument.tasks.find(
     (task) => task.renderedPromptPath !== undefined && (task.deferredPromptGroups ?? []).length === 0
   );
   assert.ok(plannedTask);
@@ -841,20 +883,29 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
     plan.rendered_prompts.some((prompt) => prompt.attempt_id === plannedTask.attemptId),
     true
   );
+  fs.writeFileSync(
+    baseTasksPath,
+    `${JSON.stringify(
+      {
+        ...baseDocument,
+        tasks: baseDocument.tasks.map((task) =>
+          task.attemptId === plannedTask.attemptId
+            ? { ...task, renderedPromptPath: path.join(fixture.runRoot, "artifacts", "substituted-prompt.md") }
+            : task
+        )
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
   assert.throws(
     () =>
       renderCurrentSmithersController({
         projectRoot: fixture.project,
         layout: evidence.layout,
         smithersRunId: evidence.smithersRunId,
-        tasks: {
-          ...taskDocument,
-          tasks: taskDocument.tasks.map((task) =>
-            task.attemptId === plannedTask.attemptId
-              ? { ...task, renderedPromptPath: path.join(fixture.runRoot, "artifacts", "substituted-prompt.md") }
-              : task
-          )
-        },
+        tasks: taskDocument,
         config: JSON.parse(resolvedConfig.contents.toString("utf8"))
       }),
     /persisted prompt plan does not match continuation task/u
@@ -1307,5 +1358,126 @@ test("dynamic lifecycle admission rejects graph, task, and state extensions not 
         /outside the verified dynamic runtime graph/u.test(diagnostic.message)
     ),
     JSON.stringify(rejectedState.diagnostics)
+  );
+});
+
+/**
+ * Recover the two literals the refreshed controller compiles in, exactly as the rendered
+ * workflow module binds them at `workflow.tsx` `compiledBaseTasks` / `dynamicGroupSpecs`.
+ */
+function compiledControllerConstants(workflowSource: string): {
+  baseTasks: CompiledSmithersTask[];
+  groups: CompiledSmithersDynamicGroup[];
+} {
+  const read = (name: string, terminator: string): unknown => {
+    const opener = `const ${name} = `;
+    const start = workflowSource.indexOf(opener);
+    assert.notEqual(start, -1, `rendered controller is missing ${name}`);
+    const end = workflowSource.indexOf(`;\nconst ${terminator} = `, start);
+    assert.notEqual(end, -1, `rendered controller is missing the ${name} terminator`);
+    return JSON.parse(workflowSource.slice(start + opener.length, end)) as unknown;
+  };
+  return {
+    baseTasks: read("compiledBaseTasks", "dynamicGroupSpecs") as CompiledSmithersTask[],
+    groups: read("dynamicGroupSpecs", "maxDynamicNodes") as CompiledSmithersDynamicGroup[]
+  };
+}
+
+test("refreshed controller compiles the pre-expansion base task set", async () => {
+  const fixture = await createDynamicFixture({ runId: "refresh-base-tasks" });
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+
+  // The run has expanded once, so the LIVE manifest -- the document `resume --refresh-controller`
+  // reads off disk -- now carries the generated tasks alongside the static ones.
+  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
+  const liveTaskDocument = parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath));
+  const generated = fixture.generatedTasks[0]!;
+  assert.equal(
+    liveTaskDocument.tasks.some((task) => task.attemptId === generated.attemptId),
+    true,
+    "fixture did not expand a dynamic group"
+  );
+  const basePath = path.join(fixture.runRoot, "smithers", "runtime-base-tasks.json");
+  assert.equal(fs.existsSync(basePath), true, "sealed dynamic base task manifest is missing");
+
+  const workflowPath = renderCurrentSmithersController({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    smithersRunId: evidence.smithersRunId,
+    tasks: liveTaskDocument,
+    config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+  });
+  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+
+  // The controller's compiled constant is the dynamic runtime's `baseTasks`. Compiling the
+  // already-generated tasks into it reserves their own attempt IDs against the very expansion
+  // that produced them, so the next materialization dies with DYNAMIC_NODE_ID_COLLISION.
+  assert.equal(
+    compiled.baseTasks.some((task) => task.metadata.node.dynamic !== undefined),
+    false,
+    "refreshed controller compiled runtime-generated tasks into its base task set"
+  );
+
+  // Replay the workflow's own call with the refreshed controller's literals.
+  const rematerialized = materializeDynamicRuntime({
+    runId: fixture.runId,
+    projectRoot: fixture.project,
+    runRoot: fixture.runRoot,
+    graphPath: path.join(fixture.runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: compiled.baseTasks,
+    groups: compiled.groups,
+    readyGroupIds: ["fanout"]
+  });
+  assert.deepEqual(
+    rematerialized.tasks.map((task) => task.attemptId).sort(),
+    liveTaskDocument.tasks.map((task) => task.attemptId).sort(),
+    "refreshed controller re-derived a different task set than the run already published"
+  );
+
+  // ONE STEP FURTHER -- KNOWN NEXT BLOCKER, NOT FIXED HERE.
+  //
+  // The collision is gone, but the controls this materialization just republished do not pass the
+  // admission check that every lifecycle command runs first. `currentControllerTasks` rebinds a
+  // plan-time prompt from its launch path to the authenticated retained snapshot under
+  // `prompt-snapshots/`, and the refreshed controller publishes that rebound path into `tasks.json`.
+  // `verifyDynamicRuntimeMaterialization` re-derives from the sealed `controls/runtime-base-tasks.json`,
+  // which still carries the launch path, so the two documents fingerprint differently. That is a
+  // second, independent defect in the same resume path; this assertion pins the exact behavior so
+  // the follow-up that fixes it has to come back here and flip it to `true`.
+  const readmitted = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(readmitted.ok, false, "the retained-prompt rebinding divergence appears to be fixed");
+  assert.ok(
+    !readmitted.ok &&
+      readmitted.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID" &&
+          /published dynamic runtime controls no longer re-derive from their sealed base: persisted dynamic runtime task plan does not match its sealed templates and manifests/u.test(
+            diagnostic.message
+          )
+      ),
+    "diagnostics" in readmitted ? JSON.stringify(readmitted.diagnostics) : ""
+  );
+
+  // Selecting the base set drops only the runtime-generated tasks. A PLANNED task whose prompt is
+  // deferred behind a dynamic ancestor belongs to the base set and must survive.
+  assert.ok(
+    compiled.baseTasks.some(
+      (task) => task.metadata.node.dynamic === undefined && (task.deferredPromptGroups ?? []).length > 0
+    ),
+    "base task set lost its deferred-prompt planned task"
+  );
+  assert.deepEqual(
+    compiled.baseTasks.map((task) => task.attemptId).sort(),
+    liveTaskDocument.tasks
+      .filter((task) => task.metadata.node.dynamic === undefined)
+      .map((task) => task.attemptId)
+      .sort()
   );
 });
