@@ -6962,6 +6962,51 @@ test(
   }
 );
 
+test("generated workflow controls admit the same persisted native workflow outside a snapshot", () => {
+  const { admitWorkflowControls, taskWorkflowControlPaths } = loadWorkflowControlPathResolvers();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-native-workflow-controls-"));
+  const workflowPath = path.join(root, ".smithers", "continuations", "current", "workflows", "workflow.tsx");
+  const differentWorkflowPath = path.join(root, ".smithers", "workflows", "different.tsx");
+  const snapshotRoot = path.join(root, "snapshots", "a".repeat(64));
+  const snapshotWorkflowPath = path.join(snapshotRoot, ".smithers", "workflows", "workflow.tsx");
+  const nativeAliasPath = path.join(root, "native-alias.tsx");
+
+  try {
+    fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+    fs.mkdirSync(path.dirname(differentWorkflowPath), { recursive: true });
+    fs.mkdirSync(path.dirname(snapshotWorkflowPath), { recursive: true });
+    fs.mkdirSync(path.join(snapshotRoot, "dependencies"), { recursive: true });
+    fs.mkdirSync(path.join(snapshotRoot, "controls"), { recursive: true });
+    fs.writeFileSync(workflowPath, "export default function Workflow() {}\n", "utf8");
+    fs.writeFileSync(differentWorkflowPath, "export default function Different() {}\n", "utf8");
+    fs.writeFileSync(snapshotWorkflowPath, "export default function Snapshot() {}\n", "utf8");
+    fs.writeFileSync(path.join(snapshotRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(snapshotRoot, "controls", "plan.json"), "{}\n", "utf8");
+    fs.symlinkSync(snapshotWorkflowPath, nativeAliasPath);
+
+    const admitted = admitWorkflowControls(workflowPath, workflowPath);
+    assert.equal(admitted.loadedWorkflowPath, workflowPath);
+    assert.equal(admitted.persistedWorkflowPath, workflowPath);
+    assert.equal(admitted.loadedExecutionSnapshotRoot, undefined);
+    assert.equal(admitted.persistedExecutionSnapshotRoot, undefined);
+    assert.deepEqual(taskWorkflowControlPaths("local", admitted), {
+      promptExecutionSnapshotRoot: undefined,
+      workflowPath: undefined,
+      executionSnapshotRoot: undefined
+    });
+    assert.throws(
+      () => admitWorkflowControls(workflowPath, differentWorkflowPath),
+      /persisted workflow path does not identify the loaded execution snapshot/u
+    );
+    assert.throws(
+      () => admitWorkflowControls(snapshotWorkflowPath, nativeAliasPath),
+      /persisted workflow path does not identify the loaded execution snapshot/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);

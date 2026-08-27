@@ -1432,10 +1432,16 @@ function admitWorkflowControls(loadedPath: string, persistedPath: string | undef
   const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
   const persistedExecutionSnapshotRoot =
     persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  // Native continuation may load the persisted project workflow directly, or
+  // a current controller rendered under .smithers/continuations. Neither path
+  // is an authenticated execution snapshot, but Smithers and the workflow still
+  // agree on one physical entrypoint. Snapshot-only task controls remain absent
+  // in that case and use the existing direct-workflow fallbacks below. Never
+  // combine one snapshot-derived path with one native path, even if an alias
+  // happens to resolve both to the same file.
   if (
     persistedPath !== undefined &&
-    (loadedExecutionSnapshotRoot === undefined ||
-      persistedExecutionSnapshotRoot === undefined ||
+    ((loadedExecutionSnapshotRoot === undefined) !== (persistedExecutionSnapshotRoot === undefined) ||
       realpathSync(loadedPath) !== realpathSync(persistedPath))
   ) {
     throw new Error("persisted workflow path does not identify the loaded execution snapshot");
