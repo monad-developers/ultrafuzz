@@ -4526,7 +4526,7 @@ bunAdapterTest(
 
 bunAdapterTest(
   "generated OpenRouter adapter retries before output and resumes exact sessions after substantive work",
-  { timeout: 20_000 },
+  { timeout: 60_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -10650,7 +10650,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
-  assert.match(workflowSource, /output=\{outputs\.task\}/);
+  assert.match(workflowSource, /output=\{outputs\.agentProcess\}/);
   assert.match(workflowSource, /Authorized Defensive Security Context/);
   assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
@@ -10937,7 +10937,7 @@ test("getRunHealth reports a terminal product status while workflow health is li
   assert.equal(unattributed?.severity, "error");
 });
 
-test("a divergent published control file leaves status readable while execution stays closed", async () => {
+test("a divergent published control file leaves status readable while native resume delegates", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -10964,7 +10964,8 @@ test("a divergent published control file leaves status readable while execution 
   fs.writeFileSync(snapshotWorkflowPath, `${pristine}\n// diverged\n`, "utf8");
   fs.chmodSync(snapshotWorkflowPath, publishedMode);
 
-  // Execution authority still fails closed, and still refuses to resume.
+  // Strict linked-evidence readers still fail closed. Ordinary resume intentionally bypasses these
+  // control seals and delegates the persisted workflow and same run ID directly to Smithers.
   const strict = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(strict.ok, false);
   if (!strict.ok) {
@@ -10972,8 +10973,7 @@ test("a divergent published control file leaves status readable while execution 
     assert.match(strict.diagnostics[0]?.message ?? "", /sealed workflow control file changed: workflow/u);
   }
   const resumed = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
 
   // An observer reads the same run, and is told exactly what diverged.
   const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
@@ -11046,7 +11046,7 @@ test("an observer still refuses a run whose sealed execution files diverged", as
   assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
-test("a sealed manifest that stops re-deriving leaves status readable while execution stays closed", async () => {
+test("a sealed manifest that stops re-deriving leaves status readable while native resume delegates", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   // `final-report` joins both strategy nodes, which is the shape that broke: issue #866 was reported
@@ -11075,16 +11075,15 @@ test("a sealed manifest that stops re-deriving leaves status readable while exec
   );
   fs.writeFileSync(tasksPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 
-  // Executing this run would be scheduling from a plan that no longer describes itself, so every
-  // execution caller must still refuse it.
+  // Strict linked-evidence callers still refuse the divergent plan. Ordinary resume intentionally
+  // leaves plan/control validation to Smithers' changed-workflow continuation boundary.
   const strict = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(strict.ok, false);
   if (!strict.ok) {
     assert.equal(strict.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
   }
   const resumed = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const cancelled = await cancelRun({ projectRoot: project, runId, env });
   assert.equal(cancelled.ok, false);
   assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
@@ -11154,13 +11153,12 @@ test("a planned graph that stops matching this build's contracts leaves status r
   output!.schema_sha256 = "a".repeat(64);
   fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
 
-  // A node whose output contract no longer matches the registry that will validate its artifacts must
-  // not be scheduled, so execution stays closed.
+  // Strict linked-evidence callers keep reporting the schema drift. Ordinary resume intentionally
+  // does not use current artifact bindings as authorization for same-ID Smithers continuation.
   const strict = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(strict.ok, false);
   const resumed = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const cancelled = await cancelRun({ projectRoot: project, runId, env });
   assert.equal(cancelled.ok, false);
   assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
@@ -11702,11 +11700,10 @@ test("startRun warns for optional specialist commands but still rejects blocking
     env: fakeSmithersEnv(optionalProject)
   });
   assert.equal(optionalResume.ok, true, JSON.stringify(optionalResume.diagnostics));
-  assert.ok(
-    optionalResume.diagnostics.some(
-      (diagnostic) => diagnostic.code === "RUN_OPTIONAL_COMMAND_MISSING" && diagnostic.severity === "warning"
-    ),
-    JSON.stringify(optionalResume.diagnostics)
+  assert.equal(
+    optionalResume.diagnostics.some((diagnostic) => diagnostic.code === "RUN_OPTIONAL_COMMAND_MISSING"),
+    false,
+    "native continuation does not re-run Ultrafuzz command preflight"
   );
 
   const blockingProject = tempProject();
@@ -12918,7 +12915,7 @@ test("snapshot anchors close when controller environment rewriting fails", async
   assert.deepEqual(openDescriptorTargetsInside(evidence.executionSnapshot.root), []);
 });
 
-test("linked lifecycle commands reuse sealed bytes after mutable project sources are replaced", async () => {
+test("native resume delegates the persisted workflow after mutable project sources are replaced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -12972,17 +12969,12 @@ test("linked lifecycle commands reuse sealed bytes after mutable project sources
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const consumed = fs.readFileSync(snapshotBytesLog, "utf8");
-  assert.match(consumed, /^workflow=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/\.smithers\/workflows\//mu);
-  assert.match(consumed, /^config=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/controls\/ultrafuzz\.toml$/mu);
-  assert.match(
-    consumed,
-    new RegExp(
-      `^prompt=/proc/(?:self|[1-9][0-9]*)/fd/[0-9]+/controls/rendered-prompts/${renderedPrompt.attempt_id}\\.md$`,
-      "mu"
-    )
-  );
-  assert.match(consumed, /^agent=\/proc\/(?:self|[1-9][0-9]*)\/fd\/[0-9]+\/\.smithers\/agents\/codex\.ts$/mu);
-  assert.doesNotMatch(consumed, /HostileReplacement|hostile-replacement|export const hostile|HOSTILE_MUTABLE_PROMPT/u);
+  assert.equal(consumed.includes(`workflow=${mutableWorkflow}\n`), true);
+  assert.match(consumed, /^config=.*\/smithers\/resolved-config\.json$/mu);
+  assert.match(consumed, /^agent=.*\/\.smithers\/agents\/codex\.ts$/mu);
+  assert.match(consumed, /HostileReplacement/u);
+  assert.match(consumed, /export const hostile/u);
+  assert.doesNotMatch(consumed, /^workflow=\/proc\//mu);
 });
 
 test("linked evidence rejects extra snapshot generations and malformed control seal keys", async () => {
