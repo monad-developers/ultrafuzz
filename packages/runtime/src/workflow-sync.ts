@@ -5049,12 +5049,26 @@ function currentPublishedReplacementOccurrenceHasAuthority(input: {
   );
   if (verifierTerminals.length !== 1) return false;
   const verifierTerminal = verifierTerminals[0]!;
+  // A finished producer may leave its verifier pending until a later run
+  // activation. Only a new producer occurrence before that verifier, or a
+  // boundary/restart inside the verifier occurrence itself, breaks the link.
   if (
     input.events.some(
       (event) =>
-        event.type === "RunStarted" &&
-        event.sourceEventSequence > supersedingStart.sourceEventSequence &&
-        event.sourceEventSequence < verifierTerminal.sourceEventSequence
+        event.sourceEventSequence > replacementTerminal.sourceEventSequence &&
+        event.sourceEventSequence < verifierTerminal.sourceEventSequence &&
+        event.type === "NodeStarted" &&
+        event.payload.nodeId === input.attempt.nodeId &&
+        event.payload.iteration === input.attempt.iteration
+    ) ||
+    input.events.some(
+      (event) =>
+        event.sourceEventSequence > verifierStart.sourceEventSequence &&
+        event.sourceEventSequence < verifierTerminal.sourceEventSequence &&
+        (event.type === "RunStarted" ||
+          (event.type === "NodeStarted" &&
+            event.payload.nodeId === input.task.verifierSmithersNodeId &&
+            event.payload.iteration === verifierIteration))
     )
   ) {
     return false;

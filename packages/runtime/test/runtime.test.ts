@@ -18564,7 +18564,7 @@ test("syncRun accepts exact historical trace authority after an immutable output
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
 });
 
-test("syncRun preserves a published replacement while superseding its traced historical occurrence", async () => {
+test("syncRun preserves a published replacement verified under a later activation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
@@ -18597,9 +18597,10 @@ test("syncRun preserves a published replacement while superseding its traced his
       }
     },
     { type: "NodeFinished", nodeId, attempt: 1, sequence: 7, timestampMs: base + 700 },
-    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 8, timestampMs: base + 800 },
-    { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 9, timestampMs: base + 900 },
-    { type: "RunFinished", sequence: 10, timestampMs: base + 1_000 }
+    { type: "RunStarted", sequence: 8, timestampMs: base + 800 },
+    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 9, timestampMs: base + 900 },
+    { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 10, timestampMs: base + 1_000 },
+    { type: "RunFinished", sequence: 11, timestampMs: base + 1_100 }
   ];
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -18664,6 +18665,34 @@ test("syncRun preserves a published replacement while superseding its traced his
     attempts.map((attempt) => attempt.source_event_sequence),
     [7]
   );
+
+  const restartedEvents = historicalEvents.map((event) =>
+    event.sequence !== undefined && event.sequence >= 8 ? { ...event, sequence: event.sequence + 1 } : event
+  );
+  const verifierActivationIndex = restartedEvents.findIndex(
+    (event) => event.type === "RunStarted" && event.timestampMs === base + 800
+  );
+  assert.notEqual(verifierActivationIndex, -1);
+  restartedEvents.splice(verifierActivationIndex, 0, {
+    type: "NodeStarted",
+    nodeId,
+    attempt: 1,
+    sequence: 8,
+    timestampMs: base + 750
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, restartedEvents), "utf8");
+
+  const rejected = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(rejected.ok, false);
+  assert.deepEqual(
+    rejected.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(rejected.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
+  assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
 });
 
 test("syncRun rejects trace-only supersession of an immutable successful publication", async () => {
