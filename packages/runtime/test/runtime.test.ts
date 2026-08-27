@@ -18564,6 +18564,108 @@ test("syncRun accepts exact historical trace authority after an immutable output
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
 });
 
+test("syncRun preserves a published replacement while superseding its traced historical occurrence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-published-traced-replacement";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const replacementEvents: Parameters<typeof workflowEvents>[1] = [
+    { type: "RunStarted", sequence: 4, timestampMs: base + 400 },
+    { type: "NodeStarted", nodeId, attempt: 1, sequence: 5, timestampMs: base + 500 },
+    {
+      type: "AgentTraceSummary",
+      nodeId,
+      sequence: 6,
+      timestampMs: base + 600,
+      extra: {
+        iteration: 0,
+        attempt: 1,
+        summary: {
+          runId: workflowRunId,
+          nodeId,
+          iteration: 0,
+          attempt: 1,
+          traceStartedAtMs: base + 550,
+          traceFinishedAtMs: base + 600,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          model: "gpt-5.5"
+        }
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 1, sequence: 7, timestampMs: base + 700 },
+    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 8, timestampMs: base + 800 },
+    { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 9, timestampMs: base + 900 },
+    { type: "RunFinished", sequence: 10, timestampMs: base + 1_000 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: nodeId, state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, replacementEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const published = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(published.ok, true, JSON.stringify(published.diagnostics));
+  assert.equal(published.value?.status, "succeeded", JSON.stringify(published.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  const manifestPath = path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json");
+  const manifestBeforeReplay = fs.readFileSync(manifestPath);
+  const taskStateBeforeReplay = structuredClone(readRunState(layout).nodes["project-discovery"]);
+  const ledgerBeforeReplay = fs.readFileSync(layout.attemptLedgerPath);
+
+  const historicalEvents: Parameters<typeof workflowEvents>[1] = [
+    { type: "RunStarted", sequence: 0, timestampMs: base },
+    { type: "NodeStarted", nodeId, attempt: 1, sequence: 1, timestampMs: base + 100 },
+    {
+      type: "AgentTraceSummary",
+      nodeId,
+      sequence: 2,
+      timestampMs: base + 200,
+      extra: {
+        iteration: 0,
+        attempt: 1,
+        summary: {
+          runId: workflowRunId,
+          nodeId,
+          iteration: 0,
+          attempt: 1,
+          traceStartedAtMs: base + 150,
+          traceFinishedAtMs: base + 200,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          model: "gpt-5.5"
+        }
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 1, sequence: 3, timestampMs: base + 300 },
+    ...replacementEvents
+  ];
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, historicalEvents), "utf8");
+
+  const replayed = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(replayed.value?.status, "succeeded");
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
+  assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
+  const attempts = ledgerBeforeReplay
+    .toString("utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { source_event_sequence?: number });
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.source_event_sequence),
+    [7]
+  );
+});
+
 test("syncRun rejects trace-only supersession of an immutable successful publication", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
