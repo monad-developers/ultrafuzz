@@ -3173,6 +3173,44 @@ test("non-force init preserves historical stock agent adapters and force replace
   assert.equal(fs.readFileSync(codexPath, "utf8"), currentAdapter);
 });
 
+test("non-force init migrates a superseded generated manifest so the project keeps its durable run", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const current = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+  };
+  const superseded = { ...current, dependencies: { ...current.dependencies, smthrs: "0.34.0" } };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(superseded, null, 2)}\n`, "utf8");
+
+  // Without `--force`, so the run directory, the Ultrafuzz run ID and the
+  // Smithers run ID a stopped run resumes under all survive.
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), renderSmithersPackageJson());
+  assert.doesNotThrow(() => assertSmithersPackageManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8"))));
+});
+
+test("non-force init preserves a manifest that is not one Ultrafuzz generated", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const current = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+  };
+  const handEdited = {
+    ...current,
+    dependencies: { ...current.dependencies, smthrs: "0.34.0", "custom-agent-package": "1.2.3" }
+  };
+  const handEditedText = `${JSON.stringify(handEdited, null, 2)}\n`;
+  fs.writeFileSync(manifestPath, handEditedText, "utf8");
+
+  assert.equal(initProject({ projectRoot: project }).ok, true);
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), handEditedText);
+});
+
 test("non-force init migrates the exact generated 0.32 package and immediately prior stock adapters", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -3212,7 +3250,7 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
     dependencies: Record<string, string>;
   };
   assert.equal(manifest.dependencies["smithers-orchestrator"], undefined);
-  assert.equal(manifest.dependencies.smthrs, "0.34.0");
+  assert.equal(manifest.dependencies.smthrs, SMITHERS_VERSION);
   assert.equal(manifest.dependencies["custom-agent-package"], "1.2.3");
   const source = fs.readFileSync(codexPath, "utf8");
   assert.match(source, /from "(?:smthrs|@smthrs\/agents)"/u);
@@ -6747,7 +6785,7 @@ default_effort = "high"
       cwd: "/workspace/target",
       options: {}
     });
-    assert.equal(SMITHERS_VERSION, "0.34.0");
+    assert.equal(SMITHERS_VERSION, "0.35.0");
     assert.ok(pinnedCommand.args.includes("--final-message-only"));
     assert.ok(pinnedCommand.args.includes("--print"));
     assert.ok(pinnedCommand.args.includes("--work-dir"));
@@ -8223,7 +8261,7 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated Kimi completed-event usage is what pinned Smithers 0.34.0 consumes",
+  "generated Kimi completed-event usage is what pinned Smithers 0.35.0 consumes",
   { timeout: 30_000 },
   async () => {
     const smithersEntry = fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"));

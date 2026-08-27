@@ -9,6 +9,26 @@ export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
 export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.105";
 export const KIMI_CODE_VERSION = "0.29.1";
 
+// Prior `smthrs` pins whose generated manifest still migrates forward in place.
+//
+// `.smithers/package.json` is written once at init and rewritten only on
+// `--force` or a recognised migration, while launch admission demands
+// `dependencies.smthrs === SMITHERS_VERSION`. Without this list every project
+// generated under the previous pin hard-fails at launch and the only recovery is
+// `init --force`, which is exactly what a resume cannot afford: recreating the
+// manifest does not preserve the Ultrafuzz run ID or the Smithers run ID the
+// durable run is keyed on.
+//
+// A listed version only migrates when the rest of the manifest still matches the
+// current generated document exactly (see `migrateGeneratedSmithersManifest`),
+// so the list is fail-safe under drift: if a future bump also moves Kimi, Zod,
+// TypeScript or the Effect override family, manifests from that release stop
+// matching and are rejected rather than silently rewritten to a shape they were
+// never installed against. That makes a stale entry inert, not dangerous --
+// but it also means an entry is only useful while its release differed from the
+// current one in `smthrs` alone, which is true of 0.34.0 -> 0.35.0.
+export const MIGRATABLE_PRIOR_SMITHERS_VERSIONS = ["0.33.0", "0.34.0"] as const;
+
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for
 // `@effect/platform-node-shared: ^4.0.0-beta.105`, an open caret over
@@ -166,12 +186,18 @@ export function smithersDependencyInstallArgs({
   ];
 }
 
+// The non-dependency half of the generated manifest. Shared so the renderer and
+// the prior-pin matcher below cannot describe different documents.
+const GENERATED_SMITHERS_MANIFEST_IDENTITY = {
+  name: "ultrafuzz-smithers",
+  private: true,
+  type: "module"
+} as const;
+
 export function renderSmithersPackageJson(): string {
   return `${JSON.stringify(
     {
-      name: "ultrafuzz-smithers",
-      private: true,
-      type: "module",
+      ...GENERATED_SMITHERS_MANIFEST_IDENTITY,
       ...REQUIRED_SMITHERS_DEPENDENCIES
     },
     null,
@@ -180,11 +206,74 @@ export function renderSmithersPackageJson(): string {
 }
 
 /**
- * Authenticates and rewrites the generated 0.32 manifest once. Extra packages
- * in the three dependency extension maps are preserved; executable fields and
- * manifests with modified generated pins are never migrated automatically.
+ * Authenticates and rewrites a superseded generated manifest once, returning the
+ * replacement text, or `undefined` when the manifest is not one this runtime is
+ * willing to rewrite on the project's behalf.
+ *
+ * Two shapes migrate, and nothing else does.
+ *
+ * 1. The frozen 0.32 shape (`smithers-orchestrator@0.32.0` plus the
+ *    `4.0.0-beta.102` override family). Extra packages in the three dependency
+ *    extension maps are preserved and only the generated pins are rewritten.
+ * 2. A manifest identical to `renderSmithersPackageJson()` apart from
+ *    `dependencies.smthrs`, which must name a version in
+ *    `MIGRATABLE_PRIOR_SMITHERS_VERSIONS`. This one is strict on purpose: it
+ *    rewrites nothing it did not itself generate, so a hand-edited or corrupted
+ *    manifest is still rejected and surfaces as a launch failure the operator
+ *    resolves deliberately, rather than being quietly overwritten.
+ *
+ * The name is historical -- it predates case 2 -- and is kept so the three call
+ * sites and the durable behaviour they encode stay put across the pin bump.
  */
 export function migrateStockSmithers032PackageManifest(value: unknown): string | undefined {
+  return migrateStock032SmithersManifest(value) ?? migrateGeneratedSmithersManifest(value);
+}
+
+/**
+ * Case 2 above. Accepts only the exact generated document for a superseded pin:
+ * the same six top-level keys, the same `name`/`private`/`type`, and dependency
+ * sections whose key sets and values match the current ones entry for entry,
+ * with `smthrs` at the prior version. Any extra dependency, any missing one, any
+ * other version drift and any override outside `REQUIRED_SMITHERS_OVERRIDES`
+ * rejects. The replacement is the canonical current document, so a manifest that
+ * only reordered keys is normalised rather than refused.
+ */
+function migrateGeneratedSmithersManifest(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const dependencies = value.dependencies;
+  if (!isRecord(dependencies)) return undefined;
+  const pinned = dependencies[SMITHERS_PACKAGE_NAME];
+  if (typeof pinned !== "string" || !MIGRATABLE_PRIOR_SMITHERS_VERSIONS.some((prior) => prior === pinned)) {
+    return undefined;
+  }
+  return matchesGeneratedSmithersManifest(value, pinned) ? renderSmithersPackageJson() : undefined;
+}
+
+function matchesGeneratedSmithersManifest(value: Record<string, unknown>, priorSmithersVersion: string): boolean {
+  const expected: Record<string, unknown> = {
+    ...GENERATED_SMITHERS_MANIFEST_IDENTITY,
+    ...REQUIRED_SMITHERS_DEPENDENCIES,
+    dependencies: {
+      ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
+      [SMITHERS_PACKAGE_NAME]: priorSmithersVersion
+    }
+  };
+  if (!hasExactKeys(value, Object.keys(expected))) return false;
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    const actual = value[key];
+    if (!isRecord(expectedValue)) {
+      if (actual !== expectedValue) return false;
+      continue;
+    }
+    if (!isRecord(actual) || !hasExactKeys(actual, Object.keys(expectedValue))) return false;
+    for (const [name, version] of Object.entries(expectedValue)) {
+      if (actual[name] !== version) return false;
+    }
+  }
+  return true;
+}
+
+function migrateStock032SmithersManifest(value: unknown): string | undefined {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||
