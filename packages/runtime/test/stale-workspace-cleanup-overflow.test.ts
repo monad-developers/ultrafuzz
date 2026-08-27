@@ -43,6 +43,7 @@ function findRuntimePackageRoot(startDir: string): string {
 
 type StaleCleanup = {
   removeStaleWorkspaceFiles: (workspaceRoot: string, preparationTree: string) => void;
+  hasSymlinkComponent: (root: string, candidate: string) => boolean;
 };
 
 /** The text of one top-level helper, as it stands in the template. */
@@ -86,12 +87,16 @@ function loadStaleCleanup(maxBufferBytes?: number): StaleCleanup {
   ]
     .map((name) => declaration(source, name))
     .join("\n");
-  const emitted = ts.transpileModule(`${runtimeRoots}\n${helpers}\nreturn { removeStaleWorkspaceFiles };`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
-  }).outputText;
+  const emitted = ts.transpileModule(
+    `${runtimeRoots}\n${helpers}\nreturn { removeStaleWorkspaceFiles, hasSymlinkComponent };`,
+    {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
+    }
+  ).outputText;
   return new Function(
     "execFileSync",
     "rmSync",
+    "unlinkSync",
     "lstatSync",
     "path",
     "MAX_INVARIANT_SUITE_ENUMERATION_BYTES",
@@ -101,6 +106,7 @@ function loadStaleCleanup(maxBufferBytes?: number): StaleCleanup {
   )(
     execFileSync,
     fs.rmSync,
+    fs.unlinkSync,
     fs.lstatSync,
     path,
     maxBufferBytes ?? templateConstant(source, "MAX_INVARIANT_SUITE_ENUMERATION_BYTES"),
@@ -232,5 +238,44 @@ test("#691 the exclusion is component-exact: runtime-root files survive, near-na
     assert.equal(fs.existsSync(path.join(workspace, "node_modules2", "x.txt")), false);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("#949 stale cleanup unlinks an ignored leaf symlink without following its target", () => {
+  const cleanup = loadStaleCleanup();
+  const workspace = gitWorkspace();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-stale-target-")));
+  try {
+    writeWorkspaceFile(workspace, ".gitignore", ".poc-scratch/node_modules/\n");
+    writeWorkspaceFile(workspace, "src/Kept.sol", "contract Kept {}\n");
+    const preparationTree = preparationTreeOf(workspace, [".gitignore", "src/Kept.sol"]);
+    const outsideTarget = path.join(outside, "esbuild");
+    fs.writeFileSync(outsideTarget, "target remains\n", "utf8");
+    const staleLink = path.join(workspace, ".poc-scratch", "node_modules", ".bin", "esbuild");
+    fs.mkdirSync(path.dirname(staleLink), { recursive: true });
+    fs.symlinkSync(outsideTarget, staleLink);
+
+    cleanup.removeStaleWorkspaceFiles(workspace, preparationTree);
+
+    assert.equal(fs.existsSync(staleLink), false);
+    assert.equal(fs.readFileSync(outsideTarget, "utf8"), "target remains\n");
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("#949 stale cleanup still identifies a symlinked parent component", () => {
+  const cleanup = loadStaleCleanup();
+  const workspace = gitWorkspace();
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-stale-parent-")));
+  try {
+    const linkedParent = path.join(workspace, "redirect");
+    fs.symlinkSync(outside, linkedParent, "dir");
+
+    assert.equal(cleanup.hasSymlinkComponent(workspace, path.join(linkedParent, "escaped.txt")), true);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   }
 });

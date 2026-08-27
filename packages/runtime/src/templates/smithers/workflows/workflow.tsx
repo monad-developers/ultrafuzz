@@ -5,7 +5,17 @@
 /** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -4152,10 +4162,27 @@ function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: strin
   for (const relativePath of candidates) {
     if (expected.has(relativePath) || isWorkspaceRuntimePath(relativePath)) continue;
     const candidate = path.resolve(workspaceRoot, ...relativePath.split("/"));
-    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || hasSymlinkComponent(workspaceRoot, candidate)) {
+    // A stale leaf symlink is safe to unlink because unlinkSync removes only
+    // the directory entry. Parent symlinks remain unsafe because they could
+    // redirect deletion outside the owned worktree.
+    if (
+      !isStrictlyInsideDirectory(workspaceRoot, candidate) ||
+      hasSymlinkComponent(workspaceRoot, path.dirname(candidate))
+    ) {
       throw new Error(`artifact-contract failure: unsafe stale workspace path ${relativePath}`);
     }
-    rmSync(candidate, { recursive: true, force: true });
+    let leaf: ReturnType<typeof lstatSync>;
+    try {
+      leaf = lstatSync(candidate);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    if (leaf.isSymbolicLink()) {
+      unlinkSync(candidate);
+    } else {
+      rmSync(candidate, { recursive: true, force: true });
+    }
   }
 }
 
