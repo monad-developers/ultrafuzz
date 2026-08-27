@@ -1341,6 +1341,15 @@ function currentControllerTasks(
   const plannedPrompts = new Map(plan.rendered_prompts.map((prompt) => [prompt.attempt_id, prompt]));
   return tasks.tasks.map((task) => {
     if (task.renderedPromptPath === undefined) return task;
+    // A prompt deferred to the dynamic runtime is never rendered at plan time, so `plan.json` has
+    // no row to rebind it to and no retained snapshot to authenticate against. That covers every
+    // generated task and every planned task with a dynamic ancestor, whose prompt the runtime
+    // re-derives from the sealed template and republishes under the task's own artifact directory.
+    // `verifyDynamicRuntimeMaterialization` is what holds those bytes to their seal. Requiring a
+    // plan row here instead made `--refresh-controller` throw
+    // `persisted prompt plan does not match continuation task ...` for every run that had expanded
+    // a dynamic group -- exactly the stopped runs a refresh exists to rescue.
+    if ((task.deferredPromptGroups ?? []).length > 0) return task;
     const planned = plannedPrompts.get(task.attemptId);
     if (planned === undefined) {
       throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
