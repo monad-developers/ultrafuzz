@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "30b8bb6d494c9138c1194f6a544ebed33c145c8691e4f5a97f0e53b64aabef85";
-const EXPECTED_BUNDLE_SHA256 = "9fa9d7ffcc5ce8c47980c86709d789d729add2939b7ac2a9cab175c7322af896";
+const EXPECTED_SCHEMA_SHA256 = "c1b2f78d53c6eb9fb877803a21652ef40b6475951226554f28f49c980ebee4d7";
+const EXPECTED_BUNDLE_SHA256 = "6be48dac42a18bd1e54c985beae6a1e4a962cb9afc4fef3571b453190645eaf0";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -79,6 +79,15 @@ describe("resolved config JSON contract", () => {
     expect(zod.success).toBe(true);
     if (zod.success) expect(zod.data).toEqual(parsed);
     expect(resolvedConfigValidatorsAgree(parsed)).toBe(true);
+  });
+
+  it("accepts Pi's maximum thinking level in sealed resolved configuration", () => {
+    const value = validFixture();
+    profile(value, "pi").reasoning = "max";
+
+    expect(validateResolvedConfigJson(value)).toEqual({ ok: true, issues: [], truncated: false });
+    expect(resolvedConfigZodSchema.safeParse(value).success).toBe(true);
+    expect(resolvedConfigValidatorsAgree(value)).toBe(true);
   });
 
   it("rejects the checked-in historical-version fixture without aliasing or conversion", () => {

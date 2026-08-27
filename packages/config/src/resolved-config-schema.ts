@@ -151,7 +151,7 @@ const modelProfileSchema = z
     if (
       profile.agent === "PiAgent" &&
       profile.reasoning !== undefined &&
-      !["off", "minimal", "low", "medium", "high", "xhigh"].includes(profile.reasoning)
+      !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(profile.reasoning)
     ) {
       context.addIssue({
         code: "custom",
