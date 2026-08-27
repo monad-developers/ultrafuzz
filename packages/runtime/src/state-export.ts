@@ -672,6 +672,38 @@ const ADDITIONAL_RUN_HEALTH_FIELDS = [
   "oneshotControl"
 ] as const;
 
+/**
+ * The closed-world key contract Ultrafuzz enforces on `smithers status --format
+ * json --full-output`. Exported so a test can diff it against the runner's own
+ * summary builder: `counts` is exact-key, so the `stalled` bucket 0.35.0 added
+ * would otherwise have made `ultrafuzz status` return WORKFLOW_STATUS_INVALID
+ * for every run, with nothing in the suite to catch it.
+ *
+ * `stalled` is admitted and then folded into `failed` (see `parsedCounts`)
+ * rather than published as an eleventh count: Ultrafuzz has no `stalled` node
+ * status, and `statusFromWorkflowState` already reports the runner's `stalled`
+ * node state as an Ultrafuzz failure, so a separate bucket here would contradict
+ * every other surface that reports the same node.
+ */
+export const CURRENT_SMITHERS_STATUS_KEY_CONTRACT = {
+  counts: {
+    exact: [
+      "finished",
+      "inProgress",
+      "pending",
+      "failed",
+      "stalled",
+      "waitingApproval",
+      "waitingEvent",
+      "waitingTimer",
+      "skipped",
+      "other",
+      "total"
+    ]
+  },
+  throughput: { exact: ["recentFinished", "windowMs", "totalFinished", "lastFinishedAtMs"] }
+} as const;
+
 function parseRunHealth(
   value: unknown,
   expectedWorkflowRunId: string
@@ -698,26 +730,8 @@ function parseRunHealth(
   if (
     counts === undefined ||
     throughput === undefined ||
-    !hasExactKeys(counts, [
-      "finished",
-      "inProgress",
-      "pending",
-      "failed",
-      // Smithers 0.35.0 initialises `stalled: 0` unconditionally, so the key is
-      // on every status document. It is folded into `failed` below rather than
-      // published as an eleventh count: Ultrafuzz has no `stalled` node status,
-      // and `statusFromWorkflowState` already maps the runner's `stalled` node
-      // state onto `failed`, so a separate bucket here would contradict every
-      // other surface that reports the same node.
-      "stalled",
-      "waitingApproval",
-      "waitingEvent",
-      "waitingTimer",
-      "skipped",
-      "other",
-      "total"
-    ]) ||
-    !hasExactKeys(throughput, ["recentFinished", "windowMs", "totalFinished", "lastFinishedAtMs"]) ||
+    !hasExactKeys(counts, CURRENT_SMITHERS_STATUS_KEY_CONTRACT.counts.exact) ||
+    !hasExactKeys(throughput, CURRENT_SMITHERS_STATUS_KEY_CONTRACT.throughput.exact) ||
     !isRunHealthVerdict(verdict) ||
     workflowStatus === undefined ||
     !SMITHERS_RUN_STATUSES.includes(workflowStatus as (typeof SMITHERS_RUN_STATUSES)[number]) ||

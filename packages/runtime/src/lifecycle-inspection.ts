@@ -601,6 +601,8 @@ const LIFECYCLE_EVENT_CATEGORIES = new Set([
   "workflow"
 ]);
 
+export const CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES: ReadonlySet<string> = LIFECYCLE_EVENT_CATEGORIES;
+
 export function isLifecycleEventCategory(value: string): boolean {
   return LIFECYCLE_EVENT_CATEGORIES.has(value);
 }
@@ -651,6 +653,47 @@ function boundedEventLimit(limit: number | undefined): number {
   return Math.min(MAX_EVENT_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
+/**
+ * The closed-world key and vocabulary contract Ultrafuzz enforces on the pinned
+ * runner's `why`, `node` and `events` surfaces. Exported so a test can diff it
+ * against the runner's own sources: `inspect` is not the only envelope Ultrafuzz
+ * parses exactly, and every one of `why`'s `warnings`, `why`'s `stalled` blocker
+ * kind, `node`'s `tokenUsage.freshInputTokens` and the two new `NodeStalled` /
+ * `RunConcurrencySaturated` event types would have failed a live 0.35.0 run
+ * closed with nothing here to catch it.
+ */
+export const CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT = {
+  whyDiagnosis: {
+    required: ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId"],
+    allowed: [
+      "runId",
+      "status",
+      "summary",
+      "generatedAtMs",
+      "blockers",
+      "warnings",
+      "information",
+      "currentNodeId",
+      "steers"
+    ]
+  },
+  nodeTokenUsage: {
+    exact: [
+      "inputTokens",
+      "freshInputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "reasoningTokens",
+      "costUsd",
+      "eventCount",
+      "models",
+      "agents"
+    ]
+  },
+  nodeLimits: { exact: ["toolPayloadBytesHuman", "validatedOutputBytesHuman"] }
+} as const;
+
 const CURRENT_WHY_BLOCKER_KINDS = [
   "waiting-approval",
   "waiting-event",
@@ -671,6 +714,8 @@ const CURRENT_WHY_BLOCKER_KINDS = [
   "approval-decided-resume-required",
   "side-effect-boundary-crossed"
 ] as const satisfies readonly RunBlockerKind[];
+
+export const CURRENT_SMITHERS_WHY_BLOCKER_KINDS: readonly string[] = CURRENT_WHY_BLOCKER_KINDS;
 
 const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "SupervisorStarted",
@@ -754,6 +799,8 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "TimerCancelled"
 ]);
 
+export const CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES: ReadonlySet<string> = CURRENT_LIFECYCLE_EVENT_TYPES;
+
 function parseCurrentWhyDiagnosis(
   snapshot: SmithersCommandSnapshot,
   expectedWorkflowRunId: string
@@ -767,8 +814,8 @@ function parseCurrentWhyDiagnosis(
   // queued steers -- and it has been conditional since 0.34.0.
   assertRequiredAndAllowedKeys(
     data,
-    ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId"],
-    ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId", "steers"],
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required,
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.allowed,
     "workflow diagnosis"
   );
   const runId = requiredString(data.runId, "workflow diagnosis runId");
@@ -1266,26 +1313,10 @@ function parseCurrentNodeToolCall(value: unknown, label: string): CurrentNodeToo
 
 function parseCurrentNodeTokenUsage(value: unknown, label: string): CurrentNodeTokenUsage {
   const row = requiredObject(value, label);
-  assertExactKeys(
-    row,
-    [
-      "inputTokens",
-      // Smithers 0.35.0's `node` detail seeds `freshInputTokens` in
-      // `emptyTokenUsage()` and carries it through every parse, merge and
-      // aggregate, so it is present on the aggregate and on every
-      // `byAttempt[].usage` of every node of every run.
-      "freshInputTokens",
-      "outputTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "reasoningTokens",
-      "costUsd",
-      "eventCount",
-      "models",
-      "agents"
-    ],
-    label
-  );
+  // `freshInputTokens` is new in 0.35.0: `emptyTokenUsage()` seeds it and every
+  // parse, merge and aggregate carries it, so it reaches the aggregate and every
+  // `byAttempt[].usage` of every node of every run.
+  assertExactKeys(row, CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact, label);
   return {
     inputTokens: requiredCount(row.inputTokens, `${label} inputTokens`),
     freshInputTokens: requiredCount(row.freshInputTokens, `${label} freshInputTokens`),
@@ -1307,19 +1338,7 @@ function parseCurrentAggregateTokenUsage(
   const row = requiredObject(value, "workflow node aggregate tokenUsage");
   assertExactKeys(
     row,
-    [
-      "inputTokens",
-      "freshInputTokens",
-      "outputTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "reasoningTokens",
-      "costUsd",
-      "eventCount",
-      "models",
-      "agents",
-      "byAttempt"
-    ],
+    [...CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact, "byAttempt"],
     "workflow node aggregate tokenUsage"
   );
   const base = parseCurrentNodeTokenUsage(
@@ -1427,7 +1446,7 @@ function parseCurrentNodeApproval(value: unknown, runId: string, nodeId: string,
 
 function parseCurrentNodeLimits(value: unknown): CurrentNodeDetail["limits"] {
   const row = requiredObject(value, "workflow node limits");
-  assertExactKeys(row, ["toolPayloadBytesHuman", "validatedOutputBytesHuman"], "workflow node limits");
+  assertExactKeys(row, CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeLimits.exact, "workflow node limits");
   const limits = {
     toolPayloadBytesHuman: requiredCount(row.toolPayloadBytesHuman, "workflow node limits toolPayloadBytesHuman"),
     validatedOutputBytesHuman: requiredCount(

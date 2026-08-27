@@ -384,6 +384,9 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
       summary: "1 node waiting for approval; run `smithers why` for detail",
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: "node:project-discovery",
+      // 0.35.0 spreads `warnings` onto every `buildDiagnosis` return path, and
+      // raises a `stalled` blocker for a node parked on an identical-error streak.
+      warnings: ["Concurrency ceiling saturated: requested demand 8, effective cap 4."],
       information: ["smithers recorded 1 stale heartbeat"],
       blockers: [
         {
@@ -444,6 +447,7 @@ test("diagnoseRun rejects aliases, extra fields, and duplicate keys instead of n
       summary: "blocked",
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: "node:project-discovery",
+      warnings: [],
       information: [],
       blockers: [
         {
@@ -1543,6 +1547,9 @@ function writeFakeInstalledEngine(project: string, input: { version: string; bin
 function nodeTokenUsage(inputTokens: number, outputTokens: number): Record<string, unknown> {
   return {
     inputTokens,
+    // New in Smithers 0.35.0's node detail. `emptyTokenUsage()` seeds it and every
+    // parse, merge and aggregate carries it, so it is on every node of every run.
+    freshInputTokens: inputTokens,
     outputTokens,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -1626,6 +1633,7 @@ function nodeDetailFixture(): unknown {
     toolCalls: [firstToolCall],
     tokenUsage: {
       inputTokens: 22,
+      freshInputTokens: 22,
       outputTokens: 11,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,

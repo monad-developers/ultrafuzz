@@ -107,6 +107,9 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   const commandLog = path.join(project, "smithers-commands.log");
   const nodeUsage = {
     inputTokens: 10,
+    // New in Smithers 0.35.0's node detail; present on the aggregate and on every
+    // `byAttempt[].usage`, so a fixture without it is not a 0.35.0 document.
+    freshInputTokens: 10,
     outputTokens: 5,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -181,6 +184,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         summary: "1 node is waiting for approval",
         generatedAtMs: 1_700_000_000_000,
         currentNodeId: "node:project-discovery",
+        // 0.35.0 spreads `warnings` onto every `buildDiagnosis` return path.
+        warnings: [],
         information: [],
         blockers: [
           {
@@ -319,6 +324,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
               inProgress: 0,
               pending: 5,
               failed: 0,
+              stalled: 0,
               waitingApproval: 1,
               waitingEvent: 0,
               waitingTimer: 0,
@@ -651,6 +657,7 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
               inProgress: 0,
               pending: 5,
               failed: 0,
+              stalled: 0,
               waitingApproval: 1,
               waitingEvent: 0,
               waitingTimer: 0,

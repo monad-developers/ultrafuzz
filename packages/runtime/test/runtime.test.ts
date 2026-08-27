@@ -1755,6 +1755,9 @@ function currentStatusEnvelope(workflowRunId = "__RUN_ID__"): Record<string, unk
         inProgress: 1,
         pending: 3,
         failed: 0,
+        // Smithers 0.35.0 initialises this unconditionally, so a fixture without
+        // it is a document the pinned runner can no longer produce.
+        stalled: 0,
         waitingApproval: 0,
         waitingEvent: 0,
         waitingTimer: 0,
@@ -1915,6 +1918,7 @@ function fakeLifecycleSmithersEnv(
           summary: "run is active",
           generatedAtMs: 1,
           blockers: [],
+          warnings: [],
           information: [],
           currentNodeId: null
         },
@@ -2284,6 +2288,14 @@ function workflowEvents(
         payload.model = "test-model";
         payload.agent = "test-agent";
         payload.inputTokens = 0;
+        // Smithers 0.35.0 emits both of these: `freshInputTokens` on every usage
+        // event `normalizeTokenUsage` produces, and `costUsd` for any model in
+        // the runner's built-in price table. Synchronization is exact-key on this
+        // payload, so a fixture without them is not a document the pinned runner
+        // can produce and every sync test would be testing a shape that no
+        // longer exists.
+        payload.freshInputTokens = 0;
+        payload.costUsd = 0;
         payload.outputTokens = 0;
       }
       if (event.extra !== undefined) {
@@ -11930,6 +11942,67 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
   assert.equal(quota.value?.gating[0]?.state, "quota-parked");
 });
 
+// The `status` surface, end to end over the shapes Smithers 0.35.0 actually
+// emits. `counts.stalled` is unconditional there, and `degraded` is now the
+// ordinary verdict for a run that tolerated a `continueOnFail` child -- both of
+// which the 0.34.0-shaped fixtures could never have produced.
+test("getRunHealth accepts the pinned 0.35.0 status counts and folds stalled nodes into failed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const envelope = currentStatusEnvelope("ultrafuzz-stalled-health-run");
+  const base = envelope.data as Record<string, unknown>;
+  const counts = base.counts as Record<string, number>;
+
+  setFakeSmithersStatus(project, {
+    ...envelope,
+    data: {
+      ...base,
+      status: "finished",
+      // 0.35.0's second `degraded` branch: `failedChildren > 0` on a finished
+      // run, which for Ultrafuzz is an ordinary tolerated `continueOnFail` lane.
+      verdict: "degraded",
+      reason: "run finished with 2 tolerated failed children",
+      counts: { ...counts, finished: 2, inProgress: 0, pending: 0, failed: 1, stalled: 2, total: 6, other: 1 },
+      liveness: { state: "succeeded-with-failures" },
+      finishedAtMs: 2_000
+    }
+  });
+
+  const health = await getRunHealth({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.verdict, "degraded");
+  // Ultrafuzz has no `stalled` node status, so the runner's stalled bucket joins
+  // the failed one rather than disappearing or becoming an eleventh count.
+  assert.equal(health.value?.counts.failed, 3);
+  assert.deepEqual(sortedKeys(Object.keys(health.value?.counts ?? {})), [
+    "failed",
+    "finished",
+    "in_progress",
+    "other",
+    "pending",
+    "skipped",
+    "total",
+    "waiting_approval",
+    "waiting_event",
+    "waiting_timer"
+  ]);
+
+  // A document without the bucket is a 0.34.0 document; the parser is exact-key
+  // in both directions, so it must be refused rather than defaulted to zero.
+  const { stalled: _dropped, ...withoutStalled } = counts;
+  setFakeSmithersStatus(project, { ...envelope, data: { ...base, counts: withoutStalled } });
+  const superseded = await getRunHealth({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(superseded.ok, false);
+  assert.deepEqual(
+    superseded.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_STATUS_INVALID"]
+  );
+});
+
 test("pauseRun accepts the workflow runner pause-request exit and is idempotent once paused", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -15009,6 +15082,14 @@ function sortedKeys(values: Iterable<string>): string[] {
 // silent widening upstream into a build failure here.
 test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", async () => {
   const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const {
+    CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES,
+    CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES,
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT,
+    CURRENT_SMITHERS_WHY_BLOCKER_KINDS
+  } = await import("../src/lifecycle-inspection.js");
+  const { CURRENT_SMITHERS_STATUS_KEY_CONTRACT } = await import("../src/state-export.js");
+  const { CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT } = await import("../src/workflow-sync.js");
   const dbSource = pinnedRunnerSourceDir("@smthrs/db", "attempt-resume-pointers");
   const schedulerSource = pinnedRunnerSourceDir("@smthrs/scheduler", "isTerminalState");
   const cliSource = pinnedRunnerSourceDir("@smthrs/cli", "node-detail");
@@ -15124,6 +15205,136 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
   // under `continueOnFail`, and a node Ultrafuzz means to retry must not be
   // hydrated back as done. If upstream promotes a new state into the
   // unconditional branch, both replacements have to learn about it.
+  // 9. `smithers why`. Ultrafuzz's parser is exact on the required set, so every
+  // key `buildDiagnosis` can return must be required, and the only key the
+  // command splices in afterwards (`steers`, conditional since 0.34.0) must be
+  // allowed. 0.35.0's unconditional `warnings` is why this is checked at all: it
+  // is spread onto every return path, so it broke `ultrafuzz diagnose` for 100%
+  // of runs with nothing in the suite to notice.
+  const whyDiagnosis = fs.readFileSync(path.join(cliSource, "why-diagnosis.js"), "utf8");
+  const buildDiagnosis = balancedBraceRegion(whyDiagnosis, whyDiagnosis.indexOf("function buildDiagnosis(params) {"));
+  const diagnosisShapes: string[][] = [];
+  for (let cursor = buildDiagnosis.indexOf("return {"); cursor !== -1;) {
+    const region = balancedBraceRegion(buildDiagnosis, cursor);
+    const indent = /\n( *)[A-Za-z_$]/u.exec(region)?.[1]?.length ?? 0;
+    diagnosisShapes.push(sortedKeys(pinnedRunnerLiteralKeys(region, indent)));
+    cursor = buildDiagnosis.indexOf("return {", cursor + region.length);
+  }
+  assert.ok(diagnosisShapes.length > 0, "buildDiagnosis yielded no return shapes; re-derive the extractor");
+  for (const shape of diagnosisShapes) {
+    assert.deepEqual(
+      shape,
+      sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required),
+      "a `why` diagnosis return shape no longer matches what Ultrafuzz requires of it"
+    );
+  }
+  const whyCommandRegion = balancedBraceRegion(cliIndex, cliIndex.indexOf('.command("why", {'));
+  const splicedWhyKeys = [...whyCommandRegion.matchAll(/\.\.\.diagnosis,\s*([A-Za-z_$][\w$]*):/gu)].map(
+    (match) => match[1]!
+  );
+  assert.deepEqual(
+    sortedKeys([...CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required, ...splicedWhyKeys]),
+    sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.allowed),
+    "the `why` command splices a key into its diagnosis that Ultrafuzz does not allow"
+  );
+  assert.deepEqual(
+    sortedKeys(
+      pinnedRunnerUnionMembers(fs.readFileSync(path.join(cliSource, "WhyBlockerKind.ts"), "utf8"), "WhyBlockerKind")
+    ),
+    sortedKeys(CURRENT_SMITHERS_WHY_BLOCKER_KINDS),
+    "the pinned runner's WhyBlockerKind union no longer matches Ultrafuzz's closed blocker enum"
+  );
+
+  // 10. `smithers status`. `counts` and `throughput` are both exact-key on the
+  // Ultrafuzz side; 0.35.0 added `counts.stalled` unconditionally.
+  const runStatus = fs.readFileSync(path.join(cliSource, "run-status.js"), "utf8");
+  assert.deepEqual(
+    sortedKeys(pinnedRunnerLiteralKeys(balancedBraceRegion(runStatus, runStatus.indexOf("  const counts = {")), 4)),
+    sortedKeys(CURRENT_SMITHERS_STATUS_KEY_CONTRACT.counts.exact),
+    "the pinned runner's status counts no longer match what Ultrafuzz parses"
+  );
+
+  // 11. `smithers node` token usage, seeded by `emptyTokenUsage()` and carried
+  // through every parse, merge and aggregate. 0.35.0 added `freshInputTokens`.
+  assert.deepEqual(
+    sortedKeys(
+      pinnedRunnerLiteralKeys(balancedBraceRegion(nodeDetail, nodeDetail.indexOf("const emptyTokenUsage = () => (")), 2)
+    ),
+    sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact),
+    "the pinned runner's node token usage shape no longer matches what Ultrafuzz parses"
+  );
+
+  // 12. `TokenUsageReported`. The durable sync path is exact-key on this payload
+  // and re-throws everywhere except `stats`, so a key added upstream takes out
+  // every run's synchronization on its first agent task. The failure-path emitter
+  // splices its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own
+  // return shape is unioned in rather than read off the emitter literal.
+  const engineSource = fs.readFileSync(
+    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
+    "utf8"
+  );
+  const emittedTokenKeys = new Set<string>();
+  for (let cursor = engineSource.indexOf('type: "TokenUsageReported"'); cursor !== -1;) {
+    const region = balancedBraceRegion(engineSource, engineSource.lastIndexOf("{", cursor));
+    const indent = /\n( *)[A-Za-z_$.]/u.exec(region)?.[1]?.length ?? 0;
+    for (const key of pinnedRunnerLiteralKeys(region, indent)) emittedTokenKeys.add(key);
+    cursor = engineSource.indexOf('type: "TokenUsageReported"', cursor + region.length);
+  }
+  assert.ok(emittedTokenKeys.size > 0, "no TokenUsageReported emitter was found; re-derive the extractor");
+  const normalizeUsage = balancedBraceRegion(
+    engineSource,
+    engineSource.indexOf("return {", engineSource.indexOf("function normalizeTokenUsage(usage) {"))
+  );
+  for (const key of pinnedRunnerLiteralKeys(normalizeUsage, 4)) emittedTokenKeys.add(key);
+  for (const busKey of CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.keysAddedByTheEventBus) {
+    assert.equal(emittedTokenKeys.has(busKey), false, `${busKey} is now an emitter key, not a bus envelope key`);
+    emittedTokenKeys.add(busKey);
+  }
+  assert.deepEqual(
+    sortedKeys(emittedTokenKeys),
+    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed),
+    "the pinned engine's TokenUsageReported payload no longer matches what workflow synchronization accepts"
+  );
+
+  // 13. Event types. `ultrafuzz events` without `--type` gets the runner's own
+  // default set, and with `--type <category>` gets a category slice, so every
+  // type the runner can categorise has to be in Ultrafuzz's closed contract for
+  // the categories it exposes. 0.35.0 added `NodeStalled` (default set) and
+  // `RunConcurrencySaturated`.
+  const { DEFAULT_LIFECYCLE_EVENT_TYPES } = (await import(path.join(cliSource, "observability-helpers.js"))) as {
+    DEFAULT_LIFECYCLE_EVENT_TYPES: readonly string[];
+  };
+  const missingDefaults = DEFAULT_LIFECYCLE_EVENT_TYPES.filter(
+    (type) => !CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES.has(type)
+  );
+  assert.deepEqual(missingDefaults, [], "the runner streams a default lifecycle event Ultrafuzz's parser rejects");
+  const { eventCategoryForType } = (await import(path.join(cliSource, "event-categories.js"))) as {
+    eventCategoryForType: (type: string) => string | null;
+  };
+  const uncategorised = [...CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES].filter(
+    (type) => eventCategoryForType(type) === null
+  );
+  assert.deepEqual(uncategorised, [], "Ultrafuzz admits an event type the pinned runner no longer emits");
+  // `--type` also accepts a category, and the runner then streams every type in
+  // it. `RunConcurrencySaturated` is reachable that way but is not in the
+  // default set, so only this direction catches it.
+  const { eventTypesForCategory } = (await import(path.join(cliSource, "event-categories.js"))) as {
+    eventTypesForCategory: (category: string) => readonly string[] | undefined;
+  };
+  const unadmittedByCategory: string[] = [];
+  for (const category of CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES) {
+    const types = eventTypesForCategory(category);
+    assert.ok(types !== undefined && types.length > 0, `the pinned runner no longer defines the ${category} category`);
+    for (const type of types) {
+      if (!CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES.has(type)) unadmittedByCategory.push(`${category}/${type}`);
+    }
+  }
+  assert.deepEqual(
+    unadmittedByCategory,
+    [],
+    "the runner streams an event under a category Ultrafuzz exposes that its parser rejects"
+  );
+
   const { isTerminalState } = (await import(path.join(schedulerSource, "isTerminalState.js"))) as {
     isTerminalState: (state: string) => boolean;
   };
@@ -16716,6 +16927,83 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
   assert.ok(
     observational.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_INVALID"),
     JSON.stringify(observational.diagnostics)
+  );
+});
+
+// Smithers 0.35.0 puts `freshInputTokens` on every usage event and `costUsd` on
+// every priced one. `validateSmithersEventPayload` is exact-key and re-throws
+// everywhere except `stats`, so before these were allowlisted the first agent
+// task of any 0.35.0 run took out `status`, `state`, `diagnose` and the evals
+// row sync for that run permanently.
+test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new fields", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const syncWithUsage = async (runId: string, usage: Record<string, unknown>) => {
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        {
+          type: "TokenUsageReported",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          extra: { iteration: 0, model: "gpt-priced", agent: "codex", ...usage }
+        },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+    return { runRoot: run.value!.run_root, result: await syncRun({ projectRoot: project, runId, env }) };
+  };
+
+  // `freshInputTokens` is the uncached share of `inputTokens`, not an addition
+  // to it, and `costUsd` is a fractional estimate. Both are accepted, and the
+  // ledger totals stay derived from `inputTokens`/`outputTokens` alone.
+  const accepted = await syncWithUsage("fresh-input-usage", {
+    inputTokens: 512,
+    freshInputTokens: 112,
+    outputTokens: 23,
+    cacheReadTokens: 400,
+    cacheWriteTokens: 0,
+    costUsd: 0.001_234_5
+  });
+  assert.equal(accepted.result.ok, true, JSON.stringify(accepted.result.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(accepted.runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { total_tokens?: number; cache_read_tokens?: number } };
+  };
+  // 512 input + 23 output + 400 cache read: `freshInputTokens` is the uncached
+  // share of `inputTokens`, so counting it would double-count the same tokens.
+  assert.equal(metadata.accounting?.current?.total_tokens, 935);
+  assert.equal(metadata.accounting?.current?.cache_read_tokens, 400);
+
+  // Both new fields stay bounded: a non-integer token count and a negative cost
+  // are contract violations, not values to coerce.
+  await assert.rejects(
+    () => syncWithUsage("fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }),
+    /freshInputTokens is invalid/u
+  );
+  await assert.rejects(
+    () => syncWithUsage("cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }),
+    /costUsd is invalid/u
+  );
+  await assert.rejects(
+    () => syncWithUsage("cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }),
+    /costUsd is invalid/u
+  );
+  // A key outside the contract still fails closed; widening it for two fields
+  // must not have relaxed the assertion itself.
+  await assert.rejects(
+    () => syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 6 }),
+    /contains unsupported fields/u
   );
 });
 
@@ -22458,6 +22746,40 @@ test("resume retries a failed artifact verifier from its agent producer and depe
     /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
     "the producer retry must also reset its zero-retry verifier and downstream dependents"
   );
+});
+
+// Smithers 0.35.0 parks a node that livelocked on an identical-error streak in
+// `stalled`, a terminal failure verdict it says "behaves exactly like `failed`".
+// Every other Ultrafuzz surface already reports such a node as failed, so an
+// operator retry that skipped it was a silent no-op: the run reported `failed`,
+// and the reset loop issued zero `timetravel` commands.
+test("resume retries stalled nodes alongside failed ones", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "stalled-node-retry-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "a node stalled on an identical failure streak" },
+      steps: [
+        { id: "node:project-discovery", state: "stalled", attempt: 3 },
+        { id: "node:strategy", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+  assert.match(commands, /^timetravel .* --node-id node:strategy .* --force(?: |$)/mu);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {

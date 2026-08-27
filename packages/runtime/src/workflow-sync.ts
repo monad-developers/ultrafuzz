@@ -5812,6 +5812,48 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
   };
 }
 
+/**
+ * The closed-world key contract Ultrafuzz enforces on the pinned runner's
+ * `TokenUsageReported` payload, which `synchronizeLinkedWorkflowRun` reads on
+ * every status, state, diagnose and evals row sync. Exported so a test can diff
+ * it against the engine's own emitters: the check is exact-key and re-throws
+ * everywhere except `stats`, so a key added upstream takes out synchronization
+ * for every run on its first agent task -- which is exactly what 0.35.0's
+ * `freshInputTokens` and `costUsd` did.
+ */
+export const CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT = {
+  allowed: [
+    "type",
+    "runId",
+    "nodeId",
+    "iteration",
+    "attempt",
+    "model",
+    "agent",
+    "inputTokens",
+    // 0.35.0's `normalizeTokenUsage` always populates `freshInputTokens` whenever
+    // it returns usage at all, so this key is on EVERY usage event of every
+    // 0.35.0 run regardless of model or provider. It is the uncached share of
+    // `inputTokens`, which is why the runner prices cost against it.
+    "freshInputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "reasoningTokens",
+    // Present whenever the reported model is in the runner's built-in price
+    // table (`@smthrs/scorers` `modelTokenPrices`), which covers every model
+    // Ultrafuzz launches; the runner omits it rather than reporting a misleading
+    // $0 for an unpriced model, so it stays optional here.
+    "costUsd",
+    "timestampMs",
+    // The runner stamps a trace envelope on every event it emits. It carries no
+    // accounting of its own, so refusing it only made every real run unsyncable.
+    // It is not part of any engine emitter's own payload literal.
+    "correlation"
+  ],
+  keysAddedByTheEventBus: ["correlation"]
+} as const;
+
 function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): WorkflowEvent[] {
   if (stdout.length === 0) return [];
   if (stdout.includes("\uFFFD")) throw new Error("Smithers event snapshot is not valid UTF-8");
@@ -5884,35 +5926,9 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
   }
   if (type !== "TokenUsageReported") return;
-  const allowed = [
-    "type",
-    "runId",
-    "nodeId",
-    "iteration",
-    "attempt",
-    "model",
-    "agent",
-    "inputTokens",
-    // Smithers 0.35.0's `normalizeTokenUsage` always populates `freshInputTokens`
-    // whenever it returns usage at all, so this key is on EVERY usage event of
-    // every 0.35.0 run regardless of model or provider. It is the uncached share
-    // of `inputTokens`, which is why the runner prices cost against it.
-    "freshInputTokens",
-    "outputTokens",
-    "cacheReadTokens",
-    "cacheWriteTokens",
-    "reasoningTokens",
-    // Present whenever the reported model is in the runner's built-in price
-    // table (`@smthrs/scorers` `modelTokenPrices`), which covers every model
-    // Ultrafuzz launches; the runner omits it rather than reporting a
-    // misleading $0 for an unpriced model, so it stays optional here.
-    "costUsd",
-    "timestampMs",
-    // The runner stamps a trace envelope on every event it emits. It carries no
-    // accounting of its own, so refusing it only made every real run unsyncable.
-    "correlation"
-  ];
-  if (!hasOnlyKeys(payload, allowed)) throw new Error(`${label} contains unsupported fields`);
+  if (!hasOnlyKeys(payload, CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed)) {
+    throw new Error(`${label} contains unsupported fields`);
+  }
   assertWorkflowEventCorrelation(payload, label);
   requiredWorkflowEventString(payload.model, `${label} model`);
   requiredWorkflowEventString(payload.agent, `${label} agent`);
