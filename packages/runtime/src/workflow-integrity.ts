@@ -623,7 +623,17 @@ export function verifyWorkflowControlSnapshot(
   // yielded, even though all wrappers named the same authenticated bytes. Once
   // the full current revalidation above succeeds, return the exact live
   // capability when its public control bytes are unchanged.
+  //
+  // Only a clean pass may reuse it. A remembered snapshot is recorded solely
+  // when this function found no divergence, so its `divergences` is always
+  // empty, while the reuse test compares only WORKFLOW_CONTROL_FILE_KEYS —
+  // divergence in anything else (a deleted rendered prompt, an expansion that
+  // no longer re-derives) leaves every compared byte equal. Reusing the
+  // snapshot there would substitute the remembered empty list for what this
+  // pass just observed and report a corrupted run as clean to every tolerant
+  // reader, which is the `status` blindness issue #866 exists to prevent.
   const reusableSnapshot =
+    divergences.length === 0 &&
     reusable !== undefined &&
     sealContents.equals(reusable.snapshot.integrityContents) &&
     WORKFLOW_CONTROL_FILE_KEYS.every((key) => verifiedContents[key].equals(reusable.snapshot.contents[key]))
