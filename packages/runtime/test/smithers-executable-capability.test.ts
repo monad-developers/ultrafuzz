@@ -234,6 +234,69 @@ test(
   }
 );
 
+test(
+  "native operator continuations resolve target workflows from only the privately bound package root",
+  { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const root = temporaryDirectory("ufz-native-operator-modules-"),
+      operatorRoot = path.join(root, "operator"),
+      targetRoot = path.join(root, "target"),
+      operatorNodeModules = path.join(operatorRoot, ".smithers", "node_modules"),
+      runner = path.join(operatorNodeModules, "smthrs", "src", "bin", "smithers.js"),
+      trustedPackage = path.join(operatorNodeModules, "native-continuation-dependency"),
+      hostileNodeModules = path.join(root, "hostile-node-modules"),
+      hostilePackage = path.join(hostileNodeModules, "native-continuation-dependency"),
+      hostileMarker = path.join(root, "hostile-package-ran"),
+      workflow = path.join(targetRoot, ".smithers", "workflows", "continued.tsx");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.mkdirSync(trustedPackage, { recursive: true });
+    fs.mkdirSync(hostilePackage, { recursive: true });
+    fs.mkdirSync(path.dirname(workflow), { recursive: true });
+    for (const [packageRoot, source] of [
+      [trustedPackage, 'export default "trusted";\n'],
+      [hostilePackage, `await Bun.write(${JSON.stringify(hostileMarker)}, "hostile"); export default "hostile";\n`]
+    ] as const) {
+      fs.writeFileSync(
+        path.join(packageRoot, "package.json"),
+        `${JSON.stringify({ name: "native-continuation-dependency", type: "module", exports: "./index.js" })}\n`
+      );
+      fs.writeFileSync(path.join(packageRoot, "index.js"), source);
+    }
+    fs.writeFileSync(
+      workflow,
+      'import dependency from "native-continuation-dependency"; export default dependency;\n',
+      "utf8"
+    );
+    writeExecutable(
+      runner,
+      "#!/usr/bin/env bun\nconst workflow = await import(process.argv[3]); console.log(JSON.stringify({ dependency: workflow.default, nodePath: process.env.NODE_PATH ?? null }));\n"
+    );
+    let checks = 0;
+    const env = bindOperatorSmithersExecutableCapability(
+      { NODE_PATH: hostileNodeModules },
+      runner,
+      operatorRoot,
+      () => {
+        checks += 1;
+      },
+      targetRoot,
+      true
+    );
+
+    const result = await runSmithersInspectionCommand({
+      args: ["inspect", workflow, "--format", "json"],
+      projectRoot: targetRoot,
+      env,
+      environmentVariableNames: ["NODE_PATH"]
+    });
+
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.json, { dependency: "trusted", nodePath: operatorNodeModules });
+    assert.equal(fs.existsSync(hostileMarker), false);
+    assert.ok(checks >= 3);
+  }
+);
+
 test("streaming Smithers commands keep the executable anchor through child close", async () => {
   const root = temporaryDirectory("ufz-runner-stream-");
   const runner = nodeRunner(root, "console.log(JSON.stringify({ sequence: 1 }));\n");

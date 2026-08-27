@@ -884,6 +884,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       // evidence directory remains mutable only for recovery receipts and logs.
       relaunchPaths: {
         runRoot: evidence.layout.root,
+        inputJson: evidence.executionSnapshot.inputJson,
         logsDir: path.join(evidence.layout.root, "smithers", "logs")
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
