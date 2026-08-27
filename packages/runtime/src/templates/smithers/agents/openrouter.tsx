@@ -367,6 +367,11 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
         relay.discard();
         throw conflict;
       }
+      const preRecoveryCallbackError = relay.callerCallbackError();
+      if (preRecoveryCallbackError !== undefined) {
+        relay.discard();
+        throw preRecoveryCallbackError.error;
+      }
       if ((relay.sawSubstantiveEvent || isTerminalRecoveryAttempt) && !relay.hasAuthoritativeTerminalMessage()) {
         const resumeSession = relay.resumeSession ?? expectedResumeSession;
         relay.rememberActionSnapshotsForResume();

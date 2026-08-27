@@ -942,7 +942,8 @@ process.stdin.on("end", () => {
       "resume-hang",
       "terminal-null-resume",
       "terminal-null-no-session",
-      "terminal-null-repeat"
+      "terminal-null-repeat",
+      "terminal-null-late-callback"
     ].includes(mode);
   if (substantiveMode && !resumed) fs.appendFileSync(sentinelPath, "mutation\\n", "utf8");
   fs.appendFileSync(journalPath, JSON.stringify({
@@ -964,6 +965,17 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
   if (mode.startsWith("terminal-null-")) {
     const outputIndex = process.argv.indexOf("--output-last-message");
+    if (mode === "terminal-null-late-callback") {
+      process.stdout.write(JSON.stringify({
+        type: "item.started",
+        item: { id: "unfinished-reasoning", type: "reasoning", text: "substantive work without a final" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+      return;
+    }
     if (!resumed || mode === "terminal-null-repeat") {
       const commentary = "I will inspect the task before I finish it.";
       if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], commentary, "utf8");
@@ -4688,6 +4700,22 @@ bunAdapterTest(
       assert.equal(
         repeatedEvents.some((event) => event.type === "completed"),
         false
+      );
+
+      resetFixture("terminal-null-late-callback");
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Preserve a late caller callback failure",
+          onStdout: () => {
+            throw new Error("terminal null stdout callback failed");
+          }
+        }),
+        /terminal null stdout callback failed/u
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh"]
       );
     } finally {
       for (const [name, value] of Object.entries({
