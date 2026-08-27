@@ -9,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
   assertRunPlanDocument,
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
@@ -1286,6 +1288,7 @@ export interface CompiledSmithersWorkflow {
   tasks: readonly CompiledSmithersTask[];
   dynamicGroups: readonly CompiledSmithersDynamicGroup[];
   maxDynamicNodes: number;
+  replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
   projectRoot: string;
@@ -1354,6 +1357,7 @@ export function renderCurrentSmithersController(input: {
     tasks: input.tasks.tasks,
     dynamicGroups: input.tasks.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,
     runRoot: input.layout.root,
@@ -1441,6 +1445,7 @@ export function refreshedSmithersControllerSnapshot(input: {
     tasks: taskDocument.tasks,
     dynamicGroups: taskDocument.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: true,
     nonBlockingAttemptIds,
     projectRoot,
     runRoot: input.layout.root,
@@ -2049,6 +2054,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     tasks,
     dynamicGroups,
     maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: false,
     nonBlockingAttemptIds,
     projectRoot,
     runRoot: input.runLayout.root,
@@ -5870,11 +5876,20 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
-  const compiledTasks = JSON.stringify(compiled.tasks, null, 2);
-  const dynamicGroups = JSON.stringify(compiled.dynamicGroups, null, 2);
+  const controllerTasks = compiled.replacePromptSchemas
+    ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
+    : compiled.tasks;
+  const controllerDynamicGroups = compiled.replacePromptSchemas
+    ? compiled.dynamicGroups.map((group) => ({
+        ...group,
+        taskTemplates: group.taskTemplates.map((task) => taskWithCurrentArtifactSchemas(task))
+      }))
+    : compiled.dynamicGroups;
+  const compiledTasks = JSON.stringify(controllerTasks, null, 2);
+  const dynamicGroups = JSON.stringify(controllerDynamicGroups, null, 2);
   const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
   const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
-  for (const task of compiled.tasks) {
+  for (const task of controllerTasks) {
     const artifactDir = path.resolve(task.artifactDir);
     if (taskByArtifactDir.has(artifactDir)) {
       throw new Error(`multiple compiled tasks share artifact directory ${JSON.stringify(artifactDir)}`);
@@ -5882,7 +5897,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     taskByArtifactDir.set(artifactDir, task);
   }
   const taskSpecs = JSON.stringify(
-    compiled.tasks.map((task) => ({
+    controllerTasks.map((task) => ({
       id: task.smithersNodeId,
       smithersRunId: compiled.smithersRunId,
       preparationId: task.preparationSmithersNodeId,
@@ -5980,9 +5995,40 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
+    __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__: JSON.stringify(compiled.replacePromptSchemas),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });
+}
+
+function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
+  return {
+    ...task,
+    metadata: {
+      ...task.metadata,
+      artifacts: {
+        ...task.metadata.artifacts,
+        outputs: task.metadata.artifacts.outputs.map((output) => {
+          const binding = artifactContractSchemaBinding(output.contract);
+          return {
+            path: output.path,
+            contract: output.contract,
+            contractDigest: artifactContractDefinition(output.contract).digest,
+            primary: output.primary,
+            ...(binding === undefined
+              ? {}
+              : {
+                  schemaFile: binding.schema_file,
+                  schemaId: binding.schema_id,
+                  schemaSha256: binding.schema_sha256,
+                  schemaBundleSha256: binding.schema_bundle_sha256,
+                  validatorBuild: binding.validator_build
+                })
+          };
+        })
+      }
+    }
+  };
 }
 
 function dependencyVerificationProducersForTask(

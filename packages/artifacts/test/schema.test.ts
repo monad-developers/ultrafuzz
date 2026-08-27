@@ -156,6 +156,28 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
   }
 });
 
+test("current-controller schema materialization replaces only an older physical bundle", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-refresh-"));
+  const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+  try {
+    materializePromptSchemas(destination);
+    const target = path.join(destination, "report.schema.json");
+    const source = path.join(packageRoot, "schema", "report.schema.json");
+    fs.chmodSync(target, 0o600);
+    fs.writeFileSync(target, '{"$id":"urn:ultrafuzz:historical-report"}\n', "utf8");
+    fs.chmodSync(target, 0o400);
+
+    assert.throws(() => materializePromptSchemas(destination), /destination differs from checked-in source/u);
+    assert.doesNotThrow(() => materializePromptSchemas(destination, { replaceExisting: true }));
+    assert.deepEqual(fs.readFileSync(target), fs.readFileSync(source));
+    assert.equal(fs.statSync(target).mode & 0o777, 0o400);
+    assert.doesNotThrow(() => materializePromptSchemas(destination, { replaceExisting: true }));
+  } finally {
+    for (const file of readdirSync(destination)) fs.chmodSync(path.join(destination, file), 0o600);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("loads only a complete physical sealed schema bundle", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-sealed-schema-bundle-"));
   const destination = path.join(root, "schemas");
@@ -229,6 +251,10 @@ test("rejects a hard-linked schema destination before changing its inode", () =>
     fs.chmodSync(destination, 0o500);
 
     assert.throws(() => materializePromptSchemas(destination), /destination entry is unsafe/u);
+    assert.throws(
+      () => materializePromptSchemas(destination, { replaceExisting: true }),
+      /destination entry is unsafe/u
+    );
     assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
   } finally {
     fs.chmodSync(destination, 0o700);

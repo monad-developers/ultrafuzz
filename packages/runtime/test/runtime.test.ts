@@ -9654,6 +9654,17 @@ test("current-controller rendering preserves continue policy for a leaf task", a
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
+  const historicalOutput = tasks.tasks
+    .flatMap((task) => task.metadata.artifacts.outputs)
+    .find((output) => output.primary === true);
+  assert.ok(historicalOutput);
+  historicalOutput.contract = "ultrafuzz/findings@2";
+  historicalOutput.contractDigest = "0".repeat(64);
+  historicalOutput.schemaFile = "findings.schema.json";
+  historicalOutput.schemaId = "urn:ultrafuzz:schema:artifacts:findings:2";
+  historicalOutput.schemaSha256 = "0".repeat(64);
+  historicalOutput.schemaBundleSha256 = "0".repeat(64);
+  historicalOutput.validatorBuild = `ultrafuzz-json-validator.v1:${"0".repeat(64)}`;
 
   const workflowPath = renderCurrentSmithersController({
     projectRoot: project,
@@ -9664,6 +9675,7 @@ test("current-controller rendering preserves continue policy for a leaf task", a
     expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
   });
   const workflowSource = fs.readFileSync(workflowPath, "utf8");
+  assert.match(workflowSource, /const replacePromptSchemas = true;/u);
   const specsPrefix = "const serializedTaskSpecs = ";
   const specsStart = workflowSource.indexOf(specsPrefix);
   const specsEnd = workflowSource.indexOf(" as const;", specsStart);
@@ -9671,8 +9683,17 @@ test("current-controller rendering preserves continue policy for a leaf task", a
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
+    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string }>;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+  const reboundOutput = specs
+    .flatMap((task) => task.outputs)
+    .find((output) => output.contract === historicalOutput.contract);
+  assert.equal(reboundOutput?.contractDigest, artifactContractDefinition(historicalOutput.contract).digest);
+  assert.equal(
+    reboundOutput?.schemaBundleSha256,
+    artifactContractSchemaBinding(historicalOutput.contract)?.schema_bundle_sha256
+  );
 });
 
 test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {
@@ -10818,7 +10839,11 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
-  assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory\)/u);
+  assert.match(workflowSource, /const replacePromptSchemas = false;/u);
+  assert.match(
+    workflowSource,
+    /materializePromptSchemas\(schemaDirectory, \{ replaceExisting: replacePromptSchemas \}\)/u
+  );
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.artifactDir, mirroredArtifactDir\(task\)\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.sourceProjectRoot, process\.cwd\(\)\)/u);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);

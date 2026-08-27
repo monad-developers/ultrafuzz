@@ -334,6 +334,7 @@ const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
+const replacePromptSchemas = __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
@@ -3634,7 +3635,9 @@ function prepareArtifactMirror(
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  preparationStep(task.attemptId, "materialize-prompt-schemas", () => materializePromptSchemas(schemaDirectory));
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () =>
+    materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
+  );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
   preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
