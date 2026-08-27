@@ -21,7 +21,7 @@ const PI_PROVIDER = "openrouter";
 // operator's value from; the child always receives it under this name.
 const PI_CREDENTIAL_ENV = "OPENROUTER_API_KEY";
 const PI_CONFIG_DIR = ".ultrafuzz/pi-coding-agent";
-const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export class CompatiblePiAgent extends SmithersPiAgent {
   override async buildCommand(params: PiCommandParams): Promise<PiCommand> {

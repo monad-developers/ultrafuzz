@@ -6578,11 +6578,16 @@ bunAdapterTest(
       const thinkingIndex = thinkingCommand.args.indexOf("--thinking");
       assert.notEqual(thinkingIndex, -1);
       assert.equal(thinkingCommand.args[thinkingIndex + 1], "high");
+      const maxThinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "max" });
+      const maxThinkingCommand = await maxThinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
+      const maxThinkingIndex = maxThinkingCommand.args.indexOf("--thinking");
+      assert.notEqual(maxThinkingIndex, -1);
+      assert.equal(maxThinkingCommand.args[maxThinkingIndex + 1], "max");
       // The throw must name the file and the key, not just the range: this is the
-      // error an operator hits copying `reasoning = "max"` off another profile.
+      // error an operator hits when selecting a value outside pi's command surface.
       assert.throws(
         () => createPiAgent({ reasoningEffort: "ludicrous" }),
-        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh/u
+        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh, max/u
       );
 
       // api_key_env names only where ultrafuzz reads the operator's value from;
