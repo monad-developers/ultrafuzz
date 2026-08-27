@@ -18225,6 +18225,9 @@ test("controller refresh selects current source without rewriting historical evi
   const statePath = path.join(launched.value!.run_root, "state.json");
   const journalPath = path.join(launched.value!.run_root, "smithers", "workflow-run-link-journal.json");
   const resolvedConfigPath = path.join(launched.value!.run_root, "smithers", "resolved-config.json");
+  const tasksPath = path.join(launched.value!.run_root, "smithers", "tasks.json");
+  const smithersGraphPath = path.join(launched.value!.run_root, "smithers", "expanded-graph.json");
+  const canonicalGraphPath = path.join(launched.value!.run_root, "graph.json");
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
     workflow?: { path?: string; run_id?: string };
   };
@@ -18236,6 +18239,20 @@ test("controller refresh selects current source without rewriting historical evi
   };
   historicalConfig.run.maxParallelNodes = 8;
   fs.writeFileSync(resolvedConfigPath, `${JSON.stringify(historicalConfig, null, 2)}\n`, "utf8");
+  const tasks = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  const referencedAttempts = new Set(
+    tasks.tasks.flatMap((task) => task.dependencyArtifactDirs.map((directory) => path.basename(directory)))
+  );
+  const leafTask = tasks.tasks.find((task) => !referencedAttempts.has(task.attemptId));
+  assert.ok(leafTask);
+  leafTask.metadata.node.group = "continuation-leaf";
+  fs.writeFileSync(tasksPath, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
+  const canonicalGraph = JSON.parse(fs.readFileSync(canonicalGraphPath, "utf8")) as {
+    groups: Record<string, unknown>;
+  };
+  canonicalGraph.groups["continuation-leaf"] = { defaults: { failure_policy: "continue" } };
+  fs.writeFileSync(canonicalGraphPath, `${JSON.stringify(canonicalGraph, null, 2)}\n`, "utf8");
+  fs.rmSync(smithersGraphPath);
   const retainedConfig = fs.readFileSync(resolvedConfigPath);
   const retainedMetadata = fs.readFileSync(metadataPath);
   const retainedJournal = fs.readFileSync(journalPath);
@@ -18263,6 +18280,16 @@ test("controller refresh selects current source without rewriting historical evi
   const continuationPath = /^up (\S+)/u.exec(commands[1] ?? "")?.[1];
   assert.ok(continuationPath);
   assert.equal(fs.existsSync(continuationPath), true);
+  const continuationSource = fs.readFileSync(continuationPath, "utf8");
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = continuationSource.indexOf(specsPrefix);
+  const specsEnd = continuationSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, continuationSource);
+  const specs = JSON.parse(continuationSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    continueOnFail: boolean;
+  }>;
+  assert.equal(specs.find((task) => task.attemptId === leafTask.attemptId)?.continueOnFail, true);
   assert.deepEqual(fs.readFileSync(historicalWorkflowPath), historicalWorkflow);
   assert.deepEqual(fs.readFileSync(resolvedConfigPath), retainedConfig);
   assert.deepEqual(fs.readFileSync(metadataPath), retainedMetadata);

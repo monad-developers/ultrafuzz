@@ -656,15 +656,19 @@ function parseContinuationResolvedConfigBytes(bytes: Uint8Array): ResolvedConfig
 }
 
 function readContinuationExpandedGraph(layout: RunLayout): unknown {
-  const graphPath = path.join(layout.root, "smithers", "expanded-graph.json");
-  try {
-    assertRegularFileInside(layout.root, graphPath, "expanded workflow graph");
-    return parseStrictJsonBytes(readRegularFileSnapshot(graphPath, 128 * 1024 * 1024));
-  } catch {
-    // The graph only restores failure-policy rendering when it is available.
-    // Missing or newer graph evidence must not become refresh authorization.
-    return undefined;
+  for (const graphPath of [path.join(layout.root, "smithers", "expanded-graph.json"), layout.graphPath]) {
+    try {
+      assertRegularFileInside(layout.root, graphPath, "workflow graph");
+      const graph = parseStrictJsonBytes(readRegularFileSnapshot(graphPath, 128 * 1024 * 1024));
+      if (Object.keys(objectRecord(objectRecord(graph).groups)).length > 0) return graph;
+    } catch {
+      // Continue to the canonical run graph when the Smithers copy is absent,
+      // unreadable, or from an unsupported schema generation.
+    }
   }
+  // Graph provenance only restores failure-policy rendering when available.
+  // Its absence must not become refresh authorization.
+  return undefined;
 }
 
 function recordNativeContinuationState(input: {
