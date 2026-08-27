@@ -132,9 +132,10 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "openrouter.tsx": {
-    classifiedSourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f",
+    classifiedSourceSha256: "cc98f84cb480d0faacb805eb8891ee5f3408ba81f4c2581a235571d65f8b43d5",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling"],
     upstreamIssues: [
+      "https://github.com/monad-developers/ultrafuzz/issues/972",
       "https://github.com/smithersai/smithers/issues/1622",
       "https://github.com/smithersai/smithers/issues/1625"
     ]
@@ -212,10 +213,10 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489"
   },
   "openrouter.tsx": {
-    maxLines: 1_250,
-    maxSyntaxNodes: 6_719,
+    maxLines: 1_325,
+    maxSyntaxNodes: 7_036,
     purpose: "adapter",
-    sourceSha256: "1a09dfba7abe15299ace0193b20a8686dce2db8a3c633cddb950e2f0fc55e15f"
+    sourceSha256: "cc98f84cb480d0faacb805eb8891ee5f3408ba81f4c2581a235571d65f8b43d5"
   },
   "pi.tsx": {
     maxLines: 200,
