@@ -16,6 +16,7 @@ import {
   artifactContractSchemaBinding,
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
+  assertRunMetadataDocument,
   executeSchemaSemanticGates,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
@@ -28,6 +29,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  RUN_METADATA_SCHEMA_VERSION,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
@@ -591,6 +593,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "readBoundedRegularArtifactSnapshot",
     "parseStrictJsonSnapshot",
     "isPlainJsonRecord",
+    "assertRunMetadataDocument",
+    "RUN_METADATA_SCHEMA_VERSION",
     "MAX_FINAL_REPORT_RUN_METADATA_BYTES",
     "MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES",
     "prepareSafeFilePath",
@@ -617,6 +621,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     readSnapshot,
     (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
     (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value),
+    assertRunMetadataDocument,
+    RUN_METADATA_SCHEMA_VERSION,
     64 * 1024 * 1024,
     1024 * 1024,
     prepareSafeFilePath,
@@ -8015,6 +8021,13 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       prompt_digest: "unavailable",
       expanded_graph_fingerprint: "unavailable"
     });
+
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({ run_id: "run-1", created_at: "not-a-timestamp" })}\n`,
+      "utf8"
+    );
+    assert.throws(() => authority.derive(task), /final-report elapsed-time metadata is malformed/u);
 
     const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
     assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata has the wrong run ID/u);

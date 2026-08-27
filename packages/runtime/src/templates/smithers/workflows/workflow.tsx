@@ -33,6 +33,7 @@ const {
   artifactValidatorSmokeFixturePath,
   assertCloudSelectedTaskMatchesCanonical,
   assertArtifactPublicationsContainNoSecrets,
+  assertRunMetadataDocument,
   assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
@@ -63,6 +64,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  RUN_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
@@ -2294,12 +2296,62 @@ function normalizeFinalReportGitHubRepository(task: (typeof taskSpecs)[number]):
   return normalizeFinalReportGitHubRemote(remote);
 }
 
+function finalReportOptionalRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!isPlainJsonRecord(value)) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return value;
+}
+
+function finalReportOptionalString(value: unknown, label: string): string {
+  if (value === undefined) return "unavailable";
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return value;
+}
+
+function finalReportOptionalSha256(value: unknown, label: string): string {
+  const projected = finalReportOptionalString(value, label);
+  if (projected !== "unavailable" && !/^[a-f0-9]{64}$/u.test(projected)) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return projected;
+}
+
+function finalReportOptionalStringArray(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string" || entry.length === 0) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return [...value];
+}
+
 function finalReportElapsedTime(createdAt: unknown, updatedAt: unknown): string {
-  if (typeof createdAt !== "string" || typeof updatedAt !== "string") return "unavailable";
-  const started = Date.parse(createdAt);
-  const finished = Date.parse(updatedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return "unavailable";
-  const totalSeconds = (finished - started) / 1_000;
+  if (
+    (createdAt !== undefined && typeof createdAt !== "string") ||
+    (updatedAt !== undefined && typeof updatedAt !== "string")
+  ) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  const started = createdAt === undefined ? undefined : Date.parse(createdAt);
+  const finished = updatedAt === undefined ? undefined : Date.parse(updatedAt);
+  if (
+    (createdAt !== undefined && (!Number.isFinite(started) || new Date(started!).toISOString() !== createdAt)) ||
+    (updatedAt !== undefined && (!Number.isFinite(finished) || new Date(finished!).toISOString() !== updatedAt))
+  ) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  if (createdAt === undefined || updatedAt === undefined) return "unavailable";
+  if (finished! < started!) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  const totalSeconds = (finished! - started!) / 1_000;
   if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
   const totalMinutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
@@ -2318,44 +2370,64 @@ function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[numb
     MAX_FINAL_REPORT_RUN_METADATA_BYTES,
     true
   );
-  const metadata = parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid");
-  if (!isPlainJsonRecord(metadata) || metadata.run_id !== task.metadata.run.ultrafuzzRunId) {
+  const parsed = parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid");
+  if (!isPlainJsonRecord(parsed) || parsed.run_id !== task.metadata.run.ultrafuzzRunId) {
     throw new Error(`artifact-contract failure: final-report run metadata has the wrong run ID ${task.attemptId}`);
   }
-  const auditProfile = isPlainJsonRecord(metadata.audit_profile) ? metadata.audit_profile : {};
-  const effectiveSettings = isPlainJsonRecord(auditProfile.effective_settings) ? auditProfile.effective_settings : {};
+  let metadata = parsed;
+  if (metadata.schema_version === RUN_METADATA_SCHEMA_VERSION) {
+    try {
+      metadata = assertRunMetadataDocument(metadata, task.metadata.run.ultrafuzzRunId);
+    } catch (error) {
+      throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`, {
+        cause: error
+      });
+    }
+  } else if (metadata.schema_version !== undefined && typeof metadata.schema_version !== "string") {
+    throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`);
+  }
+  const auditProfile = finalReportOptionalRecord(metadata.audit_profile, "audit profile");
+  const effectiveSettings = finalReportOptionalRecord(auditProfile.effective_settings, "audit-profile settings");
   const configuredStrategyLoops = effectiveSettings.strategy_loops;
-  const strategyLoops =
-    typeof configuredStrategyLoops === "number" &&
-    Number.isSafeInteger(configuredStrategyLoops) &&
-    configuredStrategyLoops >= 0
-      ? configuredStrategyLoops
-      : "unavailable";
-  const accountingRoot = isPlainJsonRecord(metadata.accounting) ? metadata.accounting : {};
-  const accounting = isPlainJsonRecord(accountingRoot.cumulative) ? accountingRoot.cumulative : {};
-  const optionalString = (value: unknown): string =>
-    typeof value === "string" && value.length > 0 ? value : "unavailable";
-  const models = Array.isArray(accounting.models)
-    ? accounting.models.filter((value): value is string => typeof value === "string" && value.length > 0)
-    : [];
-  const sourceRunIds = Array.isArray(accounting.source_run_ids)
-    ? accounting.source_run_ids.filter((value): value is string => typeof value === "string" && value.length > 0)
-    : [];
+  let strategyLoops: number | "unavailable" = "unavailable";
+  if (configuredStrategyLoops !== undefined) {
+    if (
+      typeof configuredStrategyLoops !== "number" ||
+      !Number.isSafeInteger(configuredStrategyLoops) ||
+      configuredStrategyLoops < 0
+    ) {
+      throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${task.attemptId}`);
+    }
+    strategyLoops = configuredStrategyLoops;
+  }
+  const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
+  const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
+  const models = finalReportOptionalStringArray(accounting.models, "accounting models");
+  const sourceRunIds = finalReportOptionalStringArray(accounting.source_run_ids, "accounting source run IDs");
+  if (accounting.partial_pricing !== undefined && typeof accounting.partial_pricing !== "boolean") {
+    throw new Error(`artifact-contract failure: final-report partial pricing is malformed ${task.attemptId}`);
+  }
   return {
     run_id: task.metadata.run.ultrafuzzRunId,
-    source_run_id: optionalString(metadata.source_run_id),
+    source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
     elapsed_time: finalReportElapsedTime(metadata.created_at, accountingRoot.updated_at),
     models_used: models,
-    tokens_used: optionalString(accounting.tokens_used),
-    estimated_spend: optionalString(accounting.estimated_spend),
-    partial_pricing: typeof accounting.partial_pricing === "boolean" ? accounting.partial_pricing : false,
+    tokens_used: finalReportOptionalString(accounting.tokens_used, "tokens used"),
+    estimated_spend: finalReportOptionalString(accounting.estimated_spend, "estimated spend"),
+    partial_pricing: accounting.partial_pricing ?? false,
     strategy_loops: strategyLoops,
-    audit_profile: optionalString(auditProfile.effective),
-    audit_profile_catalog_digest: optionalString(auditProfile.catalog_digest),
-    topology_digest: optionalString(auditProfile.topology_digest),
-    prompt_digest: optionalString(auditProfile.prompt_digest),
-    expanded_graph_fingerprint: optionalString(auditProfile.expanded_graph_fingerprint),
+    audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
+    audit_profile_catalog_digest: finalReportOptionalSha256(
+      auditProfile.catalog_digest,
+      "audit-profile catalog digest"
+    ),
+    topology_digest: finalReportOptionalSha256(auditProfile.topology_digest, "topology digest"),
+    prompt_digest: finalReportOptionalSha256(auditProfile.prompt_digest, "prompt digest"),
+    expanded_graph_fingerprint: finalReportOptionalSha256(
+      auditProfile.expanded_graph_fingerprint,
+      "expanded-graph fingerprint"
+    ),
     ...(sourceRunIds.length === 0 ? {} : { source_run_ids: sourceRunIds })
   };
 }

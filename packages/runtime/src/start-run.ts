@@ -493,12 +493,21 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         : (historicalWorkflowIds.at(-1) ?? `ultrafuzz-${runId}`),
       "Smithers run ID"
     );
-    const persistedWorkflowPath =
-      typeof workflow.path === "string" && workflow.path.length > 0
-        ? workflow.path
-        : path.join(".smithers", "workflows", `ultrafuzz-${runId}.tsx`);
-    let workflowPath = safeResolveInside(projectRoot, persistedWorkflowPath, "workflow path");
-    assertRegularFileInside(projectRoot, workflowPath, "workflow path");
+    let workflowPath: string;
+    if (input.refreshController === true) {
+      // Refresh renders a replacement path below. A lost or malformed
+      // historical project-workflow pointer is provenance, not authority to
+      // prevent the run-owned task evidence from reaching the current
+      // controller.
+      workflowPath = "";
+    } else {
+      const persistedWorkflowPath =
+        typeof workflow.path === "string" && workflow.path.length > 0
+          ? workflow.path
+          : path.join(".smithers", "workflows", `ultrafuzz-${runId}.tsx`);
+      workflowPath = safeResolveInside(projectRoot, persistedWorkflowPath, "workflow path");
+      assertRegularFileInside(projectRoot, workflowPath, "workflow path");
+    }
 
     const smithersRoot = safeResolveInside(layout.root, "smithers", "Smithers evidence");
     const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
@@ -516,7 +525,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     if (fs.existsSync(configPath)) {
       assertRegularFileInside(layout.root, configPath, "workflow config");
       try {
-        config = parseResolvedConfigJsonBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
+        config = parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
       } catch (error) {
         if (input.refreshController === true) throw error;
       }
@@ -535,7 +544,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         layout,
         smithersRunId,
         tasks: taskDocument,
-        config
+        config,
+        expandedGraph: readContinuationExpandedGraph(layout)
       });
     }
     const tasks = taskDocument?.tasks ?? [];
@@ -609,6 +619,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli.environmentVariableNames
       )
     });
+    recordNativeContinuationState({
+      layout,
+      config,
+      requestedConcurrency: input.maxConcurrency,
+      alreadyRunning: result.alreadyRunning ?? false
+    });
     return runtimeResult(true, {
       run_id: runId,
       workflow_run_id: smithersRunId,
@@ -619,6 +635,79 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
   } finally {
     await releaseLifecycleLock?.();
+  }
+}
+
+function parseContinuationResolvedConfigBytes(bytes: Uint8Array): ResolvedConfig {
+  try {
+    return parseResolvedConfigJsonBytes(bytes);
+  } catch (error) {
+    // `run.maxParallelNodes` was persisted by resolved-config v3 before #936
+    // removed the unused key without changing the document version. Project a
+    // read-only copy through the current parser; never rewrite the historical
+    // bytes and never make the retired setting part of continuation behavior.
+    const document = objectRecord(parseStrictJsonBytes(bytes));
+    const run = objectRecord(document.run);
+    if (!Object.hasOwn(run, "maxParallelNodes")) throw error;
+    const projected = { ...document, run: { ...run } };
+    delete projected.run.maxParallelNodes;
+    return parseResolvedConfigJsonBytes(Buffer.from(JSON.stringify(projected), "utf8"));
+  }
+}
+
+function readContinuationExpandedGraph(layout: RunLayout): unknown {
+  const graphPath = path.join(layout.root, "smithers", "expanded-graph.json");
+  try {
+    assertRegularFileInside(layout.root, graphPath, "expanded workflow graph");
+    return parseStrictJsonBytes(readRegularFileSnapshot(graphPath, 128 * 1024 * 1024));
+  } catch {
+    // The graph only restores failure-policy rendering when it is available.
+    // Missing or newer graph evidence must not become refresh authorization.
+    return undefined;
+  }
+}
+
+function recordNativeContinuationState(input: {
+  layout: RunLayout;
+  config: ResolvedConfig | undefined;
+  requestedConcurrency: number | undefined;
+  alreadyRunning: boolean;
+}): void {
+  try {
+    const submittedAt = new Date().toISOString();
+    const submittedAtMs = Date.parse(submittedAt);
+    const state = readRunState(input.layout);
+    if (state.status !== "running") state.last_transition_at = submittedAt;
+    state.status = "running";
+    state.started_at ??= submittedAt;
+    delete state.finished_at;
+    if (!input.alreadyRunning) {
+      const leaseDurationMs =
+        (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+      state.controller_lease = {
+        ...state.controller_lease,
+        status: "active",
+        duration_ms: leaseDurationMs,
+        renewed_at: submittedAt,
+        expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
+      };
+      state.concurrency.requested_concurrency =
+        input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
+    }
+    if (input.config !== undefined) {
+      state.workflow_deadline_at = new Date(
+        submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
+      ).toISOString();
+    } else if (state.workflow_deadline_at !== undefined && Date.parse(state.workflow_deadline_at) <= submittedAtMs) {
+      // A legacy run without readable config cannot supply a fresh duration.
+      // Do not let its already-expired historical deadline cancel the Smithers
+      // continuation that was just accepted.
+      delete state.workflow_deadline_at;
+    }
+    writeRunState(input.layout, state);
+  } catch {
+    // Mutable Ultrafuzz projection is best effort after Smithers accepts the
+    // continuation. Malformed legacy state must not become a new hard gate.
   }
 }
 

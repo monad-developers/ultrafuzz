@@ -41,6 +41,7 @@ import {
   VALIDATOR_BUILD_IDENTITY,
   writeRunState,
   type RunState,
+  type SmithersTaskManifestDocument,
   type SMITHERS_NODE_STATES,
   type SMITHERS_RUN_STATES,
   type SMITHERS_RUN_STATUSES
@@ -9423,6 +9424,46 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
   assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
 });
 
+test("current-controller rendering preserves continue policy for a leaf task", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "refresh-leaf-continue", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const { compileSmithersWorkflow, renderCurrentSmithersController } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-refresh-leaf-continue",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  const tasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
+  assert.ok(leaf);
+  leaf.metadata.node.group = "leaf-continue";
+
+  const workflowPath = renderCurrentSmithersController({
+    projectRoot: project,
+    layout: plan.value!.layout,
+    smithersRunId: compiled.smithersRunId,
+    tasks,
+    config: plan.value!.resolved_config,
+    expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
+  });
+  const workflowSource = fs.readFileSync(workflowPath, "utf8");
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = workflowSource.indexOf(specsPrefix);
+  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
+  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    continueOnFail: boolean;
+  }>;
+  assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+});
+
 test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -18183,14 +18224,20 @@ test("controller refresh selects current source without rewriting historical evi
   const metadataPath = path.join(launched.value!.run_root, "run.json");
   const statePath = path.join(launched.value!.run_root, "state.json");
   const journalPath = path.join(launched.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const resolvedConfigPath = path.join(launched.value!.run_root, "smithers", "resolved-config.json");
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
     workflow?: { path?: string; run_id?: string };
   };
   assert.ok(metadata.workflow?.path);
   const historicalWorkflowPath = path.join(project, metadata.workflow.path);
   const historicalWorkflow = fs.readFileSync(historicalWorkflowPath);
+  const historicalConfig = JSON.parse(fs.readFileSync(resolvedConfigPath, "utf8")) as {
+    run: Record<string, unknown>;
+  };
+  historicalConfig.run.maxParallelNodes = 8;
+  fs.writeFileSync(resolvedConfigPath, `${JSON.stringify(historicalConfig, null, 2)}\n`, "utf8");
+  const retainedConfig = fs.readFileSync(resolvedConfigPath);
   const retainedMetadata = fs.readFileSync(metadataPath);
-  const retainedState = fs.readFileSync(statePath);
   const retainedJournal = fs.readFileSync(journalPath);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
@@ -18217,9 +18264,26 @@ test("controller refresh selects current source without rewriting historical evi
   assert.ok(continuationPath);
   assert.equal(fs.existsSync(continuationPath), true);
   assert.deepEqual(fs.readFileSync(historicalWorkflowPath), historicalWorkflow);
+  assert.deepEqual(fs.readFileSync(resolvedConfigPath), retainedConfig);
   assert.deepEqual(fs.readFileSync(metadataPath), retainedMetadata);
-  assert.deepEqual(fs.readFileSync(statePath), retainedState);
   assert.deepEqual(fs.readFileSync(journalPath), retainedJournal);
+  const continuedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(continuedState.status, "running");
+  assert.equal(continuedState.finished_at, undefined);
+
+  fs.rmSync(historicalWorkflowPath);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const refreshedWithoutHistoricalProjectWorkflow = await resumeRun({
+    projectRoot: project,
+    runId,
+    refreshController: true,
+    env
+  });
+  assert.equal(
+    refreshedWithoutHistoricalProjectWorkflow.ok,
+    true,
+    JSON.stringify(refreshedWithoutHistoricalProjectWorkflow.diagnostics)
+  );
 });
 
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
@@ -19460,6 +19524,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   staleState.status = "timed-out";
   staleState.finished_at = "2000-01-01T00:00:00.000Z";
   fs.writeFileSync(staleStatePath, `${JSON.stringify(staleState, null, 2)}\n`, "utf8");
+  const resumeStartedAt = Date.now();
   const resumed = await resumeRun({
     projectRoot: project,
     runId: run.value!.run_id,
@@ -19474,10 +19539,12 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.match(fs.readFileSync(credentialLog, "utf8"), /^sealed-primary-key\|/u);
   assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
-  assert.equal(resumedState.concurrency.requested_concurrency, staleState.concurrency.requested_concurrency);
-  assert.equal(resumedState.status, "timed-out");
-  assert.equal(resumedState.finished_at, "2000-01-01T00:00:00.000Z");
-  assert.equal(resumedState.workflow_deadline_at, "2000-01-01T00:00:00.000Z");
+  assert.equal(resumedState.concurrency.requested_concurrency, 8);
+  assert.equal(resumedState.status, "running");
+  assert.equal(resumedState.finished_at, undefined);
+  assert.ok(Date.parse(resumedState.workflow_deadline_at ?? "") > resumeStartedAt);
+  assert.equal(resumedState.controller_lease.status, "active");
+  assert.ok(Date.parse(resumedState.controller_lease.renewed_at) >= resumeStartedAt);
 
   const resetResumed = await resumeRun({
     projectRoot: project,

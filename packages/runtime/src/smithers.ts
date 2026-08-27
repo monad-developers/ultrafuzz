@@ -1324,6 +1324,7 @@ export function renderCurrentSmithersController(input: {
   smithersRunId: string;
   tasks: SmithersTaskManifestDocument;
   config: ResolvedConfig;
+  expandedGraph?: unknown;
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
@@ -1332,11 +1333,19 @@ export function renderCurrentSmithersController(input: {
   for (const file of packagedController.files) {
     writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
   }
-  const optionalProducerAttempts = new Set(
+  const nonBlockingAttempts = new Set(
     input.tasks.tasks.flatMap((task) =>
       (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory))
     )
   );
+  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
+  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
+  for (const task of input.tasks.tasks) {
+    const groupId = task.metadata.node.group;
+    const group = groupId === undefined ? undefined : groups[groupId];
+    const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
+    if (defaults.failure_policy === "continue") nonBlockingAttempts.add(task.attemptId);
+  }
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.layout.runId,
@@ -1345,7 +1354,7 @@ export function renderCurrentSmithersController(input: {
     tasks: input.tasks.tasks,
     dynamicGroups: input.tasks.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
-    nonBlockingAttemptIds: [...optionalProducerAttempts].sort(compareWorkflowExecutionStrings),
+    nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,
     runRoot: input.layout.root,
     ...(input.tasks.source_revision === undefined ? {} : { sourceRevision: input.tasks.source_revision }),
@@ -4176,7 +4185,7 @@ async function prepareSmithersExecutableEnvironment(
   const nativeContinuation = isNativeSmithersContinuation(env);
   const bunModuleConfinement = nativeContinuation ? undefined : writeCurrentBunStartupControls(controllerRoot);
   const controllerSeal = operatorControllerProjectSeal(controllerRoot);
-  return bindOperatorSmithersExecutableCapability(
+  const prepared = bindOperatorSmithersExecutableCapability(
     {
       ...(env ?? {}),
       ...(bunModuleConfinement === undefined ? {} : { ULTRAFUZZ_BUN_MODULE_CONFINEMENT: bunModuleConfinement })
@@ -4190,6 +4199,15 @@ async function prepareSmithersExecutableEnvironment(
     projectRoot,
     nativeContinuation
   );
+  if (nativeContinuation) {
+    // Smithers detaches the resumed engine and supervisor. Their patched
+    // relaunch paths still refer to this operator-owned package closure after
+    // the submitting Ultrafuzz process exits, so it must outlive process-local
+    // controller cleanup. The OS temporary-directory policy remains the outer
+    // reclamation boundary.
+    operatorControllerRoots.delete(controllerRoot);
+  }
+  return prepared;
 }
 
 async function ensureSmithersDependencies(
