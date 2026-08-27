@@ -55,7 +55,6 @@
     "execution_files": {
       "type": "array",
       "maxItems": 100000,
-      "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/executionFileSeal"
       }
