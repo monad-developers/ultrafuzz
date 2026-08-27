@@ -180,7 +180,14 @@ const operatorControllerProjects = new Map<string, Promise<OperatorControllerPro
 let operatorControllerCleanupRegistered = false;
 const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {",
   SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
-const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        child = spawn("bun", [cliPath, ...childArgs], {
+// 0.35.0 routes the detached spawn through `smithersRuntimeSpawn`, which only
+// selects the interpreter: under Bun it returns exactly `{command: "bun", args}`,
+// the literal 0.34.0 shape. Upstream still has no equivalent of the fd-3
+// execution-snapshot descriptor transfer below, so the replacement keeps
+// discarding upstream's runtime selection in favour of the verified
+// `process.execPath` and adds the descriptor the runner cannot supply.
+const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_SOURCE = `        const detachedSpawn = smithersRuntimeSpawn([cliPath, ...childArgs]);
+        child = spawn(detachedSpawn.command, detachedSpawn.args, {
           detached: true,
           stdio: ["ignore", fd, fd],
           env: {
@@ -206,7 +213,13 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
             ...(childSnapshotTransfer?.env ?? {}),
           },
         });`;
-const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisor = spawn("bun", supervisorArgs, {
+// Same `smithersRuntimeSpawn` indirection as the detached spawn above. The
+// use-after-close this patch exists for survives verbatim in 0.35.0: `fd` is
+// closed in the enclosing `finally` before the supervisor spawn reaches it, so
+// the private `supervisorFd` below is still the only thing keeping the
+// supervisor off a closed descriptor.
+const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisorSpawn = smithersRuntimeSpawn(supervisorArgs);
+        const supervisor = spawn(supervisorSpawn.command, supervisorSpawn.args, {
           detached: true,
           stdio: ["ignore", fd, fd],
           env: process.env,
@@ -233,9 +246,16 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         }
         supervisor.unref();
         supervisorPid = supervisor.pid;`;
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const child = spawn(options.executable ?? "bun", args, {
+// 0.35.0 changed three things here: the interpreter now comes from
+// `smithersRuntimeSpawn` (a no-op under Bun), `options.executable` is honoured
+// when a caller supplies one, and `logFd` is no longer nullable — the runner
+// throws `detached log is unavailable` instead of falling back to `"ignore"`.
+// The replacement still overrides all three, and still supplies the fd-3
+// execution-snapshot descriptor upstream has no equivalent of.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const runtime = options.executable ? { command: options.executable, args } : smithersRuntimeSpawn(args);
+    const child = spawn(runtime.command, runtime.args, {
       cwd,
-      stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
+      stdio: ["ignore", logFd, logFd],
       env: process.env,
       detached: true,
     });`;
@@ -299,16 +319,17 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH = `    const snaps
       }
       return value;
     };
+    // \`options.executable\` is deliberately ignored. \`process.execPath\` here is the
+    // interpreter bound and verified by Ultrafuzz's executable capability;
+    // honouring a caller-supplied executable string would be a capability escape.
+    // \`logFd\` is always an open descriptor in the pinned runner, which throws when
+    // it cannot open the detached log, so there is no "ignore" fallback to keep.
     const child = spawn(process.execPath, [...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
       cwd,
       stdio:
         snapshotDescriptor === undefined
-          ? logFd === null
-            ? "ignore"
-            : ["ignore", logFd, logFd]
-          : logFd === null
-            ? ["ignore", "ignore", "ignore", snapshotDescriptor]
-            : ["ignore", logFd, logFd, snapshotDescriptor],
+          ? ["ignore", logFd, logFd]
+          : ["ignore", logFd, logFd, snapshotDescriptor],
       env: {
         ...process.env,
         ...(snapshotDescriptor === undefined
@@ -321,10 +342,32 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = SMITHERS_CLI_RESUME_SNAPSHOT
   '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
   '"--no-addons", "--preserve-symlinks-main"'
 );
-const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE =
-  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";';
-const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH =
-  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";';
+// 0.35.0 reflowed this import across multiple lines and added `watch`;
+// `realpathSync` is still absent, so the CLI still cannot compare a workflow
+// path against its persisted generation without this patch.
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE = `import {
+  closeSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  statSync,
+  watch,
+  writeFileSync,
+  writeSync,
+} from "node:fs";`;
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH = `import {
+  closeSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  statSync,
+  watch,
+  writeFileSync,
+  writeSync,
+} from "node:fs";`;
 const SMITHERS_CLI_WORKFLOW_PATH_SOURCE = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
 const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
@@ -342,7 +385,11 @@ const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resol
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
   "process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));";
-const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, cliEntry, ...process.argv.slice(2)], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [cliEntry, ...process.argv.slice(2)], {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
+// Both the execve and the spawn now route through `smithersRuntimeReentry`,
+// which under Bun returns exactly `{command: process.execPath, args}` — the
+// literal 0.34.0 shape. The replacement declares its own `relaunchArgs` and
+// never reads `runtime`, so it substitutes cleanly and keeps the fd-3 transfer.
+const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);\n    process.execve(runtime.command, [runtime.command, ...runtime.args], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);\n  const child = spawn(runtime.command, runtime.args, {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
 const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
 const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
@@ -668,12 +715,17 @@ const SMITHERS_ENGINE_REFRESH_PATH_ACCEPTANCE_PATCH = `  const acceptedWorkflowM
             mismatch === "workflow path changed" || workflowHashMismatchLabels.includes(mismatch),
         )
       : [];`;
-const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "workflow",
-          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
-          workflowHash: runMetadata.workflowHash,`;
-const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH = `          workflowName: "workflow",
-          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
-          workflowHash: runMetadata.workflowHash,`;
+// 0.35.0 re-nested `adapter.insertRun({…})` into `adapter.insertRun({…}, {…})`
+// for the `rejectExisting` option and migration 0044's `owner`/`app` columns,
+// pushing this block from 10 to 12 spaces. Behaviour is unchanged; only the
+// indentation moved. The sibling update/continuation anchors below were not
+// re-nested and stay at 10 spaces.
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `            workflowName: "workflow",
+            workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
+            workflowHash: runMetadata.workflowHash,`;
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH = `            workflowName: "workflow",
+            workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
+            workflowHash: runMetadata.workflowHash,`;
 const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE =
   "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
 const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH =
@@ -3667,6 +3719,7 @@ export function parseCurrentSmithersInspect(
       "loops",
       "exhaustedLoops",
       "steers",
+      "tokenUsage",
       "config"
     ],
     "Smithers inspect data"
@@ -3682,6 +3735,12 @@ export function parseCurrentSmithersInspect(
   if (data.steers !== undefined) validateCurrentSmithersSteers(data.steers);
   if (data.config !== undefined && !isObjectRecord(data.config)) {
     throw new Error("Smithers inspect data.config must be an object");
+  }
+  // Aggregate run usage, emitted whenever the store carries the run-usage
+  // migrations. Ultrafuzz reads its own accounting, so the contract only pins
+  // the shape well enough to notice a future change.
+  if (data.tokenUsage !== undefined && !isObjectRecord(data.tokenUsage)) {
+    throw new Error("Smithers inspect data.tokenUsage must be an object");
   }
 
   const run = data.run;
@@ -3702,6 +3761,7 @@ export function parseCurrentSmithersInspect(
       "started",
       "elapsed",
       "finished",
+      "cancellationSource",
       "activeDescendantRunId",
       "error",
       "startedBy",
@@ -3731,6 +3791,11 @@ export function parseCurrentSmithersInspect(
       requiredCurrentInspectString(value, `Smithers inspect data.run.continuedFrom[${index}]`);
     }
   }
+  // Present on every run the pinned runner recorded a cancellation request for,
+  // projected from the flat `cancel_request_*` columns.
+  if (run.cancellationSource !== undefined && !isObjectRecord(run.cancellationSource)) {
+    throw new Error("Smithers inspect data.run.cancellationSource must be an object");
+  }
   if (run.startedBy !== undefined) validateCurrentSmithersStartedBy(run.startedBy);
 
   const runState = data.runState;
@@ -3740,7 +3805,7 @@ export function parseCurrentSmithersInspect(
   assertCurrentInspectObjectKeys(
     runState,
     ["runId", "state", "computedAt"],
-    ["runId", "state", "computedAt", "blocked", "unhealthy"],
+    ["runId", "state", "computedAt", "blocked", "unhealthy", "warnings"],
     "Smithers inspect data.runState"
   );
   if (requiredCurrentInspectString(runState.runId, "Smithers inspect data.runState.runId") !== expectedWorkflowRunId) {
@@ -3754,6 +3819,12 @@ export function parseCurrentSmithersInspect(
     if (runState[key] !== undefined && !isObjectRecord(runState[key])) {
       throw new Error(`Smithers inspect data.runState.${key} must be an object`);
     }
+  }
+  // Durable operator warnings the runner derives from `RunConcurrencySaturated`
+  // events. Advisory only — a warning never blocks or fails a run, so Ultrafuzz
+  // pins the container shape and leaves the entries to the runner.
+  if (runState.warnings !== undefined && !Array.isArray(runState.warnings)) {
+    throw new Error("Smithers inspect data.runState.warnings must be an array");
   }
   const parsedRunState = requiredCurrentInspectEnum(
     runState.state,
@@ -3788,7 +3859,10 @@ export function parseCurrentSmithersInspect(
 
   const failedChildKeys = parseCurrentSmithersFailedChildKeys(data, nodeIds);
   const exhaustedLoops = parseCurrentSmithersExhaustedLoops(data.exhaustedLoops);
-  if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded") {
+  // `succeeded-with-failures` is the success-terminal state the runner derives
+  // when a run finished while tolerating a non-blocking child failure, so a
+  // workflow can exhaust a loop and still land there.
+  if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded" && parsedRunState !== "succeeded-with-failures") {
     throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
   }
   return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
@@ -3961,7 +4035,7 @@ function assertCurrentInspectObjectKeys(
   }
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
   if (unknown.length > 0) {
-    throw new Error(`${label} contains fields outside the pinned 0.34.0 shape: ${unknown.join(", ")}`);
+    throw new Error(`${label} contains fields outside the pinned 0.35.0 shape: ${unknown.join(", ")}`);
   }
 }
 
@@ -4267,6 +4341,33 @@ function redactedEvidenceText(value: string): string {
     : redacted;
 }
 
+/**
+ * Refuse to launch a compatibility-patched controller under anything but Bun.
+ *
+ * The spawn patches replace the runner's own interpreter selection with
+ * `process.execPath` plus `ultrafuzzBunStartupArgs`, because that is the
+ * interpreter `bindOperatorSmithersExecutableCapability` attested and the only
+ * one that can carry the fd-3 execution snapshot into a detached child. The
+ * pinned runner now offers a Node path of its own — `smithersRuntimeSpawn`
+ * prepends an `--import` loader hook — and the patches deliberately discard it,
+ * because composing would reintroduce an unverified interpreter and still leave
+ * the snapshot behind. Under any other interpreter the patched spawns therefore
+ * produce a child with neither the loader hook nor the snapshot descriptor,
+ * which fails deep inside a detached engine instead of here.
+ *
+ * Installations carrying only the public runner shim are exempt on exactly the
+ * basis `applySmithersCompatibilityPatches` uses: with no `@smthrs/cli` there is
+ * no patched spawn path to mis-target.
+ */
+function assertPatchedSmithersRunnerInterpreter(env: Record<string, string | undefined>, controllerRoot: string): void {
+  if (smithersExecutableCapability(env)?.interpreter.runtime === "bun") return;
+  const nodeModules = path.join(controllerRoot, ".smithers", "node_modules");
+  if (smithersDependencyRootCandidates(nodeModules, "@smthrs/cli").length === 0) return;
+  throw new Error(
+    "pinned workflow runner must run under Bun: its compatibility patches spawn every detached child through the attested interpreter and no other runtime carries the execution snapshot"
+  );
+}
+
 function scrubWorkflowRunnerText(value: string): string {
   return value.replace(/smithers/giu, "workflow runner");
 }
@@ -4309,6 +4410,7 @@ async function prepareSmithersExecutableEnvironment(
     projectRoot,
     nativeContinuation
   );
+  assertPatchedSmithersRunnerInterpreter(prepared, controllerRoot);
   if (nativeContinuation) {
     // Smithers detaches the resumed engine and supervisor. Their patched
     // relaunch paths still refer to this operator-owned package closure after
