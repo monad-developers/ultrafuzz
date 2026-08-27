@@ -4825,7 +4825,13 @@ function supersededSuccessfulAttemptHasTraceAuthority(
   events: readonly WorkflowEvent[]
 ): boolean {
   if (attempt.outcome !== "succeeded") return false;
-  if (immutableTerminalFinalization(readRunState(layout).nodes[task.attemptId])) return false;
+  const current = readRunState(layout).nodes[task.attemptId];
+  // A failed task-output disposition is the controller's immutable rejection
+  // of this otherwise successful executor occurrence.  It is exactly the
+  // state retry-failed is allowed to replace at a later run activation.  A
+  // recovered publication, by contrast, must never be discarded on trace
+  // authority alone.
+  if (immutableTerminalFinalization(current) && current?.status !== "failed") return false;
   const manifestPath = path.join(getNodeArtifactDir(layout, task.attemptId), ARTIFACT_MANIFEST_FILE);
   try {
     fs.lstatSync(manifestPath);

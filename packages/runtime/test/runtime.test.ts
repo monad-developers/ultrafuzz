@@ -18439,6 +18439,194 @@ test("syncRun accepts a superseded unadmitted success with exact sealed trace au
   );
 });
 
+test("syncRun accepts exact historical trace authority after an immutable output-validation failure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-traced-retry-after-output-failure";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: nodeId, state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      {
+        type: "AgentTraceSummary",
+        nodeId,
+        extra: {
+          iteration: 0,
+          attempt: 1,
+          summary: {
+            runId: workflowRunId,
+            nodeId,
+            iteration: 0,
+            attempt: 1,
+            traceStartedAtMs: base + 150,
+            traceFinishedAtMs: base + 200,
+            agentId: "ultrafuzz-agent:project-discovery:0:default",
+            model: "gpt-5.5"
+          }
+        }
+      },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      {
+        type: "AgentTraceSummary",
+        nodeId,
+        extra: {
+          iteration: 0,
+          attempt: 1,
+          summary: {
+            runId: workflowRunId,
+            nodeId,
+            iteration: 0,
+            attempt: 1,
+            traceStartedAtMs: base + 550,
+            traceFinishedAtMs: base + 600,
+            agentId: "ultrafuzz-agent:project-discovery:0:default",
+            model: "gpt-5.5"
+          }
+        }
+      },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        error: { message: "artifact-contract failure: required output is missing" }
+      },
+      { type: "RunFailed" }
+    ]),
+    nodeDetails: {
+      [nodeId]: {
+        node: { nodeId, lastAttempt: 1 },
+        attempts: [
+          {
+            nodeId,
+            attempt: 1,
+            state: "finished",
+            meta: {
+              agentChainIndex: 0,
+              agentId: "ultrafuzz-agent:project-discovery:0:default",
+              agentModel: "gpt-5.5"
+            }
+          }
+        ]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  const state = readRunState(layout);
+  const prior = state.nodes["project-discovery"]!;
+  state.status = "failed";
+  state.nodes["project-discovery"] = {
+    ...prior,
+    status: "failed",
+    timed_out: false,
+    finished_at: new Date(base + 350).toISOString(),
+    last_error: "artifact-contract failure: required output is missing",
+    provenance: {
+      ...prior.provenance,
+      output_contracts: { ok: false, missing: ["findings.json"] },
+      failure: {
+        category: "artifact-contract",
+        causal_task_id: "verify:project-discovery",
+        causal_failure_category: "artifact-contract",
+        dependent_task_ids: []
+      },
+      terminal_disposition: {
+        schema_version: "ultrafuzz.terminal-disposition.v1",
+        kind: "task-output-validation-failure"
+      }
+    }
+  };
+  writeRunState(layout, state);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json")), false);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
+});
+
+test("syncRun rejects trace-only supersession of an immutable successful publication", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-traced-reuse-after-publication";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      {
+        type: "AgentTraceSummary",
+        nodeId,
+        extra: {
+          iteration: 0,
+          attempt: 1,
+          summary: {
+            runId: workflowRunId,
+            nodeId,
+            iteration: 0,
+            attempt: 1,
+            traceStartedAtMs: base + 150,
+            traceFinishedAtMs: base + 200,
+            agentId: "ultrafuzz-agent:project-discovery:0:default",
+            model: "gpt-5.5"
+          }
+        }
+      },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  const state = readRunState(layout);
+  state.nodes["project-discovery"] = {
+    ...state.nodes["project-discovery"]!,
+    status: "succeeded",
+    timed_out: false,
+    finished_at: new Date(base + 300).toISOString()
+  };
+  writeRunState(layout, state);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, false);
+  assert.deepEqual(
+    sync.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+});
+
 test("syncRun rejects exact trace authority when an attempt identity is reused within one activation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
