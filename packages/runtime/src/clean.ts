@@ -90,6 +90,7 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
     }
     try {
       for (const removal of planned) {
+        restoreRemovableDirectoryPermissions(removal.absolutePath);
         fs.rmSync(removal.absolutePath, { recursive: true, force: false });
       }
     } catch {
@@ -301,4 +302,44 @@ function planRemoval(
     absolutePath,
     existed: true
   };
+}
+
+/**
+ * Restore owner write permission on directories in a tree that is about to be
+ * removed.
+ *
+ * Published workflow execution snapshots are sealed: sealSnapshotPermissions
+ * drops the write bit from their directories, leaving them dr-x------. Removing
+ * an entry needs the write bit on its parent directory rather than on the entry
+ * itself, so rmSync cannot unlink anything inside a sealed snapshot and clean
+ * failed with CLEAN_REMOVE_FAILED for every run that had published one. That
+ * left the tool unable to remove state it had created, and the abandoned
+ * snapshots accumulated at roughly a gigabyte and 59,000 files per run.
+ *
+ * Only directories are changed, and only the owner write bit is added. Symlinks
+ * are never followed, so this cannot alter permissions outside the tree. The
+ * caller has already resolved and path-guarded the root being removed.
+ */
+function restoreRemovableDirectoryPermissions(root: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(root);
+  } catch {
+    return;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return;
+  try {
+    fs.chmodSync(root, stat.mode | 0o700);
+  } catch {
+    // Best effort: rmSync reports the actionable failure.
+  }
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) restoreRemovableDirectoryPermissions(path.join(root, entry.name));
+  }
 }
