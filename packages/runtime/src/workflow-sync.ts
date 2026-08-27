@@ -368,6 +368,8 @@ export interface WorkflowSynchronizationControl {
   tolerateInvalidEventStreams?: boolean;
   /** Retry preparation may defer an exact missing-run envelope to lifecycle recovery. */
   allowMissingWorkflowRun?: boolean;
+  /** Status synchronization authenticates published evidence without taking or repairing control state. */
+  observeOnly?: boolean;
 }
 
 export interface ControllerFailureRefinalizationInput {
@@ -1016,7 +1018,9 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
 
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    ...(control.observeOnly === true ? { observeOnly: true } : {})
+  });
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }

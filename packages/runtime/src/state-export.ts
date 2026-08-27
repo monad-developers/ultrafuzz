@@ -188,7 +188,8 @@ export async function getRunHealth(input: {
   // resume it, or a single divergent control file makes an otherwise healthy run permanently
   // unobservable (issue #674). Divergences are surfaced as warnings below rather than suppressed.
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
-    tolerateControlDivergence: true
+    tolerateControlDivergence: true,
+    observeOnly: true
   });
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);
@@ -206,7 +207,10 @@ export async function getRunHealth(input: {
   // diverged and invalid. Skip it and say so instead.
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
-    const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+    const sync = await synchronizeLinkedWorkflowRun(
+      { projectRoot, runId: input.runId, env: input.env },
+      { observeOnly: true }
+    );
     syncDiagnostics.push(...sync.diagnostics);
   } else {
     syncDiagnostics.push({

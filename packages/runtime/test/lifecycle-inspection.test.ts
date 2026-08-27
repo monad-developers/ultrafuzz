@@ -8,6 +8,7 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  layoutForRunRoot,
   VALIDATOR_BUILD_IDENTITY
 } from "@ultrafuzz/artifacts";
 
@@ -30,6 +31,7 @@ import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
+import { acquireWorkflowControlLock } from "../src/workflow-integrity.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
@@ -580,8 +582,8 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
   assert.match(smithersLog(project), new RegExp(`snapshots ${WORKFLOW_RUN_ID} --json`, "u"));
 });
 
-test("queryWorkflowEvents returns a bounded lifecycle array and never asks for raw chunks", async () => {
-  const { project, env } = await launchedProject({
+test("queryWorkflowEvents returns lifecycle events while execution holds the control lock", async () => {
+  const { project, env, runRoot } = await launchedProject({
     events: [
       smithersEventLine({
         seq: 1,
@@ -614,7 +616,24 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
     ].join("\n")
   });
 
-  const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 50 });
+  const linkJournalPath = path.join(runRoot, "smithers", "workflow-run-link-journal.json");
+  const linkJournalBefore = fs.readFileSync(linkJournalPath);
+  const release = await acquireWorkflowControlLock(layoutForRunRoot(runRoot, "inspect-run"));
+  const eventsPromise = queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 50 });
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const winner = await Promise.race([
+      eventsPromise.then(() => "events" as const),
+      new Promise<"timeout">((resolve) => {
+        timeout = setTimeout(() => resolve("timeout"), 10_000);
+      })
+    ]);
+    assert.equal(winner, "events", "events waited on the execution-only workflow control lock");
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    await release();
+  }
+  const events = await eventsPromise;
 
   assert.equal(events.ok, true, JSON.stringify(events.diagnostics));
   assert.equal(events.value?.limit, 50);
@@ -633,6 +652,7 @@ test("queryWorkflowEvents returns a bounded lifecycle array and never asks for r
   assert.match(log, new RegExp(`events ${WORKFLOW_RUN_ID} --limit 50 --json`, "u"));
   assert.doesNotMatch(log, /--raw/u);
   assert.doesNotMatch(log, /--watch/u);
+  assert.deepEqual(fs.readFileSync(linkJournalPath), linkJournalBefore);
 });
 
 test("queryWorkflowEvents rejects malformed, aliased, mismatched, extra-field, duplicate-key, and blank records", async () => {
