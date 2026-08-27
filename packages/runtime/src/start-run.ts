@@ -69,6 +69,7 @@ import {
   renderCurrentSmithersController,
   requestSmithersPause,
   runSmithersLifecycleCommand,
+  type SmithersResumeInspection,
   assertCurrentCloudAgentCredentialEnvironment,
   assertSealedDataGovernance,
   smithersExecutionControlFiles,
@@ -496,6 +497,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       "Smithers run ID"
     );
     let workflowPath: string;
+    // Refresh proves ownership before rendering; the resume below reuses that
+    // evidence rather than inspecting the same run a second time (#968).
+    let refreshInspection: SmithersResumeInspection | undefined;
     if (input.refreshController === true) {
       // Refresh renders a replacement path below. A lost or malformed
       // historical project-workflow pointer is provenance, not authority to
@@ -536,7 +540,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       if (taskDocument === undefined || config === undefined) {
         throw new Error("current controller rendering requires the persisted workflow task manifest and config");
       }
-      await assertSmithersControllerRefreshable({
+      refreshInspection = await assertSmithersControllerRefreshable({
         smithersRunId,
         projectRoot,
         env: controllerRefreshInspectionEnvironment(input.env)
@@ -607,6 +611,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
+      priorInspection: refreshInspection,
       relaunchPaths: {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")

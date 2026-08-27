@@ -18,7 +18,8 @@ const namedTests = new Map([
       "compileSmithersWorkflow gates native dependencies on deterministic artifact verification",
       "compileSmithersWorkflow maps cloud attempts to portable provider sandboxes",
       "resume, replay, and fork delegate linked runs to Smithers lifecycle verbs",
-      "ordinary resume delegates active-run ownership to Smithers while explicit retry still inspects",
+      "ordinary resume checks active-run ownership before detached preflight",
+      "a refresh resume reuses its own ownership inspection instead of inspecting twice",
       "native continuation does not use historical trusted CLI identity as an authorization gate"
     ]
   ],

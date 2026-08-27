@@ -19652,6 +19652,61 @@ test("controller refresh selects current source without rewriting historical evi
   );
 });
 
+test("a refresh resume reuses its own ownership inspection instead of inspecting twice", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-single-inspect";
+  const smithersRunId = `ultrafuzz-${runId}`;
+  const inspectCommand = `inspect ${smithersRunId} --format json --full-output`;
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const issuedCommands = (): string[] => fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").trim().split("\n");
+
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.submitted, true);
+  const refreshCommands = issuedCommands();
+  // Refresh proves ownership before rendering, and the resume behind it reuses
+  // that evidence. A second inspect would be a redundant subprocess per refresh
+  // and would re-derive ownership from a run the renderer has already touched.
+  assert.deepEqual(
+    refreshCommands.filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+  assert.equal(refreshCommands[0], inspectCommand);
+  assert.match(refreshCommands[1] ?? "", new RegExp(`^up .*--resume ${smithersRunId} --run-id ${smithersRunId} `, "u"));
+
+  // The reused inspection is still the authority for explicit failed-task
+  // recovery: a retrying refresh resets its failed node off one inspect.
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const retried = await resumeRun({ projectRoot: project, runId, refreshController: true, retryFailed: true, env });
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  const retryCommands = issuedCommands();
+  assert.deepEqual(
+    retryCommands.filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+  assert.equal(
+    retryCommands.some((command) => command.startsWith("timetravel ")),
+    true,
+    retryCommands.join("\n")
+  );
+
+  // An ordinary resume has no refresh inspection to inherit, so it performs its
+  // own ownership check — exactly one, never zero and never two.
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const ordinary = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  assert.deepEqual(
+    issuedCommands().filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+});
+
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -21249,7 +21304,7 @@ test("ordinary resume leaves required-command availability to the continued work
   const eventsPath = path.join(run.value!.run_root, "events.jsonl");
   const eventsBefore = fs.readFileSync(eventsPath, "utf8");
 
-  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, force: true, env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
@@ -21291,7 +21346,7 @@ test("ordinary resume bypasses legacy control-seal and link-journal gaps", async
       assert.equal(evidence.diagnostics[0]?.path, missingPath);
       assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
     }
-    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, env });
+    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, force: true, env });
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
     assert.equal(resumed.value?.run_id, entry.runId);
     assert.equal(resumed.value?.workflow_run_id, `ultrafuzz-${entry.runId}`);
@@ -21324,7 +21379,7 @@ test("ordinary resume bypasses a malformed workflow link journal without rewriti
     assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
     assert.match(evidence.diagnostics[0]?.message ?? "", /duplicate property name/u);
   }
-  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(fs.readFileSync(journalPath, "utf8"), duplicated);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /--accept-workflow-change/u);
@@ -21469,7 +21524,7 @@ test("a pending lifecycle link reconciles split source and target projections fr
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
 });
 
-test("ordinary resume delegates active-run ownership to Smithers while explicit retry still inspects", async () => {
+test("ordinary resume checks active-run ownership before detached preflight", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21483,15 +21538,19 @@ test("ordinary resume delegates active-run ownership to Smithers while explicit 
   const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  // A duplicate `up --resume --detach` renders the workflow before Smithers
+  // checks ownership. Keep that path fatal so this regression proves active
+  // attachment cannot reach detached preflight.
+  env.SMITHERS_FAKE_FAIL_UP = "1";
 
   const resumed = await resumeRun({ projectRoot: project, runId: "active-lifecycle-run", maxConcurrency: 8, env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
-  assert.equal(resumed.value?.submitted, true);
+  assert.equal(resumed.value?.submitted, false);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.doesNotMatch(commands, /^inspect /mu);
-  assert.match(commands, /^up .* --resume ultrafuzz-active-lifecycle-run .*--accept-workflow-change/mu);
+  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
+  assert.doesNotMatch(commands, /^up /mu);
 
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   const forced = await resumeRun({
