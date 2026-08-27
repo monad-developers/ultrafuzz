@@ -34,7 +34,6 @@ import {
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
-  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
