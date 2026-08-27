@@ -19832,7 +19832,7 @@ test("ordinary resume leaves required-command availability to the continued work
   const eventsPath = path.join(run.value!.run_root, "events.jsonl");
   const eventsBefore = fs.readFileSync(eventsPath, "utf8");
 
-  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, force: true, env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
@@ -19874,7 +19874,7 @@ test("ordinary resume bypasses legacy control-seal and link-journal gaps", async
       assert.equal(evidence.diagnostics[0]?.path, missingPath);
       assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
     }
-    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, env });
+    const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, force: true, env });
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
     assert.equal(resumed.value?.run_id, entry.runId);
     assert.equal(resumed.value?.workflow_run_id, `ultrafuzz-${entry.runId}`);
@@ -19907,7 +19907,7 @@ test("ordinary resume bypasses a malformed workflow link journal without rewriti
     assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
     assert.match(evidence.diagnostics[0]?.message ?? "", /duplicate property name/u);
   }
-  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(fs.readFileSync(journalPath, "utf8"), duplicated);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /--accept-workflow-change/u);
@@ -20052,7 +20052,7 @@ test("a pending lifecycle link reconciles split source and target projections fr
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
 });
 
-test("ordinary resume delegates active-run ownership to Smithers while explicit retry still inspects", async () => {
+test("ordinary resume checks active-run ownership before detached preflight", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -20066,15 +20066,19 @@ test("ordinary resume delegates active-run ownership to Smithers while explicit 
   const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  // A duplicate `up --resume --detach` renders the workflow before Smithers
+  // checks ownership. Keep that path fatal so this regression proves active
+  // attachment cannot reach detached preflight.
+  env.SMITHERS_FAKE_FAIL_UP = "1";
 
   const resumed = await resumeRun({ projectRoot: project, runId: "active-lifecycle-run", maxConcurrency: 8, env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
-  assert.equal(resumed.value?.submitted, true);
+  assert.equal(resumed.value?.submitted, false);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.doesNotMatch(commands, /^inspect /mu);
-  assert.match(commands, /^up .* --resume ultrafuzz-active-lifecycle-run .*--accept-workflow-change/mu);
+  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
+  assert.doesNotMatch(commands, /^up /mu);
 
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   const forced = await resumeRun({

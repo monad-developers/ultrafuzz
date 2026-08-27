@@ -3110,7 +3110,10 @@ export async function runSmithersLifecycleCommand(input: {
 
   let preResumeStderr = "";
   let currentInspection: CurrentSmithersInspect | undefined;
-  if (input.action === "resume" && (input.retryFailed === true || input.resetNode !== undefined)) {
+  // Detached admission renders the workflow before Smithers checks whether
+  // this run already has an active owner. Inspect every resume first so an
+  // idempotent attach cannot fail preflight or compete with that owner (#968).
+  if (input.action === "resume") {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
       projectRoot: input.projectRoot,
