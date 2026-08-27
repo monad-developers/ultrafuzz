@@ -449,12 +449,10 @@ boundary. Modal MUST provide the equivalent root-owned,
 read-only entrypoint. Both environments MUST run a real known-valid fixture and
 verify the returned schema ID, schema digest, bundle digest, and validator build;
 `command -v` alone is insufficient. A missing, tampered, or stale launcher or
-closure is a setup failure and MUST NOT be silently repaired on ordinary
-resume. Only an authenticated controller refresh MAY publish a replacement or
-migrate a valid legacy launcher, and the candidate MUST pass the sealed
-launch-generation identity preflight before it is published or selected.
-Refreshed controller code MUST NOT substitute its newer validator packages for
-that launch identity.
+closure is a setup failure for new model work. It MUST NOT turn historical
+seals or schema identities into resume authorization. A current-controller
+continuation MAY select current validator packages while retaining historical
+source and artifacts as provenance.
 
 Before or at launch, each run MUST persist:
 
@@ -492,9 +490,9 @@ recovery decisions MUST be testable with a fake clock.
 
 Current run state MUST use schema version `ultrafuzz.run-state.v5` and schema ID
 `urn:ultrafuzz:schema:artifacts:run-state:5`. Older persisted state and graph
-versions MAY fail to resume, inspect, or render, but the failure MUST identify
-the unsupported version. The runtime MUST NOT add a historical reader that
-coerces old state into the current contract.
+versions MAY fail strict inspection, replay, or rendering, but MUST NOT prevent
+ordinary same-ID Smithers continuation. The runtime MUST NOT coerce historical
+state into the current contract as a condition of resume.
 
 Run provenance MUST contain the complete sealed workflow binding. Node
 provenance, when present, MUST match exactly one closed variant: execution,
@@ -532,9 +530,14 @@ accounting MUST also remain unavailable; a local run that retains accounting
 but loses its usage ledger MUST fail closed. The CLI result MUST use the exact
 closed `ultrafuzz.stats.v1` data contract inside `ultrafuzz.cli.result.v2`.
 
-`status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
-perform product checks, delegate to the workflow engine, and persist updated
-linked workflow identity or lifecycle evidence.
+`status`, `pause`, `replay`, and `fork` operate on strict linked workflow
+evidence. Ordinary `resume` MUST delegate the persisted workflow and same run ID
+to Smithers with workflow-change acceptance, without requiring control seals,
+link journals, controller generations, current schema bindings, graph identity,
+or metadata projections. It MUST NOT automatically reset, replay, timetravel,
+fork, migrate, or rewrite completed task artifacts. `--refresh-controller` MUST
+render current controller source without making retained provenance an
+authorization protocol.
 
 ## Artifacts, Findings, And Reports
 

@@ -32,7 +32,6 @@ import {
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
-  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -78,7 +77,6 @@ import {
   forkRun as runtimeForkRun,
   cancelRun,
   commitControllerGeneration,
-  diagnoseRun,
   getRunHealth,
   getRunStatus,
   initProject,
@@ -87,7 +85,6 @@ import {
   pauseRun,
   prepareControllerGeneration,
   readLinkedWorkflowEvidence,
-  refinalizeControllerFailures,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
@@ -100,8 +97,7 @@ import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   refreshedSmithersControllerSnapshot,
-  runSmithersInspectionCommand,
-  runSmithersLifecycleCommand
+  runSmithersInspectionCommand
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -2294,235 +2290,6 @@ function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: stri
   const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(markerRoot, { recursive: true });
   fs.writeFileSync(path.join(markerRoot, `${attemptId}.json`), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
-}
-
-function finishedVerifierNodeDetail(input: {
-  workflowRunId: string;
-  verifierTaskId: string;
-  markerPath: string;
-  attempt?: number;
-  iteration?: number;
-  state?: "finished" | "failed" | "in-progress";
-  markerSha256?: string;
-  markerSizeBytes?: number;
-}): unknown {
-  const markerBytes = fs.readFileSync(input.markerPath);
-  const marker = JSON.parse(markerBytes.toString("utf8")) as {
-    artifacts: Array<Record<string, unknown> & { path?: string; primary?: boolean }>;
-  };
-  const attempt = input.attempt ?? 1;
-  const iteration = input.iteration ?? 0;
-  const state = input.state ?? "finished";
-  const startedAtMs = Date.parse("2026-07-03T00:00:01.000Z");
-  const finishedAtMs = state === "in-progress" ? null : startedAtMs + 1_000;
-  const usage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    reasoningTokens: 0,
-    costUsd: null,
-    eventCount: 0,
-    models: [],
-    agents: []
-  };
-  const attemptRow = {
-    runId: input.workflowRunId,
-    nodeId: input.verifierTaskId,
-    iteration,
-    attempt,
-    state,
-    startedAtMs,
-    finishedAtMs,
-    durationMs: finishedAtMs === null ? null : finishedAtMs - startedAtMs,
-    error: state === "failed" ? "verification failed" : null,
-    errorDetail: null,
-    tokenUsage: usage,
-    toolCalls: [],
-    meta: null,
-    responseText: null,
-    cached: false,
-    jjPointer: null,
-    jjCwd: null
-  };
-  return {
-    ok: true,
-    data: {
-      node: {
-        runId: input.workflowRunId,
-        nodeId: input.verifierTaskId,
-        iteration,
-        state,
-        lastAttempt: attempt,
-        updatedAtMs: finishedAtMs,
-        outputTable: null,
-        label: input.verifierTaskId
-      },
-      status: state,
-      durationMs: attemptRow.durationMs,
-      attemptsSummary: {
-        total: 1,
-        failed: state === "failed" ? 1 : 0,
-        cancelled: 0,
-        succeeded: state === "finished" ? 1 : 0,
-        waiting: state === "in-progress" ? 1 : 0
-      },
-      attempts: [attemptRow],
-      toolCalls: [],
-      tokenUsage: { ...usage, byAttempt: [{ attempt, usage }] },
-      scorers: [],
-      output: {
-        validated: {
-          artifacts: marker.artifacts,
-          primary_artifact: marker.artifacts.find((artifact) => artifact.primary)?.path,
-          verification_marker_sha256:
-            input.markerSha256 ?? crypto.createHash("sha256").update(markerBytes).digest("hex"),
-          verification_marker_size_bytes: input.markerSizeBytes ?? markerBytes.byteLength
-        },
-        raw: null,
-        source: "cache",
-        cacheKey: "verified-output"
-      },
-      approval: null,
-      limits: { toolPayloadBytesHuman: 1_024, validatedOutputBytesHuman: 10_240 }
-    },
-    meta: { command: "node", duration: "1ms" }
-  };
-}
-
-async function controllerFalseFailureFixture(label: string): Promise<{
-  project: string;
-  runId: string;
-  workflowRunId: string;
-  runRoot: string;
-  markerPath: string;
-  env: Record<string, string | undefined>;
-}> {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const runId = `controller-refinalization-${label}`;
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const events = workflowEvents(workflowRunId, [
-    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-    { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
-    { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
-    { type: "RunFinished" }
-  ]);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events
-  });
-  const launched = await startRun({ projectRoot: project, runId, env });
-  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const runRoot = launched.value!.run_root;
-  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-  const synchronized = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  assert.equal(
-    readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status,
-    "succeeded",
-    JSON.stringify(synchronized.diagnostics)
-  );
-
-  const layout = layoutForRunRoot(runRoot, runId);
-  const state = readRunState(layout);
-  const prior = state.nodes["project-discovery"]!;
-  state.status = "failed";
-  state.nodes["project-discovery"] = {
-    ...prior,
-    status: "failed",
-    timed_out: false,
-    last_error: "controller output validation failed",
-    provenance: {
-      ...prior.provenance,
-      output_contracts: { ok: false, missing: [] },
-      failure: {
-        category: "artifact-contract",
-        causal_task_id: "verify:project-discovery",
-        causal_failure_category: "artifact-contract",
-        dependent_task_ids: []
-      },
-      terminal_disposition: {
-        schema_version: "ultrafuzz.terminal-disposition.v1",
-        kind: "task-output-validation-failure"
-      }
-    }
-  };
-  writeRunState(layout, state);
-  fs.rmSync(path.join(runRoot, "artifacts", "project-discovery", "artifact-manifest.json"));
-  const markerPath = path.join(runRoot, ".ultrafuzz-verification", "project-discovery.json");
-  fs.writeFileSync(
-    path.join(env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
-    `${JSON.stringify(
-      finishedVerifierNodeDetail({
-        workflowRunId,
-        verifierTaskId: "verify:project-discovery",
-        markerPath
-      }),
-      null,
-      2
-    )}\n`,
-    "utf8"
-  );
-  return { project, runId, workflowRunId, runRoot, markerPath, env };
-}
-
-async function genuineVerifierFailureFixture(label: string): Promise<{
-  project: string;
-  runId: string;
-  workflowRunId: string;
-  runRoot: string;
-  env: Record<string, string | undefined>;
-}> {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const runId = `controller-refinalization-genuine-failure-${label}`;
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "verifier rejected the task output" },
-      steps: [
-        { id: "node:project-discovery", state: "finished", attempt: 1 },
-        { id: "verify:project-discovery", state: "failed", attempt: 1 }
-      ]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
-      {
-        type: "NodeFailed",
-        nodeId: "verify:project-discovery",
-        attempt: 1,
-        error: { message: "verifier rejected the task output" }
-      },
-      { type: "RunFailed" }
-    ])
-  });
-  const launched = await startRun({ projectRoot: project, runId, env });
-  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const synchronized = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  assert.equal(synchronized.value?.status, "failed");
-  const runRoot = launched.value!.run_root;
-  const state = readRunState(layoutForRunRoot(runRoot, runId));
-  const node = state.nodes["project-discovery"];
-  assert.equal(node?.status, "failed");
-  assert.equal((node?.provenance as { workflow?: { state?: string } })?.workflow?.state, "failed");
-  assert.deepEqual((node?.provenance as { terminal_disposition?: unknown })?.terminal_disposition, {
-    schema_version: "ultrafuzz.terminal-disposition.v1",
-    kind: "task-output-validation-failure"
-  });
-  return { project, runId, workflowRunId, runRoot, env };
 }
 
 const GENERIC_RUNTIME_MARKDOWN_PATH = "setup/runtime-fixture.md";
@@ -13495,73 +13262,20 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
-// Regression coverage for the #858 busy loop itself: the stock idempotency
-// probe walks the run's ENTIRE event history through the primary key for
-// every fresh event (O(events) page reads per insert, quadratic per run),
-// which starves the controller at dynamic fan-out scale. The patched probe
-// must resolve through the covering index instead. Query-plan assertions are
-// deterministic, so the test stays fast at a bounded synthetic size.
-test("patched event insert probe seeks the covering index instead of walking the run's event history", async () => {
+// Keep creating the covering index for new databases. Do not force queries to
+// use it: historical Smithers databases may predate the index and must remain
+// resumable before any current startup migration runs.
+test("event probe compatibility patch adds an optional covering index", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
-  const { DatabaseSync } = await import("node:sqlite");
   const indexPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "event_probe_index");
   assert.ok(indexPatch);
-  const indexStatement = /`(CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx[^`]+)`/u.exec(
-    indexPatch.patched
-  )?.[1];
-  assert.ok(indexStatement, "the DDL patch must add the probe-covering index");
-  for (const id of ["event_probe_transaction", "event_probe_precheck", "event_probe_fallback", "event_probe_turn"]) {
-    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === id);
-    assert.ok(patch);
-    assert.match(patch.patched, /FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx/u);
-  }
-
-  const db = new DatabaseSync(":memory:");
-  db.exec(
-    `CREATE TABLE _smithers_events (
-       run_id TEXT NOT NULL,
-       seq INTEGER NOT NULL,
-       timestamp_ms INTEGER NOT NULL,
-       type TEXT NOT NULL,
-       payload_json TEXT NOT NULL,
-       PRIMARY KEY (run_id, seq)
-     )`
+  assert.match(indexPatch.patched, /CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx/u);
+  assert.equal(
+    SMITHERS_COMPATIBILITY_PATCHES.some((patch) =>
+      patch.patched.includes("INDEXED BY _smithers_events_insert_probe_idx")
+    ),
+    false
   );
-  const insert = db.prepare(
-    "INSERT INTO _smithers_events (run_id, seq, timestamp_ms, type, payload_json) VALUES (?, ?, ?, ?, ?)"
-  );
-  for (let seq = 0; seq < 512; seq += 1) {
-    insert.run("run-858", seq, 1_787_000_000_000 + seq, "NodeStarted", JSON.stringify({ seq, pad: "x".repeat(64) }));
-  }
-  const stockProbe = `SELECT seq
-     FROM _smithers_events
-     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
-     ORDER BY seq DESC LIMIT 1`;
-  const patchedProbe = `SELECT seq
-     FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
-     WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
-     ORDER BY seq DESC LIMIT 1`;
-  const planDetails = (statement: string): string =>
-    (db.prepare(`EXPLAIN QUERY PLAN ${statement}`).all("run-858", 1, "NodeStarted", "{}") as { detail?: string }[])
-      .map((row) => row.detail ?? "")
-      .join("\n");
-  // Stock hazard: only the (run_id, seq) primary key is available, so the
-  // probe visits every event row the run has ever written.
-  const stockPlan = planDetails(stockProbe);
-  assert.match(stockPlan, /sqlite_autoindex__smithers_events_1 \(run_id=\?\)/u);
-  db.exec(indexStatement);
-  const patchedPlan = planDetails(patchedProbe);
-  assert.match(patchedPlan, /_smithers_events_insert_probe_idx \(run_id=\? AND timestamp_ms=\? AND type=\?\)/u);
-  // The hint changes the access path, never the answer: an identical
-  // re-emitted event still resolves to its original seq, and a fresh event
-  // still probes empty.
-  const existingPayload = JSON.stringify({ seq: 17, pad: "x".repeat(64) });
-  const patched = db.prepare(patchedProbe);
-  const existing = patched.get("run-858", 1_787_000_000_017, "NodeStarted", existingPayload) as
-    { seq?: number | bigint } | undefined;
-  assert.equal(Number(existing?.seq), 17);
-  assert.equal(patched.get("run-858", 1_799_000_000_000, "NodeStarted", existingPayload), undefined);
-  db.close();
 });
 
 test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
@@ -15376,429 +15090,6 @@ test("syncRun marks task-output validation failures for terminal disposition", a
     kind: "task-output-validation-failure"
   });
 });
-
-test(
-  "authenticated controller refresh re-finalizes only the original finished verifier output and is idempotent",
-  { concurrency: false },
-  async () => {
-    const fixture = await controllerFalseFailureFixture("success");
-
-    const resumed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      refinalizeControllerFailures: true,
-      env: fixture.env
-    });
-
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    const state = readRunState(layout);
-    const node = state.nodes["project-discovery"];
-    const provenance = node?.provenance as
-      | {
-          terminal_disposition?: unknown;
-          failure?: unknown;
-          output_contracts?: { ok?: boolean };
-        }
-      | undefined;
-    assert.equal(node?.status, "succeeded");
-    assert.equal(node?.last_error, undefined);
-    assert.equal(provenance?.terminal_disposition, undefined);
-    assert.equal(provenance?.failure, undefined);
-    assert.equal(provenance?.output_contracts?.ok, true);
-    const durable = replayEvents(layout).records;
-    const intent = durable.filter((event) => event.event_type === "node-controller-refinalization-intent");
-    const result = durable.filter((event) => event.event_type === "node-controller-refinalization-result");
-    assert.equal(intent.length, 1);
-    assert.equal(result.length, 1);
-    assert.equal(result[0]?.status, "succeeded");
-    assert.equal(result[0]?.payload.operation_id, intent[0]?.payload.operation_id);
-    assert.equal(result[0]?.payload.marker_sha256, intent[0]?.payload.marker_sha256);
-
-    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const repeated = await refinalizeControllerFailures({
-      projectRoot: fixture.project,
-      layout,
-      graph: readPlannedGraphDocument(layout.graphPath),
-      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration,
-      controllerGeneration: evidence.controllerGeneration,
-      env: fixture.env
-    });
-    assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
-    assert.equal(repeated.ok && repeated.refinalized, 0);
-    assert.equal(
-      replayEvents(layout).records.filter((event) => event.event_type === "node-controller-refinalization-result")
-        .length,
-      1
-    );
-    fs.appendFileSync(
-      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
-      "modified after completed re-finalization\n"
-    );
-    const changedAfterCompletion = await refinalizeControllerFailures({
-      projectRoot: fixture.project,
-      layout,
-      graph: readPlannedGraphDocument(layout.graphPath),
-      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration,
-      controllerGeneration: evidence.controllerGeneration,
-      env: fixture.env
-    });
-    assert.equal(changedAfterCompletion.ok, false);
-    assert.match(JSON.stringify(changedAfterCompletion.diagnostics), /changed after verifier approval/u);
-  }
-);
-
-test(
-  "controller re-finalization recovers an authenticated durable intent after a crash",
-  { concurrency: false },
-  async () => {
-    const fixture = await controllerFalseFailureFixture("intent-recovery");
-    const refreshed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      env: fixture.env
-    });
-    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    const markerBytes = fs.readFileSync(fixture.markerPath);
-    const authority = {
-      workflow_run_id: evidence.smithersRunId,
-      workflow_link_id: evidence.workflowLinkId,
-      control_generation: evidence.controlGeneration,
-      controller_generation: evidence.controllerGeneration,
-      verifier_task_id: "verify:project-discovery",
-      verifier_iteration: 0,
-      verifier_attempt: 1,
-      marker_sha256: crypto.createHash("sha256").update(markerBytes).digest("hex"),
-      marker_size_bytes: markerBytes.byteLength,
-      prior_status: "failed" as const
-    };
-    const operationId = crypto
-      .createHash("sha256")
-      .update(
-        JSON.stringify([
-          "ultrafuzz.controller-refinalization.v1",
-          fixture.runId,
-          "project-discovery",
-          authority.workflow_run_id,
-          authority.workflow_link_id,
-          authority.control_generation,
-          authority.controller_generation,
-          authority.verifier_task_id,
-          authority.verifier_iteration,
-          authority.verifier_attempt,
-          authority.marker_sha256,
-          authority.marker_size_bytes,
-          authority.prior_status
-        ]),
-        "utf8"
-      )
-      .digest("hex");
-    appendEvent(layout, {
-      eventType: "node-controller-refinalization-intent",
-      nodeId: "project-discovery",
-      status: "running",
-      payload: { operation_id: operationId, ...authority }
-    });
-
-    const recovered = await refinalizeControllerFailures({
-      projectRoot: fixture.project,
-      layout,
-      graph: readPlannedGraphDocument(layout.graphPath),
-      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration,
-      controllerGeneration: evidence.controllerGeneration,
-      env: fixture.env
-    });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.equal(recovered.ok && recovered.refinalized, 1);
-    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
-    const records = replayEvents(layout).records;
-    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
-    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-result").length, 1);
-  }
-);
-
-test("controller re-finalization cannot weaken ordinary resume immutability without a refresh", async () => {
-  const rejected = await resumeRun({
-    projectRoot: tempProject(),
-    runId: "controller-refinalization-without-refresh",
-    refinalizeControllerFailures: true
-  });
-  assert.equal(rejected.ok, false);
-  assert.equal(rejected.diagnostics[0]?.code, "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH");
-});
-
-test(
-  "controller re-finalization leaves a genuine failed verifier for retry and rejects a standalone no-op",
-  { concurrency: false },
-  async () => {
-    const fixture = await genuineVerifierFailureFixture("standalone");
-    const before = readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"];
-
-    const rejected = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      refinalizeControllerFailures: true,
-      env: fixture.env
-    });
-
-    assert.equal(rejected.ok, false);
-    assert.match(JSON.stringify(rejected.diagnostics), /no eligible immutable controller false failures/u);
-    assert.doesNotMatch(JSON.stringify(rejected.diagnostics), /failure authority is incomplete/u);
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
-    assert.equal(
-      replayEvents(layout).records.some(
-        (event) =>
-          event.event_type === "node-controller-refinalization-intent" ||
-          event.event_type === "node-controller-refinalization-result"
-      ),
-      false
-    );
-  }
-);
-
-test(
-  "atomic controller re-finalization permits zero eligible nodes before retrying genuine verifier failures",
-  { concurrency: false },
-  async () => {
-    const fixture = await genuineVerifierFailureFixture("atomic-retry");
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    const before = readRunState(layout).nodes["project-discovery"];
-
-    const resumed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      refinalizeControllerFailures: true,
-      retryFailed: true,
-      env: fixture.env
-    });
-
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    assert.deepEqual(readRunState(layout).nodes["project-discovery"], before);
-    const records = replayEvents(layout).records;
-    assert.equal(
-      records.some(
-        (event) =>
-          event.event_type === "node-controller-refinalization-intent" ||
-          event.event_type === "node-controller-refinalization-result"
-      ),
-      false
-    );
-    assert.ok(
-      records.some((event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true)
-    );
-    const commands = fs.readFileSync(fixture.env.SMITHERS_FAKE_LOG!, "utf8");
-    // An explicit retry of a zero-retry generated verifier reopens its
-    // agent-owned artifact producer and lets Smithers reset the verifier with
-    // its dependents (#926), so the genuine verifier failure surfaces here as a
-    // producer timetravel rather than a verifier-only reset.
-    assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
-    assert.doesNotMatch(commands, /^timetravel .* --node-id verify:project-discovery /mu);
-    assert.match(commands, /^up .* --resume ultrafuzz-controller-refinalization-genuine-failure-atomic-retry(?: |$)/mu);
-  }
-);
-
-test(
-  "controller re-finalization rejects stale identities, unfinished verifier evidence, and modified publications",
-  { concurrency: false },
-  async () => {
-    const fixture = await controllerFalseFailureFixture("authentication-rejections");
-    const refreshed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      env: fixture.env
-    });
-    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    const base = {
-      projectRoot: fixture.project,
-      layout,
-      graph: readPlannedGraphDocument(layout.graphPath),
-      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration,
-      controllerGeneration: evidence.controllerGeneration,
-      env: fixture.env
-    };
-
-    for (const changed of [
-      { ...base, controllerGeneration: base.controlGeneration },
-      { ...base, workflowRunId: `${base.workflowRunId}-replayed` },
-      { ...base, workflowLinkId: crypto.randomUUID() },
-      { ...base, graph: { ...base.graph, nodes: [] } },
-      { ...base, tasks: [] }
-    ]) {
-      const rejected = await refinalizeControllerFailures(changed);
-      assert.equal(rejected.ok, false);
-    }
-
-    const detailPath = path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json");
-    fs.writeFileSync(
-      detailPath,
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:foreign-task",
-          markerPath: fixture.markerPath
-        })
-      )}\n`,
-      "utf8"
-    );
-    const wrongTask = await refinalizeControllerFailures(base);
-    assert.equal(wrongTask.ok, false);
-    assert.match(JSON.stringify(wrongTask.diagnostics), /exact linked finished attempt/u);
-
-    fs.writeFileSync(
-      detailPath,
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:project-discovery",
-          markerPath: fixture.markerPath,
-          attempt: 2
-        })
-      )}\n`,
-      "utf8"
-    );
-    const wrongAttempt = await refinalizeControllerFailures(base);
-    assert.equal(wrongAttempt.ok, false);
-    assert.match(JSON.stringify(wrongAttempt.diagnostics), /exact linked finished attempt/u);
-
-    fs.writeFileSync(
-      detailPath,
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:project-discovery",
-          markerPath: fixture.markerPath,
-          markerSha256: "0".repeat(64)
-        })
-      )}\n`,
-      "utf8"
-    );
-    const digestMismatch = await refinalizeControllerFailures(base);
-    assert.equal(digestMismatch.ok, false);
-    assert.match(JSON.stringify(digestMismatch.diagnostics), /marker digest or size/u);
-
-    fs.writeFileSync(
-      detailPath,
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:project-discovery",
-          markerPath: fixture.markerPath,
-          state: "in-progress"
-        })
-      )}\n`,
-      "utf8"
-    );
-    const unfinished = await refinalizeControllerFailures(base);
-    assert.equal(unfinished.ok, false);
-    assert.match(JSON.stringify(unfinished.diagnostics), /unfinished|exact linked finished attempt/u);
-
-    fs.writeFileSync(
-      detailPath,
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:project-discovery",
-          markerPath: fixture.markerPath
-        })
-      )}\n`,
-      "utf8"
-    );
-    fs.appendFileSync(
-      path.join(fixture.runRoot, "artifacts", "project-discovery", GENERIC_RUNTIME_MARKDOWN_PATH),
-      "modified after verification\n"
-    );
-    const modified = await refinalizeControllerFailures(base);
-    assert.equal(modified.ok, false);
-    assert.match(JSON.stringify(modified.diagnostics), /changed after verifier approval/u);
-    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
-    assert.equal(
-      replayEvents(layout).records.some((event) => event.event_type === "node-controller-refinalization-intent"),
-      false
-    );
-  }
-);
-
-test(
-  "controller re-finalization records a terminal rejection when current gates reproduce invalid output",
-  { concurrency: false },
-  async () => {
-    const fixture = await controllerFalseFailureFixture("invalid-output");
-    const refreshed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      refreshController: true,
-      env: fixture.env
-    });
-    assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-    const findingsPath = path.join(fixture.runRoot, "artifacts", "project-discovery", "findings.json");
-    fs.writeFileSync(findingsPath, "{}\n", "utf8");
-    writeCurrentArtifactVerificationMarker(fixture.runRoot, "project-discovery");
-    fs.writeFileSync(
-      path.join(fixture.env.SMITHERS_FAKE_NODE_DETAILS!, "verify:project-discovery.json"),
-      `${JSON.stringify(
-        finishedVerifierNodeDetail({
-          workflowRunId: fixture.workflowRunId,
-          verifierTaskId: "verify:project-discovery",
-          markerPath: fixture.markerPath
-        })
-      )}\n`,
-      "utf8"
-    );
-    const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const layout = layoutForRunRoot(fixture.runRoot, fixture.runId);
-    const rejected = await refinalizeControllerFailures({
-      projectRoot: fixture.project,
-      layout,
-      graph: readPlannedGraphDocument(layout.graphPath),
-      tasks: parseSmithersTaskManifestBytes(evidence.verifiedControl.contents.tasks).tasks,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration,
-      controllerGeneration: evidence.controllerGeneration,
-      env: fixture.env
-    });
-
-    assert.equal(rejected.ok, false);
-    assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
-    const records = replayEvents(layout).records;
-    assert.equal(records.filter((event) => event.event_type === "node-controller-refinalization-intent").length, 1);
-    const result = records.filter((event) => event.event_type === "node-controller-refinalization-result");
-    assert.equal(result.length, 1);
-    assert.equal(result[0]?.status, "failed");
-    assert.equal(result[0]?.payload.result, "rejected");
-  }
-);
 
 test("syncRun surfaces a terminal preparation wrapper failure as a failed durable node", async () => {
   const project = tempProject();
@@ -18880,123 +18171,55 @@ test("syncRun records model fan-out attempts independently", async () => {
   ]);
 });
 
-test("controller refresh preserves run authority and retains both immutable generations", async () => {
+test("controller refresh selects current source without rewriting historical evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const runId = "controller-refresh-success";
-  const env = controllerRefreshTerminalEnv(project, runId, {
-    enforceWorkflowChangeAcceptance: true,
-    failWorkflowChangeAdmissionOnce: true
-  });
+  const env = controllerRefreshTerminalEnv(project, runId, { enforceWorkflowChangeAcceptance: true });
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const before = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
-  if (!before.ok) return;
-  const originalSnapshotRoot = before.executionSnapshot.root;
 
-  const interrupted = await resumeRun({
-    projectRoot: project,
-    runId,
-    refreshController: true,
-    resetNode: "node:project-discovery",
-    env
-  });
+  const metadataPath = path.join(launched.value!.run_root, "run.json");
+  const statePath = path.join(launched.value!.run_root, "state.json");
+  const journalPath = path.join(launched.value!.run_root, "smithers", "workflow-run-link-journal.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow?: { path?: string; run_id?: string };
+  };
+  assert.ok(metadata.workflow?.path);
+  const historicalWorkflowPath = path.join(project, metadata.workflow.path);
+  const historicalWorkflow = fs.readFileSync(historicalWorkflowPath);
+  const retainedMetadata = fs.readFileSync(metadataPath);
+  const retainedState = fs.readFileSync(statePath);
+  const retainedJournal = fs.readFileSync(journalPath);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
-  assert.equal(interrupted.ok, false);
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.run_id, runId);
+  assert.equal(refreshed.value?.workflow_run_id, metadata.workflow.run_id);
+  const command = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").trim();
+  const commands = command.split("\n");
+  assert.equal(commands[0], `inspect ${metadata.workflow.run_id} --format json --full-output`);
   assert.match(
-    JSON.stringify(interrupted.diagnostics),
-    /injected admission failure after workflow-change authorization/u
+    commands[1] ?? "",
+    /\.smithers\/continuations\/[0-9a-f-]+\/workflows\/ultrafuzz-controller-refresh-success\.tsx/u
   );
-  let upCommands = fs
-    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
-    .trim()
-    .split("\n")
-    .filter((command) => command.startsWith("up "));
-  assert.equal(upCommands.length, 2);
-  assert.doesNotMatch(upCommands[0]!, /(?:^| )--accept-workflow-change(?: |$)/u);
-  assert.match(upCommands[1]!, /(?:^| )--accept-workflow-change(?: |$)/u);
-  const after = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
-  if (!after.ok) return;
-  assert.equal(after.layout.runId, runId);
-  assert.equal(after.smithersRunId, before.smithersRunId);
-  assert.equal(after.workflowLinkId, before.workflowLinkId);
-  assert.equal(after.controlGeneration, before.controlGeneration);
-  assert.notEqual(after.controllerGeneration, before.controlGeneration);
-  assert.equal(fs.existsSync(originalSnapshotRoot), true);
-  assert.equal(fs.existsSync(after.executionSnapshot.root), true);
-  assert.deepEqual(
-    fs.readdirSync(path.dirname(originalSnapshotRoot)).sort(),
-    [before.controlGeneration, after.controllerGeneration].sort()
+  assert.match(
+    commands[1] ?? "",
+    new RegExp(
+      `--resume ${metadata.workflow.run_id} --run-id ${metadata.workflow.run_id} .*--accept-workflow-change`,
+      "u"
+    )
   );
-  const metadata = JSON.parse(fs.readFileSync(path.join(after.layout.root, "run.json"), "utf8")) as {
-    run_id?: string;
-    workflow?: {
-      run_id?: string;
-      control_generation?: string;
-      controller_generation?: string;
-      controller_execution_snapshot_path?: string;
-    };
-  };
-  const state = JSON.parse(fs.readFileSync(path.join(after.layout.root, "state.json"), "utf8")) as {
-    run_id?: string;
-    provenance?: {
-      workflow?: {
-        runId?: string;
-        controlGeneration?: string;
-        controllerGeneration?: string;
-        controllerExecutionSnapshot?: string;
-      };
-    };
-  };
-  assert.equal(metadata.run_id, runId);
-  assert.equal(metadata.workflow?.run_id, before.smithersRunId);
-  assert.equal(metadata.workflow?.control_generation, before.controlGeneration);
-  assert.equal(metadata.workflow?.controller_generation, after.controllerGeneration);
-  assert.equal(
-    metadata.workflow?.controller_execution_snapshot_path,
-    `smithers/execution-snapshots/${after.controllerGeneration}`
-  );
-  assert.equal(state.run_id, runId);
-  assert.equal(state.provenance?.workflow?.runId, before.smithersRunId);
-  assert.equal(state.provenance?.workflow?.controlGeneration, before.controlGeneration);
-  assert.equal(state.provenance?.workflow?.controllerGeneration, after.controllerGeneration);
-  assert.equal(
-    state.provenance?.workflow?.controllerExecutionSnapshot,
-    `smithers/execution-snapshots/${after.controllerGeneration}`
-  );
-  assert.equal(
-    replayEvents(after.layout, Number.MAX_SAFE_INTEGER).records.filter(
-      (event) => event.event_type === "workflow-controller-generation-recorded"
-    ).length,
-    1
-  );
-
-  const recovered = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
-  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-  assert.equal(recovered.value?.workflow_run_id, before.smithersRunId);
-  const ordinary = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
-  upCommands = fs
-    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
-    .trim()
-    .split("\n")
-    .filter((command) => command.startsWith("up "));
-  assert.equal(upCommands.length, 4);
-  assert.match(upCommands[2]!, /(?:^| )--accept-workflow-change(?: |$)/u);
-  assert.match(upCommands[3]!, /(?:^| )--accept-workflow-change(?: |$)/u);
-  const retained = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(retained.ok, true, "diagnostics" in retained ? JSON.stringify(retained.diagnostics) : "");
-  if (retained.ok) {
-    assert.equal(retained.controllerGeneration, after.controllerGeneration);
-    assert.equal(retained.controlGeneration, before.controlGeneration);
-    assert.deepEqual(
-      fs.readdirSync(path.dirname(originalSnapshotRoot)).sort(),
-      [before.controlGeneration, after.controllerGeneration].sort()
-    );
-  }
+  const continuationPath = /^up (\S+)/u.exec(commands[1] ?? "")?.[1];
+  assert.ok(continuationPath);
+  assert.equal(fs.existsSync(continuationPath), true);
+  assert.deepEqual(fs.readFileSync(historicalWorkflowPath), historicalWorkflow);
+  assert.deepEqual(fs.readFileSync(metadataPath), retainedMetadata);
+  assert.deepEqual(fs.readFileSync(statePath), retainedState);
+  assert.deepEqual(fs.readFileSync(journalPath), retainedJournal);
 });
 
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
@@ -19007,9 +18230,6 @@ test("controller refresh sources stock adapters from the packaged closure instea
   const env = controllerRefreshTerminalEnv(project, runId);
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const before = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(before.ok, true, "diagnostics" in before ? JSON.stringify(before.diagnostics) : "");
-  if (!before.ok) return;
 
   const projectPiPath = path.join(project, ".smithers", "agents", "pi.ts");
   const unexpectedProjectAdapter = path.join(project, ".smithers", "agents", "unexpected.ts");
@@ -19020,15 +18240,17 @@ test("controller refresh sources stock adapters from the packaged closure instea
   const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
 
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-  const after = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
-  if (!after.ok) return;
-  assert.notEqual(after.controllerGeneration, before.controlGeneration);
-  assert.notEqual(
-    fs.readFileSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "pi.ts"), "utf8"),
-    untrustedProjectBytes
-  );
-  assert.equal(fs.existsSync(path.join(after.executionSnapshot.root, ".smithers", "agents", "unexpected.ts")), false);
+  const upCommand = fs
+    .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+    .trim()
+    .split("\n")
+    .filter((command) => command.startsWith("up "))
+    .at(-1);
+  const refreshedWorkflowPath = /^up (\S+)/u.exec(upCommand ?? "")?.[1];
+  assert.ok(refreshedWorkflowPath);
+  const refreshedRoot = path.dirname(path.dirname(refreshedWorkflowPath));
+  assert.notEqual(fs.readFileSync(path.join(refreshedRoot, "agents", "pi.ts"), "utf8"), untrustedProjectBytes);
+  assert.equal(fs.existsSync(path.join(refreshedRoot, "agents", "unexpected.ts")), false);
   assert.equal(fs.readFileSync(projectPiPath, "utf8"), untrustedProjectBytes);
   assert.equal(fs.existsSync(unexpectedProjectAdapter), true);
 });
@@ -19096,7 +18318,7 @@ test("controller refresh sources internal modules from the invoking package clos
   );
 });
 
-test("controller refresh defers old execution and replaces missing or stale Bun startup controls", async () => {
+test("controller refresh helper replaces missing or stale Bun startup controls", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -19133,53 +18355,9 @@ test("controller refresh defers old execution and replaces missing or stale Bun 
     assert.notEqual(refreshed[0]!.sourcePath, staleSource);
   }
   assert.equal(fs.readFileSync(staleSource, "utf8"), "legacy startup control\n");
-
-  const originalSnapshotRoot = before.executionSnapshot.root;
-  const savedOriginalSnapshot = `${path.dirname(originalSnapshotRoot)}.saved-${before.controlGeneration}`;
-  const originalSnapshotMode = fs.statSync(originalSnapshotRoot).mode & 0o777;
-  fs.chmodSync(originalSnapshotRoot, 0o700);
-  fs.renameSync(originalSnapshotRoot, savedOriginalSnapshot);
-  const deferred = await readLinkedWorkflowEvidence(project, runId, {
-    allowPendingControllerRefresh: true,
-    deferExecutionSnapshotForControllerRefresh: true
-  });
-  assert.equal(deferred.ok, true, "diagnostics" in deferred ? JSON.stringify(deferred.diagnostics) : "");
-  if (!deferred.ok) return;
-  assert.equal("executionSnapshot" in deferred, false);
-  assert.equal(fs.existsSync(originalSnapshotRoot), false);
-
-  const boundOldEnvironment = linkedWorkflowExecutionEnvironment(before, env);
-  const oldRunnerSource = fs.readFileSync(env.SMITHERS_BIN!, "utf8");
-  const restoreCommand = [
-    `mv ${shellQuote(savedOriginalSnapshot)} ${shellQuote(originalSnapshotRoot)}`,
-    `chmod ${originalSnapshotMode.toString(8)} ${shellQuote(originalSnapshotRoot)}`
-  ].join("\n");
-  const currentRunnerSource = oldRunnerSource.replace("  inspect)\n", `  inspect)\n${restoreCommand}\n`);
-  assert.notEqual(currentRunnerSource, oldRunnerSource);
-  writeFakeNpmInstaller(project, {
-    count: 0,
-    stderr: [],
-    runnerSource: currentRunnerSource
-  });
-
-  const refreshed = await resumeRun({
-    projectRoot: project,
-    runId,
-    refreshController: true,
-    resetNode: "node:project-discovery",
-    env: boundOldEnvironment
-  });
-  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-  const after = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(after.ok, true, "diagnostics" in after ? JSON.stringify(after.diagnostics) : "");
-  if (!after.ok) return;
-  assert.notEqual(after.controllerGeneration, before.controlGeneration);
-  assert.equal(fs.existsSync(after.executionSnapshot.root), true);
-  assert.equal(fs.existsSync(originalSnapshotRoot), true);
-  assert.equal(fs.existsSync(savedOriginalSnapshot), false);
 });
 
-test("ordinary lifecycle calls cannot invent controller workflow-change authority", async () => {
+test("ordinary resume always delegates workflow-change admission to Smithers", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -19197,26 +18375,8 @@ test("ordinary lifecycle calls cannot invent controller workflow-change authorit
     .split("\n")
     .filter((command) => command.startsWith("up "));
   assert.equal(upCommands.length, 2);
-  assert.equal(
-    upCommands.some((command) => /(?:^| )--accept-workflow-change(?: |$)/u.test(command)),
-    false
-  );
-  await assert.rejects(
-    runSmithersLifecycleCommand({
-      action: "resume",
-      smithersRunId: `ultrafuzz-${runId}`,
-      workflowPath: path.join(project, ".smithers", "workflows", "workflow.tsx"),
-      projectRoot: project,
-      keepWorkspaces: false,
-      controllerLeaseSeconds: 60,
-      env,
-      controllerRefreshAuthority: {
-        controllerGeneration: "not-an-authenticated-generation",
-        executionSnapshotRoot: path.join(project, "forged-controller-snapshot")
-      }
-    }),
-    /controller refresh authority has an invalid generation/u
-  );
+  assert.equal(upCommands.length, 2);
+  assert.match(upCommands[1]!, /(?:^| )--accept-workflow-change(?: |$)/u);
 });
 
 test("controller refresh admits a new stock bootstrap module but rejects semantic drift", async () => {
@@ -19837,7 +18997,7 @@ test("controller refresh admits only the exact current missing-history inspect e
   }
 });
 
-test("controller refresh relaunches an exact current missing-history run from the refreshed snapshot", async () => {
+test("controller refresh keeps a missing-history Smithers identity instead of recreating it", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -19861,16 +19021,20 @@ test("controller refresh relaunches an exact current missing-history run from th
     .split("\n")
     .filter((command) => command.startsWith("up "));
   assert.equal(upCommands.length, 2);
-  assert.doesNotMatch(upCommands[1]!, /(?:^| )--resume(?: |$)/u);
-  assert.match(upCommands[1]!, /^up \/proc\/[0-9]+\/fd\/[0-9]+\/\.smithers\/workflows\//u);
+  assert.match(upCommands[1]!, /\.smithers\/continuations\/[0-9a-f-]+\/workflows\//u);
+  assert.match(
+    upCommands[1]!,
+    /--resume ultrafuzz-controller-refresh-missing-history-relaunch --run-id ultrafuzz-controller-refresh-missing-history-relaunch/u
+  );
+  assert.match(upCommands[1]!, /--accept-workflow-change/u);
   assert.equal(
     fs.existsSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json")),
-    true
+    false
   );
-  assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), true);
+  assert.equal(fs.existsSync(path.join(launched.value!.run_root, "smithers", "recovery-submission.json")), false);
 });
 
-test("ordinary resume keeps the sealed CLI and controller refresh rotates a rebuilt closure", async () => {
+test("native continuation does not use historical trusted CLI identity as an authorization gate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -19878,10 +19042,9 @@ test("ordinary resume keeps the sealed CLI and controller refresh rotates a rebu
   const env = controllerRefreshTerminalEnv(project, runId);
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const entrypoint = fakeUltrafuzzCliEntrypoint(project);
-  fs.chmodSync(entrypoint, 0o700);
-  fs.appendFileSync(entrypoint, "// compatible rebuilt CLI\n", "utf8");
-  fs.chmodSync(entrypoint, 0o500);
+  const trustedMetadataPath = path.join(launched.value!.run_root, "trusted-cli.json");
+  fs.writeFileSync(trustedMetadataPath, "{}\n", "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
@@ -19890,6 +19053,15 @@ test("ordinary resume keeps the sealed CLI and controller refresh rotates a rebu
   const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
   assert.equal(refreshed.value?.submitted, true);
+  assert.equal(fs.readFileSync(trustedMetadataPath, "utf8"), "{}\n");
+  assert.equal(
+    fs
+      .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
+      .trim()
+      .split("\n")
+      .filter((command) => command.startsWith("up ")).length,
+    2
+  );
 });
 
 test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
@@ -20225,619 +19397,6 @@ test("controller refresh authenticates newly required sealed runner patches and 
   );
 });
 
-test(
-  "controller refresh adopts an exact orphan manifest after a publication crash",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-orphan-manifest";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const journalPath = path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let crashed = false;
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (!crashed && path.resolve(String(args[1])) === journalPath) {
-          crashed = true;
-          throw new Error("injected journal publication crash");
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-      assert.equal(interrupted.ok, false);
-      assert.equal(crashed, true);
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-    assert.equal(fs.existsSync(journalPath), false);
-    const manifests = fs.readdirSync(path.join(launched.value!.run_root, "smithers", "controller-generations"));
-    assert.equal(manifests.length, 1);
-    const retainedManifest = fs.readFileSync(
-      path.join(launched.value!.run_root, "smithers", "controller-generations", manifests[0]!)
-    );
-
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.deepEqual(
-      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generations", manifests[0]!)),
-      retainedManifest
-    );
-    assert.equal(fs.readdirSync(path.join(launched.value!.run_root, "smithers", "controller-generations")).length, 1);
-  }
-);
-
-test(
-  "controller refresh resumes a prepared journal after snapshot publication fails",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-prepared";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const snapshotsRoot = path.join(launched.value!.run_root, "smithers", "execution-snapshots");
-    const originalGeneration = fs.readdirSync(snapshotsRoot)[0]!;
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let crashed = false;
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        const destinationName = path.basename(String(args[1]));
-        if (!crashed && /^[0-9a-f]{64}$/u.test(destinationName) && destinationName !== originalGeneration) {
-          crashed = true;
-          throw new Error("injected snapshot publication crash");
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-      assert.equal(interrupted.ok, false);
-      assert.equal(crashed, true);
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-    const prepared = JSON.parse(
-      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
-    ) as { entries?: Array<{ phase?: string; controller_generation?: string }> };
-    assert.equal(prepared.entries?.at(-1)?.phase, "prepared");
-    assert.deepEqual(fs.readdirSync(snapshotsRoot), [originalGeneration]);
-
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.equal(fs.existsSync(path.join(snapshotsRoot, prepared.entries?.at(-1)?.controller_generation ?? "")), true);
-    const committed = JSON.parse(
-      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
-    ) as { entries?: Array<{ phase?: string }> };
-    assert.equal(committed.entries?.at(-1)?.phase, "committed");
-  }
-);
-
-test(
-  "controller refresh resumes a prepared journal after snapshot publication succeeds",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-published-prepared";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(project, runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
-      (file) => file.snapshotPath === "controls/resolved-config.json"
-    );
-    assert.ok(resolvedConfig);
-    const config = JSON.parse(resolvedConfig.contents.toString("utf8"));
-    const refreshed = refreshedSmithersControllerSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      original: evidence.verifiedControl,
-      config
-    });
-    const prepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, refreshed, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    const published = materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: prepared.snapshot,
-      authorizedGenerations: prepared.authorizedGenerations
-    });
-    assert.equal(fs.existsSync(published.root), true);
-    const journalPath = path.join(evidence.layout.root, "smithers", "controller-generation-journal.json");
-    const pending = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-      entries?: Array<{ phase?: string; controller_generation?: string }>;
-    };
-    assert.equal(pending.entries?.at(-1)?.phase, "prepared");
-
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    const committed = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-      entries?: Array<{ phase?: string; controller_generation?: string }>;
-    };
-    assert.equal(committed.entries?.at(-1)?.phase, "committed");
-    assert.equal(committed.entries?.at(-1)?.controller_generation, prepared.controllerGeneration);
-  }
-);
-
-test(
-  "controller refresh durably requires a predecessor-linked successor after a published rollback",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-published-legacy-prepared";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(project, runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
-      (file) => file.snapshotPath === "controls/resolved-config.json"
-    );
-    assert.ok(resolvedConfig);
-    const current = refreshedSmithersControllerSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      original: evidence.verifiedControl,
-      config: JSON.parse(resolvedConfig.contents.toString("utf8"))
-    });
-    const preparedCurrent = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, current, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: preparedCurrent.snapshot,
-      authorizedGenerations: preparedCurrent.authorizedGenerations
-    });
-    commitControllerGeneration(evidence.layout, evidence.verifiedControl, preparedCurrent.controllerGeneration);
-
-    const legacy = {
-      ...current,
-      snapshot: {
-        ...current.snapshot,
-        contents: {
-          ...current.snapshot.contents,
-          workflow: Buffer.concat([current.snapshot.contents.workflow, Buffer.from("\n// legacy controller\n")])
-        }
-      }
-    };
-    const preparedLegacy = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, legacy, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    const publishedLegacy = materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: preparedLegacy.snapshot,
-      authorizedGenerations: preparedLegacy.authorizedGenerations
-    });
-    assert.equal(fs.existsSync(publishedLegacy.root), true);
-
-    const snapshotsRoot = path.dirname(publishedLegacy.root);
-    const existingGenerations = new Set(fs.readdirSync(snapshotsRoot));
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let crashed = false;
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        const destinationName = path.basename(String(args[1]));
-        if (!crashed && /^[0-9a-f]{64}$/u.test(destinationName) && !existingGenerations.has(destinationName)) {
-          crashed = true;
-          throw new Error("injected rollback successor publication crash");
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-      assert.equal(interrupted.ok, false);
-      assert.equal(crashed, true);
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-
-    const journalPath = path.join(evidence.layout.root, "smithers", "controller-generation-journal.json");
-    const interruptedJournal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-      entries?: Array<{ phase?: string; controller_generation?: string }>;
-    };
-    assert.equal(interruptedJournal.entries?.length, 3);
-    assert.deepEqual(
-      interruptedJournal.entries?.map((entry) => entry.phase),
-      ["committed", "committed", "prepared"]
-    );
-    assert.equal(new Set(interruptedJournal.entries?.map((entry) => entry.controller_generation)).size, 3);
-    assert.equal(interruptedJournal.entries?.[0]?.controller_generation, preparedCurrent.controllerGeneration);
-    assert.equal(interruptedJournal.entries?.[1]?.controller_generation, preparedLegacy.controllerGeneration);
-
-    const ordinary = await resumeRun({ projectRoot: project, runId, env });
-    assert.equal(ordinary.ok, false);
-    assert.match(JSON.stringify(ordinary.diagnostics), /requires reconciliation with resume --refresh-controller/u);
-
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-      entries?: Array<{ phase?: string; controller_generation?: string }>;
-    };
-    assert.equal(journal.entries?.length, 3);
-    assert.deepEqual(
-      journal.entries?.map((entry) => entry.phase),
-      ["committed", "committed", "committed"]
-    );
-    assert.equal(new Set(journal.entries?.map((entry) => entry.controller_generation)).size, 3);
-  }
-);
-
-test(
-  "controller refresh removes an authenticated prepared temporary snapshot after abrupt exit",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-prepared-temporary";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(project, runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
-      (file) => file.snapshotPath === "controls/resolved-config.json"
-    );
-    assert.ok(resolvedConfig);
-    const refreshed = refreshedSmithersControllerSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      original: evidence.verifiedControl,
-      config: JSON.parse(resolvedConfig.contents.toString("utf8"))
-    });
-    const prepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, refreshed, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    const published = materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: prepared.snapshot,
-      authorizedGenerations: prepared.authorizedGenerations
-    });
-    const snapshotsRoot = path.dirname(published.root);
-    const temporaryName = `.${prepared.controllerGeneration}.tmp-${process.pid}-0123456789abcdef01234567`;
-    const temporaryRoot = path.join(snapshotsRoot, temporaryName);
-    fs.renameSync(published.root, temporaryRoot);
-
-    const [recovered, concurrent] = await Promise.all([
-      resumeRun({ projectRoot: project, runId, refreshController: true, env }),
-      resumeRun({ projectRoot: project, runId, refreshController: true, env })
-    ]);
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    assert.equal(concurrent.ok, true, JSON.stringify(concurrent.diagnostics));
-    assert.equal(fs.existsSync(temporaryRoot), false);
-    assert.equal(fs.existsSync(published.root), true);
-  }
-);
-
-test(
-  "controller refresh reconciles a committed journal before metadata projection",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-projection";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const metadataPath = path.join(launched.value!.run_root, "run.json");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let crashed = false;
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (!crashed && path.resolve(String(args[1])) === metadataPath) {
-          crashed = true;
-          throw new Error("injected metadata projection crash");
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      const interrupted = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-      assert.equal(interrupted.ok, false);
-      assert.equal(crashed, true);
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-    const journal = JSON.parse(
-      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
-    ) as { entries?: Array<{ phase?: string; controller_generation?: string }> };
-    assert.equal(journal.entries?.at(-1)?.phase, "committed");
-    const metadataBefore = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-      workflow?: { controller_generation?: string };
-    };
-    assert.equal(metadataBefore.workflow?.controller_generation, undefined);
-
-    const recovered = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-
-    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(project, runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (evidence.ok) {
-      assert.equal(evidence.controllerGeneration, journal.entries?.at(-1)?.controller_generation);
-      const metadataAfter = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-        workflow?: { controller_generation?: string };
-      };
-      assert.equal(metadataAfter.workflow?.controller_generation, evidence.controllerGeneration);
-    }
-  }
-);
-
-test(
-  "controller refresh advances a linear second generation across a projection crash",
-  { concurrency: false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "controller-refresh-second-projection";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    const evidence = await readLinkedWorkflowEvidence(project, runId);
-    assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-    if (!evidence.ok) return;
-    const resolvedConfig = evidence.verifiedControl.executionFiles.find(
-      (file) => file.snapshotPath === "controls/resolved-config.json"
-    );
-    assert.ok(resolvedConfig);
-    const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
-    const firstRefresh = refreshedSmithersControllerSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      original: evidence.verifiedControl,
-      config
-    });
-    const firstPrepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, firstRefresh, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: firstPrepared.snapshot,
-      authorizedGenerations: firstPrepared.authorizedGenerations
-    });
-    const firstCommitted = commitControllerGeneration(
-      evidence.layout,
-      evidence.verifiedControl,
-      firstPrepared.controllerGeneration
-    );
-    assert.equal(firstCommitted.controllerGeneration, firstPrepared.controllerGeneration);
-
-    const moduleIndex = firstPrepared.snapshot.executionFiles.findIndex((file) =>
-      file.snapshotPath.startsWith("modules/@ultrafuzz/runtime/dist/")
-    );
-    assert.notEqual(moduleIndex, -1);
-    const secondExecutionFiles = firstPrepared.snapshot.executionFiles.map((file, index) =>
-      index === moduleIndex
-        ? { ...file, contents: Buffer.concat([file.contents, Buffer.from("\n// synthetic second generation\n")]) }
-        : file
-    );
-    const secondRefresh = {
-      ...firstRefresh,
-      snapshot: { ...firstPrepared.snapshot, executionFiles: secondExecutionFiles },
-      controllerSourceDigest: crypto
-        .createHash("sha256")
-        .update(firstRefresh.controllerSourceDigest)
-        .update("synthetic-second-controller-generation")
-        .digest("hex")
-    };
-    const secondPrepared = prepareControllerGeneration(evidence.layout, evidence.verifiedControl, secondRefresh, {
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId
-    });
-    assert.notEqual(secondPrepared.controllerGeneration, firstPrepared.controllerGeneration);
-    materializeWorkflowExecutionSnapshot({
-      projectRoot: project,
-      layout: evidence.layout,
-      snapshot: secondPrepared.snapshot,
-      authorizedGenerations: secondPrepared.authorizedGenerations
-    });
-
-    const metadataPath = path.join(launched.value!.run_root, "run.json");
-    const statePath = path.join(launched.value!.run_root, "state.json");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
-    const originalRenameSync = fs.renameSync;
-    let crashed = false;
-    Object.defineProperty(fs, "renameSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (!crashed && path.resolve(String(args[1])) === metadataPath) {
-          crashed = true;
-          throw new Error("injected second-generation metadata projection crash");
-        }
-        return Reflect.apply(originalRenameSync, fs, args) as void;
-      }
-    });
-    try {
-      assert.throws(
-        () =>
-          commitControllerGeneration(evidence.layout, evidence.verifiedControl, secondPrepared.controllerGeneration),
-        /injected second-generation metadata projection crash/u
-      );
-      assert.equal(crashed, true);
-    } finally {
-      Object.defineProperty(fs, "renameSync", originalDescriptor);
-    }
-
-    const journal = JSON.parse(
-      fs.readFileSync(path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json"), "utf8")
-    ) as {
-      entries?: Array<{
-        phase?: string;
-        controller_generation?: string;
-        previous_controller_generation?: string;
-      }>;
-    };
-    assert.equal(journal.entries?.length, 2);
-    assert.deepEqual(
-      journal.entries?.map((entry) => entry.phase),
-      ["committed", "committed"]
-    );
-    assert.equal(journal.entries?.[1]?.controller_generation, secondPrepared.controllerGeneration);
-    assert.equal(journal.entries?.[1]?.previous_controller_generation, firstPrepared.controllerGeneration);
-    const metadataBefore = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-      workflow?: {
-        controller_generation?: string;
-        controller_generation_journal_path?: string;
-        controller_execution_snapshot_path?: string;
-      };
-    };
-    const stateBefore = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-      provenance?: {
-        workflow?: {
-          controllerGeneration?: string;
-          controllerGenerationJournal?: string;
-          controllerExecutionSnapshot?: string;
-        };
-      };
-    };
-    assert.equal(metadataBefore.workflow?.controller_generation, firstPrepared.controllerGeneration);
-    assert.equal(
-      metadataBefore.workflow?.controller_execution_snapshot_path,
-      `smithers/execution-snapshots/${firstPrepared.controllerGeneration}`
-    );
-    assert.equal(stateBefore.provenance?.workflow?.controllerGeneration, firstPrepared.controllerGeneration);
-    assert.equal(
-      stateBefore.provenance?.workflow?.controllerExecutionSnapshot,
-      `smithers/execution-snapshots/${firstPrepared.controllerGeneration}`
-    );
-
-    const reconciled = commitControllerGeneration(
-      evidence.layout,
-      evidence.verifiedControl,
-      secondPrepared.controllerGeneration
-    );
-    assert.equal(reconciled.controllerGeneration, secondPrepared.controllerGeneration);
-    const metadataAfterBytes = fs.readFileSync(metadataPath);
-    const metadataAfter = JSON.parse(metadataAfterBytes.toString("utf8")) as typeof metadataBefore;
-    const stateAfter = JSON.parse(fs.readFileSync(statePath, "utf8")) as typeof stateBefore;
-    assert.equal(metadataAfter.workflow?.controller_generation, secondPrepared.controllerGeneration);
-    assert.equal(
-      metadataAfter.workflow?.controller_execution_snapshot_path,
-      `smithers/execution-snapshots/${secondPrepared.controllerGeneration}`
-    );
-    assert.equal(stateAfter.provenance?.workflow?.controllerGeneration, secondPrepared.controllerGeneration);
-    assert.equal(
-      stateAfter.provenance?.workflow?.controllerExecutionSnapshot,
-      `smithers/execution-snapshots/${secondPrepared.controllerGeneration}`
-    );
-
-    const unrelatedGeneration = "f".repeat(64);
-    for (const [field, value] of [
-      ["controller_generation", unrelatedGeneration],
-      ["controller_generation_journal_path", "smithers/unrelated-controller-journal.json"],
-      ["controller_execution_snapshot_path", `smithers/execution-snapshots/${unrelatedGeneration}`]
-    ] as const) {
-      const tampered = JSON.parse(metadataAfterBytes.toString("utf8")) as typeof metadataBefore;
-      assert.ok(tampered.workflow);
-      tampered.workflow[field] = value;
-      fs.writeFileSync(metadataPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
-      assert.throws(
-        () =>
-          commitControllerGeneration(evidence.layout, evidence.verifiedControl, secondPrepared.controllerGeneration),
-        /controller generation projection conflicts/u
-      );
-      fs.writeFileSync(metadataPath, metadataAfterBytes);
-    }
-  }
-);
-
-test("controller refresh rejects unknown journal keys and conflicting projections", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "controller-refresh-tamper";
-  const env = controllerRefreshTerminalEnv(project, runId);
-  const launched = await startRun({ projectRoot: project, runId, env });
-  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
-  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-  const journalPath = path.join(launched.value!.run_root, "smithers", "controller-generation-journal.json");
-  const journalBytes = fs.readFileSync(journalPath);
-  const journal = JSON.parse(journalBytes.toString("utf8")) as Record<string, unknown>;
-  journal.unexpected = true;
-  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
-  const malformed = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(malformed.ok, false);
-  assert.match(JSON.stringify(malformed.ok ? [] : malformed.diagnostics), /controller generation journal is invalid/u);
-
-  const noncanonicalTimestamp = JSON.parse(journalBytes.toString("utf8")) as {
-    entries?: Array<{ prepared_at?: string }>;
-  };
-  noncanonicalTimestamp.entries![0]!.prepared_at = "2026-08-21T12:00:00Z";
-  fs.writeFileSync(journalPath, `${JSON.stringify(noncanonicalTimestamp, null, 2)}\n`, "utf8");
-  const invalidTimestamp = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(invalidTimestamp.ok, false);
-  assert.match(
-    JSON.stringify(invalidTimestamp.ok ? [] : invalidTimestamp.diagnostics),
-    /controller generation journal chain is invalid/u
-  );
-
-  const truncatedJournal = JSON.parse(journalBytes.toString("utf8")) as { entries?: unknown[] };
-  truncatedJournal.entries = [];
-  fs.writeFileSync(journalPath, `${JSON.stringify(truncatedJournal, null, 2)}\n`, "utf8");
-  const truncated = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(truncated.ok, false);
-  assert.match(
-    JSON.stringify(truncated.ok ? [] : truncated.diagnostics),
-    /controller generation event is absent from its journal ancestry/u
-  );
-
-  fs.writeFileSync(journalPath, journalBytes);
-  const metadataPath = path.join(launched.value!.run_root, "run.json");
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow?: { controller_generation?: string };
-  };
-  assert.ok(metadata.workflow);
-  metadata.workflow!.controller_generation = "f".repeat(64);
-  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-  const conflicting = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(conflicting.ok, false);
-  assert.match(
-    JSON.stringify(conflicting.ok ? [] : conflicting.diagnostics),
-    /controller generation projection conflicts/u
-  );
-});
-
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -20901,8 +19460,6 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   staleState.status = "timed-out";
   staleState.finished_at = "2000-01-01T00:00:00.000Z";
   fs.writeFileSync(staleStatePath, `${JSON.stringify(staleState, null, 2)}\n`, "utf8");
-  const resumeSubmittedAfterMs = Date.now();
-
   const resumed = await resumeRun({
     projectRoot: project,
     runId: run.value!.run_id,
@@ -20913,16 +19470,14 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
-  assert.equal(fs.readFileSync(retryCredentialLog, "utf8"), "sealed-primary-key|\n");
   assert.equal(fs.existsSync(missingPrompt.rendered_prompt_path), false);
+  assert.match(fs.readFileSync(credentialLog, "utf8"), /^sealed-primary-key\|/u);
   assert.doesNotMatch(fs.readFileSync(credentialLog, "utf8"), new RegExp(hostileCredential, "u"));
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
-  assert.equal(resumedState.concurrency.requested_concurrency, 8);
-  assert.equal(resumedState.controller_lease.duration_ms, 30_000);
-  assert.equal(resumedState.status, "running");
-  assert.equal(resumedState.finished_at, undefined);
-  assert.notEqual(resumedState.workflow_deadline_at, "2000-01-01T00:00:00.000Z");
-  assert.ok(Date.parse(resumedState.workflow_deadline_at ?? "") > resumeSubmittedAfterMs);
+  assert.equal(resumedState.concurrency.requested_concurrency, staleState.concurrency.requested_concurrency);
+  assert.equal(resumedState.status, "timed-out");
+  assert.equal(resumedState.finished_at, "2000-01-01T00:00:00.000Z");
+  assert.equal(resumedState.workflow_deadline_at, "2000-01-01T00:00:00.000Z");
 
   const resetResumed = await resumeRun({
     projectRoot: project,
@@ -21016,7 +19571,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     .trim()
     .split("\n")
     .map((line) => line.split("|"));
-  for (const command of ["up", "replay", "fork"]) {
+  for (const command of ["replay", "fork"]) {
     assert.ok(
       sensitiveEnvironmentEntries.some(
         ([observedCommand, sensitiveNames, customValue]) =>
@@ -21029,7 +19584,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   }
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(
     commands,
@@ -21037,7 +19592,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
@@ -21058,7 +19613,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
 });
 
 test(
-  "marker-less sealed legacy controllers permit empty sensitive sets and reject sensitive lifecycle actions",
+  "native resume strips custom sensitive values from marker-less legacy controllers",
   { concurrency: false },
   async () => {
     const project = tempProject();
@@ -21129,8 +19684,17 @@ test(
     fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
     const eventsPath = path.join(run.value!.run_root, "events.jsonl");
     const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+    const resumed = await resumeRun({
+      projectRoot: project,
+      runId: run.value!.run_id,
+      force: true,
+      env: sensitiveEnv
+    });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
+    assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
     const actions = [
-      ["resume", () => resumeRun({ projectRoot: project, runId: run.value!.run_id, force: true, env: sensitiveEnv })],
       ["replay", () => replayRun({ projectRoot: project, runId: run.value!.run_id, env: sensitiveEnv })],
       ["fork", () => forkRun({ projectRoot: project, runId: run.value!.run_id, forkFrame: 44, env: sensitiveEnv })]
     ] as const;
@@ -21148,7 +19712,7 @@ test(
   }
 );
 
-test("lifecycle relaunch rejects a required backend that disappeared before new attempts", async () => {
+test("ordinary resume leaves required-command availability to the continued workflow", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21176,13 +19740,12 @@ test("lifecycle relaunch rejects a required backend that disappeared before new 
 
   const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
 
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
-  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
   assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
 });
 
-test("legacy workflow evidence gaps fail closed without reconstructing trust", async () => {
+test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
   const cases = [
     {
       runId: "legacy-missing-control-seal",
@@ -21218,14 +19781,15 @@ test("legacy workflow evidence gaps fail closed without reconstructing trust", a
       assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
     }
     const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, env });
-    assert.equal(resumed.ok, false);
-    assert.equal(resumed.diagnostics[0]?.code, entry.code);
-    assert.equal(fs.existsSync(missingPath), false, "legacy evidence must never be synthesized");
-    assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.equal(resumed.value?.run_id, entry.runId);
+    assert.equal(resumed.value?.workflow_run_id, `ultrafuzz-${entry.runId}`);
+    assert.equal(fs.existsSync(missingPath), false, "resume must not synthesize historical authorization evidence");
+    assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /--accept-workflow-change/u);
   }
 });
 
-test("a duplicate-key workflow link journal is terminal and is never rewritten or treated as missing", async () => {
+test("ordinary resume bypasses a malformed workflow link journal without rewriting it", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   writeSmallTopology(project);
@@ -21250,10 +19814,9 @@ test("a duplicate-key workflow link journal is terminal and is never rewritten o
     assert.match(evidence.diagnostics[0]?.message ?? "", /duplicate property name/u);
   }
   const resumed = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(fs.readFileSync(journalPath, "utf8"), duplicated);
-  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /--accept-workflow-change/u);
 });
 
 test("a symlinked control seal remains invalid evidence rather than being labeled legacy", async () => {
@@ -21275,95 +19838,6 @@ test("a symlinked control seal remains invalid evidence rather than being labele
     assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
     assert.notEqual(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
   }
-});
-
-test("lifecycle commands reject a coherent metadata and state retarget before invoking Smithers", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId: "retargeted-workflow-link", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  const forgedWorkflowRunId = "ultrafuzz-retargeted-workflow-link-forged";
-  const metadataPath = path.join(run.value!.run_root, "run.json");
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow_ids?: string[];
-    workflow?: { run_id?: string };
-  };
-  assert.ok(metadata.workflow);
-  metadata.workflow.run_id = forgedWorkflowRunId;
-  metadata.workflow_ids = [forgedWorkflowRunId];
-  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
-    provenance?: { workflow?: { runId?: string; inspection?: { runId?: string } } };
-  };
-  const stateWorkflow = state.provenance?.workflow;
-  assert.ok(stateWorkflow);
-  stateWorkflow.runId = forgedWorkflowRunId;
-  stateWorkflow.inspection = { runId: forgedWorkflowRunId };
-  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
-
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
-  assert.match(resumed.diagnostics[0]?.message ?? "", /cross-bound to its control and link journals/u);
-  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
-});
-
-test("a pending workflow link cannot forge a target from an unrelated lifecycle result", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId: "forged-workflow-link-target", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-
-  const journalPath = path.join(run.value!.run_root, "smithers", "workflow-run-link-journal.json");
-  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-    entries: Array<Record<string, unknown>>;
-  };
-  const source = journal.entries.at(-1);
-  assert.ok(source);
-  const events = fs
-    .readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8")
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as { event_id: string; event_type: string; timestamp: string });
-  const invocation = events.filter((event) => event.event_type === "workflow-lifecycle-invoking").at(-1);
-  const lifecycleResult = events.filter((event) => event.event_type === "workflow-lifecycle-result").at(-1);
-  assert.ok(invocation);
-  assert.ok(lifecycleResult);
-  const preparedAt = new Date().toISOString();
-  journal.entries.push({
-    link_id: crypto.randomUUID(),
-    action: "resume",
-    workflow_run_id: "ultrafuzz-forged-workflow-link-target-attacker",
-    control_generation: source.control_generation,
-    phase: "prepared",
-    prepared_at: preparedAt,
-    updated_at: preparedAt,
-    source_workflow_run_id: source.workflow_run_id,
-    source_workflow_link_id: source.link_id,
-    controller_invocation_id: invocation.event_id,
-    controller_invoked_at: invocation.timestamp,
-    lifecycle_result_event_id: lifecycleResult.event_id,
-    lifecycle_result_at: lifecycleResult.timestamp
-  });
-  fs.writeFileSync(journalPath, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const forged = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
-
-  assert.equal(forged.ok, false);
-  assert.equal(forged.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
-  assert.match(forged.diagnostics[0]?.message ?? "", /result does not authorize its journal target/u);
-  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
 });
 
 test("a pristine initial-link projection is reconstructed only from sealed control evidence", async () => {
@@ -21484,7 +19958,7 @@ test("a pending lifecycle link reconciles split source and target projections fr
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
 });
 
-test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {
+test("ordinary resume delegates active-run ownership to Smithers while explicit retry still inspects", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21503,10 +19977,10 @@ test("resume keeps an already-running linked workflow attached without launching
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
-  assert.equal(resumed.value?.submitted, false);
+  assert.equal(resumed.value?.submitted, true);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
-  assert.doesNotMatch(commands, /^up /mu);
+  assert.doesNotMatch(commands, /^inspect /mu);
+  assert.match(commands, /^up .* --resume ultrafuzz-active-lifecycle-run .*--accept-workflow-change/mu);
 
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   const forced = await resumeRun({
@@ -21522,158 +19996,6 @@ test("resume keeps an already-running linked workflow attached without launching
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
   assert.doesNotMatch(forcedCommands, /^up /mu);
-});
-
-test("resume rejects non-current Smithers inspect evidence before making lifecycle decisions", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const workflowRunId = "ultrafuzz-strict-resume-inspect";
-  const validInspect = workflowInspect({
-    workflowRunId,
-    status: "running",
-    state: "running",
-    steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
-  });
-  const env = fakeLifecycleSmithersEnv(project, { inspect: validInspect });
-  const run = await startRun({ projectRoot: project, runId: "strict-resume-inspect", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  interface MutableInspectFixture {
-    ok?: unknown;
-    data: {
-      run?: Record<string, unknown>;
-      runState?: Record<string, unknown>;
-      steps?: unknown;
-      nodes?: Array<Record<string, unknown>>;
-      [key: string]: unknown;
-    };
-    meta?: Record<string, unknown>;
-    [key: string]: unknown;
-  }
-  const invalidInspect = (mutate: (fixture: MutableInspectFixture) => void): MutableInspectFixture => {
-    const fixture = structuredClone(validInspect) as MutableInspectFixture;
-    mutate(fixture);
-    return fixture;
-  };
-  const contradictoryLegacySteps = invalidInspect((fixture) => {
-    fixture.data.steps = [
-      { id: "node:project-discovery", state: "failed", attempt: 99, label: "legacy row must stay inert" }
-    ];
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(contradictoryLegacySteps)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const ignoredLegacyCompanion = await resumeRun({ projectRoot: project, runId: "strict-resume-inspect", env });
-
-  assert.equal(ignoredLegacyCompanion.ok, true, JSON.stringify(ignoredLegacyCompanion.diagnostics));
-  assert.equal(ignoredLegacyCompanion.value?.submitted, false);
-  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^(?:up|timetravel) /mu);
-
-  const cases: Array<{
-    label: string;
-    inspect: MutableInspectFixture;
-    message: RegExp;
-  }> = [
-    {
-      label: "missing full-output metadata",
-      inspect: invalidInspect((fixture) => delete fixture.meta),
-      message: /exact current full-output envelope/u
-    },
-    {
-      label: "wrong metadata command",
-      inspect: invalidInspect((fixture) => {
-        fixture.meta!.command = "status";
-      }),
-      message: /metadata command must be inspect/u
-    },
-    {
-      label: "missing canonical run state",
-      inspect: invalidInspect((fixture) => delete fixture.data.runState),
-      message: /missing current required fields: runState/u
-    },
-    {
-      label: "unknown run state",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.runState!.state = "unknown";
-      }),
-      message: /runState\.state is unknown/u
-    },
-    {
-      label: "removed run-state alias",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.runState!.state = "active";
-      }),
-      message: /runState\.state is not a current supported value/u
-    },
-    {
-      label: "steps-only compatibility shape",
-      inspect: invalidInspect((fixture) => delete fixture.data.nodes),
-      message: /missing current required fields: nodes/u
-    },
-    {
-      label: "missing ignored steps companion",
-      inspect: invalidInspect((fixture) => delete fixture.data.steps),
-      message: /missing current required fields: steps/u
-    },
-    {
-      label: "removed tasks shape",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.tasks = fixture.data.nodes;
-      }),
-      message: /removed field aliases: tasks/u
-    },
-    {
-      label: "unknown data field",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.result = [];
-      }),
-      message: /data contains fields outside the pinned 0\.34\.0 shape: result/u
-    },
-    {
-      label: "unknown run field",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.run!.phase = "running";
-      }),
-      message: /data\.run contains fields outside the pinned 0\.34\.0 shape: phase/u
-    },
-    {
-      label: "unknown run-state field",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.runState!.status = "running";
-      }),
-      message: /data\.runState contains fields outside the pinned 0\.34\.0 shape: status/u
-    },
-    {
-      label: "removed node-state alias",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.nodes![0]!.state = "running";
-      }),
-      message: /nodes\[0\]\.state is not a current supported value/u
-    },
-    {
-      label: "failed child outside canonical nodes",
-      inspect: invalidInspect((fixture) => {
-        fixture.data.failedChildren = 1;
-        fixture.data.failedChildKeys = ["node:missing::0"];
-      }),
-      message: /failedChildKeys\[0\] does not name a canonical node/u
-    }
-  ];
-
-  for (const invalid of cases) {
-    fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(invalid.inspect)}\n`, "utf8");
-    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-    const resumed = await resumeRun({ projectRoot: project, runId: "strict-resume-inspect", env });
-
-    assert.equal(resumed.ok, false, invalid.label);
-    assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED", invalid.label);
-    assert.match(resumed.diagnostics[0]?.message ?? "", invalid.message, invalid.label);
-    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-    assert.match(commands, /inspect ultrafuzz-strict-resume-inspect --format json --full-output/u, invalid.label);
-    assert.doesNotMatch(commands, /^(?:up|timetravel) /mu, invalid.label);
-  }
 });
 
 test("resume derives reset identities from the canonical nodes of a failed workflow", async () => {
@@ -21774,802 +20096,6 @@ test("resume retries a failed artifact verifier from its agent producer and depe
   );
 });
 
-test("retry recovery survives an interrupted submission projection and rejects superseding same-link attempts", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-stable-status";
-  const staleTerminalHealth = structuredClone(currentStatusEnvelope(workflowRunId)) as {
-    data: Record<string, unknown> & {
-      counts: Record<string, number>;
-      throughput: Record<string, number | null>;
-    };
-  };
-  staleTerminalHealth.data.status = "failed";
-  staleTerminalHealth.data.verdict = "done";
-  staleTerminalHealth.data.reason = "run finished";
-  staleTerminalHealth.data.counts = {
-    finished: 1,
-    inProgress: 0,
-    pending: 0,
-    failed: 0,
-    waitingApproval: 0,
-    waitingEvent: 0,
-    waitingTimer: 0,
-    skipped: 0,
-    other: 0,
-    total: 1
-  };
-  staleTerminalHealth.data.throughput = {
-    recentFinished: 1,
-    windowMs: 600_000,
-    totalFinished: 1,
-    lastFinishedAtMs: 2_000
-  };
-  staleTerminalHealth.data.bottleneck = [];
-  staleTerminalHealth.data.liveness = { state: "failed" };
-  staleTerminalHealth.data.finishedAtMs = 2_000;
-  const recoveredAttemptEvents = workflowEvents(workflowRunId, [
-    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }
-  ]);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: recoveredAttemptEvents,
-    status: staleTerminalHealth,
-    why: {
-      ok: true,
-      data: {
-        runId: workflowRunId,
-        status: "failed",
-        summary: "Run is finished, nothing is blocked.",
-        generatedAtMs: 2_000,
-        blockers: [],
-        information: [],
-        currentNodeId: null
-      },
-      meta: { command: "why", duration: "1ms" }
-    }
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
-  const run = await startRun({ projectRoot: project, runId: "recovery-stable-status", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-
-  // Model a controller interruption after the authenticated lifecycle result
-  // and submission events were durable but before their projection reached
-  // state.json. Synchronization must reconstruct only from that exact event trio.
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const interrupted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(interrupted.provenance?.recovery?.submission_status, "submitted");
-  const interruptedRecovery = interrupted.provenance!.recovery!;
-  interruptedRecovery.submission_status = "prepared";
-  delete interruptedRecovery.workflow_run_id;
-  delete interruptedRecovery.workflow_link_id;
-  delete interruptedRecovery.lifecycle_result_event_id;
-  delete interruptedRecovery.lifecycle_result_at;
-  delete interruptedRecovery.lifecycle_submission_event_id;
-  delete interruptedRecovery.lifecycle_submitted_at;
-  fs.writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`, "utf8");
-
-  const successfulInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "failed",
-    error: { message: "stale aggregate remains failed" },
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, recoveredAttemptEvents, "utf8");
-
-  const first = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
-  assert.equal(first.value?.status, "succeeded");
-  const second = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
-  assert.equal(second.value?.status, "succeeded");
-
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(state.status, "succeeded");
-  assert.equal(state.provenance?.recovery?.submission_status, "submitted");
-  assert.equal(state.provenance?.recovery?.recovered, true);
-  assert.equal(state.provenance?.recovery?.failed_nodes.length, 1);
-  const recoveredEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
-    (event) => event.event_type === "run-recovered"
-  );
-  assert.equal(recoveredEvents.length, 1);
-  assert.equal(recoveredEvents[0]?.payload.recovery_id, state.provenance?.recovery?.recovery_id);
-
-  const health = await getRunHealth({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
-  assert.equal(health.value?.status, "succeeded");
-  assert.equal(health.value?.verdict, "done");
-  assert.equal(health.value?.progress.failed, 0);
-  assert.equal(health.value?.eta.seconds, 0);
-
-  const diagnosis = await diagnoseRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
-  assert.equal(diagnosis.value?.run_status, "succeeded");
-  assert.equal(diagnosis.value?.workflow_status, "failed");
-  assert.equal(diagnosis.value?.summary, "Run is finished, nothing is blocked.");
-  assert.deepEqual(diagnosis.value?.blockers, []);
-
-  // A successful publication is immutable, but that cannot let its frozen
-  // state projection authenticate a newer failed or successful Smithers
-  // attempt on the same task/link.
-  const laterFailureInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "failed",
-    error: { message: "same-link task failed after recovery" },
-    steps: [{ id: "node:project-discovery", state: "failed", attempt: 3 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(laterFailureInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
-  const afterLaterFailure = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(afterLaterFailure.ok, true, JSON.stringify(afterLaterFailure.diagnostics));
-  assert.equal(afterLaterFailure.value?.status, "failed");
-
-  const laterSuccessInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "failed",
-    error: { message: "same-link aggregate remains failed" },
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 4 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(laterSuccessInspect, null, 2)}\n`, "utf8");
-  const afterLaterSuccess = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(afterLaterSuccess.ok, true, JSON.stringify(afterLaterSuccess.diagnostics));
-  assert.equal(afterLaterSuccess.value?.status, "failed");
-
-  const laterLifecycle = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    env
-  });
-  assert.equal(laterLifecycle.ok, true, JSON.stringify(laterLifecycle.diagnostics));
-  const afterLaterLifecycle = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(afterLaterLifecycle.ok, true, JSON.stringify(afterLaterLifecycle.diagnostics));
-  assert.equal(afterLaterLifecycle.value?.status, "failed");
-  assert.ok(
-    afterLaterLifecycle.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
-    JSON.stringify(afterLaterLifecycle.diagnostics)
-  );
-});
-
-test("retry recovery authenticates required success while an optional specialist remains failed", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeOptionalSpecialistTopology(project);
-  const runId = "recovery-with-persistent-optional-failure";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const initialEvents = [
-    {
-      type: "NodeFailed",
-      nodeId: "node:direct-strategy",
-      attempt: 1,
-      error: { message: "required strategy failed" }
-    },
-    {
-      type: "NodeFailed",
-      nodeId: "node:optional-specialist",
-      attempt: 1,
-      error: { message: "optional specialist failed" }
-    },
-    { type: "NodePending", nodeId: "node:final-report", attempt: 0 }
-  ];
-  const initialEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "required and optional tasks failed" },
-      steps: [
-        { id: "node:direct-strategy", state: "failed", attempt: 1 },
-        { id: "node:optional-specialist", state: "failed", attempt: 1 },
-        { id: "node:final-report", state: "pending", attempt: 0 }
-      ]
-    }),
-    events: workflowEvents(workflowRunId, initialEvents)
-  });
-  const run = await startRun({ projectRoot: project, runId, env: initialEnv });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const initialSync = await syncRun({ projectRoot: project, runId, env: initialEnv });
-  assert.equal(initialSync.ok, true, JSON.stringify(initialSync.diagnostics));
-  assert.equal(initialSync.value?.status, "failed");
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    force: true,
-    retryFailed: true,
-    env: initialEnv
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
-  assert.deepEqual(
-    submitted.provenance?.recovery?.failed_nodes.map((node) => ({
-      node_id: node.node_id,
-      workflow_task_id: node.workflow_task_id,
-      failed_attempt: node.failed_attempt
-    })),
-    [{ node_id: "direct-strategy", workflow_task_id: "node:direct-strategy", failed_attempt: 1 }]
-  );
-
-  writeRequiredArtifactSet(run.value!.run_root, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
-  writeRequiredArtifactSet(run.value!.run_root, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
-  const recoveredEvents = [
-    ...initialEvents,
-    { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 2 },
-    {
-      type: "NodeFailed",
-      nodeId: "node:optional-specialist",
-      attempt: 2,
-      error: { message: "optional specialist still failed" }
-    },
-    { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
-    { type: "RunFailed", error: { message: "optional specialist still failed" } }
-  ];
-  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "optional specialist still failed" },
-      steps: [
-        { id: "node:direct-strategy", state: "finished", attempt: 2 },
-        { id: "node:optional-specialist", state: "failed", attempt: 2 },
-        { id: "node:final-report", state: "finished", attempt: 1 }
-      ]
-    }),
-    events: workflowEvents(workflowRunId, recoveredEvents)
-  });
-
-  const synchronized = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
-
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  assert.equal(synchronized.value?.status, "succeeded", JSON.stringify(synchronized.diagnostics));
-  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(recovered.nodes["direct-strategy"]?.status, "succeeded");
-  assert.equal(recovered.nodes["optional-specialist"]?.status, "failed");
-  assert.equal(recovered.nodes["final-report"]?.status, "succeeded");
-  assert.equal(recovered.provenance?.recovery?.recovered, true);
-  assert.deepEqual(
-    recovered.provenance?.recovery?.failed_nodes.map((node) => node.node_id),
-    ["direct-strategy"]
-  );
-  const recoveryEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
-    (event) => event.event_type === "run-recovered"
-  );
-  assert.equal(recoveryEvents.length, 1);
-  assert.deepEqual(
-    recoveryEvents[0]?.payload.failed_nodes.map((node) => node.node_id),
-    ["direct-strategy"]
-  );
-});
-
-test("retry recovery stays failed when engine success has no durable submission disposition", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-missing-disposition";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: ""
-  });
-  const run = await startRun({ projectRoot: project, runId: "recovery-missing-disposition", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-
-  const layout = layoutForRunRoot(run.value!.run_root);
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const interrupted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  const recovery = interrupted.provenance?.recovery;
-  assert.equal(recovery?.submission_status, "submitted");
-  const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
-  const invocationIndex = records.findIndex((event) => event.event_id === recovery?.controller_invocation_id);
-  assert.notEqual(invocationIndex, -1);
-  assert.ok(records.slice(invocationIndex + 1).some((event) => event.event_type === "workflow-lifecycle-result"));
-  assert.ok(records.slice(invocationIndex + 1).some((event) => event.event_type === "workflow-lifecycle-submitted"));
-
-  // Model process death after the external command took effect but before its
-  // result/submission disposition was appended. The invocation and prepared
-  // intent survive, so a successful inspect must not invent authorization.
-  fs.writeFileSync(
-    layout.eventsPath,
-    `${records
-      .slice(0, invocationIndex + 1)
-      .map((event) => JSON.stringify(event))
-      .join("\n")}\n`,
-    "utf8"
-  );
-  recovery!.submission_status = "prepared";
-  delete recovery!.workflow_run_id;
-  delete recovery!.workflow_link_id;
-  delete recovery!.lifecycle_result_event_id;
-  delete recovery!.lifecycle_result_at;
-  delete recovery!.lifecycle_submission_event_id;
-  delete recovery!.lifecycle_submitted_at;
-  fs.writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`, "utf8");
-
-  const successfulInspect = workflowInspect({
-    workflowRunId,
-    status: "finished",
-    state: "succeeded",
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
-    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
-    "utf8"
-  );
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-    assert.equal(synchronized.value?.status, "failed");
-  }
-
-  const finalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(finalState.status, "failed");
-  assert.equal(finalState.nodes["project-discovery"]?.status, "succeeded");
-  assert.equal(finalState.provenance?.recovery?.submission_status, "prepared");
-  assert.equal(finalState.provenance?.recovery?.recovered, false);
-  const finalEvents = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
-  assert.equal(
-    finalEvents.some((event) => event.event_type === "workflow-lifecycle-result"),
-    false
-  );
-  assert.equal(
-    finalEvents.some((event) => event.event_type === "workflow-lifecycle-submitted"),
-    false
-  );
-  assert.equal(
-    finalEvents.some((event) => event.event_type === "run-recovered"),
-    false
-  );
-});
-
-test("retry recovery rejects same-attempt success from a succeeded engine aggregate", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-same-attempt-success";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: ""
-  });
-  const run = await startRun({ projectRoot: project, runId: "recovery-same-attempt-success", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-
-  const layout = layoutForRunRoot(run.value!.run_root);
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
-  assert.equal(submitted.provenance?.recovery?.failed_nodes[0]?.failed_attempt, 1);
-
-  const staleSuccess = workflowInspect({
-    workflowRunId,
-    status: "finished",
-    state: "succeeded",
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(staleSuccess, null, 2)}\n`, "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
-    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }]),
-    "utf8"
-  );
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-    assert.equal(synchronized.value?.status, "failed");
-  }
-
-  const finalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(finalState.status, "failed");
-  assert.equal(finalState.provenance?.recovery?.submission_status, "submitted");
-  assert.equal(finalState.provenance?.recovery?.recovered, false);
-  assert.equal(
-    replayEvents(layout, Number.MAX_SAFE_INTEGER).records.some((event) => event.event_type === "run-recovered"),
-    false
-  );
-});
-
-test("retry recovery cannot authorize a stale failed aggregate from a different workflow link", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-workflow-authority";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: ""
-  });
-  const run = await startRun({ projectRoot: project, runId: "recovery-workflow-authority", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const mismatched = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.ok(mismatched.provenance?.recovery);
-  mismatched.provenance.recovery.workflow_link_id = "00000000-0000-4000-8000-000000000099";
-  fs.writeFileSync(statePath, `${JSON.stringify(mismatched, null, 2)}\n`, "utf8");
-
-  const successfulInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "failed",
-    error: { message: "stale aggregate remains failed" },
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
-    workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
-    "utf8"
-  );
-
-  const sync = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "failed");
-  assert.ok(
-    sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
-    JSON.stringify(sync.diagnostics)
-  );
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(state.provenance?.recovery?.recovered, false);
-  assert.equal(
-    replayEvents(layoutForRunRoot(run.value!.run_root)).records.some((event) => event.event_type === "run-recovered"),
-    false
-  );
-
-  const unknownInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "unknown" as TestSmithersRunState,
-    error: { message: "workflow aggregate has no recognized state" },
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(unknownInspect, null, 2)}\n`, "utf8");
-  const unknown = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(unknown.ok, false);
-  assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_INSPECT_INVALID"));
-  assert.equal((JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState).status, "failed");
-
-  const forgedRecovery = state.provenance!.recovery!;
-  const withoutRecovery = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  delete withoutRecovery.provenance!.recovery;
-  fs.writeFileSync(statePath, `${JSON.stringify(withoutRecovery, null, 2)}\n`, "utf8");
-  const layout = layoutForRunRoot(run.value!.run_root);
-  const forgedEvent = createEventRecord(layout, {
-    eventType: "run-recovered",
-    status: "succeeded",
-    payload: {
-      recovery_id: forgedRecovery.recovery_id,
-      prior_status: "failed",
-      failed_nodes: forgedRecovery.failed_nodes
-    }
-  });
-  fs.appendFileSync(layout.eventsPath, `${JSON.stringify(forgedEvent)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(successfulInspect, null, 2)}\n`, "utf8");
-  const forgedBackfill = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(forgedBackfill.ok, true, JSON.stringify(forgedBackfill.diagnostics));
-  assert.equal(forgedBackfill.value?.status, "failed");
-  const afterForgedBackfill = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(afterForgedBackfill.provenance?.recovery, undefined);
-});
-
-test("retry recovery fails closed when durable failure provenance has no exact category", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-missing-failure-category";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: ""
-  });
-  const run = await startRun({ projectRoot: project, runId: "recovery-missing-failure-category", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  const firstSync = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
-  assert.equal(firstSync.value?.status, "failed");
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const missingCategory = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  const node = missingCategory.nodes["project-discovery"]!;
-  assert.ok(node.provenance && "failure" in node.provenance);
-  delete (node.provenance as { failure?: unknown }).failure;
-  fs.writeFileSync(statePath, `${JSON.stringify(missingCategory, null, 2)}\n`, "utf8");
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(state.provenance?.recovery, undefined);
-  const retryInvocations = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
-    (event) => event.event_type === "workflow-lifecycle-invoking" && event.payload.retry_failed === true
-  );
-  assert.equal(retryInvocations.length, 1, "retry may proceed but cannot claim recovery authority");
-});
-
-test("retry recovery rejects foreign task identity and non-positive failed attempts", async () => {
-  const cases = ["foreign-task", "zero-attempt"] as const;
-  for (const mutation of cases) {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-    const workflowRunId = `ultrafuzz-recovery-${mutation}`;
-    const env = fakeLifecycleSmithersEnv(project, {
-      inspect: workflowInspect({
-        workflowRunId,
-        status: "failed",
-        state: "failed",
-        error: { message: "Task failed: node:project-discovery" },
-        steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-      }),
-      events: workflowEvents(workflowRunId, [
-        {
-          type: "NodeFailed",
-          nodeId: "node:project-discovery",
-          attempt: 1,
-          error: { message: "discovery failed" }
-        }
-      ])
-    });
-    const run = await startRun({ projectRoot: project, runId: `recovery-${mutation}`, env });
-    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-    const synchronized = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-    assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-
-    const statePath = path.join(run.value!.run_root, "state.json");
-    const forged = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-    const node = forged.nodes["project-discovery"]!;
-    const workflow = (node.provenance as unknown as { workflow: Record<string, unknown> }).workflow;
-    if (mutation === "foreign-task") {
-      (node.provenance as unknown as { failure: Record<string, unknown> }).failure.causal_task_id = "node:foreign-task";
-    } else {
-      workflow.attempt = 0;
-      fs.writeFileSync(
-        env.SMITHERS_FAKE_INSPECT!,
-        `${JSON.stringify(
-          workflowInspect({
-            workflowRunId,
-            status: "failed",
-            state: "failed",
-            error: { message: "Task failed: node:project-discovery" },
-            steps: [{ id: "node:project-discovery", state: "failed", attempt: 0 }]
-          })
-        )}\n`,
-        "utf8"
-      );
-    }
-    fs.writeFileSync(statePath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
-    fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
-
-    const resumed = await resumeRun({
-      projectRoot: project,
-      runId: run.value!.run_id,
-      force: true,
-      retryFailed: true,
-      env
-    });
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    const after = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-    assert.equal(after.provenance?.recovery, undefined);
-  }
-});
-
-test("retry recovery rejects a required failure hidden behind a forged aggregate projection", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeOptionalSpecialistTopology(project);
-  const runId = "recovery-forged-required-aggregate";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const failedEvents = [
-    { type: "NodeFailed", nodeId: "node:direct-strategy", attempt: 1, error: { message: "direct failed" } },
-    {
-      type: "NodeFailed",
-      nodeId: "node:optional-specialist",
-      attempt: 1,
-      error: { message: "optional failed" }
-    },
-    { type: "NodeFailed", nodeId: "node:final-report", attempt: 1, error: { message: "report failed" } }
-  ];
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "required nodes failed" },
-      steps: [
-        { id: "node:direct-strategy", state: "failed", attempt: 1 },
-        { id: "node:optional-specialist", state: "failed", attempt: 1 },
-        { id: "node:final-report", state: "failed", attempt: 1 }
-      ]
-    }),
-    events: workflowEvents(workflowRunId, failedEvents)
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const synchronized = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const forged = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  const report = forged.nodes["final-report"]!;
-  report.provenance = {
-    ...(report.provenance ?? {}),
-    workflow: { run_id: workflowRunId, aggregate_attempt_statuses: ["failed"] }
-  };
-  fs.writeFileSync(statePath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, "", "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_INSPECT!,
-    `${JSON.stringify(
-      workflowInspect({
-        workflowRunId,
-        status: "failed",
-        state: "failed",
-        error: { message: "required nodes failed" },
-        steps: [
-          { id: "node:direct-strategy", state: "failed", attempt: 1 },
-          { id: "node:optional-specialist", state: "failed", attempt: 1 }
-        ]
-      })
-    )}\n`,
-    "utf8"
-  );
-
-  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const after = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(after.provenance?.recovery, undefined);
-});
-
-test("an unrelated replacement link cannot retarget a pending retry recovery", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-recovery-unrelated-link";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: ""
-  });
-  const run = await startRun({ projectRoot: project, runId: "recovery-unrelated-link", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    force: true,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const pending = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  const sourceRecoveryLinkId = pending.provenance?.recovery?.workflow_link_id;
-  assert.ok(sourceRecoveryLinkId);
-
-  const targetWorkflowRunId = `${workflowRunId}-fork`;
-  env.SMITHERS_FAKE_FORKED_RUN_ID = targetWorkflowRunId;
-  const forked = await forkRun({
-    projectRoot: project,
-    runId: run.value!.run_id,
-    forkFrame: 0,
-    env
-  });
-  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
-  const replaced = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(replaced.provenance?.workflow.runId, targetWorkflowRunId);
-  assert.equal(replaced.provenance?.recovery?.workflow_link_id, sourceRecoveryLinkId);
-  assert.notEqual(replaced.provenance?.workflow.linkId, sourceRecoveryLinkId);
-
-  const targetInspect = workflowInspect({
-    workflowRunId: targetWorkflowRunId,
-    status: "failed",
-    state: "failed",
-    error: { message: "unrelated replacement failed" },
-    steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
-  });
-  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(targetInspect, null, 2)}\n`, "utf8");
-  fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
-    workflowEvents(targetWorkflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2 }]),
-    "utf8"
-  );
-  const sync = await syncRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "failed");
-  assert.ok(
-    sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE"),
-    JSON.stringify(sync.diagnostics)
-  );
-});
-
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -22613,217 +20139,7 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
-  );
-});
-
-test("resume reopens a terminal failed workflow with only pending ready work", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "terminal-pending-ready-resume";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "workflow ended before ready work dispatched" },
-      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
-    }),
-    resumeInspect: workflowInspect({
-      workflowRunId,
-      status: "running",
-      state: "running",
-      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const synchronized = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const stranded = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(stranded.status, "failed");
-  assert.equal(stranded.nodes["project-discovery"]?.status, "pending");
-  assert.equal(stranded.nodes["project-discovery"]?.wait_reason, "ready");
-  assert.equal(stranded.nodes["project-discovery"]?.next_eligible_action, "dispatch");
-  assert.equal(
-    Object.values(stranded.nodes).some((node) => node.status === "failed" || node.status === "timed-out"),
-    false
-  );
-  stranded.workflow_deadline_at = new Date(0).toISOString();
-  fs.writeFileSync(statePath, `${JSON.stringify(stranded, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  const resumedAfter = Date.now();
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    maxConcurrency: 8,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  const reopened = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(reopened.status, "running");
-  assert.equal(reopened.finished_at, undefined);
-  assert.ok(Date.parse(reopened.workflow_deadline_at ?? "") > resumedAfter);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.doesNotMatch(commands, /^(?:timetravel|fork|replay) /mu);
-  assert.match(
-    commands,
-    /up .*ultrafuzz-terminal-pending-ready-resume\.tsx --resume ultrafuzz-terminal-pending-ready-resume --run-id ultrafuzz-terminal-pending-ready-resume --force --detach/u
-  );
-  const dispatched = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(dispatched.ok, true, JSON.stringify(dispatched.diagnostics));
-  const active = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(active.status, "running");
-  assert.equal(active.nodes["project-discovery"]?.status, "running");
-});
-
-test("forced retry resume renews a stale terminal deadline without duplicating an active workflow", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "active-terminal-deadline-resume";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "running",
-      state: "running",
-      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const stale = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  stale.status = "failed";
-  stale.finished_at = "2000-01-01T00:00:00.000Z";
-  stale.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
-  fs.writeFileSync(statePath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  const resumedAfter = Date.now();
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, false);
-  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(recovered.status, "running");
-  assert.equal(recovered.finished_at, undefined);
-  assert.ok(Date.parse(recovered.workflow_deadline_at ?? "") > resumedAfter);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.doesNotMatch(commands, /^cancel /mu, "pre-resume reconciliation must not enforce the stale deadline");
-  assert.doesNotMatch(commands, /^up /mu, "an active workflow must not receive a duplicate resume");
-});
-
-test("retry resume keeps its renewed deadline when a later lifecycle inspection fails", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "failed-after-deadline-renewal";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "running",
-      state: "running",
-      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
-    }),
-    failInspectOnInvocation: 2
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const stale = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  stale.status = "failed";
-  stale.finished_at = "2000-01-01T00:00:00.000Z";
-  stale.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
-  fs.writeFileSync(statePath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  const resumedAfter = Date.now();
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, false);
-  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
-  assert.match(resumed.diagnostics[0]?.message ?? "", /workflow inspection failed before resume/u);
-  const afterFailure = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(afterFailure.status, "running");
-  assert.equal(afterFailure.finished_at, undefined);
-  assert.ok(Date.parse(afterFailure.workflow_deadline_at ?? "") > resumedAfter);
-
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  const synchronized = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  assert.equal(synchronized.value?.status, "running");
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.doesNotMatch(commands, /^cancel /mu, "ordinary synchronization must retain the active backend");
-});
-
-test("resume renews a stale unfinished run without synthesizing a task reset", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId: "ultrafuzz-stale-retry-run",
-      status: "running",
-      state: "stale",
-      steps: [
-        { id: "node:project-discovery", state: "pending", attempt: 1 },
-        { id: "node:strategy", state: "pending", attempt: 0 }
-      ]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId: "stale-retry-run", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const expired = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  expired.workflow_deadline_at = new Date(0).toISOString();
-  fs.writeFileSync(statePath, `${JSON.stringify(expired, null, 2)}\n`, "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  const resumedAfter = Date.now();
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: "stale-retry-run",
-    maxConcurrency: 8,
-    force: true,
-    retryFailed: true,
-    env
-  });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  const resumedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.ok(Date.parse(resumedState.workflow_deadline_at ?? "") > resumedAfter);
-  assert.equal(resumedState.status, "running");
-  assert.equal(resumedState.finished_at, undefined);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json --full-output/u);
-  assert.doesNotMatch(commands, /^timetravel /mu);
-  assert.match(
-    commands,
-    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
+    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -22862,7 +20178,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
   assert.match(
     commands,
-    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
+    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
@@ -22891,77 +20207,6 @@ test("unverified dependency detection reads a dependent prepare failure off the 
     smithersSnapshotUnverifiedDependencies({ ...snapshot, json: undefined, stderr: "unrelated failure" }),
     []
   );
-});
-
-test("resume suppresses duplicate submissions for every active workflow run state", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId: "ultrafuzz-retrying-lifecycle-run",
-      status: "running",
-      state: "running",
-      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 2 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  for (const [state, nodeState] of [
-    ["running", "in-progress"],
-    ["waiting-approval", "waiting-approval"],
-    ["waiting-event", "waiting-event"],
-    ["waiting-timer", "waiting-timer"],
-    ["recovering", "in-progress"]
-  ] as const) {
-    fs.writeFileSync(
-      env.SMITHERS_FAKE_INSPECT!,
-      `${JSON.stringify(
-        workflowInspect({
-          workflowRunId: "ultrafuzz-retrying-lifecycle-run",
-          status: "running",
-          state,
-          steps: [{ id: "node:project-discovery", state: nodeState, attempt: 2 }]
-        })
-      )}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-    const resumed = await resumeRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
-
-    assert.equal(resumed.ok, true, `${state}: ${JSON.stringify(resumed.diagnostics)}`);
-    assert.equal(resumed.value?.submitted, false, `state ${state} must suppress duplicate resume`);
-    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-    assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json --full-output/u);
-    assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
-  }
-});
-
-test("resume keeps a quota-waiting workflow attached without launching a duplicate", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId: "ultrafuzz-quota-resume-run",
-      status: "waiting-quota",
-      state: "waiting-quota",
-      steps: [{ id: "node:project-discovery", state: "waiting-quota", attempt: 1 }]
-    })
-  });
-  const run = await startRun({ projectRoot: project, runId: "quota-resume-run", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-
-  const resumed = await resumeRun({ projectRoot: project, runId: "quota-resume-run", env });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, false);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
-  assert.match(commands, /inspect ultrafuzz-quota-resume-run --format json --full-output/u);
-  assert.doesNotMatch(commands, /^up /mu);
 });
 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
@@ -23010,215 +20255,8 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
-    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
-});
-
-test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  const localConfig = fs.readFileSync(configPath, "utf8");
-  fs.writeFileSync(
-    configPath,
-    `${localConfig
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
-
-[execution.providers.modal]
-app = "ultrafuzz-test"
-image = "ultrafuzz-test"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-`,
-    "utf8"
-  );
-
-  const binDir = path.join(path.dirname(project), `${path.basename(project)}-recovery-bin`);
-  const smithers = path.join(binDir, "smithers");
-  const logPath = path.join(project, "recovery-smithers.log");
-  const cloudEnvironmentLog = path.join(project, "recovery-cloud-environment.log");
-  const markerPath = path.join(project, "initial-submission-attempted");
-  const missingInspectJson = JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db")));
-  const installer = writeFakeNpmInstaller(project);
-  const npmFixture = path.join(installer.binDir, "npm");
-  fs.chmodSync(npmFixture, 0o700);
-  const installedRunnerSource = [
-    "#!/bin/sh",
-    `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
-    'if [ "$1" = "up" ]; then',
-    `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > ${shellQuote(cloudEnvironmentLog)}`,
-    "fi",
-    'if [ "$1" = "inspect" ]; then',
-    `  printf '%s\\n' ${shellQuote(missingInspectJson)}`,
-    "  exit 1",
-    "fi",
-    `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
-    `  : > ${shellQuote(markerPath)}`,
-    "  exit 42",
-    "fi",
-    `printf '%s\\n' '{"ok":true}'`,
-    ""
-  ].join("\n");
-  fs.appendFileSync(npmFixture, `\nfs.writeFileSync(target, ${JSON.stringify(installedRunnerSource)});\n`);
-  fs.chmodSync(npmFixture, 0o500);
-  fs.mkdirSync(binDir, { recursive: true });
-  fs.writeFileSync(
-    smithers,
-    [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${shellQuote(logPath)}`,
-      'if [ "$1" = "up" ]; then',
-      `  printf '%s|%s\\n' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" >> ${shellQuote(cloudEnvironmentLog)}`,
-      "fi",
-      'if [ "$1" = "inspect" ]; then',
-      `  printf '%s\\n' ${shellQuote(missingInspectJson)}`,
-      "  exit 1",
-      "fi",
-      `if [ "$1" = "up" ] && [ ! -f ${shellQuote(markerPath)} ]; then`,
-      `  : > ${shellQuote(markerPath)}`,
-      "  exit 42",
-      "fi",
-      "printf '%s\\n' '{\"ok\":true}'",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(smithers, 0o755);
-  const env = {
-    ...Object.fromEntries(effectiveRouteEnvironment("CodexAgent", process.env).map(([name]) => [name, undefined])),
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
-    MODAL_TOKEN_ID: "provider-one",
-    MODAL_TOKEN_SECRET: "provider-two"
-  };
-
-  const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
-  assert.equal(initial.ok, false);
-  assert.equal(initial.diagnostics[0]?.code, "WORKFLOW_SUBMISSION_FAILED");
-  assert.equal(initial.diagnostics[0]?.details?.exit_code, 42);
-  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
-  assert.equal(
-    fs.existsSync(path.join(runRoot, "smithers", "control-integrity.json")),
-    true,
-    "the canonical start helper must publish exact sealed control evidence before submission"
-  );
-  const sealedEvidence = await readLinkedWorkflowEvidence(project, "missing-workflow-run");
-  assert.equal(
-    sealedEvidence.ok,
-    true,
-    "diagnostics" in sealedEvidence ? JSON.stringify(sealedEvidence.diagnostics) : ""
-  );
-  fs.writeFileSync(configPath, localConfig, "utf8");
-  fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
-
-  const ordinarySync = await syncRun({ projectRoot: project, runId: "missing-workflow-run", env });
-  assert.equal(ordinarySync.ok, false);
-  assert.equal(ordinarySync.diagnostics[0]?.code, "WORKFLOW_INSPECT_FAILED");
-
-  const resumed = await resumeRun({
-    projectRoot: project,
-    runId: "missing-workflow-run",
-    maxConcurrency: 8,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-missing-workflow-run");
-
-  const commands = fs.readFileSync(logPath, "utf8").split("\n");
-  const upCommands = commands.filter((line) => line.startsWith("up "));
-  assert.equal(upCommands.length, 2);
-  assert.match(commands.find((line) => line.startsWith("inspect ")) ?? "", /--format json/u);
-  assert.doesNotMatch(upCommands[1] ?? "", /--resume/u);
-  assert.match(upCommands[1] ?? "", /--max-concurrency 8 --root /u);
-  assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
-  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
-
-  const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {
-    recovery?: string;
-    command?: string[];
-  };
-  assert.equal(recovery.recovery, "missing-workflow-run");
-  assert.equal(recovery.command?.includes("<redacted>"), true);
-  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as { status?: string };
-  assert.equal(state.status, "running");
-});
-
-test("missing-run recovery authenticates a fresh attempt epoch after a synchronized failure", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const runId = "missing-workflow-run-after-failure";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const failedEvents = workflowEvents(workflowRunId, [
-    {
-      type: "NodeFailed",
-      nodeId: "node:project-discovery",
-      attempt: 1,
-      error: { message: "discovery failed" }
-    }
-  ]);
-  const failedEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "failed",
-      state: "failed",
-      error: { message: "Task failed: node:project-discovery" },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    }),
-    events: failedEvents
-  });
-  const run = await startRun({ projectRoot: project, runId, env: failedEnv });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const failed = await syncRun({ projectRoot: project, runId, env: failedEnv });
-  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
-  assert.equal(failed.value?.status, "failed");
-  const statePath = path.join(run.value!.run_root, "state.json");
-  const failedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(
-    (failedState.nodes["project-discovery"]?.provenance as { workflow?: { attempt?: number } } | undefined)?.workflow
-      ?.attempt,
-    1
-  );
-
-  fs.writeFileSync(
-    failedEnv.SMITHERS_FAKE_INSPECT!,
-    `${JSON.stringify(missingSmithersInspect(path.join(project, "smithers.db")), null, 2)}\n`,
-    "utf8"
-  );
-  const resumed = await resumeRun({ projectRoot: project, runId, retryFailed: true, env: failedEnv });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  const submitted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(submitted.provenance?.recovery?.submission_status, "submitted");
-  assert.equal(submitted.provenance?.recovery?.failed_nodes[0]?.failed_attempt, 1);
-  const lifecycleEvents = replayEvents(layoutForRunRoot(run.value!.run_root)).records.filter(
-    (event) => event.event_type === "workflow-lifecycle-result" || event.event_type === "workflow-lifecycle-submitted"
-  );
-  assert.equal(lifecycleEvents.at(-2)?.payload.recovered_missing_workflow_run, true);
-  assert.equal(lifecycleEvents.at(-1)?.payload.recovered_missing_workflow_run, true);
-
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-  const recoveredEvents = workflowEvents(workflowRunId, [
-    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
-  ]);
-  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "finished",
-      state: "succeeded",
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: recoveredEvents
-  });
-  const synchronized = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
-  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
-  assert.equal(synchronized.value?.status, "succeeded", JSON.stringify(synchronized.diagnostics));
-  const recovered = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
-  assert.equal(recovered.status, "succeeded");
-  assert.equal(recovered.nodes["project-discovery"]?.status, "succeeded");
-  assert.equal(recovered.provenance?.recovery?.recovered, true);
 });
 
 testWhen(realSmithersGraphUnavailable() === false)(

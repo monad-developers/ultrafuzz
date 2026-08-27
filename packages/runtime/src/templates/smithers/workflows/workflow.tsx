@@ -33,7 +33,6 @@ const {
   artifactValidatorSmokeFixturePath,
   assertCloudSelectedTaskMatchesCanonical,
   assertArtifactPublicationsContainNoSecrets,
-  assertRunMetadataDocument,
   assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
@@ -1581,6 +1580,7 @@ const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
 // Current main intentionally starts automatic retries from the effective original prompt. Keep the
 // release template sealed into the generated workflow without reintroducing diagnostic injection.
 const retryFailureTemplate = __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__;
+void retryFailureTemplate;
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
@@ -2191,7 +2191,7 @@ type FinalReportRunMetadataProjection = {
   tokens_used: string;
   estimated_spend: string;
   partial_pricing: boolean;
-  strategy_loops: number;
+  strategy_loops: number | "unavailable";
   audit_profile: string;
   audit_profile_catalog_digest: string;
   topology_digest: string;
@@ -2294,8 +2294,8 @@ function normalizeFinalReportGitHubRepository(task: (typeof taskSpecs)[number]):
   return normalizeFinalReportGitHubRemote(remote);
 }
 
-function finalReportElapsedTime(createdAt: string, updatedAt: string | undefined): string {
-  if (updatedAt === undefined) return "unavailable";
+function finalReportElapsedTime(createdAt: unknown, updatedAt: unknown): string {
+  if (typeof createdAt !== "string" || typeof updatedAt !== "string") return "unavailable";
   const started = Date.parse(createdAt);
   const finished = Date.parse(updatedAt);
   if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return "unavailable";
@@ -2318,44 +2318,45 @@ function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[numb
     MAX_FINAL_REPORT_RUN_METADATA_BYTES,
     true
   );
-  let metadata: ReturnType<typeof assertRunMetadataDocument>;
-  try {
-    metadata = assertRunMetadataDocument(
-      parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid"),
-      task.metadata.run.ultrafuzzRunId
-    );
-  } catch (error) {
-    throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`, {
-      cause: error
-    });
+  const metadata = parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid");
+  if (!isPlainJsonRecord(metadata) || metadata.run_id !== task.metadata.run.ultrafuzzRunId) {
+    throw new Error(`artifact-contract failure: final-report run metadata has the wrong run ID ${task.attemptId}`);
   }
-  const auditProfile = metadata.audit_profile;
-  const strategyLoops = auditProfile?.effective_settings.strategy_loops;
-  if (
-    auditProfile === undefined ||
-    typeof strategyLoops !== "number" ||
-    !Number.isSafeInteger(strategyLoops) ||
-    strategyLoops < 0
-  ) {
-    throw new Error(`artifact-contract failure: final-report audit profile is unavailable ${task.attemptId}`);
-  }
-  const accounting = metadata.accounting?.cumulative;
+  const auditProfile = isPlainJsonRecord(metadata.audit_profile) ? metadata.audit_profile : {};
+  const effectiveSettings = isPlainJsonRecord(auditProfile.effective_settings) ? auditProfile.effective_settings : {};
+  const configuredStrategyLoops = effectiveSettings.strategy_loops;
+  const strategyLoops =
+    typeof configuredStrategyLoops === "number" &&
+    Number.isSafeInteger(configuredStrategyLoops) &&
+    configuredStrategyLoops >= 0
+      ? configuredStrategyLoops
+      : "unavailable";
+  const accountingRoot = isPlainJsonRecord(metadata.accounting) ? metadata.accounting : {};
+  const accounting = isPlainJsonRecord(accountingRoot.cumulative) ? accountingRoot.cumulative : {};
+  const optionalString = (value: unknown): string =>
+    typeof value === "string" && value.length > 0 ? value : "unavailable";
+  const models = Array.isArray(accounting.models)
+    ? accounting.models.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
+  const sourceRunIds = Array.isArray(accounting.source_run_ids)
+    ? accounting.source_run_ids.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
   return {
-    run_id: metadata.run_id,
-    source_run_id: metadata.source_run_id ?? "none",
+    run_id: task.metadata.run.ultrafuzzRunId,
+    source_run_id: optionalString(metadata.source_run_id),
     repository: normalizeFinalReportGitHubRepository(task),
-    elapsed_time: finalReportElapsedTime(metadata.created_at, metadata.accounting?.updated_at),
-    models_used: [...(accounting?.models ?? [])],
-    tokens_used: accounting?.tokens_used ?? "unavailable",
-    estimated_spend: accounting?.estimated_spend ?? "unavailable",
-    partial_pricing: accounting?.partial_pricing ?? false,
+    elapsed_time: finalReportElapsedTime(metadata.created_at, accountingRoot.updated_at),
+    models_used: models,
+    tokens_used: optionalString(accounting.tokens_used),
+    estimated_spend: optionalString(accounting.estimated_spend),
+    partial_pricing: typeof accounting.partial_pricing === "boolean" ? accounting.partial_pricing : false,
     strategy_loops: strategyLoops,
-    audit_profile: auditProfile.effective,
-    audit_profile_catalog_digest: auditProfile.catalog_digest,
-    topology_digest: auditProfile.topology_digest,
-    prompt_digest: auditProfile.prompt_digest,
-    expanded_graph_fingerprint: auditProfile.expanded_graph_fingerprint,
-    ...(accounting === undefined ? {} : { source_run_ids: [...accounting.source_run_ids] })
+    audit_profile: optionalString(auditProfile.effective),
+    audit_profile_catalog_digest: optionalString(auditProfile.catalog_digest),
+    topology_digest: optionalString(auditProfile.topology_digest),
+    prompt_digest: optionalString(auditProfile.prompt_digest),
+    expanded_graph_fingerprint: optionalString(auditProfile.expanded_graph_fingerprint),
+    ...(sourceRunIds.length === 0 ? {} : { source_run_ids: sourceRunIds })
   };
 }
 

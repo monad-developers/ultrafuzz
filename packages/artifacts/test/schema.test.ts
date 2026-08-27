@@ -1895,6 +1895,21 @@ test("finding v2 and report v3 schemas require their current canonical shapes", 
     }
   };
   assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, true);
+  const reportWithUnavailableHistoricalMetadata = {
+    ...report,
+    run_metadata: {
+      ...report.run_metadata,
+      strategy_loops: "unavailable",
+      audit_profile_catalog_digest: "unavailable",
+      topology_digest: "unavailable",
+      prompt_digest: "unavailable"
+    }
+  } as const;
+  assert.equal(reportSchema.safeParse(reportWithUnavailableHistoricalMetadata).success, true);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@3", JSON.stringify(reportWithUnavailableHistoricalMetadata)).ok,
+    true
+  );
   assert.equal(
     validateArtifactContract(
       "ultrafuzz/report@3",

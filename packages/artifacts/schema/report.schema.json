@@ -44,25 +44,53 @@
           "type": "boolean"
         },
         "strategy_loops": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "const": "unavailable"
+            }
+          ]
         },
         "audit_profile": {
           "type": "string",
           "minLength": 1
         },
         "audit_profile_catalog_digest": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "const": "unavailable"
+            }
+          ]
         },
         "topology_digest": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "const": "unavailable"
+            }
+          ]
         },
         "prompt_digest": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "const": "unavailable"
+            }
+          ]
         },
         "expanded_graph_fingerprint": {
           "type": "string",
