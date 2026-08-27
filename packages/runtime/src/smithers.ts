@@ -100,6 +100,7 @@ import {
   assertExecutableOutsideRoot,
   bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
+  nativeOperatorSmithersNodePath,
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
@@ -5025,6 +5026,12 @@ function smithersCommandEnv(
   keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  // A native continuation deliberately loads the persisted workflow from the
+  // target tree, which has no installed controller dependencies in production.
+  // Derive Bun's package fallback from the private operator capability after
+  // dropping ambient NODE_PATH below; detached children inherit this trusted
+  // path for the lifetime of the continued workflow (#973).
+  const nativeOperatorNodePath = nativeOperatorSmithersNodePath(env);
   source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS ??= SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
   if (keepWorkspaces !== undefined) {
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
@@ -5047,6 +5054,7 @@ function smithersCommandEnv(
       merged[key] = value;
     }
   }
+  if (nativeOperatorNodePath !== undefined) merged.NODE_PATH = nativeOperatorNodePath;
   merged.PATH = composeSmithersCommandPath(projectRoot, source);
   return merged;
 }

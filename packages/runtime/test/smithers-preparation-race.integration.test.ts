@@ -136,6 +136,11 @@ test("native continuation keeps a finished producer and runs only a newly render
     assert.deepEqual(fs.readFileSync(executionLog, "utf8").trim().split("\n"), ["producer"]);
     const historicalSmithersOutput = smithersNodeOutput(root, runId, "producer");
     const historicalProducerAttempt = smithersNodeAttempt(root, runId, "producer");
+    // Production launches from the immutable execution snapshot and never
+    // install controller packages into the target. Keep the symlink only for
+    // this fixture's direct initial `smithers up`; native continuation must use
+    // its privately attested operator closure instead (#973).
+    fs.unlinkSync(path.join(root, ".smithers", "node_modules"));
 
     fs.writeFileSync(
       path.join(runRoot, "run.json"),

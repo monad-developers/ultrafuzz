@@ -133,6 +133,30 @@ export function smithersExecutableCapability(
 }
 
 /**
+ * Returns the package-resolution root privately bound to an operator-owned
+ * native continuation. Caller-provided NODE_PATH never contributes to this
+ * value: the controller capability supplies and revalidates the root.
+ */
+export function nativeOperatorSmithersNodePath(
+  env: Record<string, string | undefined> | undefined
+): string | undefined {
+  const operator = smithersExecutableCapability(env)?.operatorController;
+  if (operator?.nativeContinuation !== true) return undefined;
+  operator.assertCurrent();
+  const nodeModules = path.join(operator.root, ".smithers", "node_modules");
+  const lexical = path.resolve(nodeModules);
+  const physical = fs.realpathSync(lexical);
+  if (
+    !pathInside(operator.root, lexical) ||
+    !pathInside(operator.root, physical) ||
+    !fs.statSync(physical).isDirectory()
+  ) {
+    throw new Error("operator workflow runner dependency root must remain inside its controller root");
+  }
+  return lexical;
+}
+
+/**
  * Opens the already-attested runner and interpreter and executes both through
  * held descriptors. Digest and inode checks reject replacement inside a still
  * valid snapshot root, while directly invoking the resolved interpreter makes
