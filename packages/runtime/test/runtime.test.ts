@@ -18695,6 +18695,160 @@ test("syncRun preserves a published replacement verified under a later activatio
   assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
 });
 
+test("syncRun binds an abandoned reused attempt to the final published higher retry", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-published-after-abandoned-reuse";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const publishedEvents: Parameters<typeof workflowEvents>[1] = [
+    { type: "RunStarted", sequence: 6, timestampMs: base + 600 },
+    { type: "NodeStarted", nodeId, attempt: 3, sequence: 7, timestampMs: base + 700 },
+    {
+      type: "AgentTraceSummary",
+      nodeId,
+      sequence: 8,
+      timestampMs: base + 800,
+      extra: {
+        iteration: 0,
+        attempt: 3,
+        summary: {
+          runId: workflowRunId,
+          nodeId,
+          iteration: 0,
+          attempt: 3,
+          traceStartedAtMs: base + 750,
+          traceFinishedAtMs: base + 800,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          model: "gpt-5.5"
+        }
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 3, sequence: 9, timestampMs: base + 900 },
+    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 10, timestampMs: base + 1_000 },
+    { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 11, timestampMs: base + 1_100 },
+    { type: "RunFinished", sequence: 12, timestampMs: base + 1_200 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: nodeId, state: "finished", attempt: 3 },
+        { id: verifierNodeId, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, publishedEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const published = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(published.ok, true, JSON.stringify(published.diagnostics));
+  assert.equal(published.value?.status, "succeeded", JSON.stringify(published.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  const manifestPath = path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json");
+  const manifestBeforeReplay = fs.readFileSync(manifestPath);
+  const taskStateBeforeReplay = structuredClone(readRunState(layout).nodes["project-discovery"]);
+  const ledgerBeforeReplay = fs.readFileSync(layout.attemptLedgerPath);
+
+  const historicalEvents: Parameters<typeof workflowEvents>[1] = [
+    { type: "RunStarted", sequence: 0, timestampMs: base },
+    { type: "NodeStarted", nodeId, attempt: 2, sequence: 1, timestampMs: base + 100 },
+    {
+      type: "AgentTraceSummary",
+      nodeId,
+      sequence: 2,
+      timestampMs: base + 200,
+      extra: {
+        iteration: 0,
+        attempt: 2,
+        summary: {
+          runId: workflowRunId,
+          nodeId,
+          iteration: 0,
+          attempt: 2,
+          traceStartedAtMs: base + 150,
+          traceFinishedAtMs: base + 200,
+          agentId: "ultrafuzz-agent:project-discovery:0:default",
+          model: "gpt-5.5"
+        }
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 2, sequence: 3, timestampMs: base + 300 },
+    { type: "RunStarted", sequence: 4, timestampMs: base + 400 },
+    { type: "NodeStarted", nodeId, attempt: 2, sequence: 5, timestampMs: base + 500 },
+    ...publishedEvents
+  ];
+  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, historicalEvents), "utf8");
+
+  const replayed = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(replayed.value?.status, "succeeded");
+  assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
+  assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
+  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
+
+  const expectRejected = async (events: Parameters<typeof workflowEvents>[1]): Promise<void> => {
+    fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, events), "utf8");
+    const rejected = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(
+      rejected.diagnostics.map((diagnostic) => diagnostic.code),
+      ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+    );
+    assert.match(rejected.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+    assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
+    assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
+  };
+
+  await expectRejected(historicalEvents.filter((event) => event.sequence !== 6));
+
+  const terminalBeforeBoundary = historicalEvents.map((event) =>
+    event.sequence !== undefined && event.sequence >= 6 ? { ...event, sequence: event.sequence + 1 } : event
+  );
+  terminalBeforeBoundary.push({
+    type: "NodeFailed",
+    nodeId,
+    attempt: 2,
+    sequence: 6,
+    timestampMs: base + 550,
+    error: { message: "intervening occurrence terminated" }
+  });
+  terminalBeforeBoundary.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
+  await expectRejected(terminalBeforeBoundary);
+
+  const ambiguousReplacementTrace = historicalEvents.map((event) =>
+    event.sequence !== undefined && event.sequence >= 9 ? { ...event, sequence: event.sequence + 1 } : event
+  );
+  ambiguousReplacementTrace.push({
+    type: "AgentTraceSummary",
+    nodeId,
+    sequence: 9,
+    timestampMs: base + 850,
+    extra: {
+      iteration: 0,
+      attempt: 3,
+      summary: {
+        runId: workflowRunId,
+        nodeId,
+        iteration: 0,
+        attempt: 3,
+        traceStartedAtMs: base + 825,
+        traceFinishedAtMs: base + 850,
+        agentId: "ultrafuzz-agent:project-discovery:0:default",
+        model: "gpt-5.5"
+      }
+    }
+  });
+  ambiguousReplacementTrace.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
+  await expectRejected(ambiguousReplacementTrace);
+});
+
 test("syncRun rejects trace-only supersession of an immutable successful publication", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

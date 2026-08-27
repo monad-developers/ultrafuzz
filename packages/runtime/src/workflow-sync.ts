@@ -4989,47 +4989,10 @@ function currentPublishedReplacementOccurrenceHasAuthority(input: {
   );
   if (supersedingStarts.length !== 1) return false;
   const supersedingStart = supersedingStarts[0]!;
-  const nextBoundarySequence = input.events
-    .filter(
-      (event) =>
-        event.sourceEventSequence > supersedingStart.sourceEventSequence &&
-        (event.type === "RunStarted" ||
-          (event.type === "NodeStarted" &&
-            event.payload.nodeId === input.attempt.nodeId &&
-            event.payload.iteration === input.attempt.iteration &&
-            event.payload.attempt === input.attempt.retry))
-    )
-    .map((event) => event.sourceEventSequence)
-    .sort((left, right) => left - right)[0];
-  const replacementTerminals = input.events.filter(
-    (event) =>
-      event.sourceEventSequence > supersedingStart.sourceEventSequence &&
-      (nextBoundarySequence === undefined || event.sourceEventSequence < nextBoundarySequence) &&
-      (event.type === "NodeFinished" || event.type === "NodeFailed") &&
-      event.payload.nodeId === input.attempt.nodeId &&
-      event.payload.iteration === input.attempt.iteration &&
-      event.payload.attempt === input.attempt.retry
-  );
-  if (replacementTerminals.length !== 1 || replacementTerminals[0]!.type !== "NodeFinished") return false;
-  const replacementTerminal = replacementTerminals[0]!;
-  const replacementAttempt: TerminalWorkflowAttempt = {
-    retry: input.attempt.retry,
-    iteration: input.attempt.iteration,
-    nodeId: input.attempt.nodeId,
-    startedSequence: supersedingStart.sourceEventSequence,
-    finishedSequence: replacementTerminal.sourceEventSequence,
-    startedAt: new Date(supersedingStart.timestampMs).toISOString(),
-    finishedAt: new Date(replacementTerminal.timestampMs).toISOString(),
-    outcome: "succeeded"
-  };
-  if (!successfulAttemptHasExactTraceAuthority(input.workflowRunId, input.task, replacementAttempt, input.events)) {
-    return false;
-  }
-
   const verifierIteration = input.task.metadata.loop.index;
   const verifierStarts = input.events.filter(
     (event) =>
-      event.sourceEventSequence > replacementTerminal.sourceEventSequence &&
+      event.sourceEventSequence > supersedingStart.sourceEventSequence &&
       event.type === "NodeStarted" &&
       event.payload.nodeId === input.task.verifierSmithersNodeId &&
       event.payload.iteration === verifierIteration &&
@@ -5049,6 +5012,95 @@ function currentPublishedReplacementOccurrenceHasAuthority(input: {
   );
   if (verifierTerminals.length !== 1) return false;
   const verifierTerminal = verifierTerminals[0]!;
+
+  // The occurrence that first reuses a historical attempt identity may itself
+  // be abandoned at the next activation. Bind authority to the final producer
+  // occurrence before the exact published verifier instead of assuming that
+  // the reused occurrence must be the publisher. Every intervening abandoned
+  // producer must cross a RunStarted boundary without a terminal event; this
+  // keeps overlapping starts and unrelated completed occurrences fail-closed.
+  const producerStarts = input.events
+    .filter(
+      (event) =>
+        event.sourceEventSequence >= supersedingStart.sourceEventSequence &&
+        event.sourceEventSequence < verifierStart.sourceEventSequence &&
+        event.type === "NodeStarted" &&
+        event.payload.nodeId === input.attempt.nodeId &&
+        event.payload.iteration === input.attempt.iteration
+    )
+    .sort((left, right) => left.sourceEventSequence - right.sourceEventSequence);
+  const replacementStart = producerStarts.at(-1);
+  if (replacementStart === undefined) return false;
+  let activeProducerAttempt: number | undefined = input.attempt.retry;
+  for (const event of input.events) {
+    if (
+      event.sourceEventSequence <= supersedingStart.sourceEventSequence ||
+      event.sourceEventSequence >= replacementStart.sourceEventSequence
+    ) {
+      continue;
+    }
+    if (event.type === "RunStarted") {
+      activeProducerAttempt = undefined;
+      continue;
+    }
+    if (event.payload.nodeId !== input.attempt.nodeId || event.payload.iteration !== input.attempt.iteration) {
+      continue;
+    }
+    if (event.type === "NodeStarted") {
+      if (activeProducerAttempt !== undefined) return false;
+      const retry = numberField(event.payload, "attempt");
+      if (retry === undefined || !Number.isSafeInteger(retry) || retry < input.attempt.retry) return false;
+      activeProducerAttempt = retry;
+      continue;
+    }
+    if (event.type === "NodeFinished" || event.type === "NodeFailed") return false;
+  }
+  if (replacementStart !== supersedingStart && activeProducerAttempt !== undefined) return false;
+  const replacementRetry = numberField(replacementStart.payload, "attempt");
+  if (
+    replacementRetry === undefined ||
+    !Number.isSafeInteger(replacementRetry) ||
+    replacementRetry < input.attempt.retry
+  ) {
+    return false;
+  }
+  const nextBoundarySequence = input.events
+    .filter(
+      (event) =>
+        event.sourceEventSequence > replacementStart.sourceEventSequence &&
+        (event.type === "RunStarted" ||
+          (event.type === "NodeStarted" &&
+            event.payload.nodeId === input.attempt.nodeId &&
+            event.payload.iteration === input.attempt.iteration))
+    )
+    .map((event) => event.sourceEventSequence)
+    .sort((left, right) => left - right)[0];
+  const replacementTerminals = input.events.filter(
+    (event) =>
+      event.sourceEventSequence > replacementStart.sourceEventSequence &&
+      (nextBoundarySequence === undefined || event.sourceEventSequence < nextBoundarySequence) &&
+      (event.type === "NodeFinished" || event.type === "NodeFailed") &&
+      event.payload.nodeId === input.attempt.nodeId &&
+      event.payload.iteration === input.attempt.iteration &&
+      event.payload.attempt === replacementRetry
+  );
+  if (replacementTerminals.length !== 1 || replacementTerminals[0]!.type !== "NodeFinished") return false;
+  const replacementTerminal = replacementTerminals[0]!;
+  const replacementAttempt: TerminalWorkflowAttempt = {
+    retry: replacementRetry,
+    iteration: input.attempt.iteration,
+    nodeId: input.attempt.nodeId,
+    startedSequence: replacementStart.sourceEventSequence,
+    finishedSequence: replacementTerminal.sourceEventSequence,
+    startedAt: new Date(replacementStart.timestampMs).toISOString(),
+    finishedAt: new Date(replacementTerminal.timestampMs).toISOString(),
+    outcome: "succeeded"
+  };
+  if (!successfulAttemptHasExactTraceAuthority(input.workflowRunId, input.task, replacementAttempt, input.events)) {
+    return false;
+  }
+
+  if (replacementTerminal.sourceEventSequence >= verifierStart.sourceEventSequence) return false;
   // A finished producer may leave its verifier pending until a later run
   // activation. Only a new producer occurrence before that verifier, or a
   // boundary/restart inside the verifier occurrence itself, breaks the link.
