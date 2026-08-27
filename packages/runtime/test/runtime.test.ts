@@ -939,7 +939,10 @@ process.stdin.on("end", () => {
       "fresh-conflicting-session",
       "late-conflicting-session",
       "stderr-only",
-      "resume-hang"
+      "resume-hang",
+      "terminal-null-resume",
+      "terminal-null-no-session",
+      "terminal-null-repeat"
     ].includes(mode);
   if (substantiveMode && !resumed) fs.appendFileSync(sentinelPath, "mutation\\n", "utf8");
   fs.appendFileSync(journalPath, JSON.stringify({
@@ -955,10 +958,40 @@ process.stdin.on("end", () => {
     : mode === "initial"
       ? "fixture-" + count
       : "fixture-session";
-  if (!(mode === "missing-session" && count === 1)) {
+  if (!((mode === "missing-session" || mode === "terminal-null-no-session") && count === 1)) {
     process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");
   }
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
+  if (mode.startsWith("terminal-null-")) {
+    const outputIndex = process.argv.indexOf("--output-last-message");
+    if (!resumed || mode === "terminal-null-repeat") {
+      const commentary = "I will inspect the task before I finish it.";
+      if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], commentary, "utf8");
+      process.stdout.write(JSON.stringify({
+        type: "item.completed",
+        item: { id: "premature-commentary", type: "agent_message", text: commentary }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "item.started",
+        item: { id: "unfinished-reasoning", type: "reasoning", text: "substantive work without a final" }
+      }) + "\\n");
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2, output_tokens: 1 }
+      }) + "\\n");
+      return;
+    }
+    if (outputIndex >= 0) fs.writeFileSync(process.argv[outputIndex + 1], "DONE", "utf8");
+    process.stdout.write(JSON.stringify({
+      type: "item.completed",
+      item: { id: "terminal-answer", type: "agent_message", text: "DONE" }
+    }) + "\\n");
+    process.stdout.write(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 2, output_tokens: 1 }
+    }) + "\\n");
+    return;
+  }
   if (mode === "callback-hang") {
     setTimeout(() => process.exit(0), 600);
     return;
@@ -4514,6 +4547,138 @@ bunAdapterTest(
         OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
         OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
         OPENROUTER_RETRY_FIXTURE_PROVISIONAL_ACK: previous.provisionalAck,
+        OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
+        OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
+      })) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter adapter resumes null-final work and fails closed without an authoritative terminal message",
+  { timeout: 60_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      key: process.env.OPENROUTER_API_KEY,
+      path: process.env.PATH,
+      counter: process.env.OPENROUTER_RETRY_FIXTURE_COUNTER,
+      journal: process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL,
+      sentinel: process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL,
+      mode: process.env.OPENROUTER_RETRY_FIXTURE_MODE,
+      failures: process.env.OPENROUTER_RETRY_FIXTURE_FAILURES
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
+    process.env.PATH = `${fixture.bin}${path.delimiter}${previous.path ?? ""}`;
+    process.env.OPENROUTER_RETRY_FIXTURE_COUNTER = fixture.counter;
+    process.env.OPENROUTER_RETRY_FIXTURE_JOURNAL = fixture.journal;
+    process.env.OPENROUTER_RETRY_FIXTURE_SENTINEL = fixture.sentinel;
+    const resetFixture = (mode: string) => {
+      fs.writeFileSync(fixture.counter, "0", "utf8");
+      fs.writeFileSync(fixture.journal, "", "utf8");
+      fs.rmSync(fixture.sentinel, { force: true });
+      process.env.OPENROUTER_RETRY_FIXTURE_MODE = mode;
+      process.env.OPENROUTER_RETRY_FIXTURE_FAILURES = "1";
+    };
+    const assertAgentCliError =
+      (pattern: RegExp) =>
+      (error: unknown): boolean => {
+        assert.equal((error as { code?: unknown }).code, "AGENT_CLI_ERROR");
+        assert.match(String(error), pattern);
+        return true;
+      };
+    try {
+      resetFixture("terminal-null-resume");
+      const prompt = "Finish the null-final fixture exactly once";
+      const events: Record<string, unknown>[] = [];
+      let stderr = "";
+      const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt,
+        onEvent: (event) => events.push(event),
+        onStderr: (text) => {
+          stderr += text;
+        }
+      });
+      assert.equal(result.text, "DONE");
+      assert.match(stderr, /ended without a final assistant message after substantive work/u);
+      assert.match(JSON.stringify(events), /I will inspect the task before I finish it\./u);
+      assert.match(JSON.stringify(events), /substantive work without a final/u);
+      const completions = events.filter((event) => event.type === "completed");
+      assert.equal(completions.length, 1);
+      assert.equal(completions[0]?.ok, true);
+      assert.equal(completions[0]?.answer, "DONE");
+      const recoveredJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.deepEqual(
+        recoveredJournal.map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+      assert.equal(recoveredJournal[1]?.resumeSession, "fixture-session");
+      assert.equal(recoveredJournal[0]?.stdin, prompt);
+      assert.match(recoveredJournal[1]?.stdin ?? "", /OpenRouter terminal recovery marker: [0-9a-f-]+\./u);
+      assert.equal(recoveredJournal.filter((entry) => entry.stdin.includes(prompt)).length, 1);
+      assert.deepEqual(
+        recoveredJournal.map((entry) => entry.sentinel),
+        ["mutation\n", "mutation\n"]
+      );
+
+      resetFixture("terminal-null-no-session");
+      const noSessionEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Fail closed without a session",
+          onEvent: (event) => noSessionEvents.push(event)
+        }),
+        assertAgentCliError(/no exact session was available/u)
+      );
+      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "1");
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh"]
+      );
+      assert.equal(
+        noSessionEvents.some((event) => event.type === "completed"),
+        false
+      );
+
+      resetFixture("terminal-null-repeat");
+      const repeatedPrompt = "Fail closed after one bounded continuation";
+      const repeatedEvents: Record<string, unknown>[] = [];
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: repeatedPrompt,
+          onEvent: (event) => repeatedEvents.push(event)
+        }),
+        assertAgentCliError(/exact-session continuation also ended without a final assistant message/u)
+      );
+      const repeatedJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.deepEqual(
+        repeatedJournal.map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+      assert.equal(repeatedJournal[1]?.resumeSession, "fixture-session");
+      assert.equal(repeatedJournal.filter((entry) => entry.stdin.includes(repeatedPrompt)).length, 1);
+      assert.equal(
+        repeatedEvents.some((event) => event.type === "completed"),
+        false
+      );
+    } finally {
+      for (const [name, value] of Object.entries({
+        ULTRAFUZZ_CONFIG_PATH: previous.config,
+        OPENROUTER_API_KEY: previous.key,
+        PATH: previous.path,
+        OPENROUTER_RETRY_FIXTURE_COUNTER: previous.counter,
+        OPENROUTER_RETRY_FIXTURE_JOURNAL: previous.journal,
+        OPENROUTER_RETRY_FIXTURE_SENTINEL: previous.sentinel,
         OPENROUTER_RETRY_FIXTURE_MODE: previous.mode,
         OPENROUTER_RETRY_FIXTURE_FAILURES: previous.failures
       })) {
