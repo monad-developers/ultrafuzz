@@ -747,6 +747,22 @@ config_dir = "kimi-code"
     }
   });
 
+  it("accepts Pi's maximum thinking level", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            pi: { agent: "PiAgent", model: "vendor/model", reasoning: "max" }
+          }
+        }
+      }
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.models.profiles.pi?.reasoning).toBe("max");
+  });
+
   it("loads ultrafuzz.toml from disk", async () => {
     const root = mkdtempSync(join(tmpdir(), "ultrafuzz-config-"));
     await mkdir(root, { recursive: true });
