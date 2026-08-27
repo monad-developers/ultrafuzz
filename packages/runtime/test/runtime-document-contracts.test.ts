@@ -16,6 +16,7 @@ import {
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
   WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
   WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
+  workflowControlIntegrityJsonSchema,
   type RuntimeDocumentSchemaId
 } from "../src/index.js";
 
@@ -147,6 +148,15 @@ test("runtime document semantic gates reject projected duplicates, noncanonical 
     () =>
       assertRuntimeDocument(
         WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
+        { ...seal, execution_files: [executionFile, executionFile] },
+        "seal"
+      ),
+    /workflow-control-integrity-identity-order/u
+  );
+  assert.throws(
+    () =>
+      assertRuntimeDocument(
+        WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
         {
           ...seal,
           execution_files: [
@@ -200,6 +210,24 @@ test("runtime document semantic gates reject projected duplicates, noncanonical 
       ),
     /workflow-run-link-chain-and-order/u
   );
+});
+
+test("workflow control execution-file uniqueness stays in the linear semantic gate", () => {
+  const properties = workflowControlIntegrityJsonSchema.properties as Record<string, unknown>;
+  const executionFiles = properties.execution_files as Record<string, unknown>;
+  assert.equal(executionFiles.uniqueItems, undefined);
+
+  const seal = fixture("workflow-control-integrity.schema.json");
+  const executionFile = (seal.execution_files as Array<Record<string, unknown>>)[0]!;
+  seal.execution_files = Array.from({ length: 10_000 }, (_, index) => {
+    const identity = index.toString().padStart(5, "0");
+    return {
+      ...executionFile,
+      source_path: `/generic/source/${identity}`,
+      snapshot_path: `generic/${identity}.json`
+    };
+  });
+  assert.equal(assertRuntimeDocument(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "seal"), seal);
 });
 
 test("strict runtime document parsing rejects duplicate keys before schema validation", () => {

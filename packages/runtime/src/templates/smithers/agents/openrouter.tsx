@@ -31,6 +31,8 @@ const OPENROUTER_TOTAL_DEADLINE_MARKER = "ULTRAFUZZ_OPENROUTER_TOTAL_DEADLINE";
 const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");
 const OPENROUTER_SESSION_CONTINUATION_PROMPT =
   "Continue the existing task from the current session state. Do not repeat completed work. Finish the requested deliverable.";
+const OPENROUTER_TERMINAL_CONTINUATION_PROMPT =
+  "The prior turn ended without a final assistant response after substantive work. Continue the existing task from the current session state. Do not repeat completed work. Finish the requested deliverable and provide a final response.";
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 type OpenRouter429RecoveryDecision =
@@ -93,11 +95,11 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
   }
 
   override async generate(options?: OpenRouterGenerateOptions) {
-    return this.withRateLimitRecovery(options, (attemptOptions) => super.generate(attemptOptions));
+    return this.withOpenRouterRecovery(options, (attemptOptions) => super.generate(attemptOptions));
   }
 
   override async stream(options?: OpenRouterGenerateOptions) {
-    return this.withRateLimitRecovery(options, (attemptOptions) => super.stream(attemptOptions));
+    return this.withOpenRouterRecovery(options, (attemptOptions) => super.stream(attemptOptions));
   }
 
   override async buildCommand(params: OpenRouterCommandParams) {
@@ -126,8 +128,11 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
    * A pre-output failure can be retried fresh. Once Codex has emitted model,
    * tool, or file activity, continue only through that exact Codex session so
    * workspace mutations and completed work are never replayed.
+   * A successful process is also incomplete when substantive work follows its
+   * last assistant message. Continue the exact session once so an earlier
+   * progress update can never become the terminal answer.
    */
-  private async withRateLimitRecovery<T>(
+  private async withOpenRouterRecovery<T>(
     options: OpenRouterGenerateOptions | undefined,
     operation: (attemptOptions: OpenRouterGenerateOptions) => Promise<T>
   ): Promise<T> {
@@ -140,6 +145,7 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     let retryAttempt = 0;
     let recoveryResumeSession: string | undefined;
     let recoveryMarker: string | undefined;
+    let terminalRecoveryMarker: string | undefined;
     let observedRateLimit = false;
     let lastRateLimitError: unknown;
     let retainedRateLimitRelay: BufferedAttemptRelay | undefined;
@@ -174,13 +180,18 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       }
       const relay = new BufferedAttemptRelay(options, priorAttemptActionSnapshots);
       const expectedResumeSession = recoveryResumeSession ?? originalResumeSession;
+      const isTerminalRecoveryAttempt = terminalRecoveryMarker !== undefined;
       let result: T;
       try {
         result = await operation(
           relay.options(
             remainingTimeoutMs,
             expectedResumeSession,
-            recoveryMarker === undefined ? undefined : sessionContinuationPrompt(recoveryMarker),
+            terminalRecoveryMarker !== undefined
+              ? terminalContinuationPrompt(terminalRecoveryMarker)
+              : recoveryMarker === undefined
+                ? undefined
+                : sessionContinuationPrompt(recoveryMarker),
             {
               ...(observedRateLimit ? { retryDeadlineMs: retryDeadline } : {}),
               ...(totalDeadline === undefined ? {} : { totalDeadlineMs: totalDeadline })
@@ -356,6 +367,40 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
         relay.discard();
         throw conflict;
       }
+      const preRecoveryCallbackError = relay.callerCallbackError();
+      if (preRecoveryCallbackError !== undefined) {
+        relay.discard();
+        throw preRecoveryCallbackError.error;
+      }
+      if ((relay.sawSubstantiveEvent || isTerminalRecoveryAttempt) && !relay.hasAuthoritativeTerminalMessage()) {
+        const resumeSession = relay.resumeSession ?? expectedResumeSession;
+        relay.rememberActionSnapshotsForResume();
+        relay.discard();
+        if (isTerminalRecoveryAttempt) {
+          throw this.missingTerminalAnswer(
+            options,
+            "exact-session continuation also ended without a final assistant message"
+          );
+        }
+        if (resumeSession === undefined) {
+          throw this.missingTerminalAnswer(
+            options,
+            "turn ended without a final assistant message after substantive work and no exact session was available"
+          );
+        }
+        options?.onStderr?.(
+          `[ultrafuzz] OpenRouter Codex ended without a final assistant message after substantive work; ` +
+            `resuming exact session ${resumeSession}.\n`
+        );
+        recoveryResumeSession = resumeSession;
+        recoveryMarker = undefined;
+        terminalRecoveryMarker = randomUUID();
+        observedRateLimit = false;
+        lastRateLimitError = undefined;
+        retryAttempt = 0;
+        retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
+        continue;
+      }
       // Keep caller callbacks outside the provider-error catch. A callback may
       // throw synchronously, but that must never make us replay successful work.
       relay.release();
@@ -376,6 +421,14 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
         timeoutMs: totalTimeoutMs
       }
     );
+  }
+
+  private missingTerminalAnswer(options: OpenRouterGenerateOptions | undefined, message: string): Error {
+    return new SmithersErrorInstance("AGENT_CLI_ERROR", `OpenRouter Codex ${message}`, {
+      command: "codex",
+      args: [],
+      cwd: this.cwd ?? options?.rootDir ?? process.cwd()
+    });
   }
 }
 
@@ -440,6 +493,7 @@ class BufferedAttemptRelay {
   #expectedResumeSession: string | undefined;
   #conflictingResumeSession: string | undefined;
   #callerCallbackError: { error: unknown } | undefined;
+  #lastNewSubstantiveEventWasAssistantMessage = false;
   sawSubstantiveEvent = false;
   resumeSession: string | undefined;
 
@@ -501,7 +555,10 @@ class BufferedAttemptRelay {
         const terminalAlreadyLatched = this.#sawTerminalRateLimit;
         const terminalRateLimit = isOpenRouterRateLimitEvent(event);
         if (terminalRateLimit) this.#latchTerminalRateLimit(rateLimitDiagnosticFromEvent(event));
-        if (actionSnapshot !== undefined && !duplicateAction) this.#attemptActionSnapshots.add(actionSnapshot);
+        if (actionSnapshot !== undefined && !duplicateAction) {
+          this.#attemptActionSnapshots.add(actionSnapshot);
+          this.#lastNewSubstantiveEventWasAssistantMessage = isCompletedAssistantMessageEvent(event);
+        }
         if (
           actionSnapshot !== undefined &&
           !duplicateAction &&
@@ -647,6 +704,10 @@ class BufferedAttemptRelay {
     return this.#didExceedTotalDeadline;
   }
 
+  hasAuthoritativeTerminalMessage(): boolean {
+    return this.#lastNewSubstantiveEventWasAssistantMessage;
+  }
+
   attemptSignal(): AbortSignal {
     return this.#attemptAbortController.signal;
   }
@@ -688,6 +749,10 @@ class BufferedAttemptRelay {
       substantive = true;
       this.#attemptActionSnapshots.add(snapshot);
       this.sawSubstantiveEvent = true;
+      // Smithers can flush Codex's output-last-message file through this
+      // callback after the event stream ends. That file may contain the stale
+      // commentary under recovery, so only a normalized assistant event can
+      // establish terminal authority.
       if (!terminalAlreadyLatched) this.#releasePendingEvents();
     };
     // The text emitter normally carries assistant text. A rate-limit-looking
@@ -918,6 +983,17 @@ function isSubstantiveCodexEvent(event: OpenRouterAgentEvent): boolean {
   return event.type === "action" && event.action.kind !== "turn" && event.action.kind !== "warning";
 }
 
+function isCompletedAssistantMessageEvent(event: OpenRouterAgentEvent): boolean {
+  return (
+    event.type === "action" &&
+    event.phase === "completed" &&
+    event.action.kind === "note" &&
+    event.action.title === "assistant" &&
+    typeof event.message === "string" &&
+    event.message.trim() !== ""
+  );
+}
+
 class BoundedActionSnapshots {
   readonly #snapshots = new Map<string, number>();
   #bytes = 0;
@@ -994,6 +1070,15 @@ function sessionContinuationPrompt(marker: string): string {
   return (
     `${OPENROUTER_SESSION_CONTINUATION_PROMPT} ` +
     `OpenRouter transport recovery marker: ${marker}. ` +
+    "If this marker already appears in the session, treat every copy as the same interrupted continuation request. " +
+    "Inspect the current session and workspace state before taking any action."
+  );
+}
+
+function terminalContinuationPrompt(marker: string): string {
+  return (
+    `${OPENROUTER_TERMINAL_CONTINUATION_PROMPT} ` +
+    `OpenRouter terminal recovery marker: ${marker}. ` +
     "If this marker already appears in the session, treat every copy as the same interrupted continuation request. " +
     "Inspect the current session and workspace state before taking any action."
   );

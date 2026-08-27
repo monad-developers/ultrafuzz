@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import test from "node:test";
 import ts from "typescript";
 
 import { assertRegularFileInside, parseStrictJsonBytes, readRegularFileSnapshot } from "@ultrafuzz/artifacts";
+import { captureWorkspaceTree, restoreWorkspaceTreeWithIndexLockRecovery } from "../src/index.js";
 
 /**
  * Replaying a dependency chain into a RESUMED task worktree (issue #312).
@@ -84,6 +86,56 @@ function loadHelper(name: string): (currentTree: string, manifests: readonly Man
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
   }).outputText;
   return new Function(emitted)() as (currentTree: string, manifests: readonly Manifest[]) => number;
+}
+
+function topLevelFunction(source: string, name: string): string {
+  const start = source.indexOf(`\nfunction ${name}(`);
+  assert.ok(start >= 0, `the template does not declare a top-level ${name}`);
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(end > start, `unterminated helper ${name}`);
+  return source.slice(start, end + 3);
+}
+
+function loadPersistedPreparationRestore(input: {
+  persistedPreparation: () => string | undefined;
+  preparationTrees?: Map<string, string>;
+}): (task: { attemptId: string }, workspaceRoot: string, evidenceMode: "create" | "require") => void {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const rootsStart = source.indexOf("\nconst WORKSPACE_RUNTIME_ROOTS = ");
+  assert.ok(rootsStart >= 0, "the template does not declare WORKSPACE_RUNTIME_ROOTS");
+  const rootsEnd = source.indexOf(";\n", rootsStart);
+  assert.ok(rootsEnd > rootsStart, "unterminated WORKSPACE_RUNTIME_ROOTS");
+  const declaration = [
+    source.slice(rootsStart + 1, rootsEnd + 1),
+    topLevelFunction(source, "restorePersistedWorkspacePatchPreparationBeforeReplay"),
+    topLevelFunction(source, "restoreWorkspacePatchPreparation"),
+    topLevelFunction(source, "removeStaleWorkspaceFiles"),
+    topLevelFunction(source, "isWorkspaceRuntimePath"),
+    topLevelFunction(source, "hasSymlinkComponent"),
+    "return restorePersistedWorkspacePatchPreparationBeforeReplay;"
+  ].join("\n");
+  const emitted = ts.transpileModule(declaration, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
+  }).outputText;
+  const collaborators = {
+    path,
+    lstatSync: fs.lstatSync,
+    rmSync: fs.rmSync,
+    workspacePatchPreparationTrees: input.preparationTrees ?? new Map<string, string>(),
+    readWorkspacePatchPreparation: input.persistedPreparation,
+    restoreWorkspaceTreeWithIndexLockRecovery,
+    invariantSuiteGitPaths: (workspaceRoot: string, args: readonly string[]) =>
+      execFileSync("git", [...args], { cwd: workspaceRoot, encoding: "utf8" }),
+    isStrictlyInsideDirectory: (root: string, candidate: string) =>
+      candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    isMissingPathError: (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT"
+  };
+  const names = Object.keys(collaborators);
+  return new Function(...names, emitted)(...Object.values(collaborators)) as (
+    task: { attemptId: string },
+    workspaceRoot: string,
+    evidenceMode: "create" | "require"
+  ) => void;
 }
 
 // The chain exactly as dumped from R48's durable volume, so the fixture is production shape rather than
@@ -428,6 +480,117 @@ test("#312 replay resumes mid-chain from the first dependency the worktree does 
     "patch for /dep/stateful-invariant-handlers",
     "patch for /dep/stateful-invariant-coverage"
   ]);
+});
+
+test("#949 a reopened producer restores stale task-local source before dependency replay and on prepare retry", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf949-reopened-producer-")));
+  try {
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Ultrafuzz Synthetic Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "synthetic@example.invalid"], { cwd: root });
+    fs.writeFileSync(path.join(root, "README.md"), "# synthetic workspace\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "synthetic baseline"], { cwd: root });
+    const baselineTree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+      cwd: root,
+      encoding: "utf8"
+    }).trim();
+
+    // This is the authenticated pre-agent tree: dependency replay has materialized a setup source, but
+    // the task-local producer has not run yet.
+    const dependencySource = path.join(root, "test", "foundry", "Setup.t.sol");
+    fs.mkdirSync(path.dirname(dependencySource), { recursive: true });
+    fs.writeFileSync(dependencySource, "contract SyntheticSetup {}\n", "utf8");
+    const preparationTree = captureWorkspaceTree(root);
+    restoreWorkspaceTreeWithIndexLockRecovery(root, preparationTree);
+
+    // A prior producer execution leaves task-owned source in the durable worktree. It intentionally
+    // matches neither the first dependency base nor its result, so replay must not relax the strict
+    // patch check to accept it.
+    const staleTaskSource = path.join(root, "test", "foundry", "strategy", "Generated.t.sol");
+    fs.mkdirSync(path.dirname(staleTaskSource), { recursive: true });
+    fs.writeFileSync(staleTaskSource, "contract StaleTaskOutput {}\n", "utf8");
+    assert.notEqual(captureWorkspaceTree(root), preparationTree);
+
+    const preparationTrees = new Map<string, string>();
+    const restoreBeforeReplay = loadPersistedPreparationRestore({
+      persistedPreparation: () => preparationTree,
+      preparationTrees
+    });
+    const task = { attemptId: "reopened-producer" };
+    restoreBeforeReplay(task, root, "create");
+    assert.equal(captureWorkspaceTree(root), preparationTree);
+    assert.equal(fs.existsSync(staleTaskSource), false, "task-local source must not survive reopened preparation");
+
+    // The restored tree is now exactly an authenticated dependency result, so #312 can safely skip it;
+    // `applyWorkspacePatch` remains strict and is never asked to accept task-local drift.
+    const dependency = {
+      attemptId: "setup-dependency",
+      base_tree: baselineTree,
+      result_tree: preparationTree
+    };
+    withDependencyFixture([dependency], (fixture) => {
+      let applied = false;
+      const materialize = loadFixtureMaterializer([dependency], {
+        captureWorkspaceTree: () => captureWorkspaceTree(root),
+        applyWorkspacePatch: () => {
+          applied = true;
+        }
+      });
+      materialize(fixture.task, root, true);
+      assert.equal(applied, false, "the already-restored dependency result must not be replayed");
+    });
+
+    // A stateful prepare retry re-enters the same body. Prove that another mutation is removed again,
+    // rather than merely proving Smithers invokes the body twice as the old #829 fixture did.
+    fs.mkdirSync(path.dirname(staleTaskSource), { recursive: true });
+    fs.writeFileSync(staleTaskSource, "contract PartialPreparationMutation {}\n", "utf8");
+    restoreBeforeReplay(task, root, "create");
+    assert.equal(captureWorkspaceTree(root), preparationTree);
+    assert.equal(fs.existsSync(staleTaskSource), false, "preparation retry must restart from durable evidence");
+
+    // Post-agent verification must preserve current model source for workspace-patch capture.
+    fs.mkdirSync(path.dirname(staleTaskSource), { recursive: true });
+    fs.writeFileSync(staleTaskSource, "contract CurrentAgentOutput {}\n", "utf8");
+    restoreBeforeReplay(task, root, "require");
+    assert.equal(fs.existsSync(staleTaskSource), true, "the post-agent require path must not restore");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#949 fresh preparation is untouched and modified persisted evidence fails before restoration", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf949-preparation-evidence-")));
+  try {
+    execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Ultrafuzz Synthetic Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "synthetic@example.invalid"], { cwd: root });
+    fs.writeFileSync(path.join(root, "README.md"), "baseline\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "synthetic baseline"], { cwd: root });
+    const baselineTree = captureWorkspaceTree(root);
+    const localSource = path.join(root, "test", "Fresh.t.sol");
+    fs.mkdirSync(path.dirname(localSource), { recursive: true });
+    fs.writeFileSync(localSource, "contract Fresh {}\n", "utf8");
+
+    const freshRestore = loadPersistedPreparationRestore({ persistedPreparation: () => undefined });
+    freshRestore({ attemptId: "fresh-producer" }, root, "create");
+    assert.equal(fs.existsSync(localSource), true, "no evidence means no restoration authority");
+
+    const differentTree = captureWorkspaceTree(root);
+    const preparationTrees = new Map([["reopened-producer", baselineTree]]);
+    const changedEvidenceRestore = loadPersistedPreparationRestore({
+      persistedPreparation: () => differentTree,
+      preparationTrees
+    });
+    assert.throws(
+      () => changedEvidenceRestore({ attemptId: "reopened-producer" }, root, "create"),
+      /workspace preparation was modified reopened-producer/u
+    );
+    assert.equal(fs.existsSync(localSource), true, "mismatched evidence must fail before mutating the worktree");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("#312 dependency replay rejects duplicate manifest keys through the generated strict JSON reader", () => {

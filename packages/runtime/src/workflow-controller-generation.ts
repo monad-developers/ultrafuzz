@@ -516,13 +516,28 @@ function snapshotFromManifest(
     manifest.controller_generation,
     "controller generation snapshot"
   );
+  const reusableContents = new Map<string, Buffer>([
+    [manifest.workflow_path, original.contents.workflow],
+    ...original.executionFiles.map((file) => [file.snapshotPath, file.contents] as const)
+  ]);
+  const digestScratch = Buffer.allocUnsafe(64 * 1024);
   const loaded = new Map(
     manifest.files.map((file) => {
       const filePath = resolveControllerSnapshotFile(root, file.path, "controller generation file");
       assertRegularFileInside(root, filePath, "controller generation file");
-      const contents = readRegularFileSnapshot(filePath, MAX_DOCUMENT_BYTES);
-      if (contents.byteLength !== file.size_bytes || sha256(contents) !== file.sha256) {
+      const observed = digestStableControllerFile(filePath, digestScratch);
+      if (observed.sizeBytes !== file.size_bytes || observed.sha256 !== file.sha256) {
         throw new Error(`controller generation file changed: ${file.path}`);
+      }
+      const reusable = reusableContents.get(file.path);
+      let contents: Buffer;
+      if (reusable !== undefined && reusable.byteLength === file.size_bytes && sha256(reusable) === file.sha256) {
+        contents = reusable;
+      } else {
+        contents = readRegularFileSnapshot(filePath, MAX_DOCUMENT_BYTES);
+        if (contents.byteLength !== file.size_bytes || sha256(contents) !== file.sha256) {
+          throw new Error(`controller generation file changed: ${file.path}`);
+        }
       }
       return [file.path, contents] as const;
     })
@@ -541,6 +556,50 @@ function snapshotFromManifest(
         contents: loaded.get(file.path)!
       }))
   };
+}
+
+/**
+ * Authenticate a published controller file without retaining another copy of
+ * its bytes. The descriptor checks mirror readRegularFileSnapshot: an atomic
+ * replacement drops the opened inode's link count and is rejected even when a
+ * replacement restores the original size and timestamps.
+ */
+function digestStableControllerFile(filePath: string, scratch: Buffer): { sha256: string; sizeBytes: number } {
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+  const descriptor = fs.openSync(filePath, flags);
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile()) throw new Error(`controller generation path is not a regular file: ${filePath}`);
+    if (before.size > BigInt(MAX_DOCUMENT_BYTES)) {
+      throw new Error(`controller generation file exceeds the ${MAX_DOCUMENT_BYTES}-byte limit: ${filePath}`);
+    }
+    const hash = crypto.createHash("sha256");
+    let offset = 0;
+    for (;;) {
+      const read = fs.readSync(descriptor, scratch, 0, scratch.byteLength, offset);
+      if (read === 0) break;
+      offset += read;
+      if (offset > MAX_DOCUMENT_BYTES) {
+        throw new Error(`controller generation file exceeds the ${MAX_DOCUMENT_BYTES}-byte limit: ${filePath}`);
+      }
+      hash.update(scratch.subarray(0, read));
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      before.nlink !== after.nlink ||
+      after.size !== BigInt(offset)
+    ) {
+      throw new Error(`controller generation file changed while it was read: ${filePath}`);
+    }
+    return { sha256: hash.digest("hex"), sizeBytes: offset };
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 function readJournal(layout: RunLayout, controlGeneration: string): ControllerGenerationJournal {

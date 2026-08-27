@@ -10,10 +10,11 @@ This tool initializes a protocol repository with editable prompts and topology, 
 specialized agents, collects generated fuzz tests and findings, and serves a
 local dashboard plus final report for review.
 
-> **Trust model:** Agents run in a trusted, skip-permissions workflow, and
-> user-editable prompts can influence what is performed into target repositories.
-> Review the checked-in `.ultrafuzz/prompts/` before launching a campaign. It is recommended
-> to launch Ultrafuzz on a virtual private server. See [Security](docs/security.md) for details.
+> **Note:** We strongly recommend running Ultrafuzz on a virtual private server (VPS).
+> Agents run in an unrestricted, skip-permissions workflow. Prompts and model choices
+> can influence the actions agents take on the target host and may cause unintended,
+> destructive consequences. Review the checked-in `.ultrafuzz/prompts/` before launching
+> a campaign. See [Security](docs/security.md) for details.
 
 ## Getting started
 

@@ -5,7 +5,17 @@
 /** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -334,6 +344,7 @@ const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
+const replacePromptSchemas = __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
@@ -1422,10 +1433,16 @@ function admitWorkflowControls(loadedPath: string, persistedPath: string | undef
   const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
   const persistedExecutionSnapshotRoot =
     persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  // Native continuation may load the persisted project workflow directly, or
+  // a current controller rendered under .smithers/continuations. Neither path
+  // is an authenticated execution snapshot, but Smithers and the workflow still
+  // agree on one physical entrypoint. Snapshot-only task controls remain absent
+  // in that case and use the existing direct-workflow fallbacks below. Never
+  // combine one snapshot-derived path with one native path, even if an alias
+  // happens to resolve both to the same file.
   if (
     persistedPath !== undefined &&
-    (loadedExecutionSnapshotRoot === undefined ||
-      persistedExecutionSnapshotRoot === undefined ||
+    ((loadedExecutionSnapshotRoot === undefined) !== (persistedExecutionSnapshotRoot === undefined) ||
       realpathSync(loadedPath) !== realpathSync(persistedPath))
   ) {
     throw new Error("persisted workflow path does not identify the loaded execution snapshot");
@@ -3614,6 +3631,9 @@ function prepareArtifactMirror(
   );
   if (options.replayWorkspacePatches !== false) {
     preparationStep(task.attemptId, "assert-workspace-source-revision", () => assertWorkspaceSourceRevision(task));
+    preparationStep(task.attemptId, "restore-persisted-workspace-preparation", () =>
+      restorePersistedWorkspacePatchPreparationBeforeReplay(task, workspaceRoot, evidenceMode)
+    );
   }
   if (options.pinnedSubmodules === "verify") {
     preparationStep(task.attemptId, "verify-pinned-submodules", () =>
@@ -3634,7 +3654,9 @@ function prepareArtifactMirror(
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  preparationStep(task.attemptId, "materialize-prompt-schemas", () => materializePromptSchemas(schemaDirectory));
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () =>
+    materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
+  );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
   preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
@@ -4075,8 +4097,37 @@ function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string
   return parsed.preparation_tree;
 }
 
-function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  const preparationTree = workspacePatchPreparationTrees.get(task.attemptId) ?? readWorkspacePatchPreparation(task);
+function restorePersistedWorkspacePatchPreparationBeforeReplay(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  evidenceMode: "create" | "require"
+): void {
+  // A reopened producer retains its durable worktree, including source authored by the previous model
+  // execution. That tree intentionally matches neither a dependency patch's base nor any dependency
+  // result, so #312's authenticated dependency-prefix skip cannot classify it. The preparation evidence
+  // is the runtime-owned pre-agent tree captured after dependency replay; restore it BEFORE replay so the
+  // strict base-tree check continues to distinguish genuine drift from a supported producer reopen.
+  //
+  // Never restore on the post-agent `require` path: that path must preserve the current model's source
+  // until `materializeWorkspacePatch` captures it. A fresh producer has no persisted evidence and remains
+  // on the existing pinned-baseline replay path.
+  if (evidenceMode !== "create") return;
+  const persistedPreparation = readWorkspacePatchPreparation(task);
+  if (persistedPreparation === undefined) return;
+  const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
+  if (expectedPreparation !== undefined && persistedPreparation !== expectedPreparation) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
+  restoreWorkspacePatchPreparation(task, workspaceRoot, persistedPreparation);
+}
+
+function restoreWorkspacePatchPreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  persistedPreparation?: string
+): void {
+  const preparationTree =
+    workspacePatchPreparationTrees.get(task.attemptId) ?? persistedPreparation ?? readWorkspacePatchPreparation(task);
   if (preparationTree === undefined) {
     throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
   }
@@ -4120,10 +4171,27 @@ function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: strin
   for (const relativePath of candidates) {
     if (expected.has(relativePath) || isWorkspaceRuntimePath(relativePath)) continue;
     const candidate = path.resolve(workspaceRoot, ...relativePath.split("/"));
-    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || hasSymlinkComponent(workspaceRoot, candidate)) {
+    // A stale leaf symlink is safe to unlink because unlinkSync removes only
+    // the directory entry. Parent symlinks remain unsafe because they could
+    // redirect deletion outside the owned worktree.
+    if (
+      !isStrictlyInsideDirectory(workspaceRoot, candidate) ||
+      hasSymlinkComponent(workspaceRoot, path.dirname(candidate))
+    ) {
       throw new Error(`artifact-contract failure: unsafe stale workspace path ${relativePath}`);
     }
-    rmSync(candidate, { recursive: true, force: true });
+    let leaf: ReturnType<typeof lstatSync>;
+    try {
+      leaf = lstatSync(candidate);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    if (leaf.isSymbolicLink()) {
+      unlinkSync(candidate);
+    } else {
+      rmSync(candidate, { recursive: true, force: true });
+    }
   }
 }
 
