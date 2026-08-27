@@ -12,6 +12,7 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
   writeArtifactManifest,
   type ExecutionNodeProvenance,
   type RunState
@@ -21,6 +22,7 @@ import { initProject, materializeDynamicRuntime, readLinkedWorkflowEvidence, sta
 import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import {
   refreshedSmithersControllerSnapshot,
+  renderCurrentSmithersController,
   type CompiledSmithersDynamicGroup,
   type CompiledSmithersTask
 } from "../src/smithers.js";
@@ -766,6 +768,97 @@ test("controller refresh preserves the sealed dynamic base after runtime materia
   );
   assert.equal(authority.controllerGeneration, secondPrepared.controllerGeneration);
   assert.equal(authority.semanticFingerprint, firstRefresh.semanticFingerprint);
+});
+
+test("current-controller rendering accepts runtime-materialized dynamic prompts", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-refresh-render" });
+  const generated = fixture.generatedTasks[0]!;
+  assert.ok(generated.renderedPromptPath);
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+
+  // `resume --refresh-controller` renders from the LIVE manifest, which carries every task the
+  // dynamic runtime materialized, while `plan.json` is written before any expansion and can never
+  // name a generated attempt. The retained-prompt rebinding therefore has no plan row to match.
+  const taskDocument = parseSmithersTaskManifestBytes(
+    fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"))
+  );
+  const plan = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{ attempt_id: string }>;
+  };
+  assert.equal(
+    taskDocument.tasks.some((task) => task.attemptId === generated.attemptId),
+    true
+  );
+  assert.equal(
+    plan.rendered_prompts.some((prompt) => prompt.attempt_id === generated.attemptId),
+    false
+  );
+  const generatedTask = taskDocument.tasks.find((task) => task.attemptId === generated.attemptId);
+  assert.ok(generatedTask?.metadata.node.dynamic);
+  assert.ok((generatedTask.deferredPromptGroups ?? []).length > 0);
+
+  // The join is a PLANNED task, but it has a dynamic ancestor, so its prompt is deferred too and
+  // it is likewise absent from `plan.json`.
+  const deferredPlannedTask = taskDocument.tasks.find(
+    (task) =>
+      task.metadata.node.dynamic === undefined &&
+      (task.deferredPromptGroups ?? []).length > 0 &&
+      task.renderedPromptPath !== undefined
+  );
+  assert.ok(deferredPlannedTask);
+  assert.equal(
+    plan.rendered_prompts.some((prompt) => prompt.attempt_id === deferredPlannedTask.attemptId),
+    false
+  );
+
+  const workflowPath = renderCurrentSmithersController({
+    projectRoot: fixture.project,
+    layout: evidence.layout,
+    smithersRunId: evidence.smithersRunId,
+    tasks: taskDocument,
+    config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+  });
+  assert.ok(fs.existsSync(workflowPath));
+  const workflow = fs.readFileSync(workflowPath, "utf8");
+  assert.ok(workflow.includes(JSON.stringify(generated.attemptId)), "generated attempt is absent from the controller");
+  assert.ok(
+    workflow.includes(JSON.stringify(generated.renderedPromptPath)),
+    "generated prompt path was rebound away from its runtime location"
+  );
+
+  // A prompt rendered at plan time must still fail closed on retained-prompt drift.
+  const plannedTask = taskDocument.tasks.find(
+    (task) => task.renderedPromptPath !== undefined && (task.deferredPromptGroups ?? []).length === 0
+  );
+  assert.ok(plannedTask);
+  assert.equal(
+    plan.rendered_prompts.some((prompt) => prompt.attempt_id === plannedTask.attemptId),
+    true
+  );
+  assert.throws(
+    () =>
+      renderCurrentSmithersController({
+        projectRoot: fixture.project,
+        layout: evidence.layout,
+        smithersRunId: evidence.smithersRunId,
+        tasks: {
+          ...taskDocument,
+          tasks: taskDocument.tasks.map((task) =>
+            task.attemptId === plannedTask.attemptId
+              ? { ...task, renderedPromptPath: path.join(fixture.runRoot, "artifacts", "substituted-prompt.md") }
+              : task
+          )
+        },
+        config: JSON.parse(resolvedConfig.contents.toString("utf8"))
+      }),
+    /persisted prompt plan does not match continuation task/u
+  );
 });
 
 test(
