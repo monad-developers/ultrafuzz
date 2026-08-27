@@ -17,7 +17,7 @@ interface SmithersExecutableIdentity {
   runner: FileIdentity;
   interpreter: FileIdentity & { runtime: "bun" | "other" };
   bunStartup?: Readonly<{ confinement: FileIdentity; config: FileIdentity; environment: FileIdentity }>;
-  operatorController?: Readonly<{ root: string; assertCurrent: () => void }>;
+  operatorController?: Readonly<{ root: string; assertCurrent: () => void; nativeContinuation: boolean }>;
 }
 type Forbidden = Readonly<{ lexical: string; real: string }>;
 
@@ -63,7 +63,8 @@ export function bindOperatorSmithersExecutableCapability<T extends Record<string
   executable: string,
   operatorRoot: string,
   assertCurrent: () => void,
-  forbiddenRoot?: string
+  forbiddenRoot?: string,
+  nativeContinuation = false
 ): T {
   const root = fs.realpathSync(path.resolve(operatorRoot));
   assertCurrent();
@@ -72,7 +73,8 @@ export function bindOperatorSmithersExecutableCapability<T extends Record<string
   }
   const bound = bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot, {
     root,
-    assertCurrent
+    assertCurrent,
+    nativeContinuation
   });
   const capability = smithersExecutableCapability(bound)!;
   if (!pathInside(root, capability.runner.path)) {
@@ -86,7 +88,7 @@ function bindSmithersExecutableCapabilityInternal<T extends Record<string, strin
   env: T,
   executable: string,
   forbiddenRoot?: string,
-  operatorController?: Readonly<{ root: string; assertCurrent: () => void }>
+  operatorController?: Readonly<{ root: string; assertCurrent: () => void; nativeContinuation: boolean }>
 ): T {
   const forbidden =
     forbiddenRoot === undefined
@@ -128,6 +130,30 @@ export function smithersExecutableCapability(
   env: Record<string, string | undefined> | undefined
 ): Readonly<SmithersExecutableIdentity> | undefined {
   return (env as CapableEnvironment | undefined)?.[SMITHERS_EXECUTABLE_CAPABILITY];
+}
+
+/**
+ * Returns the package-resolution root privately bound to an operator-owned
+ * native continuation. Caller-provided NODE_PATH never contributes to this
+ * value: the controller capability supplies and revalidates the root.
+ */
+export function nativeOperatorSmithersNodePath(
+  env: Record<string, string | undefined> | undefined
+): string | undefined {
+  const operator = smithersExecutableCapability(env)?.operatorController;
+  if (operator?.nativeContinuation !== true) return undefined;
+  operator.assertCurrent();
+  const nodeModules = path.join(operator.root, ".smithers", "node_modules");
+  const lexical = path.resolve(nodeModules);
+  const physical = fs.realpathSync(lexical);
+  if (
+    !pathInside(operator.root, lexical) ||
+    !pathInside(operator.root, physical) ||
+    !fs.statSync(physical).isDirectory()
+  ) {
+    throw new Error("operator workflow runner dependency root must remain inside its controller root");
+  }
+  return lexical;
 }
 
 /**
@@ -175,10 +201,14 @@ export function acquireSmithersExecutableAnchor(
       !snapshotRunner &&
       capability.operatorController !== undefined &&
       pathInside(capability.operatorController.root, capability.runner.path) &&
-      capability.bunStartup !== undefined &&
-      path.dirname(path.dirname(capability.bunStartup.confinement.path)) === capability.operatorController.root;
+      (capability.operatorController.nativeContinuation ||
+        (capability.bunStartup !== undefined &&
+          path.dirname(path.dirname(capability.bunStartup.confinement.path)) === capability.operatorController.root));
+    const unsealedNativeContinuation =
+      directOperatorRunner && capability.operatorController?.nativeContinuation === true;
     if (
       capability.interpreter.runtime === "bun" &&
+      !unsealedNativeContinuation &&
       ((!snapshotRunner && !directOperatorRunner) || !bunModuleConfinement || capability.bunStartup === undefined)
     ) {
       throw new Error("Bun workflow runner execution requires a sealed snapshot path");
@@ -195,7 +225,7 @@ export function acquireSmithersExecutableAnchor(
       for (const [name, identity] of Object.entries(capability.bunStartup!))
         assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
     const interpreterArguments =
-      capability.interpreter.runtime === "bun"
+      capability.interpreter.runtime === "bun" && bunControls !== undefined
         ? [
             `--config=${bunControls!.config}`,
             `--env-file=${bunControls!.environment}`,

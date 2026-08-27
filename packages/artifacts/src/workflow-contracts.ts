@@ -1656,13 +1656,13 @@ export const reportSchema = withDocumentMetadata(
       tokens_used: nonEmptyString,
       estimated_spend: nonEmptyString,
       partial_pricing: z.boolean(),
-      strategy_loops: nonNegativeInteger,
+      strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
       // The report renders these beside the rest of the run summary, so a report
       // that omits them cannot be projected.
       audit_profile: nonEmptyString,
-      audit_profile_catalog_digest: sha256,
-      topology_digest: sha256,
-      prompt_digest: sha256,
+      audit_profile_catalog_digest: z.union([sha256, z.literal("unavailable")]),
+      topology_digest: z.union([sha256, z.literal("unavailable")]),
+      prompt_digest: z.union([sha256, z.literal("unavailable")]),
       expanded_graph_fingerprint: nonEmptyString,
       agent_execution: reportAgentExecutionSchema.optional(),
       source_run_ids: uniqueStrings().optional()

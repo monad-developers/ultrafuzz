@@ -20,10 +20,7 @@ export default class Resume extends Command {
     "retry-failed": Flags.boolean({ summary: "Retry failed workflow tasks before resuming" }),
     "reset-node": Flags.string({ summary: "Retry one failed workflow node and its dependents before resuming" }),
     "refresh-controller": Flags.boolean({
-      summary: "Authenticate a compatible controller-only refresh before resuming the same workflow run"
-    }),
-    "refinalize-controller-failures": Flags.boolean({
-      summary: "Re-finalize eligible immutable controller false failures after an authenticated refresh"
+      summary: "Render the current controller and continue the same Smithers run"
     })
   };
 
@@ -37,7 +34,6 @@ export default class Resume extends Command {
       force: flags.force,
       retryFailed: flags["retry-failed"],
       refreshController: flags["refresh-controller"],
-      refinalizeControllerFailures: flags["refinalize-controller-failures"],
       resetNode: flags["reset-node"],
       env: cliIo().env
     });

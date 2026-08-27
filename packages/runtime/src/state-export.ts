@@ -48,7 +48,6 @@ const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "waiting-timer",
   "waiting-quota"
 ]);
-const STATUS_SYNCHRONIZATION_BUDGET_MS = 5_000;
 
 export function isLiveWorkflowRunStatus(status: string): boolean {
   return LIVE_WORKFLOW_RUN_STATUSES.has(status);
@@ -208,23 +207,11 @@ export async function getRunHealth(input: {
   // diverged and invalid. Skip it and say so instead.
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
-    const synchronizationDeadlineMs = Date.now() + STATUS_SYNCHRONIZATION_BUDGET_MS;
     const sync = await synchronizeLinkedWorkflowRun(
       { projectRoot, runId: input.runId, env: input.env },
-      { observeOnly: true, deadlineMs: synchronizationDeadlineMs, tolerateInvalidEventStreams: true }
+      { observeOnly: true }
     );
-    syncDiagnostics.push(
-      ...sync.diagnostics.map((diagnostic) =>
-        diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
-          ? {
-              ...diagnostic,
-              message:
-                "run state synchronization exceeded the observation budget; reported counts come from the workflow runner and local run state may be stale",
-              severity: "warning" as const
-            }
-          : diagnostic
-      )
-    );
+    syncDiagnostics.push(...sync.diagnostics);
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",

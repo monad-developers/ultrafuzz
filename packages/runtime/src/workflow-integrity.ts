@@ -614,10 +614,25 @@ export function verifyWorkflowControlSnapshot(
   if (observedBindings !== undefined && JSON.stringify(observedBindings) !== JSON.stringify(seal.bindings)) {
     reportDivergence("workflow control completeness binding changed");
   }
-  const verified: VerifiedWorkflowControlSnapshot = {
+  const verifiedContents = runtimeControlsChanged
+    ? { ...contents, graph: currentGraph, tasks: currentTasks }
+    : contents;
+  // WeakRef.deref() keeps its target alive until the end of the current JS job.
+  // Returning a fresh 50k-file wrapper on every synchronous prerequisite gate
+  // therefore retained every wrapper until the complete synchronization pass
+  // yielded, even though all wrappers named the same authenticated bytes. Once
+  // the full current revalidation above succeeds, return the exact live
+  // capability when its public control bytes are unchanged.
+  const reusableSnapshot =
+    reusable !== undefined &&
+    sealContents.equals(reusable.snapshot.integrityContents) &&
+    WORKFLOW_CONTROL_FILE_KEYS.every((key) => verifiedContents[key].equals(reusable.snapshot.contents[key]))
+      ? reusable.snapshot
+      : undefined;
+  const verified: VerifiedWorkflowControlSnapshot = reusableSnapshot ?? {
     paths,
     generation,
-    contents: runtimeControlsChanged ? { ...contents, graph: currentGraph, tasks: currentTasks } : contents,
+    contents: verifiedContents,
     executionFiles,
     bindings: seal.bindings,
     integrityContents: sealContents,
@@ -628,14 +643,16 @@ export function verifyWorkflowControlSnapshot(
     if (!sameWorkflowControlSnapshotChangeTokens(snapshotChangeTokensBefore, snapshotChangeTokensAfter)) {
       throw new Error("workflow execution snapshot changed while its control authority was being verified");
     }
-    rememberWorkflowControlSnapshot(
-      verified,
-      projectRoot,
-      layout,
-      publishedSnapshotRoot,
-      protectedPaths,
-      snapshotChangeTokensAfter
-    );
+    if (reusableSnapshot === undefined) {
+      rememberWorkflowControlSnapshot(
+        verified,
+        projectRoot,
+        layout,
+        publishedSnapshotRoot,
+        protectedPaths,
+        snapshotChangeTokensAfter
+      );
+    }
   }
   return verified;
 }
@@ -2131,7 +2148,11 @@ export function replaceBunStartupControlsForControllerRefresh(
   return [
     ...files
       .filter((file) => !controlPaths.has(file.snapshotPath))
-      .map((file) => ({ ...file, contents: Buffer.from(file.contents) })),
+      // Refresh helpers replace a file record before changing its contents;
+      // they never mutate a retained byte snapshot in place. Preserve the
+      // immutable backing for every unchanged file instead of eagerly copying
+      // the complete (and potentially very large) execution closure.
+      .map((file) => ({ ...file, contents: file.contents })),
     ...controls
   ];
 }

@@ -127,7 +127,8 @@ export function prepareTrustedCliClosure(input: {
     const digest = sha256(manifestBytes);
     fs.writeFileSync(path.join(temporaryRoot, MANIFEST_FILE), manifestBytes, { mode: 0o400, flag: "wx" });
     sealClosure(temporaryRoot, manifest);
-    verifyTrustedCliClosureRoot(temporaryRoot, digest, { allowTemporaryName: true });
+    // `readTrustedCliClosureAt` performs the identical full verification, so a
+    // separate pass here would only re-read and re-hash the whole closure.
     input.validate(readTrustedCliClosureAt(temporaryRoot, digest, { allowTemporaryName: true }));
     const publishedRoot = path.join(closuresRoot, digest);
     if (pathEntryExists(publishedRoot)) {

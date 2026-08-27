@@ -30,7 +30,11 @@ import {
   prepareControllerGeneration,
   verifyCommittedControllerGenerationAuthority
 } from "../src/workflow-controller-generation.js";
-import { materializeWorkflowExecutionSnapshot, verifySealedTaskManifestSnapshot } from "../src/workflow-integrity.js";
+import {
+  materializeWorkflowExecutionSnapshot,
+  verifySealedTaskManifestSnapshot,
+  verifyWorkflowControlSnapshot
+} from "../src/workflow-integrity.js";
 
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
   schema_version: "ultrafuzz.data-governance-policy.v1",
@@ -817,9 +821,19 @@ test(
         return Reflect.apply(originalCloseSync, fs, args) as void;
       }
     });
+    let liveControl: typeof evidence.verifiedControl | undefined;
     try {
       for (let lookup = 0; lookup < 5; lookup += 1) {
         verifySealedTaskManifestSnapshot(evidence.layout);
+        const current = verifyWorkflowControlSnapshot(fixture.project, evidence.layout);
+        if (liveControl === undefined) liveControl = current;
+        else {
+          assert.equal(
+            current,
+            liveControl,
+            "one live generation must reuse its exact authenticated capability instead of retaining another file graph"
+          );
+        }
       }
     } finally {
       Object.defineProperty(fs, "closeSync", closeDescriptor);

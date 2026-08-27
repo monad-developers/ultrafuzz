@@ -9,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
   assertRunPlanDocument,
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
@@ -100,6 +102,7 @@ import {
   assertExecutableOutsideRoot,
   bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
+  nativeOperatorSmithersNodePath,
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
@@ -142,8 +145,8 @@ const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
-const SHA256_DIGEST = /^[0-9a-f]{64}$/u;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
+const NATIVE_SMITHERS_CONTINUATION: unique symbol = Symbol("ultrafuzz.native-smithers-continuation");
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
 const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
@@ -152,6 +155,24 @@ interface OperatorControllerProject {
   npm: OperatorNpmProvision;
   root: string;
   seal: string;
+}
+
+type NativeContinuationEnvironment = Record<string, string | undefined> & {
+  [NATIVE_SMITHERS_CONTINUATION]?: true;
+};
+
+export function nativeSmithersContinuationEnvironment<T extends Record<string, string | undefined>>(env: T): T {
+  Object.defineProperty(env, NATIVE_SMITHERS_CONTINUATION, {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value: true
+  });
+  return env;
+}
+
+function isNativeSmithersContinuation(env: Record<string, string | undefined> | undefined): boolean {
+  return (env as NativeContinuationEnvironment | undefined)?.[NATIVE_SMITHERS_CONTINUATION] === true;
 }
 
 const operatorControllerProjects = new Map<string, Promise<OperatorControllerProject>>(),
@@ -172,7 +193,7 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
           cliPath,
           ...childArgs,
         ]);
-        child = spawn(process.execPath, [...ultrafuzzBunStartupArgs, ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
+        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
           detached: true,
           stdio:
             childSnapshotTransfer === undefined
@@ -196,7 +217,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         const supervisorFd = openSync(logFile, "a");
         let supervisor;
         try {
-          supervisor = spawn(process.execPath, [...ultrafuzzBunStartupArgs, ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
+          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
             detached: true,
             stdio:
               supervisorSnapshotTransfer === undefined
@@ -567,6 +588,13 @@ const SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH = `            workflowPath: per
               persistedForkWorkflowPath,
             ),
             entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+const SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE = `  "RunAutoResumeSkipped",
+  "RunForked",
+  "NodePending",`;
+const SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH = `  "RunAutoResumeSkipped",
+  "RunForked",
+  "AgentTraceSummary",
+  "NodePending",`;
 // Smithers executes through the descriptor path but persists the stable lexical
 // generation path. Every durable path/hash sink must keep those identities
 // separate or the next lifecycle command inherits a dead /proc path.
@@ -774,28 +802,6 @@ const SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE = `const EXTRA_INDEX_STATEMENTS = [
 const SMITHERS_DB_EVENT_PROBE_INDEX_PATCH = `const EXTRA_INDEX_STATEMENTS = [
   \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx ON _smithers_events (run_id, timestamp_ms, type)\`,
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
-const SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE = `                   FROM _smithers_events
-                   WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?`;
-const SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH = `                   FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
-                   WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?`;
-const SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE = `               FROM _smithers_events
-               WHERE run_id = ?
-                 AND timestamp_ms = ?`;
-const SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH = `               FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
-               WHERE run_id = ?
-                 AND timestamp_ms = ?`;
-const SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE = `                           FROM _smithers_events
-                           WHERE run_id = ?
-                             AND timestamp_ms = ?`;
-const SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH = `                           FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
-                           WHERE run_id = ?
-                             AND timestamp_ms = ?`;
-const SMITHERS_DB_EVENT_PROBE_TURN_SOURCE = `                               FROM _smithers_events
-                               WHERE run_id = ?
-                                 AND timestamp_ms = ?`;
-const SMITHERS_DB_EVENT_PROBE_TURN_PATCH = `                               FROM _smithers_events INDEXED BY _smithers_events_insert_probe_idx
-                               WHERE run_id = ?
-                                 AND timestamp_ms = ?`;
 
 export type SmithersCompatibilityPatchId =
   | "local_delegation"
@@ -813,6 +819,7 @@ export type SmithersCompatibilityPatchId =
   | "replay_workflow_metadata"
   | "fork_workflow_path"
   | "fork_workflow_metadata"
+  | "lifecycle_trace_summary"
   | "engine_workflow_path"
   | "engine_durability_metadata"
   | "engine_run_metadata"
@@ -827,11 +834,7 @@ export type SmithersCompatibilityPatchId =
   | "workflow_hash_entry"
   | "workflow_hash_recursion"
   | "workflow_hash_public"
-  | "event_probe_index"
-  | "event_probe_transaction"
-  | "event_probe_precheck"
-  | "event_probe_fallback"
-  | "event_probe_turn";
+  | "event_probe_index";
 
 export interface SmithersCompatibilityPatch {
   /** Stable name this patch is reported under by `doctor`. */
@@ -993,6 +996,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     upstreamAbsent: []
   },
   {
+    id: "lifecycle_trace_summary",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/observability-helpers.js",
+    patchable: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE,
+    patched: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH,
+    upstreamAbsent: ['"AgentTraceSummary"']
+  },
+  {
     id: "engine_workflow_path",
     packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
@@ -1111,38 +1122,6 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE,
     patched: SMITHERS_DB_EVENT_PROBE_INDEX_PATCH,
     // Upstream creating its own probe-covering events index retires the family.
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
-  },
-  {
-    id: "event_probe_transaction",
-    packageName: "@smthrs/db",
-    sourceRelativePath: "src/adapter.js",
-    patchable: SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE,
-    patched: SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH,
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
-  },
-  {
-    id: "event_probe_precheck",
-    packageName: "@smthrs/db",
-    sourceRelativePath: "src/adapter.js",
-    patchable: SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE,
-    patched: SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH,
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
-  },
-  {
-    id: "event_probe_fallback",
-    packageName: "@smthrs/db",
-    sourceRelativePath: "src/adapter.js",
-    patchable: SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE,
-    patched: SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH,
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
-  },
-  {
-    id: "event_probe_turn",
-    packageName: "@smthrs/db",
-    sourceRelativePath: "src/adapter.js",
-    patchable: SMITHERS_DB_EVENT_PROBE_TURN_SOURCE,
-    patched: SMITHERS_DB_EVENT_PROBE_TURN_PATCH,
     upstreamAbsent: ["_smithers_events_insert_probe_idx"]
   }
 ];
@@ -1326,6 +1305,7 @@ export interface CompiledSmithersWorkflow {
   tasks: readonly CompiledSmithersTask[];
   dynamicGroups: readonly CompiledSmithersDynamicGroup[];
   maxDynamicNodes: number;
+  replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
   projectRoot: string;
@@ -1351,6 +1331,104 @@ export interface RefreshedSmithersControllerSnapshot {
   snapshot: VerifiedWorkflowControlSnapshot;
   controllerSourceDigest: string;
   semanticFingerprint: string;
+}
+
+function currentControllerTasks(
+  layout: RunLayout,
+  tasks: SmithersTaskManifestDocument
+): readonly CompiledSmithersTask[] {
+  const plan = readRunPlanDocument(path.join(layout.root, "plan.json"), layout.runId);
+  const plannedPrompts = new Map(plan.rendered_prompts.map((prompt) => [prompt.attempt_id, prompt]));
+  return tasks.tasks.map((task) => {
+    if (task.renderedPromptPath === undefined) return task;
+    const planned = plannedPrompts.get(task.attemptId);
+    if (planned === undefined) {
+      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
+    }
+    const snapshotPath = safeResolveInside(
+      layout.root,
+      planned.rendered_prompt_snapshot_path,
+      `retained rendered prompt snapshot for ${task.attemptId}`
+    );
+    if (task.renderedPromptPath !== planned.rendered_prompt_path && task.renderedPromptPath !== snapshotPath) {
+      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
+    }
+    assertRegularFileInside(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
+    assertNoSymlinkComponents(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
+    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES).toString("utf8");
+    if (sha256Stable(contents) !== planned.rendered_prompt_digest) {
+      throw new Error(`retained rendered prompt snapshot digest does not match task ${task.attemptId}`);
+    }
+    return { ...task, renderedPromptPath: snapshotPath };
+  });
+}
+
+/**
+ * Render the current controller beside, rather than over, the source that
+ * originally launched a stopped run. Smithers records this path and its
+ * workflow hash as continuation provenance; neither value authorizes resume.
+ */
+export function renderCurrentSmithersController(input: {
+  projectRoot: string;
+  layout: RunLayout;
+  smithersRunId: string;
+  tasks: SmithersTaskManifestDocument;
+  config: ResolvedConfig;
+  expandedGraph?: unknown;
+}): string {
+  const projectRoot = path.resolve(input.projectRoot);
+  const tasks = currentControllerTasks(input.layout, input.tasks);
+  const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
+  const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
+  const packagedController = loadPackagedControllerSource();
+  for (const file of packagedController.files) {
+    writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
+  }
+  const nonBlockingAttempts = new Set(
+    tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
+  );
+  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
+  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
+  for (const task of tasks) {
+    const groupId = task.metadata.node.group;
+    const group = groupId === undefined ? undefined : groups[groupId];
+    const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
+    if (defaults.failure_policy === "continue") nonBlockingAttempts.add(task.attemptId);
+  }
+  const compiled: CompiledSmithersWorkflow = {
+    schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+    runId: input.layout.runId,
+    smithersRunId: input.smithersRunId,
+    workflowName: input.tasks.workflow_name,
+    tasks,
+    dynamicGroups: input.tasks.dynamic_groups ?? [],
+    maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: true,
+    nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
+    projectRoot,
+    runRoot: input.layout.root,
+    ...(input.tasks.source_revision === undefined ? {} : { sourceRevision: input.tasks.source_revision }),
+    ...(input.tasks.source_ref === undefined ? {} : { sourceRef: input.tasks.source_ref }),
+    workflowPath,
+    evidenceWorkflowPath: path.join(input.layout.root, "smithers", "workflow.tsx"),
+    expandedGraphPath: path.join(input.layout.root, "smithers", "expanded-graph.json"),
+    configPath: path.join(input.layout.root, "smithers", "config.fingerprint-input"),
+    resolvedConfigPath: path.join(input.layout.root, "smithers", "resolved-config.json"),
+    executionConfigPath: path.join(input.layout.root, "smithers", "execution-config.toml"),
+    inputPath: path.join(input.layout.root, "smithers", "input.json"),
+    tasksPath: path.join(input.layout.root, "smithers", "tasks.json"),
+    logsDir: path.join(input.layout.root, "smithers", "logs"),
+    productionSourceRoots: input.config.permissions.productionSourceRoots,
+    controllerSourceDigest: packagedController.digest,
+    ...(input.tasks.pinned_submodules === null ? {} : { pinnedSubmodules: input.tasks.pinned_submodules })
+  };
+  writePreparedWorkflowFile(
+    projectRoot,
+    workflowPath,
+    renderWorkflowSource(compiled, input.config),
+    "current continuation workflow"
+  );
+  return workflowPath;
 }
 
 /**
@@ -1413,6 +1491,7 @@ export function refreshedSmithersControllerSnapshot(input: {
     tasks: taskDocument.tasks,
     dynamicGroups: taskDocument.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: true,
     nonBlockingAttemptIds,
     projectRoot,
     runRoot: input.layout.root,
@@ -2021,6 +2100,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     tasks,
     dynamicGroups,
     maxDynamicNodes: input.config.run.maxDynamicNodes,
+    replacePromptSchemas: false,
     nonBlockingAttemptIds,
     projectRoot,
     runRoot: input.runLayout.root,
@@ -3048,7 +3128,6 @@ export async function runSmithersLifecycleCommand(input: {
   label?: string;
   relaunchPaths?: {
     runRoot: string;
-    inputPath: string;
     inputJson?: string;
     logsDir: string;
   };
@@ -3056,16 +3135,11 @@ export async function runSmithersLifecycleCommand(input: {
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
-  controllerRefreshAuthority?: {
-    controllerGeneration: string;
-    executionSnapshotRoot: string;
-  };
 }): Promise<{
   stdout: string;
   stderr: string;
   command: string[];
   workflowRunId?: string;
-  recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
   // Every `up` invocation has to name the run-scoped log directory. Without `--log-dir` the
@@ -3084,79 +3158,24 @@ export async function runSmithersLifecycleCommand(input: {
     return ["--log-dir", paths.logsDir];
   };
   const workflowRelaunchInputJson = (): string => {
-    const paths = input.relaunchPaths;
-    if (paths === undefined) throw new Error("workflow relaunch paths are unavailable");
-    if (paths.inputJson !== undefined) return paths.inputJson;
-    if (hasWorkflowExecutionSnapshotCapability(input.env)) {
-      throw new Error("sealed workflow relaunch is missing its materialized input bytes");
+    const inputJson = input.relaunchPaths?.inputJson;
+    if (inputJson === undefined) {
+      throw new Error("sealed workflow relaunch input is unavailable");
     }
-    assertRegularFileInside(paths.runRoot, paths.inputPath, "persisted workflow input");
-    return fs.readFileSync(paths.inputPath, "utf8");
+    return inputJson;
   };
   const workflowChangeAcceptanceArgs = (): readonly string[] => {
-    const authority = input.controllerRefreshAuthority;
-    if (authority === undefined) return [];
-    if (!SHA256_DIGEST.test(authority.controllerGeneration)) {
-      throw new Error("controller refresh authority has an invalid generation");
-    }
-    const snapshotRoot = path.resolve(authority.executionSnapshotRoot);
-    if (path.basename(snapshotRoot) !== authority.controllerGeneration) {
-      throw new Error("controller refresh authority does not match its execution snapshot");
-    }
-    assertRegularFileInside(snapshotRoot, input.workflowPath, "refreshed controller workflow");
-    return ["--accept-workflow-change"];
+    return input.action === "resume" ? ["--accept-workflow-change"] : [];
   };
 
   let preResumeStderr = "";
   let currentInspection: CurrentSmithersInspect | undefined;
-  if (input.action === "resume" && input.relaunchPaths !== undefined) {
+  if (input.action === "resume" && (input.retryFailed === true || input.resetNode !== undefined)) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotReportsMissingRun(inspection)) {
-      const recoveryLogDirArgs = workflowLogDirArgs();
-      const inputJson = workflowRelaunchInputJson();
-      const recoveryCommand = [
-        "up",
-        input.workflowPath,
-        "--detach",
-        "--run-id",
-        input.smithersRunId,
-        ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-        "--root",
-        input.projectRoot,
-        ...recoveryLogDirArgs,
-        "--input",
-        inputJson,
-        "--format",
-        "json",
-        ...supervisorCommandArgs(input.controllerLeaseSeconds)
-      ];
-      const recoveryResult = await execSmithersCli({
-        args: recoveryCommand,
-        projectRoot: input.projectRoot,
-        env: input.env,
-        environmentVariableNames: input.environmentVariableNames,
-        keepWorkspaces: input.keepWorkspaces
-      });
-      writeRuntimeDocument(
-        path.join(path.dirname(input.relaunchPaths.inputPath), "recovery-submission.json"),
-        SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
-        {
-          schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
-          smithers_run_id: input.smithersRunId,
-          recovery: "missing-workflow-run",
-          command: recoveryResult.command,
-          stdout: redactedEvidenceText(recoveryResult.stdout),
-          stderr: redactedEvidenceText(recoveryResult.stderr),
-          submitted_at: new Date().toISOString()
-        },
-        "Smithers recovery submission evidence"
-      );
-      return { ...recoveryResult, recoveredMissingRun: true };
-    }
     if (!inspection.ok) {
       throw new Error(
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
@@ -3229,7 +3248,7 @@ export async function runSmithersLifecycleCommand(input: {
     const resetMarkerPath =
       input.relaunchPaths === undefined
         ? undefined
-        : path.join(path.dirname(input.relaunchPaths.inputPath), "reset-node-applied.json");
+        : path.join(input.relaunchPaths.runRoot, "smithers", "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
       // A failure can be durable in the canonical node snapshot even when the
@@ -3273,7 +3292,7 @@ export async function runSmithersLifecycleCommand(input: {
           "Smithers reset-node marker"
         );
         writeRuntimeDocument(
-          path.join(path.dirname(input.relaunchPaths!.inputPath), "cloud-execution-generation.json"),
+          path.join(input.relaunchPaths!.runRoot, "smithers", "cloud-execution-generation.json"),
           CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
           {
             schema_version: CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
@@ -3330,6 +3349,12 @@ export async function runSmithersLifecycleCommand(input: {
   }
 
   if (input.action === "fork" && input.forkFrame !== undefined) {
+    // A Smithers fork persists frame 0 before the child has an input-table row.
+    // Detached-launch preflight runs before engine resume can restore that row
+    // from the child snapshot, so it needs the authenticated relaunch input to
+    // render the workflow. Resolve it before creating the child so a missing
+    // sealed input fails without leaving an unlinked fork behind.
+    const forkRelaunchInputJson = workflowRelaunchInputJson();
     const forkCommand = [
       "fork",
       input.workflowPath,
@@ -3363,6 +3388,8 @@ export async function runSmithersLifecycleCommand(input: {
       forkedRunId,
       "--force",
       "--detach",
+      "--input",
+      forkRelaunchInputJson,
       ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
       ...workflowLogDirArgs(),
       "--format",
@@ -4223,18 +4250,32 @@ async function prepareSmithersExecutableEnvironment(
   const controllerRoot = await operatorControllerProjectRoot(projectRoot, env, control);
   const packageRoot = resolveInstalledSmithersPackageRoot(controllerRoot);
   const executable = path.join(packageRoot, ...SMITHERS_BIN_PATH.split("/"));
-  const bunModuleConfinement = writeCurrentBunStartupControls(controllerRoot);
+  const nativeContinuation = isNativeSmithersContinuation(env);
+  const bunModuleConfinement = nativeContinuation ? undefined : writeCurrentBunStartupControls(controllerRoot);
   const controllerSeal = operatorControllerProjectSeal(controllerRoot);
-  return bindOperatorSmithersExecutableCapability(
-    { ...(env ?? {}), ULTRAFUZZ_BUN_MODULE_CONFINEMENT: bunModuleConfinement },
+  const prepared = bindOperatorSmithersExecutableCapability(
+    {
+      ...(env ?? {}),
+      ...(bunModuleConfinement === undefined ? {} : { ULTRAFUZZ_BUN_MODULE_CONFINEMENT: bunModuleConfinement })
+    },
     executable,
     controllerRoot,
     () => {
       if (operatorControllerProjectSeal(controllerRoot) !== controllerSeal)
         throw new Error("operator controller changed during execution");
     },
-    projectRoot
+    projectRoot,
+    nativeContinuation
   );
+  if (nativeContinuation) {
+    // Smithers detaches the resumed engine and supervisor. Their patched
+    // relaunch paths still refer to this operator-owned package closure after
+    // the submitting Ultrafuzz process exits, so it must outlive process-local
+    // controller cleanup. The OS temporary-directory policy remains the outer
+    // reclamation boundary.
+    operatorControllerRoots.delete(controllerRoot);
+  }
+  return prepared;
 }
 
 async function ensureSmithersDependencies(
@@ -4538,10 +4579,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const runnerSource = path.join(runnerRoots[0]!, ...SMITHERS_BIN_PATH.split("/"));
   const packageJson = path.join(packageRoot, "package.json");
   const cliSource = path.join(packageRoot, "src", "index.js");
+  const observabilitySource = path.join(packageRoot, "src", "observability-helpers.js");
   const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
   assertRegularFileInside(nodeModules, runnerSource, "installed Smithers public entrypoint");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
+  assertRegularFileInside(nodeModules, observabilitySource, "installed Smithers observability implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
   const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
   if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
@@ -4591,6 +4634,15 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     cliContents = applyRequiredSmithersPatch(cliContents, source, patched, label, predecessors, patchedMarkers);
   }
   writeFileDurable(cliSource, cliContents);
+  writeFileDurable(
+    observabilitySource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(observabilitySource, "utf8"),
+      SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE,
+      SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH,
+      "lifecycle trace summary visibility"
+    )
+  );
   const resumeDetachedContents = fs.readFileSync(resumeDetachedSource, "utf8");
   writeFileDurable(
     resumeDetachedSource,
@@ -4695,10 +4747,8 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const dbRoot = dbRoots[0]!;
   const dbPackageJson = path.join(dbRoot, "package.json");
   const dbSchemaMigrationsSource = path.join(dbRoot, "src", "schema-migrations.js");
-  const dbAdapterSource = path.join(dbRoot, "src", "adapter.js");
   assertRegularFileInside(nodeModules, dbPackageJson, "installed Smithers event-store package metadata");
   assertRegularFileInside(nodeModules, dbSchemaMigrationsSource, "installed Smithers event-store schema migrations");
-  assertRegularFileInside(nodeModules, dbAdapterSource, "installed Smithers event-store implementation");
   const dbMetadata = readPackageManagerOwnedManifestEnvelope(
     dbPackageJson,
     "installed Smithers event-store package manifest"
@@ -4715,20 +4765,6 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "event insert probe index"
     )
   );
-  let dbAdapterContents = fs.readFileSync(dbAdapterSource, "utf8");
-  for (const [source, patched, label] of [
-    [
-      SMITHERS_DB_EVENT_PROBE_TRANSACTION_SOURCE,
-      SMITHERS_DB_EVENT_PROBE_TRANSACTION_PATCH,
-      "transactional event insert probe"
-    ],
-    [SMITHERS_DB_EVENT_PROBE_PRECHECK_SOURCE, SMITHERS_DB_EVENT_PROBE_PRECHECK_PATCH, "event insert probe pre-check"],
-    [SMITHERS_DB_EVENT_PROBE_FALLBACK_SOURCE, SMITHERS_DB_EVENT_PROBE_FALLBACK_PATCH, "fallback event insert probe"],
-    [SMITHERS_DB_EVENT_PROBE_TURN_SOURCE, SMITHERS_DB_EVENT_PROBE_TURN_PATCH, "turn-serialized event insert probe"]
-  ] as const) {
-    dbAdapterContents = applyRequiredSmithersPatch(dbAdapterContents, source, patched, label);
-  }
-  writeFileDurable(dbAdapterSource, dbAdapterContents);
 }
 
 function applyRequiredSmithersPatch(
@@ -5068,6 +5104,12 @@ function smithersCommandEnv(
   keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  // A native continuation deliberately loads the persisted workflow from the
+  // target tree, which has no installed controller dependencies in production.
+  // Derive Bun's package fallback from the private operator capability after
+  // dropping ambient NODE_PATH below; detached children inherit this trusted
+  // path for the lifetime of the continued workflow (#973).
+  const nativeOperatorNodePath = nativeOperatorSmithersNodePath(env);
   source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS ??= SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
   if (keepWorkspaces !== undefined) {
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
@@ -5090,6 +5132,7 @@ function smithersCommandEnv(
       merged[key] = value;
     }
   }
+  if (nativeOperatorNodePath !== undefined) merged.NODE_PATH = nativeOperatorNodePath;
   merged.PATH = composeSmithersCommandPath(projectRoot, source);
   return merged;
 }
@@ -5913,11 +5956,20 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
-  const compiledTasks = JSON.stringify(compiled.tasks, null, 2);
-  const dynamicGroups = JSON.stringify(compiled.dynamicGroups, null, 2);
+  const controllerTasks = compiled.replacePromptSchemas
+    ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
+    : compiled.tasks;
+  const controllerDynamicGroups = compiled.replacePromptSchemas
+    ? compiled.dynamicGroups.map((group) => ({
+        ...group,
+        taskTemplates: group.taskTemplates.map((task) => taskWithCurrentArtifactSchemas(task))
+      }))
+    : compiled.dynamicGroups;
+  const compiledTasks = JSON.stringify(controllerTasks, null, 2);
+  const dynamicGroups = JSON.stringify(controllerDynamicGroups, null, 2);
   const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
   const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
-  for (const task of compiled.tasks) {
+  for (const task of controllerTasks) {
     const artifactDir = path.resolve(task.artifactDir);
     if (taskByArtifactDir.has(artifactDir)) {
       throw new Error(`multiple compiled tasks share artifact directory ${JSON.stringify(artifactDir)}`);
@@ -5925,7 +5977,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     taskByArtifactDir.set(artifactDir, task);
   }
   const taskSpecs = JSON.stringify(
-    compiled.tasks.map((task) => ({
+    controllerTasks.map((task) => ({
       id: task.smithersNodeId,
       smithersRunId: compiled.smithersRunId,
       preparationId: task.preparationSmithersNodeId,
@@ -6023,9 +6075,40 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
+    __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__: JSON.stringify(compiled.replacePromptSchemas),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });
+}
+
+function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
+  return {
+    ...task,
+    metadata: {
+      ...task.metadata,
+      artifacts: {
+        ...task.metadata.artifacts,
+        outputs: task.metadata.artifacts.outputs.map((output) => {
+          const binding = artifactContractSchemaBinding(output.contract);
+          return {
+            path: output.path,
+            contract: output.contract,
+            contractDigest: artifactContractDefinition(output.contract).digest,
+            primary: output.primary,
+            ...(binding === undefined
+              ? {}
+              : {
+                  schemaFile: binding.schema_file,
+                  schemaId: binding.schema_id,
+                  schemaSha256: binding.schema_sha256,
+                  schemaBundleSha256: binding.schema_bundle_sha256,
+                  validatorBuild: binding.validator_build
+                })
+          };
+        })
+      }
+    }
+  };
 }
 
 function dependencyVerificationProducersForTask(

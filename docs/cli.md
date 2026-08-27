@@ -120,7 +120,7 @@ publication. Use the commands in the rendered Output Contract and run
   envelope.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
-- `resume <run-id>` continues a paused run using the existing linked workflow.
+- `resume <run-id>` delegates same-ID native continuation to Smithers and automatically accepts changed workflow source; `--refresh-controller` renders the current controller first.
 - `cancel <run-id>` halts a run for good. A submitted request reports
   `cancel-requested`; a confirmed cancellation records the canonical terminal
   `canceled` state.

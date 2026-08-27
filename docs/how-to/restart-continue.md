@@ -42,14 +42,25 @@ state:
 ```bash
 ultrafuzz resume <run-id> --project /path/to/target-protocol
 ultrafuzz resume <run-id> --project /path/to/target-protocol --max-concurrency 4
+ultrafuzz resume <run-id> --project /path/to/target-protocol --refresh-controller
 ultrafuzz resume <run-id> --project /path/to/target-protocol \
   --reset-node node:failed-task --max-concurrency 4
 ```
 
-Resume delegates to the workflow engine and records updated lifecycle evidence
-for the same Ultrafuzz run. When the linked workflow is still active (running,
-queued, retrying, or waiting), resume keeps the existing run attached instead
-of submitting a duplicate continuation.
+Resume sends the persisted workflow and same run ID to Smithers with workflow
+change acceptance enabled. Smithers reuses its durable finished rows and runs
+only unfinished or newly rendered downstream tasks. Ultrafuzz control seals,
+link journals, controller generations, graph fingerprints, schema bindings,
+and metadata projections do not authorize continuation, so runs created before
+those records existed can still reach Smithers. Historical artifact bytes and
+embedded run IDs are never rewritten.
+
+Use `--refresh-controller` when continuation should render the currently
+installed controller and stock adapters. The new source is retained beside the
+historical source, and the same Smithers run is continued. An actively owned
+workflow is not refreshed. Accepting changed workflow source transfers replay
+determinism responsibility to Smithers and the operator; review the retained
+source and Smithers workflow hash when that distinction matters.
 
 Usage recorded before the continuation remains in the run's append-only usage
 ledger. After synchronization, segment rollups remain attributable to their
@@ -60,11 +71,9 @@ Completed node attempts remain in `attempts.jsonl` across every continuation.
 `ultrafuzz inspect` derives its executed and reused attempt counts from that
 append-only ledger rather than from a mutable lifecycle counter.
 
-Use `--reset-node` to retry one failed workflow node and reset its dependents
-before the linked run continues. The reset is recorded in run evidence before
-the continuation launches; if the continuation fails to start, rerun the same
-resume command and Ultrafuzz continues the already-reset run without repeating
-the reset.
+Use `--reset-node` to explicitly retry one failed workflow node and reset its
+dependents before the linked run continues. Ordinary resume performs no reset,
+timetravel, replay, or fork.
 
 ## Replay A Linked Run
 

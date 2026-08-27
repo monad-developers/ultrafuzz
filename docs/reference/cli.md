@@ -306,24 +306,22 @@ ultrafuzz fork <run-id> \
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
 and maps workflow details into the stable Ultrafuzz JSON envelope.
 
-`resume --refresh-controller` is a recovery-only compatibility operation for a
-stopped or terminal workflow. It rebuilds the controller-owned workflow,
-Ultrafuzz modules, and stock adapters from the currently installed Ultrafuzz
-packages, publishes them as a new immutable execution snapshot, and resumes the
-same Ultrafuzz and workflow run IDs. The original control generation and every
-older snapshot remain retained. Sealed graph, task, prompt, configuration,
-operator-input, source, reference, and target semantics must remain byte-for-byte
-authenticated; this option cannot upgrade dependencies or change campaign
-inputs. Active workflows are rejected so two controller generations can never
-execute concurrently. A durable generation journal reconciles interrupted
-manifest, snapshot, event, and metadata publication on a later
-`resume --refresh-controller`. Ordinary `resume` and `resume --reset-node`
-continue using the last committed controller generation without rebuilding it.
+`resume` delegates continuation to Smithers with the same Ultrafuzz and
+Smithers run IDs and automatically accepts changed workflow source. Control
+seals, link journals, controller generations, graph fingerprints, current
+schema bindings, and metadata projections remain provenance for inspection;
+they are not resume authorization. Smithers decides which finished rows can be
+reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
+rewrite historical artifacts or automatically reset, replay, timetravel, or
+fork completed work.
 
-Runs created before workflow control seals and authenticated link journals
-cannot be resumed or inspected safely in place. Their stored artifacts remain
-available, but lifecycle commands report the missing evidence and require a new
-run ID rather than constructing a seal or link from mutable historical state.
+`resume --refresh-controller` first renders the currently installed Ultrafuzz
+controller and stock adapters beside the historical source, then delegates to
+that same Smithers run. It does not publish or authenticate a historical
+controller generation. Refresh rejects an actively owned workflow. Because
+Smithers admits changed workflow source, replay determinism is the operator's
+responsibility; inspect the retained source and Smithers workflow hash when
+auditing a continuation.
 
 `status` human output is watch-friendly:
 

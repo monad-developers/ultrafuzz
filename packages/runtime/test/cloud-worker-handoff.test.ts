@@ -63,6 +63,7 @@ test("a relocated cloud worker runs its dispatched attempt without controller-ow
     const agentTasks = rendered.filter((task) => task.component === "Task" && task.props.agent !== undefined);
     assert.equal(agentTasks.length, 1, `${concreteNodeId} must render exactly one agent task`);
     assert.equal(agentTasks[0]!.id, sandboxInput.task_id);
+    assert.deepEqual(agentTasks[0]!.props.output, { __output: "agentProcess" });
     assert.equal(
       rendered.some((task) => task.component === "Sandbox"),
       false,

@@ -297,10 +297,25 @@ export function assertTrustedCliLauncher(input: { layout: RunLayout; launcherPat
   return { metadata, closure };
 }
 
+// Every closure handed to the preflight has just been verified against its own
+// content address: the manifest digest commits to the CLI entrypoint, the
+// validator preflight schema and fixture, and every packaged dependency byte,
+// and verification ties each of those bytes on disk back to that manifest. So a
+// content address this process already authenticated against the same expected
+// identity cannot answer differently, and re-launching the CLI for it only pays
+// another interpreter start. Only the authenticated result is remembered, in
+// this process, and never any verification: each run still verifies its own
+// closure, still executes the real fixture through its own run-owned launcher in
+// `runTrustedJsonValidatorPreflight`, and that launcher re-verifies the whole
+// closure on every dispatch.
+const authenticatedClosurePreflights = new Set<string>();
+
 function preflightTrustedCliClosure(
   closure: TrustedCliClosure,
   expected: { validator_build: string; schema_bundle_sha256: string }
 ): void {
+  const authenticated = [closure.digest, expected.validator_build, expected.schema_bundle_sha256].join("\0");
+  if (authenticatedClosurePreflights.has(authenticated)) return;
   const paths = closurePreflightPaths(closure);
   const stdout = execFileSync(
     process.execPath,
@@ -332,6 +347,7 @@ function preflightTrustedCliClosure(
     validatorBuild: expected.validator_build,
     artifactSha256: paths.fixtureSha256
   });
+  authenticatedClosurePreflights.add(authenticated);
 }
 
 function closurePreflightPaths(closure: TrustedCliClosure): {

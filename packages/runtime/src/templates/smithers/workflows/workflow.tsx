@@ -5,7 +5,17 @@
 /** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  unlinkSync
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -64,6 +74,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  RUN_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
@@ -266,8 +277,8 @@ const inputSchema = z
     }
   });
 
-const taskOutput = z.strictObject({
-  summary: z.string().min(1)
+const agentProcessOutput = z.strictObject({
+  completed: z.literal(true)
 });
 
 const preparationOutput = z.strictObject({
@@ -319,7 +330,7 @@ const unreachableCommitCountCommand =
 
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
-  task: taskOutput,
+  agentProcess: agentProcessOutput,
   preparation: preparationOutput,
   verification: verificationOutput
 });
@@ -333,6 +344,7 @@ const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
+const replacePromptSchemas = __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
@@ -1421,10 +1433,16 @@ function admitWorkflowControls(loadedPath: string, persistedPath: string | undef
   const loadedExecutionSnapshotRoot = workflowExecutionSnapshotRoot(loadedPath);
   const persistedExecutionSnapshotRoot =
     persistedPath === undefined ? undefined : workflowExecutionSnapshotRoot(persistedPath);
+  // Native continuation may load the persisted project workflow directly, or
+  // a current controller rendered under .smithers/continuations. Neither path
+  // is an authenticated execution snapshot, but Smithers and the workflow still
+  // agree on one physical entrypoint. Snapshot-only task controls remain absent
+  // in that case and use the existing direct-workflow fallbacks below. Never
+  // combine one snapshot-derived path with one native path, even if an alias
+  // happens to resolve both to the same file.
   if (
     persistedPath !== undefined &&
-    (loadedExecutionSnapshotRoot === undefined ||
-      persistedExecutionSnapshotRoot === undefined ||
+    ((loadedExecutionSnapshotRoot === undefined) !== (persistedExecutionSnapshotRoot === undefined) ||
       realpathSync(loadedPath) !== realpathSync(persistedPath))
   ) {
     throw new Error("persisted workflow path does not identify the loaded execution snapshot");
@@ -1581,6 +1599,7 @@ const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
 // Current main intentionally starts automatic retries from the effective original prompt. Keep the
 // release template sealed into the generated workflow without reintroducing diagnostic injection.
 const retryFailureTemplate = __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__;
+void retryFailureTemplate;
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
@@ -2191,7 +2210,7 @@ type FinalReportRunMetadataProjection = {
   tokens_used: string;
   estimated_spend: string;
   partial_pricing: boolean;
-  strategy_loops: number;
+  strategy_loops: number | "unavailable";
   audit_profile: string;
   audit_profile_catalog_digest: string;
   topology_digest: string;
@@ -2294,12 +2313,62 @@ function normalizeFinalReportGitHubRepository(task: (typeof taskSpecs)[number]):
   return normalizeFinalReportGitHubRemote(remote);
 }
 
-function finalReportElapsedTime(createdAt: string, updatedAt: string | undefined): string {
-  if (updatedAt === undefined) return "unavailable";
-  const started = Date.parse(createdAt);
-  const finished = Date.parse(updatedAt);
-  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) return "unavailable";
-  const totalSeconds = (finished - started) / 1_000;
+function finalReportOptionalRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!isPlainJsonRecord(value)) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return value;
+}
+
+function finalReportOptionalString(value: unknown, label: string): string {
+  if (value === undefined) return "unavailable";
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return value;
+}
+
+function finalReportOptionalSha256(value: unknown, label: string): string {
+  const projected = finalReportOptionalString(value, label);
+  if (projected !== "unavailable" && !/^[a-f0-9]{64}$/u.test(projected)) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return projected;
+}
+
+function finalReportOptionalStringArray(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string" || entry.length === 0) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
+  }
+  return [...value];
+}
+
+function finalReportElapsedTime(createdAt: unknown, updatedAt: unknown): string {
+  if (
+    (createdAt !== undefined && typeof createdAt !== "string") ||
+    (updatedAt !== undefined && typeof updatedAt !== "string")
+  ) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  const started = createdAt === undefined ? undefined : Date.parse(createdAt);
+  const finished = updatedAt === undefined ? undefined : Date.parse(updatedAt);
+  if (
+    (createdAt !== undefined && (!Number.isFinite(started) || new Date(started!).toISOString() !== createdAt)) ||
+    (updatedAt !== undefined && (!Number.isFinite(finished) || new Date(finished!).toISOString() !== updatedAt))
+  ) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  if (createdAt === undefined || updatedAt === undefined) return "unavailable";
+  if (finished! < started!) {
+    throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+  }
+  const totalSeconds = (finished! - started!) / 1_000;
   if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
   const totalMinutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
@@ -2318,44 +2387,65 @@ function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[numb
     MAX_FINAL_REPORT_RUN_METADATA_BYTES,
     true
   );
-  let metadata: ReturnType<typeof assertRunMetadataDocument>;
-  try {
-    metadata = assertRunMetadataDocument(
-      parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid"),
-      task.metadata.run.ultrafuzzRunId
-    );
-  } catch (error) {
-    throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`, {
-      cause: error
-    });
+  const parsed = parseStrictJsonSnapshot(snapshot, "artifact-contract failure: final-report run metadata is invalid");
+  if (!isPlainJsonRecord(parsed) || parsed.run_id !== task.metadata.run.ultrafuzzRunId) {
+    throw new Error(`artifact-contract failure: final-report run metadata has the wrong run ID ${task.attemptId}`);
   }
-  const auditProfile = metadata.audit_profile;
-  const strategyLoops = auditProfile?.effective_settings.strategy_loops;
-  if (
-    auditProfile === undefined ||
-    typeof strategyLoops !== "number" ||
-    !Number.isSafeInteger(strategyLoops) ||
-    strategyLoops < 0
-  ) {
-    throw new Error(`artifact-contract failure: final-report audit profile is unavailable ${task.attemptId}`);
+  let metadata = parsed;
+  if (metadata.schema_version === RUN_METADATA_SCHEMA_VERSION) {
+    try {
+      metadata = assertRunMetadataDocument(metadata, task.metadata.run.ultrafuzzRunId);
+    } catch (error) {
+      throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`, {
+        cause: error
+      });
+    }
+  } else if (metadata.schema_version !== undefined && typeof metadata.schema_version !== "string") {
+    throw new Error(`artifact-contract failure: final-report run metadata is invalid ${task.attemptId}`);
   }
-  const accounting = metadata.accounting?.cumulative;
+  const auditProfile = finalReportOptionalRecord(metadata.audit_profile, "audit profile");
+  const effectiveSettings = finalReportOptionalRecord(auditProfile.effective_settings, "audit-profile settings");
+  const configuredStrategyLoops = effectiveSettings.strategy_loops;
+  let strategyLoops: number | "unavailable" = "unavailable";
+  if (configuredStrategyLoops !== undefined) {
+    if (
+      typeof configuredStrategyLoops !== "number" ||
+      !Number.isSafeInteger(configuredStrategyLoops) ||
+      configuredStrategyLoops < 0
+    ) {
+      throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${task.attemptId}`);
+    }
+    strategyLoops = configuredStrategyLoops;
+  }
+  const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
+  const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
+  const models = finalReportOptionalStringArray(accounting.models, "accounting models");
+  const sourceRunIds = finalReportOptionalStringArray(accounting.source_run_ids, "accounting source run IDs");
+  if (accounting.partial_pricing !== undefined && typeof accounting.partial_pricing !== "boolean") {
+    throw new Error(`artifact-contract failure: final-report partial pricing is malformed ${task.attemptId}`);
+  }
   return {
-    run_id: metadata.run_id,
-    source_run_id: metadata.source_run_id ?? "none",
+    run_id: task.metadata.run.ultrafuzzRunId,
+    source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
-    elapsed_time: finalReportElapsedTime(metadata.created_at, metadata.accounting?.updated_at),
-    models_used: [...(accounting?.models ?? [])],
-    tokens_used: accounting?.tokens_used ?? "unavailable",
-    estimated_spend: accounting?.estimated_spend ?? "unavailable",
-    partial_pricing: accounting?.partial_pricing ?? false,
+    elapsed_time: finalReportElapsedTime(metadata.created_at, accountingRoot.updated_at),
+    models_used: models,
+    tokens_used: finalReportOptionalString(accounting.tokens_used, "tokens used"),
+    estimated_spend: finalReportOptionalString(accounting.estimated_spend, "estimated spend"),
+    partial_pricing: accounting.partial_pricing ?? false,
     strategy_loops: strategyLoops,
-    audit_profile: auditProfile.effective,
-    audit_profile_catalog_digest: auditProfile.catalog_digest,
-    topology_digest: auditProfile.topology_digest,
-    prompt_digest: auditProfile.prompt_digest,
-    expanded_graph_fingerprint: auditProfile.expanded_graph_fingerprint,
-    ...(accounting === undefined ? {} : { source_run_ids: [...accounting.source_run_ids] })
+    audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
+    audit_profile_catalog_digest: finalReportOptionalSha256(
+      auditProfile.catalog_digest,
+      "audit-profile catalog digest"
+    ),
+    topology_digest: finalReportOptionalSha256(auditProfile.topology_digest, "topology digest"),
+    prompt_digest: finalReportOptionalSha256(auditProfile.prompt_digest, "prompt digest"),
+    expanded_graph_fingerprint: finalReportOptionalSha256(
+      auditProfile.expanded_graph_fingerprint,
+      "expanded-graph fingerprint"
+    ),
+    ...(sourceRunIds.length === 0 ? {} : { source_run_ids: sourceRunIds })
   };
 }
 
@@ -3026,9 +3116,10 @@ function artifactAwareAgent(
     ...(configuredModel === undefined ? {} : { model: configuredModel }),
     ...(agent.tools === undefined ? {} : { tools: agent.tools }),
     ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
-    ...(agent.supportsNativeStructuredOutput === undefined
-      ? {}
-      : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
+    // The wrapper, not the model, owns the Smithers output row. Advertising
+    // native structured output prevents Smithers from adding a JSON contract
+    // to the model prompt or opening correction turns for terminal telemetry.
+    supportsNativeStructuredOutput: true,
     ...(typeof continuationAgent.cliEngine === "string" ? { cliEngine: continuationAgent.cliEngine } : {}),
     ...(typeof continuationAgent.hijackEngine === "string" ? { hijackEngine: continuationAgent.hijackEngine } : {}),
     ...(agent.parseFileChanges === undefined ? {} : { parseFileChanges: agent.parseFileChanges.bind(agent) }),
@@ -3044,7 +3135,9 @@ function artifactAwareAgent(
               if (executionAgent.preflight === undefined) {
                 throw new Error("agent factory changed its preflight capability");
               }
-              return await executionAgent.preflight(args);
+              const preflightArgs = { ...args };
+              Reflect.deleteProperty(preflightArgs, "outputSchema");
+              return await executionAgent.preflight(preflightArgs);
             } catch (error) {
               throw freshNormalizedAgentFailure(error);
             }
@@ -3097,8 +3190,8 @@ function artifactAwareAgent(
       if (firstGenerationForAttempt && reportOutputs !== undefined) {
         materializeFinalReportPromptAuthority(task, authoritativeFinalReportCoverage(task), execution);
       }
-      // Smithers schema correction calls remain part of this same attempt and
-      // already carry the original authoritative prompt in their conversation.
+      // Any repeated generation call remains part of this same Smithers
+      // attempt and already carries the original authoritative prompt.
       const attemptArgs = firstGenerationForAttempt
         ? authoritativeFinalReportPromptAuthorityArgs(task, authoritativeFinalReportRunMetadataArgs(task, retryArgs))
         : retryArgs;
@@ -3106,12 +3199,21 @@ function artifactAwareAgent(
         executionAgent ??= admittedAgent();
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportPromptAuthorityUnchanged(task);
-        const result = await executionAgent.generate(attemptArgs);
+        // Smithers requires a durable object output for every task, but an
+        // agent's substantive output is the declared artifact set. Keep the
+        // workflow-owned process marker away from the underlying adapter so
+        // arbitrary or absent terminal text cannot become a second contract.
+        const unstructuredArgs = { ...attemptArgs };
+        Reflect.deleteProperty(unstructuredArgs, "outputSchema");
+        const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
-        return result;
+        return {
+          ...(result !== null && typeof result === "object" ? result : {}),
+          _output: { completed: true }
+        };
       } catch (error) {
         try {
           assertDependencyArtifactAdmissionCurrent(task);
@@ -3529,6 +3631,9 @@ function prepareArtifactMirror(
   );
   if (options.replayWorkspacePatches !== false) {
     preparationStep(task.attemptId, "assert-workspace-source-revision", () => assertWorkspaceSourceRevision(task));
+    preparationStep(task.attemptId, "restore-persisted-workspace-preparation", () =>
+      restorePersistedWorkspacePatchPreparationBeforeReplay(task, workspaceRoot, evidenceMode)
+    );
   }
   if (options.pinnedSubmodules === "verify") {
     preparationStep(task.attemptId, "verify-pinned-submodules", () =>
@@ -3549,7 +3654,9 @@ function prepareArtifactMirror(
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  preparationStep(task.attemptId, "materialize-prompt-schemas", () => materializePromptSchemas(schemaDirectory));
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () =>
+    materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
+  );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
   preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
@@ -3990,8 +4097,37 @@ function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string
   return parsed.preparation_tree;
 }
 
-function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  const preparationTree = workspacePatchPreparationTrees.get(task.attemptId) ?? readWorkspacePatchPreparation(task);
+function restorePersistedWorkspacePatchPreparationBeforeReplay(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  evidenceMode: "create" | "require"
+): void {
+  // A reopened producer retains its durable worktree, including source authored by the previous model
+  // execution. That tree intentionally matches neither a dependency patch's base nor any dependency
+  // result, so #312's authenticated dependency-prefix skip cannot classify it. The preparation evidence
+  // is the runtime-owned pre-agent tree captured after dependency replay; restore it BEFORE replay so the
+  // strict base-tree check continues to distinguish genuine drift from a supported producer reopen.
+  //
+  // Never restore on the post-agent `require` path: that path must preserve the current model's source
+  // until `materializeWorkspacePatch` captures it. A fresh producer has no persisted evidence and remains
+  // on the existing pinned-baseline replay path.
+  if (evidenceMode !== "create") return;
+  const persistedPreparation = readWorkspacePatchPreparation(task);
+  if (persistedPreparation === undefined) return;
+  const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
+  if (expectedPreparation !== undefined && persistedPreparation !== expectedPreparation) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
+  restoreWorkspacePatchPreparation(task, workspaceRoot, persistedPreparation);
+}
+
+function restoreWorkspacePatchPreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  persistedPreparation?: string
+): void {
+  const preparationTree =
+    workspacePatchPreparationTrees.get(task.attemptId) ?? persistedPreparation ?? readWorkspacePatchPreparation(task);
   if (preparationTree === undefined) {
     throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
   }
@@ -4035,10 +4171,27 @@ function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: strin
   for (const relativePath of candidates) {
     if (expected.has(relativePath) || isWorkspaceRuntimePath(relativePath)) continue;
     const candidate = path.resolve(workspaceRoot, ...relativePath.split("/"));
-    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || hasSymlinkComponent(workspaceRoot, candidate)) {
+    // A stale leaf symlink is safe to unlink because unlinkSync removes only
+    // the directory entry. Parent symlinks remain unsafe because they could
+    // redirect deletion outside the owned worktree.
+    if (
+      !isStrictlyInsideDirectory(workspaceRoot, candidate) ||
+      hasSymlinkComponent(workspaceRoot, path.dirname(candidate))
+    ) {
       throw new Error(`artifact-contract failure: unsafe stale workspace path ${relativePath}`);
     }
-    rmSync(candidate, { recursive: true, force: true });
+    let leaf: ReturnType<typeof lstatSync>;
+    try {
+      leaf = lstatSync(candidate);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    if (leaf.isSymbolicLink()) {
+      unlinkSync(candidate);
+    } else {
+      rmSync(candidate, { recursive: true, force: true });
+    }
   }
 }
 
@@ -8326,14 +8479,14 @@ function requireCompleteDynamicStrategyOutputTuple(task: (typeof taskSpecs)[numb
 
 function finalizeAndVerifyArtifacts(
   task: (typeof taskSpecs)[number],
-  agentTaskOutput: z.infer<typeof taskOutput> | undefined
+  agentProcess: z.infer<typeof agentProcessOutput> | undefined
 ): z.infer<typeof verificationOutput> {
   // The model session has already returned. Only explicitly runtime-owned
-  // artifacts and exact-byte companions may be materialized here. This task is
-  // always configured with zero retries so a missing or malformed agent-owned
-  // output is terminal and can never reopen or replay model work.
+  // artifacts and exact-byte companions may be materialized here. The process
+  // marker is emitted by artifactAwareAgent only after generation succeeds; a
+  // failed or killed process therefore cannot publish verified artifacts.
   clearArtifactVerificationMarker(task);
-  if (!taskOutput.safeParse(agentTaskOutput).success) {
+  if (!agentProcessOutput.safeParse(agentProcess).success) {
     throw new Error(`artifact-contract failure: agent task did not succeed ${task.attemptId}`);
   }
   prepareArtifactMirror(task, {
@@ -9076,7 +9229,7 @@ export default smithers((ctx) => {
   if (!cloudWorker) {
     recordGoalSearchCoverage(
       taskSpecs,
-      (nodeId) => ctx.outputMaybe(outputs.task, { nodeId }) !== undefined,
+      (nodeId) => ctx.outputMaybe(outputs.agentProcess, { nodeId }) !== undefined,
       (nodeId) => ctx.outputMaybe(outputs.verification, { nodeId }) !== undefined
     );
   }
@@ -9148,7 +9301,7 @@ export default smithers((ctx) => {
                     agent_credential_env: task.execution.agentCredentialEnv,
                     ...(operatorPromptInput === undefined ? {} : { operator_prompt: operatorPromptInput })
                   }}
-                  output={outputs.task}
+                  output={outputs.agentProcess}
                   dependsOn={task.dependsOn}
                   continueOnFail={task.continueOnFail}
                   allowNetwork
@@ -9164,7 +9317,7 @@ export default smithers((ctx) => {
                   output={outputs.verification}
                   dependsOn={[task.id]}
                   needs={{ agent: task.id }}
-                  deps={{ agent: outputs.task }}
+                  deps={{ agent: outputs.agentProcess }}
                   depsOptional
                   continueOnFail={task.continueOnFail}
                   retries={0}
@@ -9204,7 +9357,7 @@ export default smithers((ctx) => {
               </Task>
               <Task
                 id={task.id}
-                output={outputs.task}
+                output={outputs.agentProcess}
                 agent={agentForTask(task, fullTaskPrompt)}
                 dependsOn={[task.preparationId]}
                 continueOnFail={task.continueOnFail}
@@ -9221,7 +9374,7 @@ export default smithers((ctx) => {
                 output={outputs.verification}
                 dependsOn={[task.id]}
                 needs={{ agent: task.id }}
-                deps={{ agent: outputs.task }}
+                deps={{ agent: outputs.agentProcess }}
                 depsOptional
                 continueOnFail={task.continueOnFail}
                 retries={0}
