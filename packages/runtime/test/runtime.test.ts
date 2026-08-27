@@ -18421,6 +18421,7 @@ test("syncRun accepts a superseded unadmitted success with exact sealed trace au
         }
       },
       { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "RunStarted" },
       { type: "NodeStarted", nodeId, attempt: 1 }
     ])
   });
