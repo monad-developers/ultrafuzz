@@ -19652,6 +19652,61 @@ test("controller refresh selects current source without rewriting historical evi
   );
 });
 
+test("a refresh resume reuses its own ownership inspection instead of inspecting twice", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "controller-refresh-single-inspect";
+  const smithersRunId = `ultrafuzz-${runId}`;
+  const inspectCommand = `inspect ${smithersRunId} --format json --full-output`;
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const issuedCommands = (): string[] => fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").trim().split("\n");
+
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.submitted, true);
+  const refreshCommands = issuedCommands();
+  // Refresh proves ownership before rendering, and the resume behind it reuses
+  // that evidence. A second inspect would be a redundant subprocess per refresh
+  // and would re-derive ownership from a run the renderer has already touched.
+  assert.deepEqual(
+    refreshCommands.filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+  assert.equal(refreshCommands[0], inspectCommand);
+  assert.match(refreshCommands[1] ?? "", new RegExp(`^up .*--resume ${smithersRunId} --run-id ${smithersRunId} `, "u"));
+
+  // The reused inspection is still the authority for explicit failed-task
+  // recovery: a retrying refresh resets its failed node off one inspect.
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const retried = await resumeRun({ projectRoot: project, runId, refreshController: true, retryFailed: true, env });
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  const retryCommands = issuedCommands();
+  assert.deepEqual(
+    retryCommands.filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+  assert.equal(
+    retryCommands.some((command) => command.startsWith("timetravel ")),
+    true,
+    retryCommands.join("\n")
+  );
+
+  // An ordinary resume has no refresh inspection to inherit, so it performs its
+  // own ownership check — exactly one, never zero and never two.
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const ordinary = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
+  assert.deepEqual(
+    issuedCommands().filter((command) => command.startsWith("inspect ")),
+    [inspectCommand]
+  );
+});
+
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -1244,6 +1244,15 @@ export interface CurrentSmithersInspect {
   exhaustedLoops: CurrentSmithersExhaustedLoop[];
 }
 
+/**
+ * The pre-resume ownership evidence a controller refresh already collected, so
+ * the lifecycle command reuses it instead of inspecting the same run twice.
+ * `missing` records the one outcome refresh tolerates and the full-output
+ * envelope contract does not: a Smithers identity with no recorded history.
+ */
+export type SmithersResumeInspection =
+  { status: "missing" } | { status: "present"; snapshot: SmithersCommandSnapshot; inspect: CurrentSmithersInspect };
+
 export interface CurrentSmithersExhaustedLoop {
   id: string;
   iteration: number;
@@ -3135,6 +3144,7 @@ export async function runSmithersLifecycleCommand(input: {
   force?: boolean;
   retryFailed?: boolean;
   label?: string;
+  priorInspection?: SmithersResumeInspection;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -3179,21 +3189,35 @@ export async function runSmithersLifecycleCommand(input: {
 
   let preResumeStderr = "";
   let currentInspection: CurrentSmithersInspect | undefined;
+  let inspection: SmithersCommandSnapshot | undefined;
   // Detached admission renders the workflow before Smithers checks whether
   // this run already has an active owner. Inspect every resume first so an
   // idempotent attach cannot fail preflight or compete with that owner (#968).
-  if (input.action === "resume") {
-    const inspection = await runSmithersInspectionCommand({
+  //
+  // A `--refresh-controller` resume has already inspected this exact run to
+  // prove it is refreshable, and hands that evidence down as `priorInspection`.
+  // Reuse it rather than issuing a second `inspect` per refresh: the refresh
+  // gate deliberately admits a run with no recorded history, which the
+  // full-output envelope contract rejects outright, so re-inspecting would also
+  // fail a refresh that must succeed.
+  if (input.action === "resume" && input.priorInspection === undefined) {
+    const performed = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (!inspection.ok) {
+    if (!performed.ok) {
       throw new Error(
-        `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
+        `workflow inspection failed before resume: ${performed.error ?? (performed.stderr.trim() || "unknown error")}`
       );
     }
-    currentInspection = parseCurrentSmithersInspect(inspection, input.smithersRunId);
+    inspection = performed;
+    currentInspection = parseCurrentSmithersInspect(performed, input.smithersRunId);
+  } else if (input.action === "resume" && input.priorInspection?.status === "present") {
+    inspection = input.priorInspection.snapshot;
+    currentInspection = input.priorInspection.inspect;
+  }
+  if (currentInspection !== undefined && inspection !== undefined) {
     if (
       smithersRunStateIsActive(currentInspection) &&
       input.resetNode === undefined &&
@@ -3467,25 +3491,31 @@ export async function runSmithersLifecycleCommand(input: {
   };
 }
 
+/**
+ * Proves the run is refreshable and returns the ownership evidence it used, so
+ * the resume that follows reuses this inspection instead of issuing its own.
+ */
 export async function assertSmithersControllerRefreshable(input: {
   smithersRunId: string;
   projectRoot: string;
   env?: Record<string, string | undefined>;
-}): Promise<void> {
+}): Promise<SmithersResumeInspection> {
   const inspection = await runSmithersInspectionCommand({
     args: ["inspect", input.smithersRunId, "--format", "json", "--full-output"],
     projectRoot: input.projectRoot,
     env: input.env
   });
-  if (smithersSnapshotReportsMissingRun(inspection)) return;
+  if (smithersSnapshotReportsMissingRun(inspection)) return { status: "missing" };
   if (!inspection.ok) {
     throw new Error(
       `workflow inspection failed before controller refresh: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
     );
   }
-  if (smithersRunStateIsActive(parseCurrentSmithersInspect(inspection, input.smithersRunId))) {
+  const inspect = parseCurrentSmithersInspect(inspection, input.smithersRunId);
+  if (smithersRunStateIsActive(inspect)) {
     throw new Error("controller refresh requires a stopped, terminal, or missing workflow run");
   }
+  return { status: "present", snapshot: inspection, inspect };
 }
 
 export async function runSmithersInspectionCommand(input: {
