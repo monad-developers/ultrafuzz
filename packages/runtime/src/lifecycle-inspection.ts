@@ -675,6 +675,7 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "RunContinuedAsNew",
   "RunHijackRequested",
   "RunHijacked",
+  "AgentTraceSummary",
   "OneshotSteerQueued",
   "OneshotSteerDelivered",
   "OneshotSteerAcknowledged",
