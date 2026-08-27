@@ -4631,6 +4631,24 @@ bunAdapterTest(
         ["mutation\n", "mutation\n"]
       );
 
+      resetFixture("terminal-null-resume");
+      const streamPrompt = "Finish the streamed null-final fixture exactly once";
+      const streamEvents: Record<string, unknown>[] = [];
+      const streamResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).stream({
+        prompt: streamPrompt,
+        onEvent: (event) => streamEvents.push(event)
+      });
+      assert.equal(await streamResult.text, "DONE");
+      assert.deepEqual(await streamResult.textStream.getReader().read(), { value: "DONE", done: false });
+      const streamJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
+      assert.deepEqual(
+        streamJournal.map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+      assert.equal(streamJournal[1]?.resumeSession, "fixture-session");
+      assert.equal(streamJournal.filter((entry) => entry.stdin.includes(streamPrompt)).length, 1);
+      assert.equal(streamEvents.filter((event) => event.type === "completed").length, 1);
+
       resetFixture("terminal-null-no-session");
       const noSessionEvents: Record<string, unknown>[] = [];
       await assert.rejects(

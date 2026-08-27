@@ -383,14 +383,10 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
             "turn ended without a final assistant message after substantive work and no exact session was available"
           );
         }
-        try {
-          options?.onStderr?.(
-            `[ultrafuzz] OpenRouter Codex ended without a final assistant message after substantive work; ` +
-              `resuming exact session ${resumeSession}.\n`
-          );
-        } catch (callbackError) {
-          throw callbackError;
-        }
+        options?.onStderr?.(
+          `[ultrafuzz] OpenRouter Codex ended without a final assistant message after substantive work; ` +
+            `resuming exact session ${resumeSession}.\n`
+        );
         recoveryResumeSession = resumeSession;
         recoveryMarker = undefined;
         terminalRecoveryMarker = randomUUID();
