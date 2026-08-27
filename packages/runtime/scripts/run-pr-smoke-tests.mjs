@@ -20,7 +20,12 @@ const namedTests = new Map([
       "resume, replay, and fork delegate linked runs to Smithers lifecycle verbs",
       "ordinary resume checks active-run ownership before detached preflight",
       "a refresh resume reuses its own ownership inspection instead of inspecting twice",
-      "native continuation does not use historical trusted CLI identity as an authorization gate"
+      "native continuation does not use historical trusted CLI identity as an authorization gate",
+      // Reads the release that is actually pinned. This is the lane's tripwire
+      // for a runner bump that widens an enum or the inspect envelope, which
+      // otherwise only shows up as a failed production run.
+      "pinned runner state and envelope contracts match Ultrafuzz's mirrors",
+      "the pinned runner drops resume pointers only from dead attempts"
     ]
   ],
   [
@@ -34,7 +39,10 @@ const bunTestNames = [
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
   "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
   "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
-  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry"
+  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
+  // Needs bun:sqlite, so it can only run in this lane. Gates the claim that the
+  // pinned runner's schema migrations are additive over a stopped 0.34.0 store.
+  "pinned store migrations are additive over a 0.34.0 database"
 ];
 const selectedBunTestNames = bunTestNames.map((name) => `${bunTestNamePrefix}${name}`);
 const smokeEnvironment = { ...process.env };

@@ -846,9 +846,12 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
 // and total cost quadratic in event count; at dynamic fan-out scale the
 // controller's main thread saturates in these page reads (issue #858: ~300%
 // CPU, frozen stream.ndjson, starved node-timeout timers, idle agents).
-// The fix is one covering index plus an INDEXED BY hint at each probe site:
-// the hint is required because the planner otherwise still prefers the
-// primary key for the ORDER BY even when the index exists.
+// The fix is one covering index, created for new databases only. It is
+// deliberately NOT paired with an `INDEXED BY` hint at the probe sites, even
+// though the planner may still prefer the primary key without one: a hint is a
+// hard requirement, and a historical database that predates the index would
+// stop opening at all. `runtime.test.ts`'s "event probe compatibility patch
+// adds an optional covering index" pins that choice from the other side.
 const SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE = `const EXTRA_INDEX_STATEMENTS = [
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
 const SMITHERS_DB_EVENT_PROBE_INDEX_PATCH = `const EXTRA_INDEX_STATEMENTS = [
@@ -3684,6 +3687,64 @@ function retryProducerForFailedVerifier(
   return { nodeId: producer.nodeId, iteration: failedTask.iteration };
 }
 
+/**
+ * The closed-world key contract Ultrafuzz enforces on `smithers inspect
+ * --format json --full-output`. Exported so a test can diff it against the
+ * pinned runner's own payload builder: an upstream release that emits a key
+ * absent from `allowed` makes every inspect fail closed, which is exactly how
+ * `tokenUsage`, `run.cancellationSource` and `runState.warnings` would have
+ * broken the 0.34.0-to-0.35.0 bump had nothing checked.
+ */
+export const CURRENT_SMITHERS_INSPECT_KEY_CONTRACT = {
+  data: {
+    required: ["run", "runState", "steps", "nodes"],
+    allowed: [
+      "run",
+      "runState",
+      "failedChildren",
+      "failedChildKeys",
+      "steps",
+      "nodes",
+      "approvals",
+      "timers",
+      "loops",
+      "exhaustedLoops",
+      "steers",
+      "tokenUsage",
+      "config"
+    ]
+  },
+  run: {
+    required: ["id", "workflow", "status", "started", "elapsed"],
+    allowed: [
+      "id",
+      "workflow",
+      "status",
+      "parentRunId",
+      "started",
+      "elapsed",
+      "finished",
+      "cancellationSource",
+      "activeDescendantRunId",
+      "error",
+      "startedBy",
+      "continuedFrom",
+      "continuedFromDisplay"
+    ]
+  },
+  runState: {
+    required: ["runId", "state", "computedAt"],
+    allowed: ["runId", "state", "computedAt", "blocked", "unhealthy", "warnings"]
+  },
+  node: { exact: ["nodeId", "state", "attempt", "label"] },
+  /**
+   * `pool` is emitted only under `smithers inspect --pool`, a flag Ultrafuzz
+   * never passes, so it is deliberately outside `data.allowed` rather than
+   * missing from it.
+   */
+  dataKeysGatedOnUnusedFlags: ["pool"]
+} as const satisfies Record<string, unknown>;
+
 export function parseCurrentSmithersInspect(
   snapshot: SmithersCommandSnapshot,
   expectedWorkflowRunId: string
@@ -3706,22 +3767,8 @@ export function parseCurrentSmithersInspect(
   }
   assertCurrentInspectObjectKeys(
     data,
-    ["run", "runState", "steps", "nodes"],
-    [
-      "run",
-      "runState",
-      "failedChildren",
-      "failedChildKeys",
-      "steps",
-      "nodes",
-      "approvals",
-      "timers",
-      "loops",
-      "exhaustedLoops",
-      "steers",
-      "tokenUsage",
-      "config"
-    ],
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.data.required,
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.data.allowed,
     "Smithers inspect data"
   );
   if (!Array.isArray(data.steps)) {
@@ -3752,22 +3799,8 @@ export function parseCurrentSmithersInspect(
   }
   assertCurrentInspectObjectKeys(
     run,
-    ["id", "workflow", "status", "started", "elapsed"],
-    [
-      "id",
-      "workflow",
-      "status",
-      "parentRunId",
-      "started",
-      "elapsed",
-      "finished",
-      "cancellationSource",
-      "activeDescendantRunId",
-      "error",
-      "startedBy",
-      "continuedFrom",
-      "continuedFromDisplay"
-    ],
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.run.required,
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.run.allowed,
     "Smithers inspect data.run"
   );
   if (requiredCurrentInspectString(run.id, "Smithers inspect data.run.id") !== expectedWorkflowRunId) {
@@ -3804,8 +3837,8 @@ export function parseCurrentSmithersInspect(
   }
   assertCurrentInspectObjectKeys(
     runState,
-    ["runId", "state", "computedAt"],
-    ["runId", "state", "computedAt", "blocked", "unhealthy", "warnings"],
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.runState.required,
+    CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.runState.allowed,
     "Smithers inspect data.runState"
   );
   if (requiredCurrentInspectString(runState.runId, "Smithers inspect data.runState.runId") !== expectedWorkflowRunId) {
@@ -3841,7 +3874,7 @@ export function parseCurrentSmithersInspect(
   const nodeIds = new Set<string>();
   const nodes = data.nodes.map((value, index): CurrentSmithersInspectNode => {
     const label = `Smithers inspect data.nodes[${index}]`;
-    if (!isObjectRecord(value) || !hasExactObjectKeys(value, ["nodeId", "state", "attempt", "label"])) {
+    if (!isObjectRecord(value) || !hasExactObjectKeys(value, CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.node.exact)) {
       throw new Error(`${label} must use the exact current node shape`);
     }
     const nodeId = requiredCurrentInspectString(value.nodeId, `${label}.nodeId`);
