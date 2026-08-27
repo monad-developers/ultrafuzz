@@ -18439,6 +18439,60 @@ test("syncRun accepts a superseded unadmitted success with exact sealed trace au
   );
 });
 
+test("syncRun rejects exact trace authority when an attempt identity is reused within one activation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-same-activation-traced-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      {
+        type: "AgentTraceSummary",
+        nodeId,
+        extra: {
+          iteration: 0,
+          attempt: 1,
+          summary: {
+            runId: workflowRunId,
+            nodeId,
+            iteration: 0,
+            attempt: 1,
+            traceStartedAtMs: base + 150,
+            traceFinishedAtMs: base + 200,
+            agentId: "ultrafuzz-agent:project-discovery:0:default",
+            model: "gpt-5.5"
+          }
+        }
+      },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId, attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, false);
+  assert.deepEqual(
+    sync.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+  );
+  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+});
+
 test("syncRun replays bounded production lifecycle history with ledgered and trace-authorized supersessions", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

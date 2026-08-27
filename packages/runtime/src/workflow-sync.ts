@@ -1750,9 +1750,10 @@ async function inspectTerminalAttemptAuthorities(input: {
   const pending = terminalWorkflowAttempts(relevantEvents, {
     tolerateMissingStarts: true,
     recordedTerminalSequences,
-    authorizeUnrecordedSuperseded: (attempt) => {
+    authorizeUnrecordedSuperseded: (attempt, context) => {
       const task = tasksByNodeId.get(attempt.nodeId);
       return (
+        context.crossedRunActivation &&
         task !== undefined &&
         supersededSuccessfulAttemptHasTraceAuthority(input.layout, input.workflowRunId, task, attempt, relevantEvents)
       );
@@ -4533,7 +4534,8 @@ function appendTerminalTaskAttempts(input: {
   const allExisting = replayNodeAttempts(input.layout).entries;
   const terminalAttempts = terminalWorkflowAttempts(input.events, {
     recordedTerminalSequences: recordedTerminalAttemptSequencesFromEntries(allExisting, input.workflowRunId),
-    authorizeUnrecordedSuperseded: (attempt) =>
+    authorizeUnrecordedSuperseded: (attempt, context) =>
+      context.crossedRunActivation &&
       supersededSuccessfulAttemptHasTraceAuthority(input.layout, input.workflowRunId, input.task, attempt, input.events)
   });
   const state = readRunState(input.layout);
@@ -4721,7 +4723,10 @@ function terminalWorkflowAttempts(
   options: {
     tolerateMissingStarts?: boolean;
     recordedTerminalSequences?: ReadonlySet<number>;
-    authorizeUnrecordedSuperseded?: (attempt: TerminalWorkflowAttempt) => boolean;
+    authorizeUnrecordedSuperseded?: (
+      attempt: TerminalWorkflowAttempt,
+      context: { crossedRunActivation: boolean }
+    ) => boolean;
   } = {}
 ): TerminalWorkflowAttempt[] {
   const active = new Map<
@@ -4729,6 +4734,8 @@ function terminalWorkflowAttempts(
     Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
   >();
   const attempts = new Map<string, TerminalWorkflowAttempt>();
+  const terminalActivations = new Map<string, number>();
+  let activation = 0;
   for (const event of events) {
     if (event.type === "RunStarted") {
       // Smithers cancels stale in-progress rows before each resumed activation,
@@ -4736,6 +4743,7 @@ function terminalWorkflowAttempts(
       // duplicate starts fail-closed within one activation while allowing the
       // next activation to reuse the same durable attempt number.
       active.clear();
+      activation += 1;
       continue;
     }
     if (event.type !== "NodeStarted" && event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
@@ -4749,15 +4757,22 @@ function terminalWorkflowAttempts(
       if (active.has(identity)) throw new Error(`Smithers attempt ${identity} has multiple active NodeStarted events`);
       const superseded = attempts.get(identity);
       if (superseded !== undefined) {
+        const terminalActivation = terminalActivations.get(identity);
+        if (terminalActivation === undefined) {
+          throw new Error(`Smithers attempt ${identity} is missing its terminal activation authority`);
+        }
         if (
           !options.recordedTerminalSequences?.has(superseded.finishedSequence) &&
-          options.authorizeUnrecordedSuperseded?.(superseded) !== true
+          options.authorizeUnrecordedSuperseded?.(superseded, {
+            crossedRunActivation: activation > terminalActivation
+          }) !== true
         ) {
           throw new Error(
             `Smithers attempt ${identity} supersedes terminal event ${superseded.finishedSequence} before durable attempt recording`
           );
         }
         attempts.delete(identity);
+        terminalActivations.delete(identity);
       }
       active.set(identity, {
         retry,
@@ -4784,6 +4799,7 @@ function terminalWorkflowAttempts(
       ...(terminal.failureCategory === undefined ? {} : { failureCategory: terminal.failureCategory }),
       ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage })
     });
+    terminalActivations.set(identity, activation);
   }
   return [...attempts.values()].sort((left, right) => left.finishedSequence - right.finishedSequence);
 }
