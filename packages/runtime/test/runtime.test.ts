@@ -98,7 +98,8 @@ import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   refreshedSmithersControllerSnapshot,
-  runSmithersInspectionCommand
+  runSmithersInspectionCommand,
+  runSmithersLifecycleCommand
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -18673,6 +18674,54 @@ test("ordinary resume always delegates workflow-change admission to Smithers", a
   assert.match(upCommands[1]!, /(?:^| )--accept-workflow-change(?: |$)/u);
 });
 
+test("fork child preflight receives sealed input and resolves it before creating the child", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  const commandLog = env.SMITHERS_FAKE_LOG!;
+  const workflowPath = path.join(project, ".smithers", "workflows", "workflow.tsx");
+  const relaunchInput = '{"required":"sealed-value"}';
+
+  fs.writeFileSync(commandLog, "", "utf8");
+  const forked = await runSmithersLifecycleCommand({
+    action: "fork",
+    smithersRunId: "ultrafuzz-fork-input-source",
+    workflowPath,
+    projectRoot: project,
+    forkFrame: 7,
+    relaunchPaths: {
+      runRoot: project,
+      inputJson: relaunchInput,
+      logsDir: path.join(project, "logs")
+    },
+    keepWorkspaces: false,
+    controllerLeaseSeconds: 60,
+    env
+  });
+  assert.equal(forked.workflowRunId, "ultrafuzz-lifecycle-run-forked");
+  assert.ok(forked.command.includes("<redacted>"));
+  assert.equal(forked.command.includes(relaunchInput), false);
+  assert.match(
+    fs.readFileSync(commandLog, "utf8"),
+    /up .* --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --input \{"required":"sealed-value"\} /u
+  );
+
+  fs.writeFileSync(commandLog, "", "utf8");
+  await assert.rejects(
+    runSmithersLifecycleCommand({
+      action: "fork",
+      smithersRunId: "ultrafuzz-fork-input-source",
+      workflowPath,
+      projectRoot: project,
+      forkFrame: 7,
+      keepWorkspaces: false,
+      controllerLeaseSeconds: 60,
+      env
+    }),
+    /sealed workflow relaunch input is unavailable/u
+  );
+  assert.equal(fs.readFileSync(commandLog, "utf8"), "", "missing sealed input must fail before fork creation");
+});
+
 test("controller refresh admits a new stock bootstrap module but rejects semantic drift", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -19898,15 +19947,14 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --input \{[\s\S]* --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/
   );
   const runLogsDir = path.join(run.value!.run_root, "smithers", "logs");
-  for (const relaunch of commands.split("\n").filter((line) => line.startsWith("up ") && line.includes("--resume "))) {
-    assert.ok(
-      relaunch.includes(`--log-dir ${runLogsDir} `),
-      `a relaunched workflow must keep streaming into the run's own log directory: ${relaunch}`
-    );
-  }
+  assert.equal(
+    commands.split(`--log-dir ${runLogsDir} `).length - 1,
+    3,
+    "every relaunched workflow must keep streaming into the run's own log directory"
+  );
 });
 
 test(

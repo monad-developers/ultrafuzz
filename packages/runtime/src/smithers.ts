@@ -3077,6 +3077,7 @@ export async function runSmithersLifecycleCommand(input: {
   label?: string;
   relaunchPaths?: {
     runRoot: string;
+    inputJson?: string;
     logsDir: string;
   };
   keepWorkspaces: boolean;
@@ -3104,6 +3105,13 @@ export async function runSmithersLifecycleCommand(input: {
     fs.mkdirSync(paths.logsDir, { recursive: true });
     assertNoSymlinkComponents(paths.runRoot, paths.logsDir, "workflow log directory");
     return ["--log-dir", paths.logsDir];
+  };
+  const workflowRelaunchInputJson = (): string => {
+    const inputJson = input.relaunchPaths?.inputJson;
+    if (inputJson === undefined) {
+      throw new Error("sealed workflow relaunch input is unavailable");
+    }
+    return inputJson;
   };
   const workflowChangeAcceptanceArgs = (): readonly string[] => {
     return input.action === "resume" ? ["--accept-workflow-change"] : [];
@@ -3290,6 +3298,12 @@ export async function runSmithersLifecycleCommand(input: {
   }
 
   if (input.action === "fork" && input.forkFrame !== undefined) {
+    // A Smithers fork persists frame 0 before the child has an input-table row.
+    // Detached-launch preflight runs before engine resume can restore that row
+    // from the child snapshot, so it needs the authenticated relaunch input to
+    // render the workflow. Resolve it before creating the child so a missing
+    // sealed input fails without leaving an unlinked fork behind.
+    const forkRelaunchInputJson = workflowRelaunchInputJson();
     const forkCommand = [
       "fork",
       input.workflowPath,
@@ -3323,6 +3337,8 @@ export async function runSmithersLifecycleCommand(input: {
       forkedRunId,
       "--force",
       "--detach",
+      "--input",
+      forkRelaunchInputJson,
       ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
       ...workflowLogDirArgs(),
       "--format",
