@@ -19126,6 +19126,16 @@ test("controller refresh defers old execution and replaces missing or stale Bun 
     }
   ];
   const replaced = replaceBunStartupControlsForControllerRefresh(before.layout, legacyFiles);
+  const unchanged = legacyFiles.find((file) => !startupControlPaths.includes(file.snapshotPath));
+  assert.ok(unchanged);
+  const retained = replaced.find((file) => file.snapshotPath === unchanged.snapshotPath);
+  assert.ok(retained);
+  assert.notEqual(retained, unchanged, "refresh must clone the mutable file record");
+  assert.equal(
+    retained.contents,
+    unchanged.contents,
+    "refresh must share the immutable backing bytes for an unchanged execution file"
+  );
   for (const startupPath of startupControlPaths) {
     const refreshed = replaced.filter((file) => file.snapshotPath === startupPath);
     assert.equal(refreshed.length, 1);
@@ -19455,6 +19465,16 @@ test("controller generation reloads authenticated dependency filenames outside a
     original: evidence.verifiedControl,
     config
   });
+  const retainedPath = "controls/plan.json";
+  const originalRetained = evidence.verifiedControl.executionFiles.find((file) => file.snapshotPath === retainedPath);
+  const refreshedRetained = refreshed.snapshot.executionFiles.find((file) => file.snapshotPath === retainedPath);
+  assert.ok(originalRetained);
+  assert.ok(refreshedRetained);
+  assert.equal(
+    refreshedRetained.contents,
+    originalRetained.contents,
+    "controller refresh must not copy unchanged execution bytes"
+  );
   const declarationPath = "modules/synthetic-package/dist/$command.d.ts";
   const declarationContents = Buffer.from("export interface Command {}\n", "utf8");
   const refreshedWithDeclaration = {
@@ -19489,7 +19509,18 @@ test("controller generation reloads authenticated dependency filenames outside a
   );
 
   const declaration = committed.snapshot.executionFiles.find((file) => file.snapshotPath === declarationPath);
+  const committedRetained = committed.snapshot.executionFiles.find((file) => file.snapshotPath === retainedPath);
   assert.deepEqual(declaration?.contents, declarationContents);
+  assert.notEqual(
+    declaration?.contents,
+    declarationContents,
+    "new generation-only bytes must come from the authenticated published snapshot"
+  );
+  assert.equal(
+    committedRetained?.contents,
+    originalRetained.contents,
+    "commit must reuse launch-generation bytes only after exact path, size, and digest authentication"
+  );
   assert.equal(
     declaration?.sourcePath,
     path.join(
