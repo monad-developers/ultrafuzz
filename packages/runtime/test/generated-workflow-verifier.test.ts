@@ -9663,6 +9663,7 @@ test("generated Smithers preparation names its failing step and carries a retry 
   const steps = [
     "resolve-workspace-root",
     "assert-workspace-source-revision",
+    "restore-persisted-workspace-preparation",
     "verify-pinned-submodules",
     "hydrate-pinned-submodules",
     "preserve-pinned-source-proof",
@@ -9685,6 +9686,23 @@ test("generated Smithers preparation names its failing step and carries a retry 
   for (const step of steps) {
     assert.match(preparation, new RegExp(`preparationStep\\(task\\.attemptId, "${step}", \\(\\) =>`, "u"), step);
   }
+
+  // #949: retry-failed reopens a producer onto its durable worktree, which can still contain that
+  // producer's earlier source output. Restore the runtime-owned pre-agent tree before replaying the
+  // first dependency patch; doing this later leaves the strict base-tree guard no safe classification
+  // for task-local drift. The post-agent require path must never take this branch.
+  const restorePersisted = preparation.indexOf("restorePersistedWorkspacePatchPreparationBeforeReplay(");
+  const replayDependencies = preparation.indexOf("materializeWorkspacePatchDependencies(");
+  assert.ok(restorePersisted >= 0 && restorePersisted < replayDependencies, preparation);
+  const restoreHelperStart = source.indexOf("function restorePersistedWorkspacePatchPreparationBeforeReplay");
+  const restorePreparationStart = source.indexOf("function restoreWorkspacePatchPreparation", restoreHelperStart + 1);
+  assert.ok(restoreHelperStart >= 0 && restorePreparationStart > restoreHelperStart, source);
+  const restoreHelper = source.slice(restoreHelperStart, restorePreparationStart);
+  assert.match(restoreHelper, /if \(evidenceMode !== "create"\) return;/u);
+  assert.match(restoreHelper, /const persistedPreparation = readWorkspacePatchPreparation\(task\);/u);
+  assert.match(restoreHelper, /if \(persistedPreparation === undefined\) return;/u);
+  assert.match(restoreHelper, /workspace preparation was modified/u);
+  assert.match(restoreHelper, /restoreWorkspacePatchPreparation\(task, workspaceRoot, persistedPreparation\);/u);
 
   // #672: a preparation failure was terminal because the preparation Task hardcoded retries={0},
   // out of reach of the topology's max_attempts. The compiled budget must never drop below one
