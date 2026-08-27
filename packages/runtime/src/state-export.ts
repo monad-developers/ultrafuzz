@@ -460,7 +460,11 @@ function parseCurrentPsRow(value: unknown, index: number): CurrentSmithersPsRow 
   requiredString(row.workflow, `${label}.workflow`);
   const state = requiredEnum(row.state, SMITHERS_RUN_STATES, `${label}.state`);
   if (state === "unknown") throw new Error(`${label}.state cannot be unknown`);
-  const expectedStatus = state === "succeeded" ? "finished" : state;
+  // Upstream renames both successful derived states to "finished" for legacy
+  // `ps` consumers (`@smthrs/cli/src/tail.js` `deriveTailStatus`); every other
+  // derived state passes through unchanged. Mirroring only "succeeded" here
+  // rejects every run that tolerated a child failure.
+  const expectedStatus = state === "succeeded" || state === "succeeded-with-failures" ? "finished" : state;
   if (requiredString(row.status, `${label}.status`) !== expectedStatus) {
     throw new Error(`${label}.status does not match the canonical derived state`);
   }

@@ -3167,7 +3167,7 @@ function artifactAwareAgent(
         Reflect.deleteProperty(freshArgs, "messages");
         return {
           ...freshArgs,
-          // Smithers 0.34 adds worktree-isolation and structured-output
+          // Smithers 0.35 adds worktree-isolation and structured-output
           // contracts before calling the agent. Preserve that effective prompt
           // while dropping prior conversation/session state.
           prompt: typeof args?.prompt === "string" ? args.prompt : originalPrompt,

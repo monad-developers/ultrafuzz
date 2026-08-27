@@ -1451,7 +1451,9 @@ function recoveryAuthorizesTerminalAggregate(input: {
     .filter(([nodeId]) => !input.nonBlockingNodeIds.has(nodeId))
     .map(([, status]) => status);
   if (
-    (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
+    (input.inspect.runState !== "failed" &&
+      input.inspect.runState !== "succeeded" &&
+      input.inspect.runState !== "succeeded-with-failures") ||
     recovery === undefined ||
     submissionAuthority === undefined ||
     !input.evidenceComplete ||
@@ -5469,7 +5471,11 @@ function statusFromWorkflowState(state: SmithersNodeState): NodeStatus {
   switch (state) {
     case "finished":
       return "succeeded";
+    // Smithers 0.35.0 persists `stalled` as a terminal TaskState and treats it
+    // exactly like `failed` in `isTerminalState`, so it maps to the same
+    // Ultrafuzz node status rather than reading as still-running work.
     case "failed":
+    case "stalled":
     case "cancelled":
       return "failed";
     case "skipped":
@@ -5535,7 +5541,14 @@ function finalRunStatus(
   ) {
     return "running";
   }
-  if (workflowStatus === "succeeded") {
+  // `succeeded-with-failures` is Smithers 0.35.0's ordinary terminal state for a
+  // run that tolerated a `continueOnFail` child, which Ultrafuzz generates
+  // deliberately. It must terminalize exactly like `succeeded`: the blocking
+  // statuses below already exclude non-blocking nodes, so the tolerated failure
+  // is filtered out before this gate. Falling through to `return currentStatus`
+  // instead would leave such a run reported `running` forever, and the Modal
+  // resume and worker poll loops key their exit on that status.
+  if (workflowStatus === "succeeded" || workflowStatus === "succeeded-with-failures") {
     if (options.recoveryRequiresAuthorization === true && options.recoveredAggregateAuthorized !== true) {
       return "failed";
     }
@@ -5810,7 +5823,7 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
       );
     }
     if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["runId", "seq", "timestampMs", "type", "payload"])) {
-      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.34.0 envelope`);
+      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.35.0 envelope`);
     }
     const workflowRunId = requiredWorkflowEventString(parsed.runId, `Smithers event record ${index + 1} runId`);
     const sourceEventSequence = requiredWorkflowEventCount(parsed.seq, `Smithers event record ${index + 1} seq`);

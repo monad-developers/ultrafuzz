@@ -854,6 +854,7 @@
             "in-progress",
             "finished",
             "failed",
+            "stalled",
             "cancelled",
             "skipped"
           ]

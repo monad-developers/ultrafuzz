@@ -1,9 +1,9 @@
 import { isRecord } from "@ultrafuzz/artifacts";
 
-export const SMITHERS_VERSION = "0.34.0";
+export const SMITHERS_VERSION = "0.35.0";
 export const SMITHERS_PACKAGE_NAME = "smthrs";
 export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
-// Smithers 0.34.0 pins this Effect build across its own packages. Track what
+// Smithers 0.35.0 pins this Effect build across its own packages. Track what
 // Smithers declares: left unpinned, npm installs two Effect copies side by side
 // and the engine loses the single Effect module identity its services are keyed on.
 export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.105";
@@ -69,7 +69,7 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
   "@effect/sql-sqlite-bun@4.0.0-beta.105": "2026-08-07T01:13:00.629Z",
   "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
   "effect@4.0.0-beta.105": "2026-08-07T01:37:58.225Z",
-  "smthrs@0.34.0": "2026-08-13T03:21:30.904Z",
+  "smthrs@0.35.0": "2026-08-17T20:35:37.787Z",
   "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
   "zod@4.4.3": "2026-05-04T07:06:40.819Z"
 };
@@ -96,8 +96,8 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // The rule for moving it: choose a fixed instant after every new pin has
 // published and propagated, but already in the past when release validation
 // runs -- npm does not freeze a future `--before` view. This instant is more
-// than eight hours after the newest pin (`smthrs@0.34.0`, at 03:21:30Z).
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-13T12:00:00Z";
+// than eight hours after the newest pin (`smthrs@0.35.0`, at 20:35:37Z).
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-18T06:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
