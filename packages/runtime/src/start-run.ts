@@ -118,6 +118,8 @@ export interface LinkedWorkflowEvidence {
 type LinkedWorkflowEvidenceFailure = { ok: false; diagnostics: RuntimeDiagnostic[] };
 type ReadLinkedWorkflowEvidenceOptions = {
   tolerateControlDivergence?: boolean;
+  /** Observers authenticate only already-published evidence and never take or mutate control authority. */
+  observeOnly?: boolean;
 };
 
 const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
@@ -1213,12 +1215,16 @@ export async function readLinkedWorkflowEvidence(
   }
   let releaseControlLock: (() => Promise<void>) | undefined;
   try {
-    releaseControlLock = await acquireWorkflowControlLock(layout);
+    if (options.observeOnly !== true) {
+      releaseControlLock = await acquireWorkflowControlLock(layout);
+    }
     const missingEvidence = missingLinkedWorkflowEvidenceDiagnostic(resolvedProjectRoot, layout);
     if (missingEvidence !== undefined) {
       return { ok: false, diagnostics: [missingEvidence] };
     }
-    reconcilePendingWorkflowRunLink(resolvedProjectRoot, layout);
+    if (options.observeOnly !== true) {
+      reconcilePendingWorkflowRunLink(resolvedProjectRoot, layout);
+    }
     const metadata = readRunMetadataDocument(metadataPath, runId);
     const workflow = metadata.workflow;
     if (workflow === undefined) {
@@ -1281,6 +1287,7 @@ export async function readLinkedWorkflowEvidence(
       layout,
       snapshot: controller.snapshot,
       authorizedGenerations: controller.authorizedGenerations,
+      ...(options.observeOnly === true ? { observeOnly: true } : {}),
       ...(startupControlDrift === undefined ? {} : { tolerateStartupControlDrift: true })
     });
     const expectedWorkflowFields: Record<string, string> = {
@@ -1318,7 +1325,9 @@ export async function readLinkedWorkflowEvidence(
     ) {
       throw new Error("durable run state does not exactly match sealed workflow control evidence");
     }
-    const linkHistory = verifyWorkflowRunLinkHistory(layout);
+    const linkHistory = verifyWorkflowRunLinkHistory(layout, {
+      ...(options.observeOnly === true ? { allowPending: true } : {})
+    });
     const initialWorkflowLink = linkHistory.initial;
     const activeWorkflowLink = linkHistory.current;
     if (
