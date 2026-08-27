@@ -29,6 +29,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  RUN_METADATA_SCHEMA_VERSION,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
@@ -590,8 +591,10 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "realpathSync",
     "execFileSync",
     "readBoundedRegularArtifactSnapshot",
-    "assertRunMetadataDocument",
     "parseStrictJsonSnapshot",
+    "isPlainJsonRecord",
+    "assertRunMetadataDocument",
+    "RUN_METADATA_SCHEMA_VERSION",
     "MAX_FINAL_REPORT_RUN_METADATA_BYTES",
     "MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES",
     "prepareSafeFilePath",
@@ -616,8 +619,10 @@ function loadFinalReportRunMetadataAuthorityHarness(
     fs.realpathSync,
     () => remote,
     readSnapshot,
-    assertRunMetadataDocument,
     (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value),
+    assertRunMetadataDocument,
+    RUN_METADATA_SCHEMA_VERSION,
     64 * 1024 * 1024,
     1024 * 1024,
     prepareSafeFilePath,
@@ -7999,8 +8004,33 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       assert.doesNotThrow(() => authority.assertUnchanged(task));
     }
 
+    fs.writeFileSync(path.join(runRoot, "run.json"), `${JSON.stringify({ run_id: "run-1" })}\n`, "utf8");
+    assert.deepEqual(authority.derive(task), {
+      run_id: "run-1",
+      source_run_id: "unavailable",
+      repository: "https://github.com/example/project",
+      elapsed_time: "unavailable",
+      models_used: [],
+      tokens_used: "unavailable",
+      estimated_spend: "unavailable",
+      partial_pricing: false,
+      strategy_loops: "unavailable",
+      audit_profile: "unavailable",
+      audit_profile_catalog_digest: "unavailable",
+      topology_digest: "unavailable",
+      prompt_digest: "unavailable",
+      expanded_graph_fingerprint: "unavailable"
+    });
+
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({ run_id: "run-1", created_at: "not-a-timestamp" })}\n`,
+      "utf8"
+    );
+    assert.throws(() => authority.derive(task), /final-report elapsed-time metadata is malformed/u);
+
     const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
-    assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata is invalid/u);
+    assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata has the wrong run ID/u);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

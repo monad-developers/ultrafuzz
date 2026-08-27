@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -9,14 +8,16 @@ import {
   assertPlannedGraphSemantics,
   assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
-  NODE_PROVENANCE_FAILURE_CATEGORIES,
   assertNoSymlinkComponents,
   assertPathInside,
+  assertRegularFileInside,
   layoutForRunRoot,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
+  readRegularFileSnapshot,
   readRunMetadataDocument,
   readRunState,
+  safeResolveInside,
   sensitiveEnvironmentValues,
   updateRunStatus,
   validatePlannedGraph,
@@ -27,7 +28,6 @@ import {
   type RunMetadataDocument,
   type RunMetadataWorkflow,
   type RunWorkflowProvenance,
-  type RunRecoveryProvenance,
   type RunLayout,
   type AppendEventInput,
   type PlannedGraphDocument,
@@ -50,7 +50,12 @@ import {
 import { planRun } from "./plan-run.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
-import { prepareTrustedCliEnvironment, runTrustedJsonValidatorPreflight } from "./trusted-cli.js";
+import {
+  prepareTrustedCliEnvironment,
+  runTrustedJsonValidatorPreflight,
+  TRUSTED_CLI_ENVIRONMENT_VARIABLES,
+  type TrustedCliEnvironment
+} from "./trusted-cli.js";
 import { hasRuntimeErrors, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   assertControllerExecutionSnapshotDigest,
@@ -60,7 +65,8 @@ import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governanc
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
-  refreshedSmithersControllerSnapshot,
+  nativeSmithersContinuationEnvironment,
+  renderCurrentSmithersController,
   requestSmithersPause,
   runSmithersLifecycleCommand,
   assertCurrentCloudAgentCredentialEnvironment,
@@ -82,11 +88,7 @@ import {
   type MaterializedWorkflowExecutionSnapshot,
   type VerifiedWorkflowControlSnapshot
 } from "./workflow-integrity.js";
-import {
-  commitControllerGeneration,
-  effectiveControllerGeneration,
-  prepareControllerGeneration
-} from "./workflow-controller-generation.js";
+import { effectiveControllerGeneration } from "./workflow-controller-generation.js";
 import {
   finalizeWorkflowRunLink,
   prepareWorkflowRunLink,
@@ -104,7 +106,6 @@ export interface LinkedWorkflowEvidence {
   ok: true;
   smithersRunId: string;
   workflowPath: string;
-  inputJson: string;
   layout: RunLayout;
   controlGeneration: string;
   controllerGeneration: string;
@@ -114,32 +115,10 @@ export interface LinkedWorkflowEvidence {
   executionSnapshot: MaterializedWorkflowExecutionSnapshot;
 }
 
-export type DeferredLinkedWorkflowEvidence = Omit<
-  LinkedWorkflowEvidence,
-  "workflowPath" | "inputJson" | "executionSnapshot"
->;
-
 type LinkedWorkflowEvidenceFailure = { ok: false; diagnostics: RuntimeDiagnostic[] };
 type ReadLinkedWorkflowEvidenceOptions = {
   tolerateControlDivergence?: boolean;
-  allowPendingControllerRefresh?: boolean;
-  /** Controller refresh authenticates the old generation but must not execute it before replacement. */
-  deferExecutionSnapshotForControllerRefresh?: boolean;
 };
-
-function hasMaterializedWorkflowEvidence(
-  evidence: LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence
-): evidence is LinkedWorkflowEvidence {
-  return (
-    "executionSnapshot" in evidence &&
-    typeof evidence.executionSnapshot === "object" &&
-    evidence.executionSnapshot !== null &&
-    "workflowPath" in evidence &&
-    typeof evidence.workflowPath === "string" &&
-    "inputJson" in evidence &&
-    typeof evidence.inputJson === "string"
-  );
-}
 
 const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "SMITHERS_BIN",
@@ -483,7 +462,257 @@ function openRouterCredentialPreflightDiagnostics(
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput) {
-  return submitLifecycleAction(input, "resume");
+  return submitSmithersContinuation(input);
+}
+
+async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
+  let releaseLifecycleLock: (() => Promise<void>) | undefined;
+  try {
+    const projectRoot = path.resolve(input.projectRoot);
+    const runsRoot = await runsRootForProject(projectRoot);
+    const runId = validateSafeId(input.runId, "run ID");
+    const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
+    assertPathInside(runsRoot, layout.root, "run root");
+    if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+    releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
+
+    assertRegularFileInside(layout.root, layout.runMetadataPath, "run metadata");
+    const metadata = objectRecord(
+      parseStrictJsonBytes(readRegularFileSnapshot(layout.runMetadataPath, 16 * 1024 * 1024))
+    );
+    if (metadata.run_id !== runId) throw new Error("run metadata does not match the requested run ID");
+    const workflow = objectRecord(metadata.workflow);
+    const historicalWorkflowIds = Array.isArray(metadata.workflow_ids)
+      ? metadata.workflow_ids.filter(
+          (value): value is string => typeof value === "string" && value.length > 0 && !value.includes("\0")
+        )
+      : [];
+    const smithersRunId = validateSafeId(
+      typeof workflow.run_id === "string" && workflow.run_id.length > 0 && !workflow.run_id.includes("\0")
+        ? workflow.run_id
+        : (historicalWorkflowIds.at(-1) ?? `ultrafuzz-${runId}`),
+      "Smithers run ID"
+    );
+    let workflowPath: string;
+    if (input.refreshController === true) {
+      // Refresh renders a replacement path below. A lost or malformed
+      // historical project-workflow pointer is provenance, not authority to
+      // prevent the run-owned task evidence from reaching the current
+      // controller.
+      workflowPath = "";
+    } else {
+      const persistedWorkflowPath =
+        typeof workflow.path === "string" && workflow.path.length > 0
+          ? workflow.path
+          : path.join(".smithers", "workflows", `ultrafuzz-${runId}.tsx`);
+      workflowPath = safeResolveInside(projectRoot, persistedWorkflowPath, "workflow path");
+      assertRegularFileInside(projectRoot, workflowPath, "workflow path");
+    }
+
+    const smithersRoot = safeResolveInside(layout.root, "smithers", "Smithers evidence");
+    const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
+    const configPath = safeResolveInside(smithersRoot, "resolved-config.json", "workflow config");
+    let taskDocument: SmithersTaskManifestDocument | undefined;
+    let config: ResolvedConfig | undefined;
+    if (fs.existsSync(tasksPath)) {
+      assertRegularFileInside(layout.root, tasksPath, "workflow task manifest");
+      try {
+        taskDocument = parseSmithersTaskManifestBytes(readRegularFileSnapshot(tasksPath, 128 * 1024 * 1024));
+      } catch (error) {
+        if (input.refreshController === true) throw error;
+      }
+    }
+    if (fs.existsSync(configPath)) {
+      assertRegularFileInside(layout.root, configPath, "workflow config");
+      try {
+        config = parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
+      } catch (error) {
+        if (input.refreshController === true) throw error;
+      }
+    }
+    if (input.refreshController === true) {
+      if (taskDocument === undefined || config === undefined) {
+        throw new Error("current controller rendering requires the persisted workflow task manifest and config");
+      }
+      await assertSmithersControllerRefreshable({
+        smithersRunId,
+        projectRoot,
+        env: controllerRefreshInspectionEnvironment(input.env)
+      });
+      workflowPath = renderCurrentSmithersController({
+        projectRoot,
+        layout,
+        smithersRunId,
+        tasks: taskDocument,
+        config,
+        expandedGraph: readContinuationExpandedGraph(layout)
+      });
+    }
+    const tasks = taskDocument?.tasks ?? [];
+    const forgeGuard =
+      config === undefined
+        ? { env: { ...(input.env ?? {}) }, environmentVariableNames: [] as readonly string[], active: false }
+        : prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const controllerEnvironment = {
+      ...forgeGuard.env,
+      ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
+      ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
+      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: configPath }),
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
+    };
+    let trustedCli: TrustedCliEnvironment = {
+      active: false,
+      env: { ...controllerEnvironment },
+      environmentVariableNames: []
+    };
+    for (const name of TRUSTED_CLI_ENVIRONMENT_VARIABLES) trustedCli.env[name] = undefined;
+    if (taskDocument !== undefined && config !== undefined) {
+      try {
+        const prepared = prepareTrustedCliEnvironment({
+          layout,
+          cliEntrypoint: input.ultrafuzzCliEntrypoint,
+          env: controllerEnvironment,
+          required: tasks.some((task) =>
+            task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
+          ),
+          allowIdentityRotation: input.refreshController === true
+        });
+        if (prepared.active) runTrustedJsonValidatorPreflight({ layout, trusted: prepared });
+        trustedCli = prepared;
+      } catch {
+        // Historical validator identity is task setup provenance, not authority
+        // to prevent Smithers from continuing the workflow.
+      }
+    }
+    const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
+    const providerCredentialNames =
+      config === undefined ? [] : agentCredentialEnvironmentVariableNames(config, agentRefs);
+    const continuedEnvironment =
+      input.refreshController === true ? trustedCli.env : withoutSensitiveAllowlistedEnvironment(trustedCli.env);
+    const lifecycleEnvironment = {
+      ...process.env,
+      ...providerScopedControllerEnvironment(continuedEnvironment, providerCredentialNames)
+    };
+    if (config !== undefined && taskDocument !== undefined) {
+      assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
+    }
+    const result = await runSmithersLifecycleCommand({
+      action: "resume",
+      smithersRunId,
+      workflowPath,
+      projectRoot,
+      maxConcurrency: input.maxConcurrency ?? config?.run.maxParallelAgents,
+      resetNode: input.resetNode,
+      force: input.force,
+      retryFailed: input.retryFailed,
+      relaunchPaths: {
+        runRoot: layout.root,
+        logsDir: path.join(smithersRoot, "logs")
+      },
+      keepWorkspaces: config?.run.keepWorkspaces ?? false,
+      controllerLeaseSeconds: config?.run.controllerLeaseSeconds ?? 60,
+      env: nativeSmithersContinuationEnvironment(lifecycleEnvironment),
+      environmentVariableNames: mergeEnvironmentVariableNames(
+        config === undefined ? [] : agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
+        ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
+        forgeGuard.environmentVariableNames,
+        trustedCli.environmentVariableNames
+      )
+    });
+    recordNativeContinuationState({
+      layout,
+      config,
+      requestedConcurrency: input.maxConcurrency,
+      alreadyRunning: result.alreadyRunning ?? false
+    });
+    return runtimeResult(true, {
+      run_id: runId,
+      workflow_run_id: smithersRunId,
+      action: "resume" as const,
+      submitted: !result.alreadyRunning
+    });
+  } catch (error) {
+    return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
+  } finally {
+    await releaseLifecycleLock?.();
+  }
+}
+
+function parseContinuationResolvedConfigBytes(bytes: Uint8Array): ResolvedConfig {
+  try {
+    return parseResolvedConfigJsonBytes(bytes);
+  } catch (error) {
+    // `run.maxParallelNodes` was persisted by resolved-config v3 before #936
+    // removed the unused key without changing the document version. Project a
+    // read-only copy through the current parser; never rewrite the historical
+    // bytes and never make the retired setting part of continuation behavior.
+    const document = objectRecord(parseStrictJsonBytes(bytes));
+    const run = objectRecord(document.run);
+    if (!Object.hasOwn(run, "maxParallelNodes")) throw error;
+    const projected = { ...document, run: { ...run } };
+    delete projected.run.maxParallelNodes;
+    return parseResolvedConfigJsonBytes(Buffer.from(JSON.stringify(projected), "utf8"));
+  }
+}
+
+function readContinuationExpandedGraph(layout: RunLayout): unknown {
+  for (const graphPath of [path.join(layout.root, "smithers", "expanded-graph.json"), layout.graphPath]) {
+    try {
+      assertRegularFileInside(layout.root, graphPath, "workflow graph");
+      const graph = parseStrictJsonBytes(readRegularFileSnapshot(graphPath, 128 * 1024 * 1024));
+      if (Object.keys(objectRecord(objectRecord(graph).groups)).length > 0) return graph;
+    } catch {
+      // Continue to the canonical run graph when the Smithers copy is absent,
+      // unreadable, or from an unsupported schema generation.
+    }
+  }
+  // Graph provenance only restores failure-policy rendering when available.
+  // Its absence must not become refresh authorization.
+  return undefined;
+}
+
+function recordNativeContinuationState(input: {
+  layout: RunLayout;
+  config: ResolvedConfig | undefined;
+  requestedConcurrency: number | undefined;
+  alreadyRunning: boolean;
+}): void {
+  try {
+    const submittedAt = new Date().toISOString();
+    const submittedAtMs = Date.parse(submittedAt);
+    const state = readRunState(input.layout);
+    if (state.status !== "running") state.last_transition_at = submittedAt;
+    state.status = "running";
+    state.started_at ??= submittedAt;
+    delete state.finished_at;
+    if (!input.alreadyRunning) {
+      const leaseDurationMs =
+        (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+      state.controller_lease = {
+        ...state.controller_lease,
+        status: "active",
+        duration_ms: leaseDurationMs,
+        renewed_at: submittedAt,
+        expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
+      };
+      state.concurrency.requested_concurrency =
+        input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
+    }
+    if (input.config !== undefined) {
+      state.workflow_deadline_at = new Date(
+        submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
+      ).toISOString();
+    } else if (state.workflow_deadline_at !== undefined && Date.parse(state.workflow_deadline_at) <= submittedAtMs) {
+      // A legacy run without readable config cannot supply a fresh duration.
+      // Do not let its already-expired historical deadline cancel the Smithers
+      // continuation that was just accepted.
+      delete state.workflow_deadline_at;
+    }
+    writeRunState(input.layout, state);
+  } catch {
+    // Mutable Ultrafuzz projection is best effort after Smithers accepts the
+    // continuation. Malformed legacy state must not become a new hard gate.
+  }
 }
 
 export async function replayRun(input: WorkflowLifecycleInput) {
@@ -578,37 +807,7 @@ function isWorkflowSubmissionFailureEventPayload(
   );
 }
 
-async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
-  if (input.refreshController === true && action !== "resume") {
-    return runtimeFailure<WorkflowLifecycleValue>([
-      {
-        code: "WORKFLOW_CONTROLLER_REFRESH_REQUIRES_RESUME",
-        message: "controller refresh is supported only by resume",
-        severity: "error",
-        source: "runtime"
-      }
-    ]);
-  }
-  if (input.refinalizeControllerFailures === true && input.refreshController !== true) {
-    return runtimeFailure<WorkflowLifecycleValue>([
-      {
-        code: "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_REFRESH",
-        message: "controller failure re-finalization requires resume --refresh-controller",
-        severity: "error",
-        source: "runtime"
-      }
-    ]);
-  }
-  if (input.refinalizeControllerFailures === true && action !== "resume") {
-    return runtimeFailure<WorkflowLifecycleValue>([
-      {
-        code: "WORKFLOW_CONTROLLER_REFINALIZATION_REQUIRES_RESUME",
-        message: "controller failure re-finalization is supported only by resume",
-        severity: "error",
-        source: "runtime"
-      }
-    ]);
-  }
+async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "replay" | "fork") {
   if (action === "fork" && input.forkFrame === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>([
       {
@@ -622,228 +821,20 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
 
   let releaseLifecycleLock: (() => Promise<void>) | undefined;
   try {
-    // A refresh may need to remove an authenticated prepared-generation temporary publication
-    // while loading evidence. Resolve and lock the run before that first read so a concurrent
-    // publisher can never have its live temporary tree classified as stale.
-    if (input.refreshController === true) {
-      const resolvedProjectRoot = path.resolve(input.projectRoot);
-      const runsRoot = await runsRootForProject(resolvedProjectRoot);
-      const safeRunId = validateSafeId(input.runId, "run ID");
-      const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
-      assertPathInside(runsRoot, layout.root, "run root");
-      if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-      releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
-    }
-    let evidence: LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure =
-      input.refreshController === true
-        ? await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-            allowPendingControllerRefresh: true,
-            deferExecutionSnapshotForControllerRefresh: true
-          })
-        : await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
+    let evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
     if (!evidence.ok) return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
-    releaseLifecycleLock ??= await acquireWorkflowLifecycleLock(evidence.layout);
-    const lockedEvidence =
-      input.refreshController === true
-        ? await readLinkedWorkflowEvidence(input.projectRoot, input.runId, {
-            allowPendingControllerRefresh: true,
-            deferExecutionSnapshotForControllerRefresh: true
-          })
-        : await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
+    releaseLifecycleLock = await acquireWorkflowLifecycleLock(evidence.layout);
+    const lockedEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
     if (!lockedEvidence.ok) return runtimeFailure<WorkflowLifecycleValue>(lockedEvidence.diagnostics);
     evidence = lockedEvidence;
-    // Trusted-CLI rotation must retain the validator generation sealed when the
-    // run launched. A controller refresh deliberately replaces non-schema
-    // controller code, so sourcing its replacement snapshot here could import
-    // a newer validator build that can never satisfy trusted-cli.json.
-    const trustedCliIdentitySnapshotRoot = path.join(
-      evidence.layout.root,
-      "smithers",
-      "execution-snapshots",
-      evidence.verifiedControl.generation
-    );
     const sealedConfig = parseSealedResolvedConfig(evidence.verifiedControl.executionFiles);
-    const controllerRefreshAuthorityFor = (current: LinkedWorkflowEvidence) =>
-      current.controllerGeneration === current.controlGeneration
-        ? undefined
-        : {
-            controllerGeneration: current.controllerGeneration,
-            executionSnapshotRoot: current.executionSnapshot.root
-          };
-    if (input.refreshController === true) {
-      const releaseControlLock = await acquireWorkflowControlLock(evidence.layout);
-      try {
-        await assertSmithersControllerRefreshable({
-          smithersRunId: evidence.smithersRunId,
-          projectRoot: path.resolve(input.projectRoot),
-          env: controllerRefreshInspectionEnvironment(input.env)
-        });
-        const original = verifyWorkflowControlSnapshot(path.resolve(input.projectRoot), evidence.layout);
-        if (original.generation !== evidence.controlGeneration) {
-          throw new Error("workflow control changed before controller refresh");
-        }
-        const activeLink = verifyCommittedWorkflowRunLink(evidence.layout);
-        if (
-          activeLink.workflow_run_id !== evidence.smithersRunId ||
-          activeLink.link_id !== evidence.workflowLinkId ||
-          activeLink.control_generation !== original.generation
-        ) {
-          throw new Error("workflow link changed before controller refresh");
-        }
-        const prepared = prepareControllerGeneration(
-          evidence.layout,
-          original,
-          refreshedSmithersControllerSnapshot({
-            projectRoot: path.resolve(input.projectRoot),
-            layout: evidence.layout,
-            original,
-            effective: evidence.controllerSnapshot,
-            config: sealedConfig
-          }),
-          {
-            workflowRunId: activeLink.workflow_run_id,
-            workflowLinkId: activeLink.link_id
-          }
-        );
-        const published = materializeWorkflowExecutionSnapshot({
-          projectRoot: path.resolve(input.projectRoot),
-          layout: evidence.layout,
-          snapshot: prepared.snapshot,
-          authorizedGenerations: prepared.authorizedGenerations
-        });
-        const committed = commitControllerGeneration(evidence.layout, original, prepared.controllerGeneration);
-        evidence = {
-          ...evidence,
-          workflowPath: published.workflowPath,
-          inputJson: published.inputJson,
-          controllerGeneration: committed.controllerGeneration,
-          controllerSnapshot: committed.snapshot,
-          executionSnapshot: published
-        };
-      } finally {
-        await releaseControlLock();
-      }
-    }
-    if (!hasMaterializedWorkflowEvidence(evidence)) {
-      throw new Error("controller refresh did not materialize its authenticated execution snapshot");
-    }
-    const controllerRefreshAuthority = controllerRefreshAuthorityFor(evidence);
     const sealedGraph = parseSealedExpandedGraph(evidence.verifiedControl.contents.expanded_graph);
     const taskDocument = parseSealedTaskManifest(evidence.verifiedControl.contents);
     const preflightDiagnostics = await requiredCommandPreflightDiagnostics(input, sealedConfig, sealedGraph);
     if (hasRuntimeErrors(preflightDiagnostics)) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
-    // Reconcile Smithers before retrying so a stale local running state cannot
-    // hide the failed run that this retry is recovering.
-    if (action === "resume" && input.retryFailed === true) {
-      // Renew the durable deadline before any reconciliation that can reopen
-      // the local run. If a later preflight or lifecycle inspection fails, an
-      // already-active workflow must not be left paired with an expired local
-      // deadline that the next ordinary sync would enforce by cancelling it.
-      const deadlineRenewedAt = new Date().toISOString();
-      const stateBeforeSynchronization = readRunState(evidence.layout);
-      stateBeforeSynchronization.workflow_deadline_at = new Date(
-        Date.parse(deadlineRenewedAt) + sealedConfig.run.workflowDeadlineSeconds * 1_000
-      ).toISOString();
-      writeRunState(evidence.layout, stateBeforeSynchronization);
-      const { syncRun } = await import("./workflow-sync.js");
-      const synchronization = await syncRun(
-        { projectRoot: input.projectRoot, runId: input.runId, env: input.env },
-        { allowMissingWorkflowRun: true }
-      );
-      if (!synchronization.ok) {
-        return runtimeFailure<WorkflowLifecycleValue>(synchronization.diagnostics);
-      }
-    }
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
-    const stateBeforeLifecycle = readRunState(evidence.layout);
-    let recoveryCandidate:
-      | {
-          failedNodes: RunRecoveryProvenance["failed_nodes"];
-          sourceWorkflowRunId: string;
-          sourceWorkflowLinkId: string;
-        }
-      | undefined;
-    if (action === "resume" && input.retryFailed === true && stateBeforeLifecycle.status === "failed") {
-      const nonBlockingAttemptIds = new Set(
-        taskDocument.tasks
-          .filter((task) => {
-            const node = sealedGraph.nodes.find((candidate) => candidate.id === task.concreteNodeId);
-            return node !== undefined && expandedNodeContinuesOnFailure(sealedGraph, node);
-          })
-          .map((task) => task.attemptId)
-      );
-      const failedNodes: RunRecoveryProvenance["failed_nodes"] = [];
-      let completeAttemptAuthority = true;
-      for (const node of Object.values(stateBeforeLifecycle.nodes).filter(
-        (candidate) =>
-          (candidate.status === "failed" || candidate.status === "timed-out") &&
-          !nonBlockingAttemptIds.has(candidate.node_id)
-      )) {
-        const provenance = node.provenance as Record<string, unknown> | undefined;
-        const workflow = provenance?.workflow as Record<string, unknown> | undefined;
-        const workflowTaskId = workflow?.task_id;
-        const failedAttempt = workflow?.attempt;
-        const sealedTasks = taskDocument.tasks.filter((task) => task.attemptId === node.node_id);
-        const sealedTask = sealedTasks.length === 1 ? sealedTasks[0] : undefined;
-        const sealedWorkflowTaskIds =
-          sealedTask === undefined
-            ? undefined
-            : new Set([
-                sealedTask.preparationSmithersNodeId,
-                sealedTask.smithersNodeId,
-                sealedTask.verifierSmithersNodeId
-              ]);
-        if (
-          sealedTask === undefined ||
-          typeof workflowTaskId !== "string" ||
-          sealedWorkflowTaskIds?.has(workflowTaskId) !== true ||
-          workflow?.agent_task_id !== sealedTask.smithersNodeId ||
-          workflow?.verifier_task_id !== sealedTask.verifierSmithersNodeId ||
-          typeof failedAttempt !== "number" ||
-          !Number.isSafeInteger(failedAttempt) ||
-          failedAttempt < 1
-        ) {
-          // A multi-attempt concrete node is only a projection over its
-          // authoritative task attempts and cannot be substituted for one.
-          // Any missing or foreign sealed task/attempt identity makes this
-          // recovery fail closed rather than hiding a required failure.
-          completeAttemptAuthority = false;
-          break;
-        }
-        const failure = provenance?.failure as Record<string, unknown> | undefined;
-        const category = failure?.category;
-        if (
-          typeof category !== "string" ||
-          !NODE_PROVENANCE_FAILURE_CATEGORIES.includes(
-            category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"]
-          ) ||
-          failure?.causal_task_id !== workflowTaskId ||
-          failure?.causal_failure_category !== category ||
-          !Array.isArray(failure?.dependent_task_ids) ||
-          failure.dependent_task_ids.length !== 0
-        ) {
-          completeAttemptAuthority = false;
-          break;
-        }
-        const failureCategory = category as RunRecoveryProvenance["failed_nodes"][number]["failure_category"];
-        failedNodes.push({
-          node_id: node.node_id,
-          workflow_task_id: workflowTaskId,
-          failed_attempt: failedAttempt,
-          failure_category: failureCategory
-        });
-      }
-      if (completeAttemptAuthority && failedNodes.length > 0) {
-        recoveryCandidate = {
-          failedNodes,
-          sourceWorkflowRunId: evidence.smithersRunId,
-          sourceWorkflowLinkId: evidence.workflowLinkId
-        };
-      }
-    }
-    const retryFailedLifecycle = action === "resume" && input.retryFailed === true;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: sealedConfig,
@@ -853,11 +844,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     const trustedCli = prepareTrustedCliEnvironment({
       layout: evidence.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
-      executionSnapshotRoot:
-        input.refreshController === true ? trustedCliIdentitySnapshotRoot : evidence.executionSnapshot.root,
+      executionSnapshotRoot: evidence.executionSnapshot.root,
       env: forgeGuard.env,
-      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks),
-      allowIdentityRotation: input.refreshController === true
+      required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
@@ -871,31 +860,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
     );
     assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
-    if (input.refinalizeControllerFailures === true) {
-      const { refinalizeControllerFailures } = await import("./workflow-sync.js");
-      const refinalizationGraph = assertSealedPlannedGraph(
-        parseStrictJsonBytes(evidence.verifiedControl.contents.graph)
-      );
-      assertSmithersTaskManifestMatchesPlannedGraph(taskDocument, refinalizationGraph);
-      const refinalization = await refinalizeControllerFailures({
-        projectRoot: path.resolve(input.projectRoot),
-        layout: evidence.layout,
-        graph: refinalizationGraph,
-        tasks: taskDocument.tasks,
-        workflowRunId: evidence.smithersRunId,
-        workflowLinkId: evidence.workflowLinkId,
-        controlGeneration: evidence.controlGeneration,
-        controllerGeneration: evidence.controllerGeneration,
-        env: lifecycleEnvironment,
-        // The same authenticated lifecycle invocation will retry genuine
-        // Smithers failures after controller-only false failures are handled.
-        // Standalone re-finalization retains its explicit no-candidate error.
-        ...(retryFailedLifecycle ? { allowNoEligibleForRetry: true } : {})
-      });
-      if (!refinalization.ok) {
-        return runtimeFailure<WorkflowLifecycleValue>(refinalization.diagnostics);
-      }
-    }
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -903,38 +867,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         action,
         workflow_run_id: evidence.smithersRunId,
         control_generation: evidence.controlGeneration,
-        workflow_link_id: evidence.workflowLinkId,
-        ...(retryFailedLifecycle ? { retry_failed: true } : {})
+        workflow_link_id: evidence.workflowLinkId
       }
     });
-    let preparedRecovery: RunRecoveryProvenance | undefined;
-    if (recoveryCandidate !== undefined) {
-      const state = readRunState(evidence.layout);
-      const priorRecovery = state.provenance?.recovery;
-      preparedRecovery = {
-        recovery_id: crypto.randomUUID(),
-        submission_status: "prepared",
-        recovered: false,
-        prior_status: "failed",
-        failed_nodes: recoveryCandidate.failedNodes,
-        source_workflow_run_id: recoveryCandidate.sourceWorkflowRunId,
-        source_workflow_link_id: recoveryCandidate.sourceWorkflowLinkId,
-        control_generation: evidence.controlGeneration,
-        controller_invocation_id: controllerInvocation.event_id,
-        controller_invoked_at: controllerInvocation.timestamp
-      };
-      writeRunState(evidence.layout, {
-        ...state,
-        provenance: {
-          ...state.provenance!,
-          recovery_history: [
-            ...(state.provenance?.recovery_history ?? []),
-            ...(priorRecovery === undefined ? [] : [priorRecovery])
-          ],
-          recovery: preparedRecovery
-        }
-      });
-    }
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -944,14 +879,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
       force: input.force,
-      retryFailed: input.retryFailed,
       label: input.label,
       // Recovery consumes the already-materialized sealed input bytes. The
       // evidence directory remains mutable only for recovery receipts and logs.
       relaunchPaths: {
         runRoot: evidence.layout.root,
-        inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
-        inputJson: evidence.inputJson,
         logsDir: path.join(evidence.layout.root, "smithers", "logs")
       },
       keepWorkspaces: sealedConfig.run.keepWorkspaces,
@@ -962,8 +894,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
-      ),
-      controllerRefreshAuthority
+      )
     });
     const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
     const lifecycleResultEvent = appendEvent(evidence.layout, {
@@ -976,9 +907,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         workflow_run_id: workflowRunId,
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
-        controller_invoked_at: controllerInvocation.timestamp,
-        ...(retryFailedLifecycle ? { retry_failed: true } : {}),
-        ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
+        controller_invoked_at: controllerInvocation.timestamp
       }
     });
     const linkedWorkflow = await updateLinkedWorkflowRunId(evidence.layout, workflowRunId, {
@@ -992,19 +921,17 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       lifecycleResultAt: lifecycleResultEvent.timestamp
     });
     const submittedAt = new Date().toISOString();
-    if (!lifecycleResult.alreadyRunning || action === "resume") {
+    if (!lifecycleResult.alreadyRunning) {
       const state = readRunState(evidence.layout);
-      if (!lifecycleResult.alreadyRunning) {
-        const leaseDurationMs = sealedConfig.run.controllerLeaseSeconds * 1_000;
-        state.concurrency.requested_concurrency = requestedConcurrency;
-        state.controller_lease = {
-          ...state.controller_lease,
-          status: "active",
-          duration_ms: leaseDurationMs,
-          renewed_at: submittedAt,
-          expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
-        };
-      }
+      const leaseDurationMs = sealedConfig.run.controllerLeaseSeconds * 1_000;
+      state.concurrency.requested_concurrency = requestedConcurrency;
+      state.controller_lease = {
+        ...state.controller_lease,
+        status: "active",
+        duration_ms: leaseDurationMs,
+        renewed_at: submittedAt,
+        expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
+      };
       state.workflow_deadline_at = new Date(
         Date.parse(submittedAt) + sealedConfig.run.workflowDeadlineSeconds * 1_000
       ).toISOString();
@@ -1012,7 +939,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       writeRunState(evidence.layout, state);
     }
     updateRunStatus(evidence.layout, "running", submittedAt);
-    const lifecycleSubmissionEvent = appendEvent(evidence.layout, {
+    appendEvent(evidence.layout, {
       eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",
       status: "running",
       payload: {
@@ -1022,37 +949,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         control_generation: evidence.controlGeneration,
         controller_invocation_id: controllerInvocation.event_id,
         controller_invoked_at: controllerInvocation.timestamp,
-        ...(retryFailedLifecycle ? { retry_failed: true } : {}),
-        ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
-        ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
+        ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {})
       }
     });
-    if (preparedRecovery !== undefined && !lifecycleResult.alreadyRunning) {
-      const state = readRunState(evidence.layout);
-      if (
-        state.provenance?.recovery?.submission_status !== "prepared" ||
-        state.provenance.recovery.recovery_id !== preparedRecovery.recovery_id ||
-        state.provenance.recovery.controller_invocation_id !== controllerInvocation.event_id
-      ) {
-        throw new Error("prepared retry recovery authority changed before lifecycle submission completed");
-      }
-      writeRunState(evidence.layout, {
-        ...state,
-        provenance: {
-          ...state.provenance!,
-          recovery: {
-            ...preparedRecovery,
-            submission_status: "submitted",
-            workflow_run_id: workflowRunId,
-            workflow_link_id: linkedWorkflow.link_id,
-            lifecycle_result_event_id: lifecycleResultEvent.event_id,
-            lifecycle_result_at: lifecycleResultEvent.timestamp,
-            lifecycle_submission_event_id: lifecycleSubmissionEvent.event_id,
-            lifecycle_submitted_at: lifecycleSubmissionEvent.timestamp
-          }
-        }
-      });
-    }
     return runtimeResult(
       true,
       {
@@ -1267,21 +1166,11 @@ async function persistSmithersEvidence(
   return { verifiedControl, executionSnapshot, workflowLinkId: committedWorkflowLink.link_id };
 }
 
-export function readLinkedWorkflowEvidence(
-  projectRoot: string,
-  runId: string,
-  options: ReadLinkedWorkflowEvidenceOptions & { deferExecutionSnapshotForControllerRefresh: true }
-): Promise<DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure>;
-export function readLinkedWorkflowEvidence(
-  projectRoot: string,
-  runId: string,
-  options?: ReadLinkedWorkflowEvidenceOptions & { deferExecutionSnapshotForControllerRefresh?: false }
-): Promise<LinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure>;
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
   runId: string,
   options: ReadLinkedWorkflowEvidenceOptions = {}
-): Promise<LinkedWorkflowEvidence | DeferredLinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure> {
+): Promise<LinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure> {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const runsRoot = await runsRootForProject(resolvedProjectRoot);
   let metadataPath: string;
@@ -1381,23 +1270,18 @@ export async function readLinkedWorkflowEvidence(
     ) {
       throw new Error("compiled workflow identity does not match the sealed task manifest");
     }
-    const controller = effectiveControllerGeneration(layout, verifiedControl, {
-      allowPending: options.allowPendingControllerRefresh === true
-    });
+    const controller = effectiveControllerGeneration(layout, verifiedControl);
     const startupControlDrift = tolerateDivergence
       ? sealedBunStartupControlDrift(controller.snapshot.executionFiles)
       : undefined;
     if (startupControlDrift !== undefined) observerDivergences.push(startupControlDrift);
-    const executionSnapshot =
-      options.deferExecutionSnapshotForControllerRefresh === true
-        ? undefined
-        : materializeWorkflowExecutionSnapshot({
-            projectRoot: resolvedProjectRoot,
-            layout,
-            snapshot: controller.snapshot,
-            authorizedGenerations: controller.authorizedGenerations,
-            ...(startupControlDrift === undefined ? {} : { tolerateStartupControlDrift: true })
-          });
+    const executionSnapshot = materializeWorkflowExecutionSnapshot({
+      projectRoot: resolvedProjectRoot,
+      layout,
+      snapshot: controller.snapshot,
+      authorizedGenerations: controller.authorizedGenerations,
+      ...(startupControlDrift === undefined ? {} : { tolerateStartupControlDrift: true })
+    });
     const expectedWorkflowFields: Record<string, string> = {
       path: projectRelativePath(resolvedProjectRoot, verifiedControl.paths.workflowPath),
       evidence_path: runRelativePath(layout, verifiedControl.paths.evidenceWorkflowPath),
@@ -1465,13 +1349,8 @@ export async function readLinkedWorkflowEvidence(
           ? verifiedControl
           : { ...verifiedControl, divergences: [...verifiedControl.divergences, ...observerDivergences] },
       controllerSnapshot: controller.snapshot,
-      ...(executionSnapshot === undefined
-        ? {}
-        : {
-            workflowPath: executionSnapshot.workflowPath,
-            inputJson: executionSnapshot.inputJson,
-            executionSnapshot
-          })
+      workflowPath: executionSnapshot.workflowPath,
+      executionSnapshot
     };
   } catch (error) {
     return {
@@ -1874,6 +1753,24 @@ function sensitiveAllowlistedEnvironmentVariableNames(source: Record<string, str
     for (const sourceName of matchingSourceNames) names.add(sourceName);
   }
   return [...names].sort();
+}
+
+function withoutSensitiveAllowlistedEnvironment(
+  source: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  const sanitized = { ...source };
+  const sensitiveNames = new Set(
+    sensitiveAllowlistedEnvironmentVariableNames(source).map((name) => name.toUpperCase())
+  );
+  for (const name of Object.keys(sanitized)) {
+    if (sensitiveNames.has(name.toUpperCase())) sanitized[name] = undefined;
+  }
+  sanitized.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = (source.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0 && !sensitiveNames.has(name.toUpperCase()))
+    .join(",");
+  return sanitized;
 }
 
 function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {

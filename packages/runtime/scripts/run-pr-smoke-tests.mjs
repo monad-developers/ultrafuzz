@@ -17,9 +17,9 @@ const namedTests = new Map([
       "plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission",
       "compileSmithersWorkflow gates native dependencies on deterministic artifact verification",
       "compileSmithersWorkflow maps cloud attempts to portable provider sandboxes",
-      "resume reopens a terminal failed workflow with only pending ready work",
-      "retry recovery survives an interrupted submission projection and rejects superseding same-link attempts",
-      "forced retry resume renews a stale terminal deadline without duplicating an active workflow"
+      "resume, replay, and fork delegate linked runs to Smithers lifecycle verbs",
+      "ordinary resume delegates active-run ownership to Smithers while explicit retry still inspects",
+      "native continuation does not use historical trusted CLI identity as an authorization gate"
     ]
   ],
   [

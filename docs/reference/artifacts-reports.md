@@ -68,8 +68,11 @@ snapshot inventory rather than a standalone workflow-origin attestation.
 ## Run Metadata
 
 `run.json` records the run schema version, run ID, creation timestamp, mode,
-linked workflow IDs, and workflow evidence pointers. Lifecycle commands such as
-`resume`, `replay`, and `fork` use this linked workflow evidence.
+linked workflow IDs, and workflow evidence pointers. Strict inspection,
+`replay`, and `fork` use the complete linked-workflow evidence. Ordinary
+`resume` needs only the safe run root, persisted workflow path, and Smithers run
+identity; newer projections and authorization journals do not gate native
+continuation.
 
 `config.resolved.toml` stores the resolved config for the run. Secret-looking
 values are redacted before persistence, and restore metadata is written to
@@ -109,12 +112,11 @@ loader/search injection, confines ESM and CommonJS module resolution to the
 closure, and precedes target-controlled directories on the producer's `PATH`.
 Before model work, Ultrafuzz uses it to validate a real known-valid fixture and
 checks the returned schema ID, schema digest, bundle digest, and build identity.
-A missing, changed, or stale launcher or closure is a setup failure; it is not
-recreated silently when an existing run resumes. An authenticated controller
-refresh can preflight and atomically select a replacement closure or migrate a
-valid legacy launcher. The replacement validator packages come from the
-original authenticated execution generation, not the refreshed controller
-generation. Modal images provide the equivalent root-owned, read-only
+A missing, changed, or stale launcher or closure remains a setup failure for
+new schema-backed model work, but its historical identity is not continuation
+authorization. A current-controller continuation may select the current
+launcher and validator packages while retaining the old closure as provenance.
+Modal images provide the equivalent root-owned, read-only
 `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
 ## State

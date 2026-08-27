@@ -83,9 +83,10 @@ verified content-addressed snapshot of the CLI and every transitive package, so
 a working-tree rebuild cannot change an active run. Ambient Node loader/search
 variables are removed and both ESM and CommonJS module resolution must stay
 inside that snapshot; document reads are unaffected. A path lookup alone is not
-a preflight, and a missing or tampered launcher or closure is not silently
-repaired on ordinary resume; an authenticated controller refresh is required to
-publish or migrate a closure.
+a preflight. Ordinary resume now delegates continuation to Smithers instead of
+using the historical launcher or closure as an authorization gate. A current
+controller refresh publishes a new controller path without rewriting the
+historical closure.
 
 Exit `0` establishes portable document-shape conformance only. Cross-file
 joins, projected-key uniqueness, filesystem and Git facts, digest relationships,
