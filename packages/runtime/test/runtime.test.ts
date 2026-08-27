@@ -9424,7 +9424,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
   assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
 });
 
-test("current-controller rendering preserves continue policy for a leaf task", async () => {
+test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOptionalSpecialistTopology(project);
@@ -9440,9 +9440,18 @@ test("current-controller rendering preserves continue policy for a leaf task", a
     renderedPrompts: plan.value!.rendered_prompts
   });
   const tasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.layout.root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
+  const promptedTask = tasks.tasks.find((task) => task.renderedPromptPath !== undefined);
+  assert.ok(promptedTask?.renderedPromptPath);
+  fs.rmSync(promptedTask.renderedPromptPath);
 
   const workflowPath = renderCurrentSmithersController({
     projectRoot: project,
@@ -9460,8 +9469,86 @@ test("current-controller rendering preserves continue policy for a leaf task", a
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
+    promptPath?: string;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+  const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
+  assert.ok(plannedPrompt);
+  const snapshotPath = path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path);
+  assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
+
+  // The workflow runtime persists the current task specifications back to tasks.json. A later
+  // refresh therefore sees the retained path produced above, not the cleanup-owned launch path.
+  // It must accept only that exact authenticated snapshot and produce the same prompt binding.
+  promptedTask.renderedPromptPath = snapshotPath;
+  const repeatedWorkflowPath = renderCurrentSmithersController({
+    projectRoot: project,
+    layout: plan.value!.layout,
+    smithersRunId: compiled.smithersRunId,
+    tasks,
+    config: plan.value!.resolved_config,
+    expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
+  });
+  const repeatedSource = fs.readFileSync(repeatedWorkflowPath, "utf8");
+  const repeatedStart = repeatedSource.indexOf(specsPrefix);
+  const repeatedEnd = repeatedSource.indexOf(" as const;", repeatedStart);
+  assert.ok(repeatedStart >= 0 && repeatedEnd > repeatedStart, repeatedSource);
+  const repeatedSpecs = JSON.parse(
+    repeatedSource.slice(repeatedStart + specsPrefix.length, repeatedEnd)
+  ) as typeof specs;
+  assert.equal(repeatedSpecs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
+  assert.equal(repeatedSpecs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+
+  promptedTask.renderedPromptPath = path.join(plan.value!.layout.root, "prompt-snapshots", `${"0".repeat(64)}.md`);
+  assert.throws(
+    () =>
+      renderCurrentSmithersController({
+        projectRoot: project,
+        layout: plan.value!.layout,
+        smithersRunId: compiled.smithersRunId,
+        tasks,
+        config: plan.value!.resolved_config
+      }),
+    /persisted prompt plan does not match continuation task/u
+  );
+});
+
+test("current-controller rendering fails closed on retained prompt snapshot drift", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "refresh-prompt-drift", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const { compileSmithersWorkflow, renderCurrentSmithersController } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-refresh-prompt-drift",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  const tasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.layout.root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{ attempt_id: string; rendered_prompt_snapshot_path: string }>;
+  };
+  const promptedTask = tasks.tasks.find((task) => task.renderedPromptPath !== undefined);
+  assert.ok(promptedTask);
+  const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
+  assert.ok(plannedPrompt);
+  fs.appendFileSync(path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path), "drift\n");
+
+  assert.throws(
+    () =>
+      renderCurrentSmithersController({
+        projectRoot: project,
+        layout: plan.value!.layout,
+        smithersRunId: compiled.smithersRunId,
+        tasks,
+        config: plan.value!.resolved_config
+      }),
+    /retained rendered prompt snapshot digest does not match task/u
+  );
 });
 
 test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {

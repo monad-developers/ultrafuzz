@@ -1313,6 +1313,36 @@ export interface RefreshedSmithersControllerSnapshot {
   semanticFingerprint: string;
 }
 
+function currentControllerTasks(
+  layout: RunLayout,
+  tasks: SmithersTaskManifestDocument
+): readonly CompiledSmithersTask[] {
+  const plan = readRunPlanDocument(path.join(layout.root, "plan.json"), layout.runId);
+  const plannedPrompts = new Map(plan.rendered_prompts.map((prompt) => [prompt.attempt_id, prompt]));
+  return tasks.tasks.map((task) => {
+    if (task.renderedPromptPath === undefined) return task;
+    const planned = plannedPrompts.get(task.attemptId);
+    if (planned === undefined) {
+      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
+    }
+    const snapshotPath = safeResolveInside(
+      layout.root,
+      planned.rendered_prompt_snapshot_path,
+      `retained rendered prompt snapshot for ${task.attemptId}`
+    );
+    if (task.renderedPromptPath !== planned.rendered_prompt_path && task.renderedPromptPath !== snapshotPath) {
+      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
+    }
+    assertRegularFileInside(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
+    assertNoSymlinkComponents(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
+    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES).toString("utf8");
+    if (sha256Stable(contents) !== planned.rendered_prompt_digest) {
+      throw new Error(`retained rendered prompt snapshot digest does not match task ${task.attemptId}`);
+    }
+    return { ...task, renderedPromptPath: snapshotPath };
+  });
+}
+
 /**
  * Render the current controller beside, rather than over, the source that
  * originally launched a stopped run. Smithers records this path and its
@@ -1327,6 +1357,7 @@ export function renderCurrentSmithersController(input: {
   expandedGraph?: unknown;
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
+  const tasks = currentControllerTasks(input.layout, input.tasks);
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
@@ -1334,13 +1365,11 @@ export function renderCurrentSmithersController(input: {
     writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
   }
   const nonBlockingAttempts = new Set(
-    input.tasks.tasks.flatMap((task) =>
-      (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory))
-    )
+    tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
   );
   const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
   const groups = isObjectRecord(graph.groups) ? graph.groups : {};
-  for (const task of input.tasks.tasks) {
+  for (const task of tasks) {
     const groupId = task.metadata.node.group;
     const group = groupId === undefined ? undefined : groups[groupId];
     const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
@@ -1351,7 +1380,7 @@ export function renderCurrentSmithersController(input: {
     runId: input.layout.runId,
     smithersRunId: input.smithersRunId,
     workflowName: input.tasks.workflow_name,
-    tasks: input.tasks.tasks,
+    tasks,
     dynamicGroups: input.tasks.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
