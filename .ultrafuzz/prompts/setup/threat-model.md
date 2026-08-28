@@ -23,6 +23,22 @@ Read-only controlled capability registry (use only the top-level
 Do not inspect sibling runs, historical reports, benchmark ground truth,
 host-global files, or network resources.
 
+## Failure-resilient checkpoint
+
+Before extended analysis, read the schema, the controlled capability registry,
+the supplied handoffs, and enough repository evidence to satisfy every
+non-empty collection required by the schema. Then immediately write a
+conservative, schema-valid working `{{artifact_path}}/threat-model.json` and a
+non-empty `{{artifact_path}}/THREAT_MODEL.md`, and run the exact validation
+command from the injected output contract. Mark capabilities whose status is
+not yet established as `unknown`, and record uncertainty explicitly; never
+fabricate evidence merely to complete the checkpoint.
+
+Refine the validated JSON in bounded increments and revalidate after each
+material update. If a validated checkpoint from an interrupted attempt already
+exists at the artifact path, validate and refine it instead of starting over.
+Do not postpone the first validated artifacts until the end of the task.
+
 ## Analysis
 
 Start from scope, assets, value stores, actors, roles, privileges, trust

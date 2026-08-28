@@ -97,6 +97,16 @@ function normalized(markdown: string): string {
 }
 
 describe("prompt semantic anchors", () => {
+  it("checkpoints a valid threat model before extended analysis", () => {
+    const threatModel = prompt("setup/threat-model.md");
+
+    expect(threatModel).toContain("## Failure-resilient checkpoint");
+    expect(threatModel).toMatch(/immediately write a\s+conservative, schema-valid working/u);
+    expect(threatModel).toMatch(/run the exact validation\s+command/u);
+    expect(threatModel).toMatch(/checkpoint from an interrupted attempt already\s+exists/u);
+    expect(threatModel).toMatch(/Do not postpone the first validated artifacts/u);
+  });
+
   it("keeps every direct strategy on the finding-first optional-evidence policy", () => {
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
