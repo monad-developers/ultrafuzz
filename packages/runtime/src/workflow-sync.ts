@@ -1451,7 +1451,9 @@ function recoveryAuthorizesTerminalAggregate(input: {
     .filter(([nodeId]) => !input.nonBlockingNodeIds.has(nodeId))
     .map(([, status]) => status);
   if (
-    (input.inspect.runState !== "failed" && input.inspect.runState !== "succeeded") ||
+    (input.inspect.runState !== "failed" &&
+      input.inspect.runState !== "succeeded" &&
+      input.inspect.runState !== "succeeded-with-failures") ||
     recovery === undefined ||
     submissionAuthority === undefined ||
     !input.evidenceComplete ||
@@ -5469,7 +5471,11 @@ function statusFromWorkflowState(state: SmithersNodeState): NodeStatus {
   switch (state) {
     case "finished":
       return "succeeded";
+    // Smithers 0.35.0 persists `stalled` as a terminal TaskState and treats it
+    // exactly like `failed` in `isTerminalState`, so it maps to the same
+    // Ultrafuzz node status rather than reading as still-running work.
     case "failed":
+    case "stalled":
     case "cancelled":
       return "failed";
     case "skipped":
@@ -5535,7 +5541,14 @@ function finalRunStatus(
   ) {
     return "running";
   }
-  if (workflowStatus === "succeeded") {
+  // `succeeded-with-failures` is Smithers 0.35.0's ordinary terminal state for a
+  // run that tolerated a `continueOnFail` child, which Ultrafuzz generates
+  // deliberately. It must terminalize exactly like `succeeded`: the blocking
+  // statuses below already exclude non-blocking nodes, so the tolerated failure
+  // is filtered out before this gate. Falling through to `return currentStatus`
+  // instead would leave such a run reported `running` forever, and the Modal
+  // resume and worker poll loops key their exit on that status.
+  if (workflowStatus === "succeeded" || workflowStatus === "succeeded-with-failures") {
     if (options.recoveryRequiresAuthorization === true && options.recoveredAggregateAuthorized !== true) {
       return "failed";
     }
@@ -5621,7 +5634,16 @@ function unattributedTerminalFailureKey(payload: unknown): string {
 }
 
 function workflowSucceeded(inspect: WorkflowInspect): boolean {
-  return inspect.runState === "succeeded" && inspect.exhaustedLoops.length === 0;
+  // `succeeded-with-failures` is Smithers 0.35.0's ordinary terminal state for a
+  // run that tolerated a `continueOnFail` child, so it must be admitted here for
+  // the same reason `finalRunStatus` admits it. This gate arms the
+  // WORKFLOW_TASK_EVIDENCE_MISSING error, which is precisely the safety check a
+  // run with tolerated failures needs: leaving it closed would let a run finish
+  // reported `succeeded` with a task silently unaccounted for.
+  return (
+    (inspect.runState === "succeeded" || inspect.runState === "succeeded-with-failures") &&
+    inspect.exhaustedLoops.length === 0
+  );
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
@@ -5775,7 +5797,11 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
   const current = parseCurrentSmithersInspect(snapshot, expectedWorkflowRunId);
   const failedWorkflowTaskIds = new Set(current.failedChildKeys.map((key) => key.slice(0, key.lastIndexOf("::"))));
   for (const node of current.nodes) {
-    if (node.state === "failed") failedWorkflowTaskIds.add(node.nodeId);
+    // Smithers 0.35.0's `stalled` is a terminal failure verdict, so a stalled
+    // node is a failing workflow task. Omitting it made the
+    // WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE diagnostic report "unreported"
+    // for exactly the run whose failing node it was meant to name.
+    if (node.state === "failed" || node.state === "stalled") failedWorkflowTaskIds.add(node.nodeId);
   }
   return {
     runStatus: current.runStatus,
@@ -5785,6 +5811,48 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
     exhaustedLoops: current.exhaustedLoops
   };
 }
+
+/**
+ * The closed-world key contract Ultrafuzz enforces on the pinned runner's
+ * `TokenUsageReported` payload, which `synchronizeLinkedWorkflowRun` reads on
+ * every status, state, diagnose and evals row sync. Exported so a test can diff
+ * it against the engine's own emitters: the check is exact-key and re-throws
+ * everywhere except `stats`, so a key added upstream takes out synchronization
+ * for every run on its first agent task -- which is exactly what 0.35.0's
+ * `freshInputTokens` and `costUsd` did.
+ */
+export const CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT = {
+  allowed: [
+    "type",
+    "runId",
+    "nodeId",
+    "iteration",
+    "attempt",
+    "model",
+    "agent",
+    "inputTokens",
+    // 0.35.0's `normalizeTokenUsage` always populates `freshInputTokens` whenever
+    // it returns usage at all, so this key is on EVERY usage event of every
+    // 0.35.0 run regardless of model or provider. It is the uncached share of
+    // `inputTokens`, which is why the runner prices cost against it.
+    "freshInputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "reasoningTokens",
+    // Present whenever the reported model is in the runner's built-in price
+    // table (`@smthrs/scorers` `modelTokenPrices`), which covers every model
+    // Ultrafuzz launches; the runner omits it rather than reporting a misleading
+    // $0 for an unpriced model, so it stays optional here.
+    "costUsd",
+    "timestampMs",
+    // The runner stamps a trace envelope on every event it emits. It carries no
+    // accounting of its own, so refusing it only made every real run unsyncable.
+    // It is not part of any engine emitter's own payload literal.
+    "correlation"
+  ],
+  keysAddedByTheEventBus: ["correlation"]
+} as const;
 
 function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): WorkflowEvent[] {
   if (stdout.length === 0) return [];
@@ -5810,7 +5878,7 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
       );
     }
     if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["runId", "seq", "timestampMs", "type", "payload"])) {
-      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.34.0 envelope`);
+      throw new Error(`Smithers event record ${index + 1} must use the exact five-key 0.35.0 envelope`);
     }
     const workflowRunId = requiredWorkflowEventString(parsed.runId, `Smithers event record ${index + 1} runId`);
     const sourceEventSequence = requiredWorkflowEventCount(parsed.seq, `Smithers event record ${index + 1} seq`);
@@ -5858,33 +5926,20 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
   }
   if (type !== "TokenUsageReported") return;
-  const allowed = [
-    "type",
-    "runId",
-    "nodeId",
-    "iteration",
-    "attempt",
-    "model",
-    "agent",
-    "inputTokens",
-    "outputTokens",
-    "cacheReadTokens",
-    "cacheWriteTokens",
-    "reasoningTokens",
-    "timestampMs",
-    // The runner stamps a trace envelope on every event it emits. It carries no
-    // accounting of its own, so refusing it only made every real run unsyncable.
-    "correlation"
-  ];
-  if (!hasOnlyKeys(payload, allowed)) throw new Error(`${label} contains unsupported fields`);
+  if (!hasOnlyKeys(payload, CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed)) {
+    throw new Error(`${label} contains unsupported fields`);
+  }
   assertWorkflowEventCorrelation(payload, label);
   requiredWorkflowEventString(payload.model, `${label} model`);
   requiredWorkflowEventString(payload.agent, `${label} agent`);
   requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
   requiredWorkflowEventCount(payload.outputTokens, `${label} outputTokens`);
-  for (const field of ["cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
+  for (const field of ["freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
     if (payload[field] !== undefined) requiredWorkflowEventCount(payload[field], `${label} ${field}`);
   }
+  // Cost is a fractional USD estimate, not a token count, so it gets the
+  // finite-non-negative bound rather than the safe-integer one.
+  if (payload.costUsd !== undefined) requiredWorkflowEventCostUsd(payload.costUsd, `${label} costUsd`);
 }
 
 function requiredWorkflowEventString(value: unknown, label: string): string {
@@ -5896,6 +5951,11 @@ function requiredWorkflowEventString(value: unknown, label: string): string {
 
 function requiredWorkflowEventCount(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function requiredWorkflowEventCostUsd(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${label} is invalid`);
   return value;
 }
 

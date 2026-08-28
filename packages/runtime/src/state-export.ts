@@ -460,7 +460,11 @@ function parseCurrentPsRow(value: unknown, index: number): CurrentSmithersPsRow 
   requiredString(row.workflow, `${label}.workflow`);
   const state = requiredEnum(row.state, SMITHERS_RUN_STATES, `${label}.state`);
   if (state === "unknown") throw new Error(`${label}.state cannot be unknown`);
-  const expectedStatus = state === "succeeded" ? "finished" : state;
+  // Upstream renames both successful derived states to "finished" for legacy
+  // `ps` consumers (`@smthrs/cli/src/tail.js` `deriveTailStatus`); every other
+  // derived state passes through unchanged. Mirroring only "succeeded" here
+  // rejects every run that tolerated a child failure.
+  const expectedStatus = state === "succeeded" || state === "succeeded-with-failures" ? "finished" : state;
   if (requiredString(row.status, `${label}.status`) !== expectedStatus) {
     throw new Error(`${label}.status does not match the canonical derived state`);
   }
@@ -668,6 +672,38 @@ const ADDITIONAL_RUN_HEALTH_FIELDS = [
   "oneshotControl"
 ] as const;
 
+/**
+ * The closed-world key contract Ultrafuzz enforces on `smithers status --format
+ * json --full-output`. Exported so a test can diff it against the runner's own
+ * summary builder: `counts` is exact-key, so the `stalled` bucket 0.35.0 added
+ * would otherwise have made `ultrafuzz status` return WORKFLOW_STATUS_INVALID
+ * for every run, with nothing in the suite to catch it.
+ *
+ * `stalled` is admitted and then folded into `failed` (see `parsedCounts`)
+ * rather than published as an eleventh count: Ultrafuzz has no `stalled` node
+ * status, and `statusFromWorkflowState` already reports the runner's `stalled`
+ * node state as an Ultrafuzz failure, so a separate bucket here would contradict
+ * every other surface that reports the same node.
+ */
+export const CURRENT_SMITHERS_STATUS_KEY_CONTRACT = {
+  counts: {
+    exact: [
+      "finished",
+      "inProgress",
+      "pending",
+      "failed",
+      "stalled",
+      "waitingApproval",
+      "waitingEvent",
+      "waitingTimer",
+      "skipped",
+      "other",
+      "total"
+    ]
+  },
+  throughput: { exact: ["recentFinished", "windowMs", "totalFinished", "lastFinishedAtMs"] }
+} as const;
+
 function parseRunHealth(
   value: unknown,
   expectedWorkflowRunId: string
@@ -694,19 +730,8 @@ function parseRunHealth(
   if (
     counts === undefined ||
     throughput === undefined ||
-    !hasExactKeys(counts, [
-      "finished",
-      "inProgress",
-      "pending",
-      "failed",
-      "waitingApproval",
-      "waitingEvent",
-      "waitingTimer",
-      "skipped",
-      "other",
-      "total"
-    ]) ||
-    !hasExactKeys(throughput, ["recentFinished", "windowMs", "totalFinished", "lastFinishedAtMs"]) ||
+    !hasExactKeys(counts, CURRENT_SMITHERS_STATUS_KEY_CONTRACT.counts.exact) ||
+    !hasExactKeys(throughput, CURRENT_SMITHERS_STATUS_KEY_CONTRACT.throughput.exact) ||
     !isRunHealthVerdict(verdict) ||
     workflowStatus === undefined ||
     !SMITHERS_RUN_STATUSES.includes(workflowStatus as (typeof SMITHERS_RUN_STATUSES)[number]) ||
@@ -715,11 +740,13 @@ function parseRunHealth(
   ) {
     return undefined;
   }
+  const stalled = numberField(counts, "stalled");
+  const reportedFailed = numberField(counts, "failed");
   const parsedCounts = {
     finished: numberField(counts, "finished"),
     in_progress: numberField(counts, "inProgress"),
     pending: numberField(counts, "pending"),
-    failed: numberField(counts, "failed"),
+    failed: reportedFailed === undefined || stalled === undefined ? undefined : reportedFailed + stalled,
     waiting_approval: numberField(counts, "waitingApproval"),
     waiting_event: numberField(counts, "waitingEvent"),
     waiting_timer: numberField(counts, "waitingTimer"),

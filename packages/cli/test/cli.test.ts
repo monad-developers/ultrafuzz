@@ -75,6 +75,7 @@ function fakeStatusEnvelope(
         inProgress: running ? 1 : 0,
         pending: running ? 3 : 0,
         failed: 0,
+        stalled: 0,
         waitingApproval: 0,
         waitingEvent: 0,
         waitingTimer: 0,

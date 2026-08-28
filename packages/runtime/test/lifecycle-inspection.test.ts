@@ -384,6 +384,9 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
       summary: "1 node waiting for approval; run `smithers why` for detail",
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: "node:project-discovery",
+      // 0.35.0 spreads `warnings` onto every `buildDiagnosis` return path, and
+      // raises a `stalled` blocker for a node parked on an identical-error streak.
+      warnings: ["Concurrency ceiling saturated: requested demand 8, effective cap 4."],
       information: ["smithers recorded 1 stale heartbeat"],
       blockers: [
         {
@@ -403,6 +406,17 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
           reason: "side effect boundary crossed",
           waitingSince: 1_699_999_500_000,
           unblocker: "review the boundary"
+        },
+        {
+          // New in 0.35.0: raised for every node the scheduler parked on an
+          // identical-error streak. A closed enum without it rejected the whole
+          // diagnosis, not just this row.
+          kind: "stalled",
+          nodeId: "node:strategy",
+          iteration: 0,
+          reason: "3 identical failures in a row",
+          waitingSince: 1_699_999_700_000,
+          unblocker: "smithers resume --retry-failed"
         }
       ]
     }
@@ -414,7 +428,13 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
   assert.equal(diagnosis.value?.workflow_status, "running");
   assert.equal(diagnosis.value?.current_node_id, "node:project-discovery");
   assert.equal(diagnosis.value?.summary, "1 node waiting for approval; run `ultrafuzz why` for detail");
-  assert.equal(diagnosis.value?.notes[0], "workflow runner recorded 1 stale heartbeat");
+  // Smithers 0.35.0 reports a concurrency-saturation `warnings` array beside
+  // `information`, and renders both in the same operator section of `why`, so
+  // they land together in the public `notes` with warnings first.
+  assert.deepEqual(diagnosis.value?.notes, [
+    "Concurrency ceiling saturated: requested demand 8, effective cap 4.",
+    "workflow runner recorded 1 stale heartbeat"
+  ]);
   assert.equal(diagnosis.value?.blockers[0]?.kind, "waiting-approval");
   assert.equal(diagnosis.value?.blockers[0]?.attempt, 2);
   assert.equal(diagnosis.value?.blockers[0]?.max_attempts, 3);
@@ -422,6 +442,8 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
   assert.equal(diagnosis.value?.blockers[0]?.waiting_since, new Date(1_699_999_000_000).toISOString());
   assert.equal(diagnosis.value?.blockers[1]?.kind, "side-effect-boundary-crossed");
   assert.equal(diagnosis.value?.blockers[1]?.iteration, null);
+  assert.equal(diagnosis.value?.blockers[2]?.kind, "stalled");
+  assert.equal(diagnosis.value?.blockers[2]?.node_id, "node:strategy");
   assertNoEngineBranding(diagnosis.value);
   assert.match(smithersLog(project), new RegExp(`why ${WORKFLOW_RUN_ID} --format json`, "u"));
 });
@@ -444,6 +466,7 @@ test("diagnoseRun rejects aliases, extra fields, and duplicate keys instead of n
       summary: "blocked",
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: "node:project-discovery",
+      warnings: [],
       information: [],
       blockers: [
         {
@@ -1543,6 +1566,9 @@ function writeFakeInstalledEngine(project: string, input: { version: string; bin
 function nodeTokenUsage(inputTokens: number, outputTokens: number): Record<string, unknown> {
   return {
     inputTokens,
+    // New in Smithers 0.35.0's node detail. `emptyTokenUsage()` seeds it and every
+    // parse, merge and aggregate carries it, so it is on every node of every run.
+    freshInputTokens: inputTokens,
     outputTokens,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -1626,6 +1652,7 @@ function nodeDetailFixture(): unknown {
     toolCalls: [firstToolCall],
     tokenUsage: {
       inputTokens: 22,
+      freshInputTokens: 22,
       outputTokens: 11,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,

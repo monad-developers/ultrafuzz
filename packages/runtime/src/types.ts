@@ -561,6 +561,7 @@ export type RunBlockerKind =
   | "stale-task-heartbeat"
   | "retry-backoff"
   | "retries-exhausted"
+  | "stalled"
   | "dependency-failed"
   | "stale-heartbeat"
   | "engine-busy"

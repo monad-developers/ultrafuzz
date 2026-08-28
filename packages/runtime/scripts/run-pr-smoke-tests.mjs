@@ -20,7 +20,12 @@ const namedTests = new Map([
       "resume, replay, and fork delegate linked runs to Smithers lifecycle verbs",
       "ordinary resume checks active-run ownership before detached preflight",
       "a refresh resume reuses its own ownership inspection instead of inspecting twice",
-      "native continuation does not use historical trusted CLI identity as an authorization gate"
+      "native continuation does not use historical trusted CLI identity as an authorization gate",
+      // Reads the release that is actually pinned. This is the lane's tripwire
+      // for a runner bump that widens an enum or the inspect envelope, which
+      // otherwise only shows up as a failed production run.
+      "pinned runner state and envelope contracts match Ultrafuzz's mirrors",
+      "the pinned runner drops resume pointers only from dead attempts"
     ]
   ],
   [
@@ -34,7 +39,10 @@ const bunTestNames = [
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
   "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
   "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
-  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry"
+  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
+  // Needs bun:sqlite, so it can only run in this lane. Gates the claim that the
+  // pinned runner's schema migrations are additive over a stopped 0.34.0 store.
+  "pinned store migrations are additive over a 0.34.0 database"
 ];
 const selectedBunTestNames = bunTestNames.map((name) => `${bunTestNamePrefix}${name}`);
 const smokeEnvironment = { ...process.env };
@@ -113,9 +121,38 @@ function assertNamedTestsPassed(output, expectedTestNames) {
   }
 }
 
+// Bun's runner prints a `(fail) <name>` line per failure but no per-test line
+// for a pass -- verified against the pinned `bun-version: 1.3.14` in ci.yml, and
+// against 1.4.0. So the post-condition is read off the run summary instead: the
+// name pattern selects exactly `expectedTestNames`, so a rename, a skip or a
+// filtered-out test shows up as a pass count below the expected one, which is
+// the property this check exists to enforce. `stripAnsi` because bun colourises
+// the summary whenever it believes it has a terminal.
 function assertBunTestsPassed(output, expectedTestNames) {
-  const missing = expectedTestNames.filter((name) => !output.includes(`(pass) ${name}`));
-  if (missing.length > 0) {
-    throw new Error(`PR Bun runtime smoke did not execute expected tests: ${JSON.stringify(missing)}`);
+  const plain = stripAnsi(output);
+  const failures = [...plain.matchAll(/^\(fail\) (.+?)(?: \[[^\]]*\])?$/gmu)].map((match) => match[1]);
+  if (failures.length > 0) {
+    throw new Error(`PR Bun runtime smoke failed tests: ${JSON.stringify(failures)}`);
   }
+  const summary = (label) => {
+    const matches = [...plain.matchAll(new RegExp(`^\\s*(\\d+) ${label}$`, "gmu"))].map((match) => Number(match[1]));
+    if (matches.length !== 1) {
+      throw new Error(`PR Bun runtime smoke could not read the "${label}" count from the runner summary`);
+    }
+    return matches[0];
+  };
+  const passed = summary("pass");
+  const failed = summary("fail");
+  if (failed !== 0) throw new Error(`PR Bun runtime smoke reported ${failed} failing test(s)`);
+  if (passed !== expectedTestNames.length) {
+    throw new Error(
+      `PR Bun runtime smoke ran ${passed} of ${expectedTestNames.length} expected tests; one was renamed, skipped, or filtered out`
+    );
+  }
+}
+
+function stripAnsi(value) {
+  // Built with `new RegExp` rather than a literal: the CSI introducer is a
+  // control character, which a regex literal cannot carry past `no-control-regex`.
+  return value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "gu"), "");
 }

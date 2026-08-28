@@ -67,6 +67,16 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
 
 export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
   private pendingUsage: DeepSeekSmithersUsage | undefined;
+  private readonly ultrafuzzApiKey: string;
+
+  // Smithers 0.35.0's BaseCliAgent rejects unknown constructor options with a
+  // TypeError, so the Ultrafuzz-only credential is held here instead of on
+  // `this.opts`. `configDir` is the adapter's own option and stays there.
+  constructor(options: DeepSeekAgentOptions) {
+    const { ultrafuzzApiKey, ...smithersOptions } = options;
+    super(smithersOptions);
+    this.ultrafuzzApiKey = ultrafuzzApiKey;
+  }
 
   override generate(
     ...args: Parameters<SmithersClaudeCodeAgent["generate"]>
@@ -100,7 +110,6 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     this.opts.settingSources = "";
     const command = await super.buildCommand(params);
     try {
-      const opts = this.opts as DeepSeekAgentOptions;
       return {
         ...command,
         env: workflowControlChildEnvironment(
@@ -110,7 +119,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
             // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
             // Anthropic credential can never win over the DeepSeek route.
             ANTHROPIC_API_KEY: "",
-            ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
+            ANTHROPIC_AUTH_TOKEN: this.ultrafuzzApiKey,
             ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
             // Keep first-party Claude auth, alternate provider routing, and host
             // proxies from competing with the explicit DeepSeek endpoint/token.
@@ -140,7 +149,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
             CLAUDE_CODE_USE_VERTEX: "",
             // Claude treats an empty secure-storage override as "use the default".
             // Point it at the same isolated root as the rest of its session state.
-            CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
+            CLAUDE_SECURESTORAGE_CONFIG_DIR: (this.opts as { configDir: string }).configDir
           },
           process.env,
           { agent: "DeepSeekAgent" }

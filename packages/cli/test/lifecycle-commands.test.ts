@@ -107,6 +107,9 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   const commandLog = path.join(project, "smithers-commands.log");
   const nodeUsage = {
     inputTokens: 10,
+    // New in Smithers 0.35.0's node detail; present on the aggregate and on every
+    // `byAttempt[].usage`, so a fixture without it is not a 0.35.0 document.
+    freshInputTokens: 10,
     outputTokens: 5,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
@@ -181,6 +184,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
         summary: "1 node is waiting for approval",
         generatedAtMs: 1_700_000_000_000,
         currentNodeId: "node:project-discovery",
+        // 0.35.0 spreads `warnings` onto every `buildDiagnosis` return path.
+        warnings: [],
         information: [],
         blockers: [
           {
@@ -192,6 +197,17 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             unblocker: "approve the pending request",
             attempt: 1,
             maxAttempts: 3
+          },
+          {
+            // New in Smithers 0.35.0. `adaptBlocker` passes the kind through
+            // verbatim, so it has to be in the public CLI result schema's enum
+            // too or the whole envelope fails producer validation.
+            kind: "stalled",
+            nodeId: "node:strategy",
+            iteration: 0,
+            reason: "3 identical failures in a row",
+            waitingSince: 1_699_999_700_000,
+            unblocker: "smithers resume --retry-failed"
           }
         ]
       },
@@ -319,6 +335,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
               inProgress: 0,
               pending: 5,
               failed: 0,
+              stalled: 0,
               waitingApproval: 1,
               waitingEvent: 0,
               waitingTimer: 0,
@@ -387,6 +404,8 @@ test("why reports the diagnosis in human and JSON output", async () => {
   const data = body.data as { blockers: Array<{ kind: string; node_id: string }>; current_node_id: string };
   assert.equal(data.current_node_id, "node:project-discovery");
   assert.equal(data.blockers[0]?.kind, "waiting-approval");
+  assert.equal(data.blockers[1]?.kind, "stalled");
+  assert.equal(data.blockers[1]?.node_id, "node:strategy");
 });
 
 test("timeline surfaces frame numbers for fork --frame", async () => {
@@ -651,6 +670,7 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
               inProgress: 0,
               pending: 5,
               failed: 0,
+              stalled: 0,
               waitingApproval: 1,
               waitingEvent: 0,
               waitingTimer: 0,

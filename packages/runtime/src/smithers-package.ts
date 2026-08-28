@@ -1,13 +1,40 @@
 import { isRecord } from "@ultrafuzz/artifacts";
 
-export const SMITHERS_VERSION = "0.34.0";
+export const SMITHERS_VERSION = "0.35.0";
 export const SMITHERS_PACKAGE_NAME = "smthrs";
 export const SMITHERS_BIN_PATH = "src/bin/smithers.js";
-// Smithers 0.34.0 pins this Effect build across its own packages. Track what
+// Smithers 0.35.0 pins this Effect build across its own packages. Track what
 // Smithers declares: left unpinned, npm installs two Effect copies side by side
 // and the engine loses the single Effect module identity its services are keyed on.
 export const SMITHERS_EFFECT_VERSION = "4.0.0-beta.105";
 export const KIMI_CODE_VERSION = "0.29.1";
+
+// Prior `smthrs` pins whose generated manifest still migrates forward in place.
+//
+// `.smithers/package.json` is written once at init and rewritten only on
+// `--force` or a recognised migration, while launch admission demands
+// `dependencies.smthrs === SMITHERS_VERSION`. Without this list every project
+// generated under the previous pin hard-fails at launch and the only recovery is
+// `init --force`, which is exactly what a resume cannot afford: recreating the
+// manifest does not preserve the Ultrafuzz run ID or the Smithers run ID the
+// durable run is keyed on.
+//
+// A listed version only migrates when the rest of the manifest still matches the
+// current generated document exactly (see `migrateGeneratedSmithersManifest`),
+// so the list is fail-safe under drift: if a future bump also moves Kimi, Zod,
+// TypeScript or the Effect override family, manifests from that release stop
+// matching and are rejected rather than silently rewritten to a shape they were
+// never installed against. That makes a stale entry inert, not dangerous --
+// but it also means an entry is only useful while its release differed from the
+// current one in `smthrs` alone, which is true of 0.34.0 -> 0.35.0.
+//
+// Only versions this repository actually pinned belong here. `0.34.0` is the
+// sole `smthrs` pin ever committed (the release before it pinned
+// `smithers-orchestrator@0.32.0`, which the separate stock-0.32 migrator
+// handles), so listing anything else would make the migrator's own promise --
+// that it rewrites nothing it did not itself generate -- false for a manifest
+// Ultrafuzz never wrote.
+export const MIGRATABLE_PRIOR_SMITHERS_VERSIONS = ["0.34.0"] as const;
 
 // The `@effect/*` packages Smithers pulls in must be pinned alongside Effect
 // itself, not just deduplicated. `@effect/platform-bun` asks for
@@ -69,7 +96,7 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
   "@effect/sql-sqlite-bun@4.0.0-beta.105": "2026-08-07T01:13:00.629Z",
   "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
   "effect@4.0.0-beta.105": "2026-08-07T01:37:58.225Z",
-  "smthrs@0.34.0": "2026-08-13T03:21:30.904Z",
+  "smthrs@0.35.0": "2026-08-17T20:35:37.787Z",
   "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
   "zod@4.4.3": "2026-05-04T07:06:40.819Z"
 };
@@ -96,8 +123,8 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // The rule for moving it: choose a fixed instant after every new pin has
 // published and propagated, but already in the past when release validation
 // runs -- npm does not freeze a future `--before` view. This instant is more
-// than eight hours after the newest pin (`smthrs@0.34.0`, at 03:21:30Z).
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-13T12:00:00Z";
+// than eight hours after the newest pin (`smthrs@0.35.0`, at 20:35:37Z).
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-18T06:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
@@ -166,12 +193,18 @@ export function smithersDependencyInstallArgs({
   ];
 }
 
+// The non-dependency half of the generated manifest. Shared so the renderer and
+// the prior-pin matcher below cannot describe different documents.
+const GENERATED_SMITHERS_MANIFEST_IDENTITY = {
+  name: "ultrafuzz-smithers",
+  private: true,
+  type: "module"
+} as const;
+
 export function renderSmithersPackageJson(): string {
   return `${JSON.stringify(
     {
-      name: "ultrafuzz-smithers",
-      private: true,
-      type: "module",
+      ...GENERATED_SMITHERS_MANIFEST_IDENTITY,
       ...REQUIRED_SMITHERS_DEPENDENCIES
     },
     null,
@@ -180,11 +213,74 @@ export function renderSmithersPackageJson(): string {
 }
 
 /**
- * Authenticates and rewrites the generated 0.32 manifest once. Extra packages
- * in the three dependency extension maps are preserved; executable fields and
- * manifests with modified generated pins are never migrated automatically.
+ * Authenticates and rewrites a superseded generated manifest once, returning the
+ * replacement text, or `undefined` when the manifest is not one this runtime is
+ * willing to rewrite on the project's behalf.
+ *
+ * Two shapes migrate, and nothing else does.
+ *
+ * 1. The frozen 0.32 shape (`smithers-orchestrator@0.32.0` plus the
+ *    `4.0.0-beta.102` override family). Extra packages in the three dependency
+ *    extension maps are preserved and only the generated pins are rewritten.
+ * 2. A manifest identical to `renderSmithersPackageJson()` apart from
+ *    `dependencies.smthrs`, which must name a version in
+ *    `MIGRATABLE_PRIOR_SMITHERS_VERSIONS`. This one is strict on purpose: it
+ *    rewrites nothing it did not itself generate, so a hand-edited or corrupted
+ *    manifest is still rejected and surfaces as a launch failure the operator
+ *    resolves deliberately, rather than being quietly overwritten.
+ *
+ * The name is historical -- it predates case 2 -- and is kept so the three call
+ * sites and the durable behaviour they encode stay put across the pin bump.
  */
 export function migrateStockSmithers032PackageManifest(value: unknown): string | undefined {
+  return migrateStock032SmithersManifest(value) ?? migrateGeneratedSmithersManifest(value);
+}
+
+/**
+ * Case 2 above. Accepts only the exact generated document for a superseded pin:
+ * the same six top-level keys, the same `name`/`private`/`type`, and dependency
+ * sections whose key sets and values match the current ones entry for entry,
+ * with `smthrs` at the prior version. Any extra dependency, any missing one, any
+ * other version drift and any override outside `REQUIRED_SMITHERS_OVERRIDES`
+ * rejects. The replacement is the canonical current document, so a manifest that
+ * only reordered keys is normalised rather than refused.
+ */
+function migrateGeneratedSmithersManifest(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const dependencies = value.dependencies;
+  if (!isRecord(dependencies)) return undefined;
+  const pinned = dependencies[SMITHERS_PACKAGE_NAME];
+  if (typeof pinned !== "string" || !MIGRATABLE_PRIOR_SMITHERS_VERSIONS.some((prior) => prior === pinned)) {
+    return undefined;
+  }
+  return matchesGeneratedSmithersManifest(value, pinned) ? renderSmithersPackageJson() : undefined;
+}
+
+function matchesGeneratedSmithersManifest(value: Record<string, unknown>, priorSmithersVersion: string): boolean {
+  const expected: Record<string, unknown> = {
+    ...GENERATED_SMITHERS_MANIFEST_IDENTITY,
+    ...REQUIRED_SMITHERS_DEPENDENCIES,
+    dependencies: {
+      ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
+      [SMITHERS_PACKAGE_NAME]: priorSmithersVersion
+    }
+  };
+  if (!hasExactKeys(value, Object.keys(expected))) return false;
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    const actual = value[key];
+    if (!isRecord(expectedValue)) {
+      if (actual !== expectedValue) return false;
+      continue;
+    }
+    if (!isRecord(actual) || !hasExactKeys(actual, Object.keys(expectedValue))) return false;
+    for (const [name, version] of Object.entries(expectedValue)) {
+      if (actual[name] !== version) return false;
+    }
+  }
+  return true;
+}
+
+function migrateStock032SmithersManifest(value: unknown): string | undefined {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["name", "private", "type", "dependencies", "devDependencies", "overrides"]) ||

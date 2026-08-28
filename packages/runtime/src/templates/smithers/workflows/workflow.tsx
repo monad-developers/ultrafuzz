@@ -3167,9 +3167,13 @@ function artifactAwareAgent(
         Reflect.deleteProperty(freshArgs, "messages");
         return {
           ...freshArgs,
-          // Smithers 0.34 adds worktree-isolation and structured-output
+          // Smithers 0.35 adds worktree-isolation and structured-output
           // contracts before calling the agent. Preserve that effective prompt
           // while dropping prior conversation/session state.
+          // Not redundant with the runner's own `attempt-resume-pointers`
+          // (new in 0.35): that scrubs an attempt row only on the transition
+          // into failed/cancelled, and exempts a `hijackHandoff`. This scrub is
+          // error-agnostic and applies to every retry generation.
           prompt: typeof args?.prompt === "string" ? args.prompt : originalPrompt,
           resumeSession: undefined,
           continueSession: false,

@@ -115,6 +115,7 @@ export const SMITHERS_RUN_STATES = [
   "cancel-pending",
   "cancelled",
   "succeeded",
+  "succeeded-with-failures",
   "unknown"
 ] as const;
 
@@ -129,6 +130,7 @@ export const SMITHERS_NODE_STATES = [
   "in-progress",
   "finished",
   "failed",
+  "stalled",
   "cancelled",
   "skipped"
 ] as const;

@@ -121,8 +121,23 @@ export class KimiCode029Agent extends SmithersKimiAgent {
   private activeUsageBaseline: KimiUsageBaseline | undefined;
   private pendingFailureUsage: KimiSmithersUsage | undefined;
 
+  private readonly ultrafuzzAuth: KimiAuthOptions;
+
+  // Smithers 0.35.0's BaseCliAgent constructor calls `assertKnownCliAgentOptions`
+  // and throws a TypeError for any option outside the agent's own allowlist.
+  // `KimiAgent`'s allowlist carries `configDir` but neither `apiKey` nor the two
+  // `ultrafuzz*` keys, so all three are split off here and held privately;
+  // `configDir` stays on `this.opts` because `buildCommand` swaps it around the
+  // pinned adapter's own argv construction.
   constructor(options: KimiCode029Options) {
-    super({ ...options });
+    const { apiKey, ultrafuzzAuthMode, ultrafuzzReasoningEffort, ...smithersOptions } = options;
+    super({ ...smithersOptions });
+    this.ultrafuzzAuth = {
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(smithersOptions.configDir === undefined ? {} : { configDir: smithersOptions.configDir }),
+      ultrafuzzAuthMode,
+      ultrafuzzReasoningEffort
+    };
   }
 
   override generate(...args: Parameters<SmithersKimiAgent["generate"]>): ReturnType<SmithersKimiAgent["generate"]> {
@@ -162,13 +177,17 @@ export class KimiCode029Agent extends SmithersKimiAgent {
 
   override async buildCommand(params: KimiCommandParams): Promise<KimiCommand> {
     this.pendingFailureUsage = undefined;
-    const opts = this.opts as KimiCode029Options;
+    // `this.opts` is now the pinned adapter's own option bag; the Ultrafuzz-only
+    // auth keys live on `this.ultrafuzzAuth` so they never reach
+    // `assertKnownCliAgentOptions`.
+    const opts = this.opts as ConstructorParameters<typeof SmithersKimiAgent>[0];
+    const auth = this.ultrafuzzAuth;
     const knownSession = configuredSession(params, opts);
-    const apiKey = opts.ultrafuzzAuthMode === "api-key" ? requiredApiKey(opts.apiKey) : undefined;
+    const apiKey = auth.ultrafuzzAuthMode === "api-key" ? requiredApiKey(auth.apiKey) : undefined;
     const apiKeyConfigDir =
       apiKey === undefined
         ? undefined
-        : createKimiApiKeyConfigDir(opts.model ?? this.model, opts.ultrafuzzReasoningEffort);
+        : createKimiApiKeyConfigDir(opts.model ?? this.model, auth.ultrafuzzReasoningEffort);
     const configuredSourceDir = opts.configDir;
     const buildOnlyConfigDir =
       apiKeyConfigDir === undefined && configuredSourceDir !== undefined
@@ -211,7 +230,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         applyKimiReasoningConfig(
           path.join(executionConfigDir, "config.toml"),
           opts.model ?? this.model,
-          opts.ultrafuzzReasoningEffort
+          auth.ultrafuzzReasoningEffort
         );
       }
       if (executionConfigDir !== undefined && sessionStoreDir !== undefined) {
@@ -240,7 +259,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         agent: "KimiAgent",
         // API-key mode executes a generated isolated config, never the
         // operator provider-home config used for subscription auth.
-        ...(opts.ultrafuzzAuthMode === "subscription" && configuredSourceDir !== undefined
+        ...(auth.ultrafuzzAuthMode === "subscription" && configuredSourceDir !== undefined
           ? { configDir: configuredSourceDir }
           : {})
       });
@@ -1370,7 +1389,10 @@ function findKimiSection(lines: string[], headerOrHeaders: string | Set<string>)
   return { start, end };
 }
 
-function configuredSession(params: KimiCommandParams, opts: KimiCode029Options): string | undefined {
+function configuredSession(
+  params: KimiCommandParams,
+  opts: ConstructorParameters<typeof SmithersKimiAgent>[0]
+): string | undefined {
   const resume = typeof params.options?.resumeSession === "string" ? params.options.resumeSession : undefined;
   if (resume !== undefined) return requiredSessionId(resume);
   if (opts.session !== undefined) return requiredSessionId(opts.session);

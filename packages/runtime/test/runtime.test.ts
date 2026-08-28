@@ -44,9 +44,9 @@ import {
   writeRunState,
   type RunState,
   type SmithersTaskManifestDocument,
-  type SMITHERS_NODE_STATES,
-  type SMITHERS_RUN_STATES,
-  type SMITHERS_RUN_STATUSES
+  SMITHERS_NODE_STATES,
+  SMITHERS_RUN_STATES,
+  SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
 import {
   parseProjectConfigToml,
@@ -1755,6 +1755,9 @@ function currentStatusEnvelope(workflowRunId = "__RUN_ID__"): Record<string, unk
         inProgress: 1,
         pending: 3,
         failed: 0,
+        // Smithers 0.35.0 initialises this unconditionally, so a fixture without
+        // it is a document the pinned runner can no longer produce.
+        stalled: 0,
         waitingApproval: 0,
         waitingEvent: 0,
         waitingTimer: 0,
@@ -1915,6 +1918,7 @@ function fakeLifecycleSmithersEnv(
           summary: "run is active",
           generatedAtMs: 1,
           blockers: [],
+          warnings: [],
           information: [],
           currentNodeId: null
         },
@@ -2116,6 +2120,12 @@ function workflowInspect(input: {
   failedChildKeys?: string[];
   exhaustedLoops?: Array<{ id: string; iteration: number; maxIterations: number | null }>;
   steers?: Array<Record<string, unknown>>;
+  // Fields the pinned 0.35.0 runner added to the inspect envelope. They are
+  // optional here so the existing fixtures stay minimal, but at least one test
+  // must emit all three or the widened allowlists are never exercised.
+  tokenUsage?: Record<string, unknown>;
+  cancellationSource?: Record<string, unknown>;
+  warnings?: Array<Record<string, unknown>>;
   includeVerifierSteps?: boolean;
   steps: Array<{ id: string; state: TestSmithersNodeState; attempt?: number }>;
 }): unknown {
@@ -2152,6 +2162,7 @@ function workflowInspect(input: {
         workflow: input.workflowRunId,
         status: input.status ?? "finished",
         ...(input.error === undefined ? {} : { error: input.error }),
+        ...(input.cancellationSource === undefined ? {} : { cancellationSource: input.cancellationSource }),
         started: "2026-07-03T00:00:00.000Z",
         elapsed: "2s",
         finished: input.status === "running" ? undefined : "2026-07-03T00:00:02.000Z"
@@ -2159,8 +2170,10 @@ function workflowInspect(input: {
       runState: {
         runId: input.workflowRunId,
         computedAt: "2026-07-03T00:00:03.000Z",
-        state: input.state ?? (input.status === "running" ? "running" : "succeeded")
+        state: input.state ?? (input.status === "running" ? "running" : "succeeded"),
+        ...(input.warnings === undefined ? {} : { warnings: input.warnings })
       },
+      ...(input.tokenUsage === undefined ? {} : { tokenUsage: input.tokenUsage }),
       ...(input.failedChildKeys === undefined || input.failedChildKeys.length === 0
         ? {}
         : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
@@ -2275,6 +2288,14 @@ function workflowEvents(
         payload.model = "test-model";
         payload.agent = "test-agent";
         payload.inputTokens = 0;
+        // Smithers 0.35.0 emits both of these: `freshInputTokens` on every usage
+        // event `normalizeTokenUsage` produces, and `costUsd` for any model in
+        // the runner's built-in price table. Synchronization is exact-key on this
+        // payload, so a fixture without them is not a document the pinned runner
+        // can produce and every sync test would be testing a shape that no
+        // longer exists.
+        payload.freshInputTokens = 0;
+        payload.costUsd = 0;
         payload.outputTokens = 0;
       }
       if (event.extra !== undefined) {
@@ -3173,6 +3194,44 @@ test("non-force init preserves historical stock agent adapters and force replace
   assert.equal(fs.readFileSync(codexPath, "utf8"), currentAdapter);
 });
 
+test("non-force init migrates a superseded generated manifest so the project keeps its durable run", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const current = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+  };
+  const superseded = { ...current, dependencies: { ...current.dependencies, smthrs: "0.34.0" } };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(superseded, null, 2)}\n`, "utf8");
+
+  // Without `--force`, so the run directory, the Ultrafuzz run ID and the
+  // Smithers run ID a stopped run resumes under all survive.
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), renderSmithersPackageJson());
+  assert.doesNotThrow(() => assertSmithersPackageManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8"))));
+});
+
+test("non-force init preserves a manifest that is not one Ultrafuzz generated", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const current = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+  };
+  const handEdited = {
+    ...current,
+    dependencies: { ...current.dependencies, smthrs: "0.34.0", "custom-agent-package": "1.2.3" }
+  };
+  const handEditedText = `${JSON.stringify(handEdited, null, 2)}\n`;
+  fs.writeFileSync(manifestPath, handEditedText, "utf8");
+
+  assert.equal(initProject({ projectRoot: project }).ok, true);
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), handEditedText);
+});
+
 test("non-force init migrates the exact generated 0.32 package and immediately prior stock adapters", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -3212,7 +3271,7 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
     dependencies: Record<string, string>;
   };
   assert.equal(manifest.dependencies["smithers-orchestrator"], undefined);
-  assert.equal(manifest.dependencies.smthrs, "0.34.0");
+  assert.equal(manifest.dependencies.smthrs, SMITHERS_VERSION);
   assert.equal(manifest.dependencies["custom-agent-package"], "1.2.3");
   const source = fs.readFileSync(codexPath, "utf8");
   assert.match(source, /from "(?:smthrs|@smthrs\/agents)"/u);
@@ -6723,12 +6782,20 @@ default_effort = "high"
     fs.mkdirSync(path.join(sourceConfig, "sessions"));
     fs.writeFileSync(path.join(sourceConfig, "sessions", "unrelated.json"), "{}\n", "utf8");
 
-    const options = {
+    // Smithers 0.35.0's BaseCliAgent rejects any constructor option outside the
+    // agent's own allowlist, and `KimiAgent`'s allowlist carries neither the two
+    // `ultrafuzz*` keys nor `apiKey`. The generated adapter therefore splits them
+    // off before `super()`, and this test keeps the two halves apart the same way:
+    // the pinned adapter is constructed from `pinnedOptions` alone.
+    const pinnedOptions = {
       model: "kimi-k3",
       configDir: sourceConfig,
-      ultrafuzzAuthMode: "subscription",
-      ultrafuzzReasoningEffort: "max",
       extraArgs: ["--add-dir", "/workspace/extra"]
+    };
+    const options = {
+      ...pinnedOptions,
+      ultrafuzzAuthMode: "subscription",
+      ultrafuzzReasoningEffort: "max"
     };
 
     const smithersModule = (await import(
@@ -6741,13 +6808,28 @@ default_effort = "high"
         }>;
       };
     };
-    const pinnedBase = new smithersModule.KimiAgent(options);
+    // The pinned adapter must reject the Ultrafuzz-only keys, and the generated
+    // one must accept them. Together these pin the split the adapter's
+    // constructor performs: if a future release widens `CLI_AGENT_OPTION_KEYS`
+    // to admit them, the first assertion fails and the split can be retired
+    // deliberately rather than left as dead indirection.
+    assert.throws(
+      () => new smithersModule.KimiAgent(options),
+      /KimiAgent received unknown options: ultrafuzzAuthMode, ultrafuzzReasoningEffort/u
+    );
+    assert.throws(
+      () => new smithersModule.KimiAgent({ ...pinnedOptions, apiKey: "kimi-key" }),
+      /KimiAgent received unknown option: apiKey/u
+    );
+    assert.doesNotThrow(() => new KimiCode029Agent({ ...options, apiKey: "kimi-key" }));
+
+    const pinnedBase = new smithersModule.KimiAgent(pinnedOptions);
     const pinnedCommand = await pinnedBase.buildCommand({
       prompt: "Pinned Smithers contract",
       cwd: "/workspace/target",
       options: {}
     });
-    assert.equal(SMITHERS_VERSION, "0.34.0");
+    assert.equal(SMITHERS_VERSION, "0.35.0");
     assert.ok(pinnedCommand.args.includes("--final-message-only"));
     assert.ok(pinnedCommand.args.includes("--print"));
     assert.ok(pinnedCommand.args.includes("--work-dir"));
@@ -8223,7 +8305,7 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated Kimi completed-event usage is what pinned Smithers 0.34.0 consumes",
+  "generated Kimi completed-event usage is what pinned Smithers 0.35.0 consumes",
   { timeout: 30_000 },
   async () => {
     const smithersEntry = fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"));
@@ -11189,6 +11271,64 @@ test("getRunStatus uses only validated current runState and validates the events
   );
 });
 
+// Every lifecycle test drives a fake Smithers, so the widened enums and
+// allowlists are only really exercised if a fixture emits the 0.35.0 shapes.
+// This one does: the success-terminal state a tolerated child failure produces,
+// a stalled node, and all three new envelope fields, through the real
+// `getRunStatus` path rather than the parser in isolation.
+test("getRunStatus accepts the pinned 0.35.0 inspect shapes end to end", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "smithers-0350-envelope";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const launched = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const inspect = workflowInspect({
+    workflowRunId,
+    status: "finished",
+    state: "succeeded-with-failures",
+    steps: [
+      { id: "node:project-discovery", state: "finished", attempt: 1 },
+      { id: "node:invariant-authoring", state: "stalled", attempt: 2 }
+    ],
+    includeVerifierSteps: false,
+    tokenUsage: { inputTokens: 128, outputTokens: 64, costUsd: null },
+    cancellationSource: { source: "cli", clientIdentity: "operator" },
+    warnings: [
+      {
+        kind: "concurrency-ceiling-saturated",
+        requestedDemand: 8,
+        effectiveCap: 4,
+        remediationCommand: "smithers config set concurrency 8",
+        observedAt: "2026-07-03T00:00:01.000Z"
+      }
+    ]
+  });
+  const env = fakeLifecycleSmithersEnv(project, { inspect });
+
+  const current = await getRunStatus({ projectRoot: project, runId, env });
+
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
+  assert.equal(current.value?.workflow?.inspect.ok, true);
+  // `workflow.status` is the parsed `data.runState.state`, so this is the
+  // success-terminal state a run with a tolerated child failure now derives —
+  // the one the pre-bump closed enum rejected.
+  assert.equal(current.value?.workflow?.status, "succeeded-with-failures");
+
+  // The same fixture minus the widening is a hard failure, which is what every
+  // 0.35.0 run would have hit before step 5/6.
+  const rejected = structuredClone(inspect) as {
+    data: { runState: Record<string, unknown>; nodes: Array<{ state: string }> };
+  };
+  rejected.data.runState.state = "succeeded-with-a-future-verdict";
+  fs.writeFileSync(env.SMITHERS_FAKE_INSPECT!, `${JSON.stringify(rejected)}\n`, "utf8");
+  await assert.rejects(
+    () => getRunStatus({ projectRoot: project, runId, env }),
+    /data\.runState\.state is not a current supported value/iu
+  );
+});
+
 test("getRunStatus counts only a canonical event-v2 journal and fails closed on invalid presence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -11734,7 +11874,7 @@ test("getRunHealth rejects every noncurrent status envelope without fallback or 
   }
 });
 
-test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operation metadata shapes", async () => {
+test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operation metadata shapes", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -11800,6 +11940,67 @@ test("getRunHealth accepts strict 0.34 orphan, cancel-pending, quota, and operat
   assert.equal(quota.ok, true, JSON.stringify(quota.diagnostics));
   assert.equal(quota.value?.quota?.parked_count, 5);
   assert.equal(quota.value?.gating[0]?.state, "quota-parked");
+});
+
+// The `status` surface, end to end over the shapes Smithers 0.35.0 actually
+// emits. `counts.stalled` is unconditional there, and `degraded` is now the
+// ordinary verdict for a run that tolerated a `continueOnFail` child -- both of
+// which the 0.34.0-shaped fixtures could never have produced.
+test("getRunHealth accepts the pinned 0.35.0 status counts and folds stalled nodes into failed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const envelope = currentStatusEnvelope("ultrafuzz-stalled-health-run");
+  const base = envelope.data as Record<string, unknown>;
+  const counts = base.counts as Record<string, number>;
+
+  setFakeSmithersStatus(project, {
+    ...envelope,
+    data: {
+      ...base,
+      status: "finished",
+      // 0.35.0's second `degraded` branch: `failedChildren > 0` on a finished
+      // run, which for Ultrafuzz is an ordinary tolerated `continueOnFail` lane.
+      verdict: "degraded",
+      reason: "run finished with 2 tolerated failed children",
+      counts: { ...counts, finished: 2, inProgress: 0, pending: 0, failed: 1, stalled: 2, total: 6, other: 1 },
+      liveness: { state: "succeeded-with-failures" },
+      finishedAtMs: 2_000
+    }
+  });
+
+  const health = await getRunHealth({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.verdict, "degraded");
+  // Ultrafuzz has no `stalled` node status, so the runner's stalled bucket joins
+  // the failed one rather than disappearing or becoming an eleventh count.
+  assert.equal(health.value?.counts.failed, 3);
+  assert.deepEqual(sortedKeys(Object.keys(health.value?.counts ?? {})), [
+    "failed",
+    "finished",
+    "in_progress",
+    "other",
+    "pending",
+    "skipped",
+    "total",
+    "waiting_approval",
+    "waiting_event",
+    "waiting_timer"
+  ]);
+
+  // A document without the bucket is a 0.34.0 document; the parser is exact-key
+  // in both directions, so it must be refused rather than defaulted to zero.
+  const { stalled: _dropped, ...withoutStalled } = counts;
+  setFakeSmithersStatus(project, { ...envelope, data: { ...base, counts: withoutStalled } });
+  const superseded = await getRunHealth({ projectRoot: project, runId: "stalled-health-run", env });
+  assert.equal(superseded.ok, false);
+  assert.deepEqual(
+    superseded.diagnostics.map((diagnostic) => diagnostic.code),
+    ["WORKFLOW_STATUS_INVALID"]
+  );
 });
 
 test("pauseRun accepts the workflow runner pause-request exit and is idempotent once paused", async () => {
@@ -13689,7 +13890,24 @@ test("compatibility patcher rewrites every described workaround", async () => {
     fs.mkdirSync(path.dirname(targetRunner), { recursive: true });
     fs.writeFileSync(
       path.join(cliRoot, "package.json"),
-      `${JSON.stringify({ name: "@smthrs/cli", version: SMITHERS_VERSION, type: "module", exports: "./index.js" })}\n`,
+      // Mirrors the real package's subpath export map, not just its main entry:
+      // the pinned runner's `bin/smithers.js` imports
+      // `@smthrs/cli/node-loader/registerNodeWorkflowLoader` before the CLI
+      // itself, so a fixture that publishes only `.` cannot even be executed.
+      `${JSON.stringify({
+        name: "@smthrs/cli",
+        version: SMITHERS_VERSION,
+        type: "module",
+        exports: { ".": "./index.js", "./*": "./*.js" }
+      })}\n`,
+      "utf8"
+    );
+    fs.mkdirSync(path.join(cliRoot, "node-loader"), { recursive: true });
+    // Faithful to the real hook: under Bun it installs nothing and returns
+    // false, because Bun already transpiles TypeScript and JSX on import.
+    fs.writeFileSync(
+      path.join(cliRoot, "node-loader", "registerNodeWorkflowLoader.js"),
+      'export function registerNodeWorkflowLoader() {\n  return typeof Bun === "undefined";\n}\n',
       "utf8"
     );
     fs.writeFileSync(
@@ -14730,7 +14948,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     }
   }
 
-  // Preserve the upstream 0.34 MDX/non-module leaf guard while adding stable
+  // Preserve the upstream 0.35 MDX/non-module leaf guard while adding stable
   // path identity to the graph hash. Dropping extname here would reintroduce
   // import scanning inside prompt prose and make otherwise valid resumes fail.
   const workflowHashSource = sourceByPatchId.get("workflow_hash_import");
@@ -14779,6 +14997,736 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
   for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) {
     assert.equal(version, SMITHERS_EFFECT_VERSION, `override ${name} must track Effect ${SMITHERS_EFFECT_VERSION}`);
   }
+});
+
+// The subset of `bun:sqlite`'s Database the store tests use. Declared here so
+// the file still typechecks under Node, which has no `bun:sqlite` types, and so
+// the class is reached through the pinned runner's own loader rather than a
+// literal `bun:` import.
+interface BunSqliteHandle {
+  run: (sql: string, params?: readonly unknown[]) => unknown;
+  query: (sql: string) => { all: (params?: readonly unknown[]) => Array<Record<string, unknown>> };
+  close: () => void;
+}
+
+// Resolves a pinned `@smthrs/*` subpackage's `src` directory through a `.js`
+// probe the package's export map already publishes, and proves the directory
+// belongs to the pinned release before anything is read out of it. Type sources
+// (`*.ts`) are shipped but not exported, so they can only be reached this way.
+function pinnedRunnerSourceDir(packageName: string, probeSubpath: string): string {
+  const resolveFromPinnedRunner = createRequire(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  );
+  const resolved = resolveFromPinnedRunner.resolve(`${packageName}/${probeSubpath}`);
+  const suffix = path.join("src", `${probeSubpath}.js`);
+  assert.equal(resolved.endsWith(suffix), true, `${packageName}/${probeSubpath} resolved to ${resolved}`);
+  const packageRoot = resolved.slice(0, -suffix.length);
+  const version = (JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version?: string })
+    .version;
+  assert.equal(version, SMITHERS_VERSION, `${packageName} belongs to an unpinned release`);
+  return path.join(packageRoot, "src");
+}
+
+function pinnedRunnerUnionMembers(source: string, typeName: string): string[] {
+  const marker = `export type ${typeName} =`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `${typeName} is no longer declared where Ultrafuzz mirrors it`);
+  assert.equal(source.split(marker).length, 2, `${typeName} is declared more than once`);
+  const end = source.indexOf(";", start);
+  assert.notEqual(end, -1, `${typeName} declaration is unterminated`);
+  const members = [...source.slice(start + marker.length, end).matchAll(/"([^"]+)"/gu)].map((match) => match[1]!);
+  assert.ok(members.length > 0, `${typeName} yielded no union members; re-derive the extractor`);
+  return members;
+}
+
+function balancedBraceRegion(source: string, from: number): string {
+  let depth = 0;
+  for (let index = source.indexOf("{", from); index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(from, index + 1);
+    }
+  }
+  throw new Error("pinned runner source region is unbalanced");
+}
+
+// Collects the property names an object-literal region can emit: the keys
+// written at `indent`, plus the shorthand and single-property literals the
+// conditional spreads splice in (`...(x ? { x } : {})`).
+function pinnedRunnerLiteralKeys(region: string, indent: number): Set<string> {
+  const keys = new Set<string>();
+  const direct = new RegExp(`^ {${indent}}([A-Za-z_$][\\w$]*)\\s*[:,]`, "u");
+  for (const line of region.split("\n")) {
+    const match = direct.exec(line);
+    if (match !== null) keys.add(match[1]!);
+  }
+  for (const match of region.matchAll(/\{\s*([A-Za-z_$][\w$]*)(?:\s*:[^{}]*?)?\s*\}/gu)) keys.add(match[1]!);
+  for (const match of region.matchAll(/\{\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\}/gu)) {
+    keys.add(match[1]!);
+    keys.add(match[2]!);
+  }
+  return keys;
+}
+
+function sortedKeys(values: Iterable<string>): string[] {
+  return [...new Set(values)].sort();
+}
+
+// Nothing else in the tree reads the pinned runner's own type sources, which is
+// why every 0.34.0-to-0.35.0 contract break landed unnoticed: `RunState` gained
+// `succeeded-with-failures`, `TaskState` gained `stalled`, and `inspect` grew
+// `tokenUsage`, `run.cancellationSource` and `runState.warnings` — each of which
+// hits a closed enum or an exact-key assertion and fails a live run closed.
+// Ultrafuzz mirrors those vocabularies deliberately; this test is what turns a
+// silent widening upstream into a build failure here.
+test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", async () => {
+  const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const {
+    CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES,
+    CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES,
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT,
+    CURRENT_SMITHERS_WHY_BLOCKER_KINDS
+  } = await import("../src/lifecycle-inspection.js");
+  const { CURRENT_SMITHERS_STATUS_KEY_CONTRACT } = await import("../src/state-export.js");
+  const { CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT } = await import("../src/workflow-sync.js");
+  const dbSource = pinnedRunnerSourceDir("@smthrs/db", "attempt-resume-pointers");
+  const schedulerSource = pinnedRunnerSourceDir("@smthrs/scheduler", "isTerminalState");
+  const cliSource = pinnedRunnerSourceDir("@smthrs/cli", "node-detail");
+
+  // 1. Run states. Order matters as well as membership: the mirror is quoted
+  // from this declaration, so a drift in either is a re-derivation signal.
+  assert.deepEqual(
+    pinnedRunnerUnionMembers(fs.readFileSync(path.join(dbSource, "runState", "RunState.ts"), "utf8"), "RunState"),
+    [...SMITHERS_RUN_STATES],
+    "the pinned runner's RunState union no longer matches SMITHERS_RUN_STATES"
+  );
+
+  // 2. Node states.
+  assert.deepEqual(
+    pinnedRunnerUnionMembers(fs.readFileSync(path.join(schedulerSource, "TaskState.ts"), "utf8"), "TaskState"),
+    [...SMITHERS_NODE_STATES],
+    "the pinned runner's TaskState union no longer matches SMITHERS_NODE_STATES"
+  );
+
+  // 3. Run statuses. `data.run.status` is the persisted `_smithers_runs.status`
+  // column, whose admissible values the runner enumerates directly.
+  const { DB_RUN_ALLOWED_STATUSES } = (await import(path.join(dbSource, "adapter", "DB_RUN_ALLOWED_STATUSES.js"))) as {
+    DB_RUN_ALLOWED_STATUSES: readonly string[];
+  };
+  assert.deepEqual(
+    sortedKeys(DB_RUN_ALLOWED_STATUSES),
+    sortedKeys(SMITHERS_RUN_STATUSES),
+    "the pinned runner's persisted run statuses no longer match SMITHERS_RUN_STATUSES"
+  );
+
+  // 4. `data.runState` is a serialized `RunStateView`, so its optional keys are
+  // exactly the allowlist and its required keys exactly the required set.
+  const runStateView = fs.readFileSync(path.join(dbSource, "runState", "RunStateView.ts"), "utf8");
+  const viewBody = balancedBraceRegion(runStateView, runStateView.indexOf("export type RunStateView ="));
+  const viewFields = [...viewBody.matchAll(/^ {2}([A-Za-z_$][\w$]*)(\??):/gmu)].map((match) => ({
+    key: match[1]!,
+    optional: match[2] === "?"
+  }));
+  assert.ok(viewFields.length > 0, "RunStateView yielded no fields; re-derive the extractor");
+  assert.deepEqual(
+    sortedKeys(viewFields.map((field) => field.key)),
+    sortedKeys(CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.runState.allowed),
+    "RunStateView no longer matches the Smithers inspect data.runState allowlist"
+  );
+  assert.deepEqual(
+    sortedKeys(viewFields.filter((field) => !field.optional).map((field) => field.key)),
+    sortedKeys(CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.runState.required),
+    "RunStateView's required fields no longer match what Ultrafuzz demands of data.runState"
+  );
+
+  // 5. The `inspect --format json --full-output` payload builder. Ultrafuzz's
+  // parser is exact-key, so any key the builder can emit must be allowlisted.
+  const cliIndex = fs.readFileSync(path.join(cliSource, "index.js"), "utf8");
+  const resultMarker = "  const result = {\n    run: {\n";
+  assert.equal(cliIndex.split(resultMarker).length, 2, "the pinned runner's inspect payload builder moved");
+  const resultRegion = balancedBraceRegion(cliIndex, cliIndex.indexOf(resultMarker));
+  const runRegion = balancedBraceRegion(resultRegion, resultRegion.indexOf("{", resultRegion.indexOf("    run: ")));
+  const dataKeys = pinnedRunnerLiteralKeys(resultRegion.replace(runRegion, ""), 4);
+  const runKeys = pinnedRunnerLiteralKeys(runRegion, 6);
+  for (const match of cliIndex.matchAll(/^\s+result\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*=/gmu)) {
+    if (match[2] === undefined) dataKeys.add(match[1]!);
+    else if (match[1] === "run") runKeys.add(match[2]);
+  }
+  for (const gated of CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.dataKeysGatedOnUnusedFlags) {
+    assert.equal(dataKeys.delete(gated), true, `data.${gated} is no longer emitted, so the exemption is now a lie`);
+  }
+  assert.deepEqual(
+    sortedKeys(dataKeys),
+    sortedKeys(CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.data.allowed),
+    "the pinned runner's inspect payload no longer matches the Smithers inspect data allowlist"
+  );
+  assert.deepEqual(
+    sortedKeys(runKeys),
+    sortedKeys(CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.run.allowed),
+    "the pinned runner's inspect run payload no longer matches the data.run allowlist"
+  );
+  const canonicalNodesRegion = balancedBraceRegion(cliIndex, cliIndex.indexOf("const canonicalNodes = nodes.map"));
+  assert.deepEqual(
+    sortedKeys(pinnedRunnerLiteralKeys(canonicalNodesRegion, 4)),
+    sortedKeys(CURRENT_SMITHERS_INSPECT_KEY_CONTRACT.node.exact),
+    "the pinned runner's canonical inspect node shape changed"
+  );
+
+  // 6. `smithers node` limits, which lifecycle-inspection.ts pins numerically.
+  const nodeDetail = fs.readFileSync(path.join(cliSource, "node-detail.js"), "utf8");
+  const limitConstant = (name: string): string => {
+    const match = new RegExp(`^const ${name} = (.+);$`, "mu").exec(nodeDetail);
+    assert.notEqual(match, null, `${name} is no longer declared in the pinned runner`);
+    return match![1]!;
+  };
+  assert.equal(limitConstant("MAX_TOOL_PAYLOAD_BYTES_HUMAN"), "1024");
+  assert.equal(limitConstant("MAX_VALIDATED_OUTPUT_BYTES_HUMAN"), "10 * 1024");
+  const limitsRegion = balancedBraceRegion(nodeDetail, nodeDetail.indexOf("limits: {"));
+  assert.deepEqual(sortedKeys(pinnedRunnerLiteralKeys(limitsRegion, 8)), [
+    "toolPayloadBytesHuman",
+    "validatedOutputBytesHuman"
+  ]);
+
+  // 7. The five-key event envelope workflow-sync.ts parses out of `events`.
+  const envelopeRegion = balancedBraceRegion(cliIndex, cliIndex.indexOf("function buildEventNdjsonLine"));
+  const returnRegion = balancedBraceRegion(envelopeRegion, envelopeRegion.indexOf("return JSON.stringify({"));
+  assert.deepEqual(sortedKeys(pinnedRunnerLiteralKeys(returnRegion, 4)), [
+    "payload",
+    "runId",
+    "seq",
+    "timestampMs",
+    "type"
+  ]);
+
+  // 8. `terminal_state_restore` and `resume_hydration` restore a node into a
+  // resumed session only for the states upstream calls terminal unconditionally.
+  // `failed` and `stalled` both stay out: upstream makes them terminal only
+  // under `continueOnFail`, and a node Ultrafuzz means to retry must not be
+  // hydrated back as done. If upstream promotes a new state into the
+  // unconditional branch, both replacements have to learn about it.
+  // 9. `smithers why`. Ultrafuzz's parser is exact on the required set, so every
+  // key `buildDiagnosis` can return must be required, and the only key the
+  // command splices in afterwards (`steers`, conditional since 0.34.0) must be
+  // allowed. 0.35.0's unconditional `warnings` is why this is checked at all: it
+  // is spread onto every return path, so it broke `ultrafuzz diagnose` for 100%
+  // of runs with nothing in the suite to notice.
+  const whyDiagnosis = fs.readFileSync(path.join(cliSource, "why-diagnosis.js"), "utf8");
+  const buildDiagnosis = balancedBraceRegion(whyDiagnosis, whyDiagnosis.indexOf("function buildDiagnosis(params) {"));
+  const diagnosisShapes: string[][] = [];
+  for (let cursor = buildDiagnosis.indexOf("return {"); cursor !== -1;) {
+    const region = balancedBraceRegion(buildDiagnosis, cursor);
+    const indent = /\n( *)[A-Za-z_$]/u.exec(region)?.[1]?.length ?? 0;
+    diagnosisShapes.push(sortedKeys(pinnedRunnerLiteralKeys(region, indent)));
+    cursor = buildDiagnosis.indexOf("return {", cursor + region.length);
+  }
+  assert.ok(diagnosisShapes.length > 0, "buildDiagnosis yielded no return shapes; re-derive the extractor");
+  for (const shape of diagnosisShapes) {
+    assert.deepEqual(
+      shape,
+      sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required),
+      "a `why` diagnosis return shape no longer matches what Ultrafuzz requires of it"
+    );
+  }
+  const whyCommandRegion = balancedBraceRegion(cliIndex, cliIndex.indexOf('.command("why", {'));
+  const splicedWhyKeys = [...whyCommandRegion.matchAll(/\.\.\.diagnosis,\s*([A-Za-z_$][\w$]*):/gu)].map(
+    (match) => match[1]!
+  );
+  assert.deepEqual(
+    sortedKeys([...CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required, ...splicedWhyKeys]),
+    sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.allowed),
+    "the `why` command splices a key into its diagnosis that Ultrafuzz does not allow"
+  );
+  assert.deepEqual(
+    sortedKeys(
+      pinnedRunnerUnionMembers(fs.readFileSync(path.join(cliSource, "WhyBlockerKind.ts"), "utf8"), "WhyBlockerKind")
+    ),
+    sortedKeys(CURRENT_SMITHERS_WHY_BLOCKER_KINDS),
+    "the pinned runner's WhyBlockerKind union no longer matches Ultrafuzz's closed blocker enum"
+  );
+
+  // 10. `smithers status`. `counts` and `throughput` are both exact-key on the
+  // Ultrafuzz side; 0.35.0 added `counts.stalled` unconditionally.
+  const runStatus = fs.readFileSync(path.join(cliSource, "run-status.js"), "utf8");
+  assert.deepEqual(
+    sortedKeys(pinnedRunnerLiteralKeys(balancedBraceRegion(runStatus, runStatus.indexOf("  const counts = {")), 4)),
+    sortedKeys(CURRENT_SMITHERS_STATUS_KEY_CONTRACT.counts.exact),
+    "the pinned runner's status counts no longer match what Ultrafuzz parses"
+  );
+
+  // 11. `smithers node` token usage, seeded by `emptyTokenUsage()` and carried
+  // through every parse, merge and aggregate. 0.35.0 added `freshInputTokens`.
+  assert.deepEqual(
+    sortedKeys(
+      pinnedRunnerLiteralKeys(balancedBraceRegion(nodeDetail, nodeDetail.indexOf("const emptyTokenUsage = () => (")), 2)
+    ),
+    sortedKeys(CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact),
+    "the pinned runner's node token usage shape no longer matches what Ultrafuzz parses"
+  );
+
+  // 12. `TokenUsageReported`. The durable sync path is exact-key on this payload
+  // and re-throws everywhere except `stats`, so a key added upstream takes out
+  // every run's synchronization on its first agent task. The failure-path emitter
+  // splices its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own
+  // return shape is unioned in rather than read off the emitter literal.
+  const engineSource = fs.readFileSync(
+    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
+    "utf8"
+  );
+  const emittedTokenKeys = new Set<string>();
+  for (let cursor = engineSource.indexOf('type: "TokenUsageReported"'); cursor !== -1;) {
+    const region = balancedBraceRegion(engineSource, engineSource.lastIndexOf("{", cursor));
+    const indent = /\n( *)[A-Za-z_$.]/u.exec(region)?.[1]?.length ?? 0;
+    for (const key of pinnedRunnerLiteralKeys(region, indent)) emittedTokenKeys.add(key);
+    cursor = engineSource.indexOf('type: "TokenUsageReported"', cursor + region.length);
+  }
+  assert.ok(emittedTokenKeys.size > 0, "no TokenUsageReported emitter was found; re-derive the extractor");
+  const normalizeUsage = balancedBraceRegion(
+    engineSource,
+    engineSource.indexOf("return {", engineSource.indexOf("function normalizeTokenUsage(usage) {"))
+  );
+  for (const key of pinnedRunnerLiteralKeys(normalizeUsage, 4)) emittedTokenKeys.add(key);
+  for (const busKey of CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.keysAddedByTheEventBus) {
+    assert.equal(emittedTokenKeys.has(busKey), false, `${busKey} is now an emitter key, not a bus envelope key`);
+    emittedTokenKeys.add(busKey);
+  }
+  assert.deepEqual(
+    sortedKeys(emittedTokenKeys),
+    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed),
+    "the pinned engine's TokenUsageReported payload no longer matches what workflow synchronization accepts"
+  );
+
+  // 13. Event types. `ultrafuzz events` without `--type` gets the runner's own
+  // default set, and with `--type <category>` gets a category slice, so every
+  // type the runner can categorise has to be in Ultrafuzz's closed contract for
+  // the categories it exposes. 0.35.0 added `NodeStalled` (default set) and
+  // `RunConcurrencySaturated`.
+  const { DEFAULT_LIFECYCLE_EVENT_TYPES } = (await import(path.join(cliSource, "observability-helpers.js"))) as {
+    DEFAULT_LIFECYCLE_EVENT_TYPES: readonly string[];
+  };
+  const missingDefaults = DEFAULT_LIFECYCLE_EVENT_TYPES.filter(
+    (type) => !CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES.has(type)
+  );
+  assert.deepEqual(missingDefaults, [], "the runner streams a default lifecycle event Ultrafuzz's parser rejects");
+  const { eventCategoryForType } = (await import(path.join(cliSource, "event-categories.js"))) as {
+    eventCategoryForType: (type: string) => string | null;
+  };
+  const uncategorised = [...CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES].filter(
+    (type) => eventCategoryForType(type) === null
+  );
+  assert.deepEqual(uncategorised, [], "Ultrafuzz admits an event type the pinned runner no longer emits");
+  // `--type` also accepts a category, and the runner then streams every type in
+  // it. `RunConcurrencySaturated` is reachable that way but is not in the
+  // default set, so only this direction catches it.
+  const { eventTypesForCategory } = (await import(path.join(cliSource, "event-categories.js"))) as {
+    eventTypesForCategory: (category: string) => readonly string[] | undefined;
+  };
+  const unadmittedByCategory: string[] = [];
+  for (const category of CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES) {
+    const types = eventTypesForCategory(category);
+    assert.ok(types !== undefined && types.length > 0, `the pinned runner no longer defines the ${category} category`);
+    for (const type of types) {
+      if (!CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES.has(type)) unadmittedByCategory.push(`${category}/${type}`);
+    }
+  }
+  assert.deepEqual(
+    unadmittedByCategory,
+    [],
+    "the runner streams an event under a category Ultrafuzz exposes that its parser rejects"
+  );
+
+  const { isTerminalState } = (await import(path.join(schedulerSource, "isTerminalState.js"))) as {
+    isTerminalState: (state: string) => boolean;
+  };
+  const unconditionallyTerminal = SMITHERS_NODE_STATES.filter((state) => isTerminalState(state));
+  assert.deepEqual([...unconditionallyTerminal].sort(), ["finished", "skipped"]);
+  for (const patchId of ["terminal_state_restore", "resume_hydration"] as const) {
+    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === patchId);
+    assert.ok(patch !== undefined, `${patchId} patch was not described`);
+    const restored = SMITHERS_NODE_STATES.filter((state) => patch.patched.includes(`"${state}"`));
+    assert.deepEqual(
+      [...restored].sort(),
+      [...unconditionallyTerminal].sort(),
+      `${patchId} restores a different state set than the pinned runner treats as unconditionally terminal`
+    );
+  }
+});
+
+// Acceptance criterion 3: a failed or cancelled attempt must not hand a stale
+// agent continuation pointer to the attempt that replaces it. 0.35.0 implements
+// that upstream, so the thing worth pinning here is the *contract* Ultrafuzz now
+// depends on: which attempt states are treated as dead, which meta keys are
+// discarded, and the two carve-outs (a live attempt, and a hijack hand-off) that
+// must keep their pointers or a human loses the session they are sitting in.
+test("the pinned runner drops resume pointers only from dead attempts", async () => {
+  const dbSource = pinnedRunnerSourceDir("@smthrs/db", "attempt-resume-pointers");
+  const {
+    ATTEMPT_RESUME_POINTER_META_KEYS,
+    NON_SUCCESS_TERMINAL_ATTEMPT_STATES,
+    attemptResumePointersUsable,
+    clearAttemptResumePointers,
+    isNonSuccessTerminalAttemptState
+  } = (await import(path.join(dbSource, "attempt-resume-pointers.js"))) as {
+    ATTEMPT_RESUME_POINTER_META_KEYS: readonly string[];
+    NON_SUCCESS_TERMINAL_ATTEMPT_STATES: readonly string[];
+    attemptResumePointersUsable: (attempt: { state?: unknown } | null | undefined) => boolean;
+    clearAttemptResumePointers: (metaJson: unknown) => string | null;
+    isNonSuccessTerminalAttemptState: (state: unknown) => boolean;
+  };
+
+  assert.deepEqual([...NON_SUCCESS_TERMINAL_ATTEMPT_STATES], ["failed", "cancelled", "canceled"]);
+  assert.deepEqual(
+    [...ATTEMPT_RESUME_POINTER_META_KEYS],
+    ["agentResume", "agentConversation", "lastHeartbeat", "resumedFromConversation", "resumedFromSession"]
+  );
+  // Every state Ultrafuzz can observe on a node is classified deliberately: only
+  // the two failure-terminal ones invalidate pointers, and no live or waiting
+  // state does. A future release that widens the list to, say, `stalled` would
+  // start discarding conversations Ultrafuzz still resumes from.
+  assert.deepEqual(
+    SMITHERS_NODE_STATES.filter((state) => isNonSuccessTerminalAttemptState(state)),
+    ["failed", "cancelled"]
+  );
+  for (const live of [
+    "pending",
+    "in-progress",
+    "waiting-approval",
+    "waiting-event",
+    "waiting-timer",
+    "waiting-quota"
+  ]) {
+    assert.equal(attemptResumePointersUsable({ state: live }), true, live);
+  }
+  for (const dead of NON_SUCCESS_TERMINAL_ATTEMPT_STATES) {
+    assert.equal(attemptResumePointersUsable({ state: dead }), false, dead);
+  }
+  // An attempt with no recorded state is not evidence the conversation is gone.
+  assert.equal(attemptResumePointersUsable(undefined), true);
+  assert.equal(attemptResumePointersUsable({}), true);
+
+  const pointers = {
+    agentResume: "session-1",
+    agentConversation: "/runs/conversation.json",
+    lastHeartbeat: { at: 1 },
+    resumedFromConversation: "/runs/previous.json",
+    resumedFromSession: "session-0"
+  };
+  const stripped = clearAttemptResumePointers(JSON.stringify({ ...pointers, nodeId: "node:a", attempt: 2 }));
+  assert.notEqual(stripped, null);
+  assert.deepEqual(JSON.parse(stripped!), { nodeId: "node:a", attempt: 2 });
+  // A hijack hand-off is the one cancelled attempt whose pointers stay: a human
+  // is in that session and both resume and `smithers hijack` need to rejoin it.
+  assert.equal(clearAttemptResumePointers(JSON.stringify({ ...pointers, hijackHandoff: { to: "human" } })), null);
+  // Nothing to strip, and nothing readable, are both "leave the row alone".
+  assert.equal(clearAttemptResumePointers(JSON.stringify({ nodeId: "node:a" })), null);
+  assert.equal(clearAttemptResumePointers("not json"), null);
+  assert.equal(clearAttemptResumePointers(""), null);
+  assert.equal(clearAttemptResumePointers(undefined), null);
+});
+
+// The three keys 0.35.0 added to the inspect envelope (`data.tokenUsage`,
+// `data.run.cancellationSource`, `data.runState.warnings`) reach an exact-key
+// assertion, and the two states it added (`succeeded-with-failures`, `stalled`)
+// reach closed enums. Both would fail every inspect of a live run, so parse a
+// payload carrying all five and prove each new field is bound-checked rather
+// than merely allowlisted.
+test("parseCurrentSmithersInspect admits the 0.35.0 envelope and bounds its new fields", async () => {
+  const { parseCurrentSmithersInspect } = await import("../src/smithers.js");
+  const workflowRunId = "ultrafuzz-inspect-0350";
+  const envelope = {
+    ok: true,
+    data: {
+      run: {
+        id: workflowRunId,
+        workflow: "workflow",
+        status: "finished",
+        started: "2026-08-27T00:00:00.000Z",
+        elapsed: "2s",
+        finished: "2026-08-27T00:00:02.000Z",
+        cancellationSource: { source: "cli", clientIdentity: "operator" }
+      },
+      runState: {
+        runId: workflowRunId,
+        state: "succeeded-with-failures",
+        computedAt: "2026-08-27T00:00:03.000Z",
+        warnings: [
+          {
+            kind: "concurrency-ceiling-saturated",
+            requestedDemand: 8,
+            effectiveCap: 4,
+            remediationCommand: "smithers config set concurrency 8",
+            observedAt: "2026-08-27T00:00:01.000Z"
+          }
+        ]
+      },
+      tokenUsage: { inputTokens: 10, outputTokens: 4, costUsd: null },
+      failedChildren: 1,
+      failedChildKeys: ["node:tolerated::0"],
+      exhaustedLoops: [{ id: "loop:a", iteration: 3, maxIterations: 3 }],
+      steps: [],
+      nodes: [
+        { nodeId: "node:tolerated", state: "failed", attempt: 1, label: "node:tolerated" },
+        { nodeId: "node:stuck", state: "stalled", attempt: 2, label: "node:stuck" },
+        { nodeId: "node:done", state: "finished", attempt: 1, label: "node:done" }
+      ]
+    },
+    meta: { command: "inspect", duration: "1ms" }
+  };
+  const snapshot = (json: unknown) => ({ command: ["inspect"], ok: true, stdout: "", stderr: "", json });
+
+  const parsed = parseCurrentSmithersInspect(snapshot(envelope), workflowRunId);
+  assert.equal(parsed.runState, "succeeded-with-failures");
+  assert.deepEqual(
+    parsed.nodes.map((node) => node.state),
+    ["failed", "stalled", "finished"]
+  );
+  // `exhaustedLoops` is only meaningful for a success-terminal run, and a run
+  // that tolerated a child failure now lands on `succeeded-with-failures`
+  // instead of `succeeded`, so the guard has to accept both.
+  assert.deepEqual(
+    parsed.exhaustedLoops.map((loop) => loop.id),
+    ["loop:a"]
+  );
+  assert.deepEqual(parsed.failedChildKeys, ["node:tolerated::0"]);
+
+  type MutableInspectData = Record<string, Record<string, unknown>> & {
+    run: Record<string, unknown>;
+    runState: Record<string, unknown>;
+  };
+  const mutate = (apply: (data: MutableInspectData) => void): unknown => {
+    const copy = structuredClone(envelope) as unknown as { data: MutableInspectData };
+    apply(copy.data);
+    return copy;
+  };
+  await assert.rejects(
+    async () => parseCurrentSmithersInspect(snapshot(mutate((data) => (data.tokenUsage = [] as never))), workflowRunId),
+    /data\.tokenUsage must be an object/u
+  );
+  await assert.rejects(
+    async () =>
+      parseCurrentSmithersInspect(snapshot(mutate((data) => (data.run.cancellationSource = "cli"))), workflowRunId),
+    /data\.run\.cancellationSource must be an object/u
+  );
+  await assert.rejects(
+    async () => parseCurrentSmithersInspect(snapshot(mutate((data) => (data.runState.warnings = {}))), workflowRunId),
+    /data\.runState\.warnings must be an array/u
+  );
+  // The allowlist stays closed: a key the pinned runner does not emit is still
+  // a contract break, not a field to ignore.
+  await assert.rejects(
+    async () => parseCurrentSmithersInspect(snapshot(mutate((data) => (data.futureField = {}))), workflowRunId),
+    /contains fields outside the pinned 0\.35\.0 shape: futureField/u
+  );
+});
+
+// Acceptance criterion 4: a stopped 0.34.0 run's durable store must survive the
+// four migrations 0.35.0 adds (0041-0044) with its history intact, and the
+// upgrade must be re-runnable and recoverable. The migrations are forward-only
+// with no down path, so the real safety property is that they are purely
+// additive: every new column is nullable, no historical row is rewritten, and a
+// failed run records nothing it did not actually apply.
+//
+// The 0.34.0 shape is produced by migrating a fresh store to 0.35.0 and then
+// removing exactly what 0041-0044 add. That is the same end state a 0.34.0
+// binary leaves behind and it needs no second install, which a CI lane cannot
+// have; it is also why the removal list is asserted against the ledger's own
+// recorded statements rather than hand-maintained.
+bunAdapterTest("pinned store migrations are additive over a 0.34.0 database", async () => {
+  const dbSource = pinnedRunnerSourceDir("@smthrs/db", "attempt-resume-pointers");
+  const { openDurableSqliteDatabase } = (await import(path.join(dbSource, "openDurableSqliteDatabase.js"))) as {
+    openDurableSqliteDatabase: (file: string) => { db: unknown; close: () => void };
+  };
+  const { ensureSqlMessageStorage } = (await import(path.join(dbSource, "sql-message-storage.js"))) as {
+    ensureSqlMessageStorage: (db: unknown) => Promise<void>;
+  };
+  const { loadBunSqliteDatabase } = (await import(path.join(dbSource, "bunSqliteRuntime.js"))) as {
+    loadBunSqliteDatabase: () => new (file: string) => BunSqliteHandle;
+  };
+  const Database = loadBunSqliteDatabase();
+
+  const store = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ufz-smithers-db-")), "smithers.db");
+  const migrate = async (): Promise<void> => {
+    const handle = openDurableSqliteDatabase(store);
+    try {
+      await ensureSqlMessageStorage(handle.db);
+    } finally {
+      handle.close();
+    }
+  };
+  const withSqlite = async <T>(body: (sqlite: BunSqliteHandle) => T): Promise<T> => {
+    const sqlite = new Database(store);
+    try {
+      return body(sqlite);
+    } finally {
+      sqlite.close();
+    }
+  };
+  const columnNames = (sqlite: BunSqliteHandle, table: string): string[] =>
+    sqlite
+      .query(`PRAGMA table_info(${table})`)
+      .all()
+      .map((row) => String((row as { name: unknown }).name));
+  const ledger = (sqlite: BunSqliteHandle): Array<Record<string, unknown>> =>
+    sqlite.query("SELECT id, applied_at_ms, checksum, details_json FROM _smithers_schema_migrations ORDER BY id").all();
+  const attemptRows = (sqlite: BunSqliteHandle): Array<Record<string, unknown>> =>
+    sqlite.query("SELECT * FROM _smithers_attempts ORDER BY node_id, attempt").all();
+
+  await migrate();
+
+  const ADDED_MIGRATIONS = [
+    "0041_run_usage_breakdown_columns",
+    "0042_run_cancellation_source_details",
+    "0043_memory_notes_postgres_staged",
+    "0044_run_ownership"
+  ] as const;
+  const ADDED_INDEX = "_smithers_runs_owner_app_created_idx";
+  const ADDED_COLUMNS: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ["_smithers_runs", ["cancel_request_detail", "cancel_request_signal", "owner", "app"]],
+    ["_smithers_run_usage", ["fresh_input_tokens", "cost_usd"]]
+  ];
+
+  // The removal list is only the right list while the ledger's own recorded DDL
+  // says so. If a future release changes what 0041-0044 add, this fails here
+  // rather than silently testing a shape nobody ships.
+  await withSqlite((sqlite) => {
+    const recorded = new Map(ledger(sqlite).map((row) => [String(row.id), String(row.checksum ?? "")]));
+    for (const id of ADDED_MIGRATIONS) assert.ok(recorded.has(id), `${id} is not in the pinned migration set`);
+    for (const [table, columns] of ADDED_COLUMNS) {
+      for (const column of columns) {
+        const statement = `ALTER TABLE ${table} ADD COLUMN ${column} `;
+        assert.ok(
+          [...recorded.values()].some((checksum) => checksum.includes(statement)),
+          `no pinned migration adds ${table}.${column}`
+        );
+      }
+      assert.deepEqual(
+        columns.filter((column) => columnNames(sqlite, table).includes(column)),
+        [...columns],
+        `${table} is missing a column 0041-0044 should have added`
+      );
+    }
+    assert.ok(
+      String(recorded.get("0044_run_ownership")).includes(ADDED_INDEX),
+      `0044 no longer creates ${ADDED_INDEX}`
+    );
+  });
+
+  // Roll the store back to the 0.34.0 shape and seed it the way a stopped run
+  // leaves it, including a failed attempt carrying every resume pointer.
+  const failedMetaJson = JSON.stringify({
+    agentResume: "session-1",
+    agentConversation: "/runs/conversation.json",
+    lastHeartbeat: { at: 1 },
+    resumedFromConversation: "/runs/previous.json",
+    resumedFromSession: "session-0",
+    nodeId: "node:a"
+  });
+  await withSqlite((sqlite) => {
+    sqlite.run("PRAGMA foreign_keys = OFF");
+    sqlite.run(`DROP INDEX IF EXISTS ${ADDED_INDEX}`);
+    for (const [table, columns] of ADDED_COLUMNS) {
+      for (const column of columns) sqlite.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    }
+    for (const id of ADDED_MIGRATIONS) sqlite.run("DELETE FROM _smithers_schema_migrations WHERE id = ?", [id]);
+    sqlite.run(
+      "INSERT INTO _smithers_runs (run_id, workflow_name, status, created_at_ms, started_at_ms) VALUES (?, ?, ?, ?, ?)",
+      ["run-0340", "workflow", "failed", 1, 1]
+    );
+    sqlite.run(
+      "INSERT INTO _smithers_attempts (run_id, node_id, iteration, attempt, state, started_at_ms, meta_json) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ["run-0340", "node:a", 0, 1, "failed", 1, failedMetaJson]
+    );
+    sqlite.run(
+      "INSERT INTO _smithers_attempts (run_id, node_id, iteration, attempt, state, started_at_ms, meta_json) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ["run-0340", "node:b", 0, 1, "finished", 1, JSON.stringify({ agentResume: "session-2" })]
+    );
+    sqlite.run(
+      "INSERT INTO _smithers_agent_checkpoint_contents (content_hash, checkpoint_json, size_bytes, created_at_ms) " +
+        "VALUES (?, ?, ?, ?)",
+      ["hash-1", "{}", 2, 1]
+    );
+    sqlite.run(
+      "INSERT INTO _smithers_agent_checkpoints " +
+        "(run_id, node_id, iteration, attempt, sequence, content_hash, codec, version, purpose, created_at_ms) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ["run-0340", "node:a", 0, 1, 0, "hash-1", "json", 1, "resume", 1]
+    );
+    for (const [table, columns] of ADDED_COLUMNS) {
+      for (const column of columns) {
+        assert.equal(columnNames(sqlite, table).includes(column), false, `${table}.${column} survived the rollback`);
+      }
+    }
+  });
+  const before = await withSqlite((sqlite) => ({
+    attempts: attemptRows(sqlite),
+    checkpoints: sqlite.query("SELECT * FROM _smithers_agent_checkpoints").all()
+  }));
+
+  // (e) An injected failure must not leave a ledger row for work that did not
+  // happen, and the next run must converge. Squatting the index name is the
+  // narrowest way to make exactly one migration's `up` throw.
+  await withSqlite((sqlite) => sqlite.run(`CREATE TABLE ${ADDED_INDEX} (x INTEGER)`));
+  await assert.rejects(migrate, new RegExp(`already a table named ${ADDED_INDEX}`, "u"));
+  await withSqlite((sqlite) => {
+    const applied = ledger(sqlite).map((row) => String(row.id));
+    assert.equal(applied.includes("0044_run_ownership"), false, "0044 was recorded even though it threw");
+    assert.equal(applied.includes("0043_memory_notes_postgres_staged"), true, "0043 ran before the failure");
+    sqlite.run(`DROP TABLE ${ADDED_INDEX}`);
+  });
+
+  await migrate();
+
+  await withSqlite((sqlite) => {
+    // (a) every added migration applied, and 0043 records why SQLite skips it.
+    const applied = new Map(ledger(sqlite).map((row) => [String(row.id), row]));
+    for (const id of ADDED_MIGRATIONS) assert.ok(applied.has(id), `${id} did not apply`);
+    assert.deepEqual(JSON.parse(String(applied.get("0043_memory_notes_postgres_staged")!.details_json)), {
+      skipped: "postgres_only"
+    });
+    // (b) the ledger records a checksum for each, and the schema really moved.
+    for (const id of ADDED_MIGRATIONS) {
+      assert.equal(typeof applied.get(id)!.checksum, "string");
+      assert.ok(String(applied.get(id)!.checksum).length > 0, `${id} recorded no checksum`);
+    }
+    for (const [table, columns] of ADDED_COLUMNS) {
+      for (const column of columns) {
+        assert.equal(columnNames(sqlite, table).includes(column), true, `${table}.${column} was not added`);
+      }
+    }
+    assert.equal(
+      sqlite.query("SELECT type FROM sqlite_master WHERE name = ?").all([ADDED_INDEX]).length,
+      1,
+      `${ADDED_INDEX} was not created`
+    );
+    // (c) the mechanical proof AC4 needs: no historical row was rewritten.
+    assert.deepEqual(attemptRows(sqlite), before.attempts);
+    assert.deepEqual(sqlite.query("SELECT * FROM _smithers_agent_checkpoints").all(), before.checkpoints);
+    assert.equal(
+      String((attemptRows(sqlite).find((row) => row.node_id === "node:a") ?? {}).meta_json),
+      failedMetaJson,
+      "the failed attempt's resume pointers were rewritten by a migration rather than on its next transition"
+    );
+    // Downgrade tolerance: every added column is nullable, so a 0.34.0 binary
+    // writing a run row into a 0.35-migrated store still succeeds. That is the
+    // only rollback story forward-only migrations have.
+    sqlite.run("INSERT INTO _smithers_runs (run_id, workflow_name, status, created_at_ms) VALUES (?, ?, ?, ?)", [
+      "run-0340-downgrade",
+      "workflow",
+      "running",
+      2
+    ]);
+    assert.deepEqual(
+      sqlite.query("SELECT owner, app FROM _smithers_runs WHERE run_id = ?").all(["run-0340-downgrade"]),
+      [{ owner: null, app: null }]
+    );
+  });
+
+  // (d) re-running the upgrade is a no-op, ledger included.
+  const settled = await withSqlite((sqlite) => ledger(sqlite));
+  await migrate();
+  assert.deepEqual(await withSqlite((sqlite) => ledger(sqlite)), settled);
 });
 
 test("startRun rejects an explicit project-local Smithers bin with a leading dot target", async () => {
@@ -15979,6 +16927,83 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
   assert.ok(
     observational.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_INVALID"),
     JSON.stringify(observational.diagnostics)
+  );
+});
+
+// Smithers 0.35.0 puts `freshInputTokens` on every usage event and `costUsd` on
+// every priced one. `validateSmithersEventPayload` is exact-key and re-throws
+// everywhere except `stats`, so before these were allowlisted the first agent
+// task of any 0.35.0 run took out `status`, `state`, `diagnose` and the evals
+// row sync for that run permanently.
+test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new fields", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const syncWithUsage = async (runId: string, usage: Record<string, unknown>) => {
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        {
+          type: "TokenUsageReported",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          extra: { iteration: 0, model: "gpt-priced", agent: "codex", ...usage }
+        },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+    return { runRoot: run.value!.run_root, result: await syncRun({ projectRoot: project, runId, env }) };
+  };
+
+  // `freshInputTokens` is the uncached share of `inputTokens`, not an addition
+  // to it, and `costUsd` is a fractional estimate. Both are accepted, and the
+  // ledger totals stay derived from `inputTokens`/`outputTokens` alone.
+  const accepted = await syncWithUsage("fresh-input-usage", {
+    inputTokens: 512,
+    freshInputTokens: 112,
+    outputTokens: 23,
+    cacheReadTokens: 400,
+    cacheWriteTokens: 0,
+    costUsd: 0.001_234_5
+  });
+  assert.equal(accepted.result.ok, true, JSON.stringify(accepted.result.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(accepted.runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { total_tokens?: number; cache_read_tokens?: number } };
+  };
+  // 512 input + 23 output + 400 cache read: `freshInputTokens` is the uncached
+  // share of `inputTokens`, so counting it would double-count the same tokens.
+  assert.equal(metadata.accounting?.current?.total_tokens, 935);
+  assert.equal(metadata.accounting?.current?.cache_read_tokens, 400);
+
+  // Both new fields stay bounded: a non-integer token count and a negative cost
+  // are contract violations, not values to coerce.
+  await assert.rejects(
+    () => syncWithUsage("fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }),
+    /freshInputTokens is invalid/u
+  );
+  await assert.rejects(
+    () => syncWithUsage("cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }),
+    /costUsd is invalid/u
+  );
+  await assert.rejects(
+    () => syncWithUsage("cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }),
+    /costUsd is invalid/u
+  );
+  // A key outside the contract still fails closed; widening it for two fields
+  // must not have relaxed the assertion itself.
+  await assert.rejects(
+    () => syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 6 }),
+    /contains unsupported fields/u
   );
 });
 
@@ -21311,6 +22336,63 @@ test("ordinary resume leaves required-command availability to the continued work
   assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore);
 });
 
+// Acceptance criterion 1, at the layer a stopped run actually goes through.
+// A project created before the runner bump still carries the previous pin in
+// `.smithers/package.json`. Resume must continue that run under its own
+// Ultrafuzz run ID, Smithers run ID and workflow link ID, because the only way
+// to "recreate" the manifest is `init --force`, which creates a new run.
+//
+// It also records the boundary, which is easy to get wrong from the source:
+// `ensureSmithersDependencies` — the one caller of `assertSmithersPackageManifest`
+// outside init — only ever runs against the operator controller's own temporary
+// project root, where it has just written `renderSmithersPackageJson()` itself.
+// Nothing on the launch path reads the *target* project's manifest, so bringing
+// that file forward is `initProject`'s job (covered by the non-force init tests
+// above) and a superseded pin can never block a resume.
+test("resume continues under a superseded generated manifest without changing either run ID", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "superseded-manifest-resume", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runId = run.value!.run_id;
+  const before = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(before.ok, true, JSON.stringify(before.ok ? [] : before.diagnostics));
+
+  // Roll the project back to what a pre-bump `init` wrote.
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  const current = JSON.parse(renderSmithersPackageJson()) as { dependencies: Record<string, string> };
+  const superseded = `${JSON.stringify(
+    { ...current, dependencies: { ...current.dependencies, smthrs: "0.34.0" } },
+    null,
+    2
+  )}\n`;
+  fs.writeFileSync(manifestPath, superseded, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.run_id, runId);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
+  const after = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(after.ok, true, JSON.stringify(after.ok ? [] : after.diagnostics));
+  if (before.ok && after.ok) {
+    assert.equal(after.smithersRunId, before.smithersRunId);
+    assert.equal(after.workflowLinkId, before.workflowLinkId);
+  }
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), superseded, "resume rewrote the target project's manifest");
+
+  // `init` is where it converges, still without `--force` and still on the same
+  // run directory, so the run the resume above continued stays reachable.
+  assert.equal(initProject({ projectRoot: project }).ok, true);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), renderSmithersPackageJson());
+  const migrated = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(migrated.ok, true, JSON.stringify(migrated.ok ? [] : migrated.diagnostics));
+  if (before.ok && migrated.ok) assert.equal(migrated.smithersRunId, before.smithersRunId);
+});
+
 test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
   const cases = [
     {
@@ -21664,6 +22746,40 @@ test("resume retries a failed artifact verifier from its agent producer and depe
     /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
     "the producer retry must also reset its zero-retry verifier and downstream dependents"
   );
+});
+
+// Smithers 0.35.0 parks a node that livelocked on an identical-error streak in
+// `stalled`, a terminal failure verdict it says "behaves exactly like `failed`".
+// Every other Ultrafuzz surface already reports such a node as failed, so an
+// operator retry that skipped it was a silent no-op: the run reported `failed`,
+// and the reset loop issued zero `timetravel` commands.
+test("resume retries stalled nodes alongside failed ones", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "stalled-node-retry-run";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "a node stalled on an identical failure streak" },
+      steps: [
+        { id: "node:project-discovery", state: "stalled", attempt: 3 },
+        { id: "node:strategy", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /^timetravel .* --node-id node:project-discovery .* --force(?: |$)/mu);
+  assert.match(commands, /^timetravel .* --node-id node:strategy .* --force(?: |$)/mu);
 });
 
 test("resume retries failed tasks reported inside a successful terminal workflow", async () => {

@@ -9,7 +9,7 @@ RUN corepack enable && corepack prepare pnpm@11.1.1 --activate && \
     pnpm --filter @ultrafuzz/evmbench build
 RUN mkdir -p /opt/ultrafuzz-smithers && \
     node --input-type=module -e 'import { writeFileSync } from "node:fs"; import { renderSmithersPackageJson } from "./packages/runtime/dist/smithers-package.js"; writeFileSync("/opt/ultrafuzz-smithers/package.json", renderSmithersPackageJson())' && \
-    npm install --prefix /opt/ultrafuzz-smithers --ignore-scripts --package-lock=false --no-audit --no-fund --loglevel=error
+    node --input-type=module -e 'import { execFileSync } from "node:child_process"; import { smithersDependencyInstallArgs } from "./packages/runtime/dist/smithers-package.js"; execFileSync("npm", smithersDependencyInstallArgs({ prefix: "/opt/ultrafuzz-smithers" }), { stdio: "inherit" })'
 
 FROM ${BASE_IMAGE}
 ARG PROFILE

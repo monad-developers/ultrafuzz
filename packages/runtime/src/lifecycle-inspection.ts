@@ -80,6 +80,7 @@ interface CurrentWhyDiagnosis {
   summary: string;
   generatedAtMs: number;
   blockers: CurrentWhyBlocker[];
+  warnings: string[];
   information: string[];
   currentNodeId: string | null;
 }
@@ -139,6 +140,7 @@ interface CurrentEventRecord {
 
 interface CurrentNodeTokenUsage extends JsonObject {
   inputTokens: number;
+  freshInputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
@@ -334,7 +336,11 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
       summary: publicWorkflowText(diagnosis.summary),
       current_node_id: diagnosis.currentNodeId,
       blockers: diagnosis.blockers.map(adaptBlocker),
-      notes: diagnosis.information.map(publicWorkflowText),
+      // The runner renders `warnings` and `information` in the same operator
+      // section of `why`, so they land in the same public `notes` list rather
+      // than a new field nothing downstream reads. Warnings lead, matching the
+      // runner's own ordering.
+      notes: [...diagnosis.warnings, ...diagnosis.information].map(publicWorkflowText),
       generated_at: timestampFromMs(diagnosis.generatedAtMs)
     },
     syncDiagnostics
@@ -595,6 +601,8 @@ const LIFECYCLE_EVENT_CATEGORIES = new Set([
   "workflow"
 ]);
 
+export const CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES: ReadonlySet<string> = LIFECYCLE_EVENT_CATEGORIES;
+
 export function isLifecycleEventCategory(value: string): boolean {
   return LIFECYCLE_EVENT_CATEGORIES.has(value);
 }
@@ -645,6 +653,47 @@ function boundedEventLimit(limit: number | undefined): number {
   return Math.min(MAX_EVENT_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
+/**
+ * The closed-world key and vocabulary contract Ultrafuzz enforces on the pinned
+ * runner's `why`, `node` and `events` surfaces. Exported so a test can diff it
+ * against the runner's own sources: `inspect` is not the only envelope Ultrafuzz
+ * parses exactly, and every one of `why`'s `warnings`, `why`'s `stalled` blocker
+ * kind, `node`'s `tokenUsage.freshInputTokens` and the two new `NodeStalled` /
+ * `RunConcurrencySaturated` event types would have failed a live 0.35.0 run
+ * closed with nothing here to catch it.
+ */
+export const CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT = {
+  whyDiagnosis: {
+    required: ["runId", "status", "summary", "generatedAtMs", "blockers", "warnings", "information", "currentNodeId"],
+    allowed: [
+      "runId",
+      "status",
+      "summary",
+      "generatedAtMs",
+      "blockers",
+      "warnings",
+      "information",
+      "currentNodeId",
+      "steers"
+    ]
+  },
+  nodeTokenUsage: {
+    exact: [
+      "inputTokens",
+      "freshInputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "reasoningTokens",
+      "costUsd",
+      "eventCount",
+      "models",
+      "agents"
+    ]
+  },
+  nodeLimits: { exact: ["toolPayloadBytesHuman", "validatedOutputBytesHuman"] }
+} as const;
+
 const CURRENT_WHY_BLOCKER_KINDS = [
   "waiting-approval",
   "waiting-event",
@@ -654,12 +703,19 @@ const CURRENT_WHY_BLOCKER_KINDS = [
   "stale-task-heartbeat",
   "retry-backoff",
   "retries-exhausted",
+  // Smithers 0.35.0 raises a `stalled` blocker for every node the scheduler
+  // parked after an identical-error streak. It is a terminal failure verdict
+  // that behaves like `failed` upstream, and `why` emits it for any run with
+  // such a node, so a closed enum without it rejects the whole diagnosis.
+  "stalled",
   "stale-heartbeat",
   "engine-busy",
   "dependency-failed",
   "approval-decided-resume-required",
   "side-effect-boundary-crossed"
 ] as const satisfies readonly RunBlockerKind[];
+
+export const CURRENT_SMITHERS_WHY_BLOCKER_KINDS: readonly string[] = CURRENT_WHY_BLOCKER_KINDS;
 
 const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "SupervisorStarted",
@@ -669,6 +725,9 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "RunStarted",
   "RunStatusChanged",
   "RunStateChanged",
+  // New in Smithers 0.35.0: category `run`, so `ultrafuzz events --type run`
+  // streams it, and it is what `why` turns into a durable concurrency warning.
+  "RunConcurrencySaturated",
   "RunFinished",
   "RunFailed",
   "RunCancelled",
@@ -699,6 +758,9 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "TaskHeartbeatTimeout",
   "NodeFinished",
   "NodeFailed",
+  // New in Smithers 0.35.0, and in the runner's DEFAULT_LIFECYCLE_EVENT_TYPES,
+  // so a bare `ultrafuzz events <run>` streams it without any `--type` filter.
+  "NodeStalled",
   "NodeCancelled",
   "NodeSkipped",
   "NodeRetrying",
@@ -737,14 +799,23 @@ const CURRENT_LIFECYCLE_EVENT_TYPES = new Set([
   "TimerCancelled"
 ]);
 
+export const CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES: ReadonlySet<string> = CURRENT_LIFECYCLE_EVENT_TYPES;
+
 function parseCurrentWhyDiagnosis(
   snapshot: SmithersCommandSnapshot,
   expectedWorkflowRunId: string
 ): CurrentWhyDiagnosis {
   const data = currentCommandData(snapshot, "why");
-  assertExactKeys(
+  // `warnings` is required, not optional: Smithers 0.35.0 builds it as
+  // `concurrencyWarning ? [warning] : []` and spreads it unconditionally on
+  // every one of `buildDiagnosis`'s return paths, so `[]` serializes as a
+  // present key on every diagnosis of every run. `steers` is the one genuinely
+  // conditional key -- the `why` command appends it only when the run has
+  // queued steers -- and it has been conditional since 0.34.0.
+  assertRequiredAndAllowedKeys(
     data,
-    ["runId", "status", "summary", "generatedAtMs", "blockers", "information", "currentNodeId"],
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.required,
+    CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.whyDiagnosis.allowed,
     "workflow diagnosis"
   );
   const runId = requiredString(data.runId, "workflow diagnosis runId");
@@ -758,6 +829,7 @@ function parseCurrentWhyDiagnosis(
     summary: requiredString(data.summary, "workflow diagnosis summary"),
     generatedAtMs: requiredTimestampMs(data.generatedAtMs, "workflow diagnosis generatedAtMs"),
     blockers,
+    warnings: requiredStringArray(data.warnings, "workflow diagnosis warnings", { allowEmpty: true }),
     information: requiredStringArray(data.information, "workflow diagnosis information", { allowEmpty: true }),
     currentNodeId: requiredNullableString(data.currentNodeId, "workflow diagnosis currentNodeId")
   };
@@ -1241,23 +1313,13 @@ function parseCurrentNodeToolCall(value: unknown, label: string): CurrentNodeToo
 
 function parseCurrentNodeTokenUsage(value: unknown, label: string): CurrentNodeTokenUsage {
   const row = requiredObject(value, label);
-  assertExactKeys(
-    row,
-    [
-      "inputTokens",
-      "outputTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "reasoningTokens",
-      "costUsd",
-      "eventCount",
-      "models",
-      "agents"
-    ],
-    label
-  );
+  // `freshInputTokens` is new in 0.35.0: `emptyTokenUsage()` seeds it and every
+  // parse, merge and aggregate carries it, so it reaches the aggregate and every
+  // `byAttempt[].usage` of every node of every run.
+  assertExactKeys(row, CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact, label);
   return {
     inputTokens: requiredCount(row.inputTokens, `${label} inputTokens`),
+    freshInputTokens: requiredCount(row.freshInputTokens, `${label} freshInputTokens`),
     outputTokens: requiredCount(row.outputTokens, `${label} outputTokens`),
     cacheReadTokens: requiredCount(row.cacheReadTokens, `${label} cacheReadTokens`),
     cacheWriteTokens: requiredCount(row.cacheWriteTokens, `${label} cacheWriteTokens`),
@@ -1276,18 +1338,7 @@ function parseCurrentAggregateTokenUsage(
   const row = requiredObject(value, "workflow node aggregate tokenUsage");
   assertExactKeys(
     row,
-    [
-      "inputTokens",
-      "outputTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "reasoningTokens",
-      "costUsd",
-      "eventCount",
-      "models",
-      "agents",
-      "byAttempt"
-    ],
+    [...CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeTokenUsage.exact, "byAttempt"],
     "workflow node aggregate tokenUsage"
   );
   const base = parseCurrentNodeTokenUsage(
@@ -1395,7 +1446,7 @@ function parseCurrentNodeApproval(value: unknown, runId: string, nodeId: string,
 
 function parseCurrentNodeLimits(value: unknown): CurrentNodeDetail["limits"] {
   const row = requiredObject(value, "workflow node limits");
-  assertExactKeys(row, ["toolPayloadBytesHuman", "validatedOutputBytesHuman"], "workflow node limits");
+  assertExactKeys(row, CURRENT_SMITHERS_LIFECYCLE_KEY_CONTRACT.nodeLimits.exact, "workflow node limits");
   const limits = {
     toolPayloadBytesHuman: requiredCount(row.toolPayloadBytesHuman, "workflow node limits toolPayloadBytesHuman"),
     validatedOutputBytesHuman: requiredCount(
@@ -1404,7 +1455,7 @@ function parseCurrentNodeLimits(value: unknown): CurrentNodeDetail["limits"] {
     )
   };
   if (limits.toolPayloadBytesHuman !== 1_024 || limits.validatedOutputBytesHuman !== 10 * 1_024) {
-    contractError("workflow node limits do not match the pinned 0.34.0 contract");
+    contractError("workflow node limits do not match the pinned 0.35.0 contract");
   }
   return limits;
 }

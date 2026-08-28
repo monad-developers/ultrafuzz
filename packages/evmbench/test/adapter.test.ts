@@ -198,6 +198,58 @@ describe("EVMBench adapter", () => {
     );
   });
 
+  // Smithers 0.35.0 widened `degraded`: besides an exhausted loop, a finished run
+  // that tolerated a `continueOnFail` child now reports it, and Ultrafuzz
+  // generates such lanes by design. The two are separated by Ultrafuzz's own
+  // aggregate status, because `finalRunStatus` forces `failed` whenever
+  // `inspect.exhaustedLoops` is non-empty -- so a `degraded` run reported
+  // `succeeded` converged and the benchmark must collect its report.
+  it("collects the report for a degraded run whose Ultrafuzz aggregate succeeded", async () => {
+    const fixture = adapterFixture();
+    const invocations: string[][] = [];
+
+    const reportPath = path.join(fixture.auditRoot, "report.md");
+    fs.writeFileSync(reportPath, "# Synthetic report\n", "utf8");
+
+    const result = await runEvmbenchAdapter({
+      ...fixture,
+      wait: async () => {
+        throw new Error("adapter should not wait");
+      },
+      execute: (args) => {
+        invocations.push(args);
+        if (args[0] === "status") {
+          return success("status", statusData("degraded", "run finished with 1 tolerated failed child", "succeeded"));
+        }
+        if (args[0] === "report") return success("report", reportData(reportPath));
+        return defaultSuccess(args[0], fixture.auditRoot);
+      }
+    });
+
+    expect(result.runId).toBe("evmbench-smoke");
+    expect(invocations.some(([command]) => command === "report")).toBe(true);
+    expect(fs.readFileSync(path.join(fixture.submissionRoot, "audit.md"), "utf8")).toBe("# Synthetic report\n");
+  });
+
+  // The same verdict on a run Ultrafuzz did not call a success is still fatal:
+  // an exhausted loop lands there, and that is what the abort exists for.
+  it("still aborts a degraded run whose Ultrafuzz aggregate failed", async () => {
+    const fixture = adapterFixture();
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        wait: async () => {
+          throw new Error("adapter should not wait");
+        },
+        execute: (args) =>
+          args[0] === "status"
+            ? success("status", statusData("degraded", "loop never converged", "failed"))
+            : defaultSuccess(args[0], fixture.auditRoot)
+      })
+    ).rejects.toThrow("ended degraded without converging: loop never converged");
+  });
+
   it("does not auto-resume an existing degraded run", async () => {
     const fixture = adapterFixture();
     fs.mkdirSync(path.join(fixture.auditRoot, ".ultrafuzz", "runs", "evmbench-smoke"), { recursive: true });
@@ -364,12 +416,16 @@ function reportData(markdownPath: string): Record<string, unknown> {
   };
 }
 
-function statusData(verdict: EvmbenchStatusVerdict, reason = "synthetic status"): Record<string, unknown> {
+function statusData(
+  verdict: EvmbenchStatusVerdict,
+  reason = "synthetic status",
+  runStatus?: string
+): Record<string, unknown> {
   const terminal = new Set(["done", "degraded", "blocked", "paused", "cancelled", "failed"]).has(verdict);
   return {
     run_id: "evmbench-smoke",
     run_root: "/synthetic/.ultrafuzz/runs/evmbench-smoke",
-    status: verdict === "done" ? "succeeded" : "running",
+    status: runStatus ?? (verdict === "done" ? "succeeded" : "running"),
     workflow_ids: ["evmbench-smoke"],
     workflow_run_id: "evmbench-smoke",
     workflow_status: verdict === "done" ? "succeeded" : "running",
