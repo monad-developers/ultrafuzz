@@ -197,6 +197,17 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             unblocker: "approve the pending request",
             attempt: 1,
             maxAttempts: 3
+          },
+          {
+            // New in Smithers 0.35.0. `adaptBlocker` passes the kind through
+            // verbatim, so it has to be in the public CLI result schema's enum
+            // too or the whole envelope fails producer validation.
+            kind: "stalled",
+            nodeId: "node:strategy",
+            iteration: 0,
+            reason: "3 identical failures in a row",
+            waitingSince: 1_699_999_700_000,
+            unblocker: "smithers resume --retry-failed"
           }
         ]
       },
@@ -393,6 +404,8 @@ test("why reports the diagnosis in human and JSON output", async () => {
   const data = body.data as { blockers: Array<{ kind: string; node_id: string }>; current_node_id: string };
   assert.equal(data.current_node_id, "node:project-discovery");
   assert.equal(data.blockers[0]?.kind, "waiting-approval");
+  assert.equal(data.blockers[1]?.kind, "stalled");
+  assert.equal(data.blockers[1]?.node_id, "node:strategy");
 });
 
 test("timeline surfaces frame numbers for fork --frame", async () => {
