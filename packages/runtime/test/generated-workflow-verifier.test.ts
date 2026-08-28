@@ -7580,6 +7580,68 @@ test("agent retries are error-agnostic fresh generations with Smithers' effectiv
   assert.equal(calls[2]?.prompt, undefined);
 });
 
+test("a resumed activation's first dispatch carries no stale continuation pointer", async () => {
+  // A resumed activation is a new controller process re-dispatching the same
+  // attempt number, so the wrapper is rebuilt and this is the first generation
+  // it has seen for that attempt. Smithers derives the continuation pointer
+  // from the interrupted attempt's heartbeat; the session it names does not
+  // exist any more, and the worktree may even have been restored elsewhere.
+  const checkpointConversation = [
+    { role: "user", content: "the original task prompt" },
+    { role: "assistant", content: "work completed before the interruption" }
+  ];
+  const staleHeartbeat = { agentEngine: "pi", agentResume: "interrupted-session", agentConversation: ["prior"] };
+  const resumedPointers = [
+    // Smithers captured a session id for the interrupted attempt.
+    { resumeSession: "interrupted-session", continueSession: false },
+    // No id was captured, so Smithers falls back to the cwd-scoped
+    // `--continue`. This is the worse of the two: after a workspace restore it
+    // attaches the task to whatever conversation is most recent in the
+    // worktree, which need not be this task's.
+    { resumeSession: undefined, continueSession: true }
+  ];
+
+  for (const pointer of resumedPointers) {
+    const calls: Array<Record<string, unknown>> = [];
+    const wrapped = loadArtifactAwareAgent()({ agentChain: [{}] }, 0, "the original task prompt", {
+      async generate(args: unknown): Promise<unknown> {
+        calls.push(args as Record<string, unknown>);
+        return { text: "ok" };
+      }
+    });
+
+    await wrapped.generate({
+      prompt: "worktree isolation\n\nthe original task prompt\n\nstructured output contract",
+      messages: checkpointConversation,
+      lastHeartbeat: staleHeartbeat,
+      taskContext: { attempt: 1 },
+      ...pointer
+    });
+
+    assert.equal(calls[0]?.resumeSession, undefined);
+    assert.equal(calls[0]?.continueSession, false);
+    assert.equal(calls[0]?.lastHeartbeat, undefined);
+    // The checkpoint conversation is Smithers' own portable state, not a
+    // pointer into an agent CLI's session store, so the resume keeps its value:
+    // the agent replays the transcript instead of chasing a dead session id.
+    assert.equal(calls[0]?.messages, checkpointConversation);
+    assert.equal(calls[0]?.prompt, "worktree isolation\n\nthe original task prompt\n\nstructured output contract");
+
+    // Correction turns are later generations within the same attempt against a
+    // session this process opened itself, so they keep their live pointer.
+    await wrapped.generate({
+      prompt: "return corrected JSON",
+      resumeSession: "session-opened-by-this-process",
+      continueSession: true,
+      lastHeartbeat: { agentEngine: "pi" },
+      taskContext: { attempt: 1 }
+    });
+    assert.equal(calls[1]?.resumeSession, "session-opened-by-this-process");
+    assert.equal(calls[1]?.continueSession, true);
+    assert.deepEqual(calls[1]?.lastHeartbeat, { agentEngine: "pi" });
+  }
+});
+
 test("agent failures redact configured credentials before Smithers can retain them", async () => {
   const agentCredentialName = "ULTRAFUZZ_TEST_AGENT_CREDENTIAL";
   const modalCredentialName = "ULTRAFUZZ_TEST_MODAL_CREDENTIAL";
@@ -8306,7 +8368,14 @@ test("generated retries do not inspect or inject previous failure text", () => {
   assert.match(agent, /resumeSession: undefined/u);
   assert.match(agent, /continueSession: false/u);
   assert.match(agent, /lastHeartbeat: undefined/u);
-  assert.match(agent, /Reflect\.deleteProperty\(freshArgs, "messages"\)/u);
+  assert.match(agent, /Reflect\.deleteProperty\(continuationFreeArgs, "messages"\)/u);
+  // #955: the continuation-pointer scrub must be built before the attempt gate,
+  // so a resumed activation re-dispatching attempt 1 is scrubbed too. Only the
+  // prompt/conversation reset below it is retry-only.
+  assert.match(
+    agent,
+    /const continuationFreeArgs = \{\s*\.\.\.\(args \?\? \{\}\),\s*resumeSession: undefined,\s*continueSession: false,\s*lastHeartbeat: undefined\s*\};[\s\S]*?if \(smithersAttempt <= 1\) return continuationFreeArgs;/u
+  );
   assert.match(
     agent,
     /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u

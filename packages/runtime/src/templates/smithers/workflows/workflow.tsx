@@ -3158,15 +3158,44 @@ function artifactAwareAgent(
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
       }
-      // Automatic retries are deliberately error-agnostic. Start a fresh
-      // generation with the exact original prompt instead of resuming a
-      // failed session or injecting its error text into the next prompt.
       const retryArgs = (() => {
-        if (smithersAttempt <= 1 || !firstGenerationForAttempt) return args;
-        const freshArgs = { ...(args ?? {}) };
-        Reflect.deleteProperty(freshArgs, "messages");
+        // Repeated generations inside one attempt are Smithers' own correction
+        // turns. They must keep the live session they are correcting.
+        if (!firstGenerationForAttempt) return args;
+        // #955: Smithers derives a continuation pointer for this dispatch from
+        // the previous attempt's heartbeat - either `resumeSession` (a session
+        // id in the agent CLI's own store) or, when no id was captured, the
+        // `continueSession` fallback that means "--continue the latest session
+        // in this worktree". Neither pointer survives a resumed activation:
+        // the controller process is new and the worktree may have been
+        // restored on another machine, so the referenced session is gone.
+        // `continueSession` is the more dangerous of the two, because it is
+        // cwd-scoped rather than id-scoped: after a workspace restore it can
+        // attach this task to whatever conversation happens to be most recent
+        // in that worktree. Drop both, plus the heartbeat they are derived
+        // from, on the first dispatch of an attempt in this controller
+        // process. Attempt 1 is included deliberately: `attemptedGenerations`
+        // is a fresh Set per process, so a resumed activation re-dispatching
+        // attempt 1 lands here, while a fresh run carries no pointer at all
+        // and the scrub is inert.
+        const continuationFreeArgs = {
+          ...(args ?? {}),
+          resumeSession: undefined,
+          continueSession: false,
+          lastHeartbeat: undefined
+        };
+        // A resume is not a retry. Its `messages` are Smithers' own checkpoint
+        // conversation - portable state it stored itself, not a pointer into
+        // an agent CLI's local session store - and `resumeCheckpoint` is
+        // likewise portable. Keep both so the agent continues from the
+        // replayed transcript instead of a dead session id.
+        if (smithersAttempt <= 1) return continuationFreeArgs;
+        // Automatic retries are deliberately error-agnostic. Start a fresh
+        // generation with the exact original prompt instead of resuming a
+        // failed session or injecting its error text into the next prompt.
+        Reflect.deleteProperty(continuationFreeArgs, "messages");
         return {
-          ...freshArgs,
+          ...continuationFreeArgs,
           // Smithers 0.35 adds worktree-isolation and structured-output
           // contracts before calling the agent. Preserve that effective prompt
           // while dropping prior conversation/session state.
@@ -3174,10 +3203,7 @@ function artifactAwareAgent(
           // (new in 0.35): that scrubs an attempt row only on the transition
           // into failed/cancelled, and exempts a `hijackHandoff`. This scrub is
           // error-agnostic and applies to every retry generation.
-          prompt: typeof args?.prompt === "string" ? args.prompt : originalPrompt,
-          resumeSession: undefined,
-          continueSession: false,
-          lastHeartbeat: undefined
+          prompt: typeof args?.prompt === "string" ? args.prompt : originalPrompt
         };
       })();
       const reportOutputs = declaredFinalReportOutputPair(task);
