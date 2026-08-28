@@ -121,9 +121,38 @@ function assertNamedTestsPassed(output, expectedTestNames) {
   }
 }
 
+// Bun's runner prints a `(fail) <name>` line per failure but no per-test line
+// for a pass -- verified against the pinned `bun-version: 1.3.14` in ci.yml, and
+// against 1.4.0. So the post-condition is read off the run summary instead: the
+// name pattern selects exactly `expectedTestNames`, so a rename, a skip or a
+// filtered-out test shows up as a pass count below the expected one, which is
+// the property this check exists to enforce. `stripAnsi` because bun colourises
+// the summary whenever it believes it has a terminal.
 function assertBunTestsPassed(output, expectedTestNames) {
-  const missing = expectedTestNames.filter((name) => !output.includes(`(pass) ${name}`));
-  if (missing.length > 0) {
-    throw new Error(`PR Bun runtime smoke did not execute expected tests: ${JSON.stringify(missing)}`);
+  const plain = stripAnsi(output);
+  const failures = [...plain.matchAll(/^\(fail\) (.+?)(?: \[[^\]]*\])?$/gmu)].map((match) => match[1]);
+  if (failures.length > 0) {
+    throw new Error(`PR Bun runtime smoke failed tests: ${JSON.stringify(failures)}`);
   }
+  const summary = (label) => {
+    const matches = [...plain.matchAll(new RegExp(`^\\s*(\\d+) ${label}$`, "gmu"))].map((match) => Number(match[1]));
+    if (matches.length !== 1) {
+      throw new Error(`PR Bun runtime smoke could not read the "${label}" count from the runner summary`);
+    }
+    return matches[0];
+  };
+  const passed = summary("pass");
+  const failed = summary("fail");
+  if (failed !== 0) throw new Error(`PR Bun runtime smoke reported ${failed} failing test(s)`);
+  if (passed !== expectedTestNames.length) {
+    throw new Error(
+      `PR Bun runtime smoke ran ${passed} of ${expectedTestNames.length} expected tests; one was renamed, skipped, or filtered out`
+    );
+  }
+}
+
+function stripAnsi(value) {
+  // Built with `new RegExp` rather than a literal: the CSI introducer is a
+  // control character, which a regex literal cannot carry past `no-control-regex`.
+  return value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "gu"), "");
 }
