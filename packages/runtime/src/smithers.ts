@@ -837,13 +837,15 @@ const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChe
 // and total cost quadratic in event count; at dynamic fan-out scale the
 // controller's main thread saturates in these page reads (issue #858: ~300%
 // CPU, frozen stream.ndjson, starved node-timeout timers, idle agents).
-// The fix is one covering index plus an INDEXED BY hint at each probe site:
-// the hint is required because the planner otherwise still prefers the
-// primary key for the ORDER BY even when the index exists.
+// The fix is a covering index whose equality prefix matches the probe and whose
+// trailing `seq` satisfies its ordering. Including `payload_json` keeps the final
+// equality check inside the index. SQLite then selects the index without an
+// `INDEXED BY` hint, so historical databases remain readable before a current
+// startup has created the optional index.
 const SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE = `const EXTRA_INDEX_STATEMENTS = [
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
 const SMITHERS_DB_EVENT_PROBE_INDEX_PATCH = `const EXTRA_INDEX_STATEMENTS = [
-  \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx ON _smithers_events (run_id, timestamp_ms, type)\`,
+  \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_v2_idx ON _smithers_events (run_id, timestamp_ms, type, seq, payload_json)\`,
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
 
 export type SmithersCompatibilityPatchId =
@@ -1175,7 +1177,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE,
     patched: SMITHERS_DB_EVENT_PROBE_INDEX_PATCH,
     // Upstream creating its own probe-covering events index retires the family.
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+    upstreamAbsent: ["_smithers_events_insert_probe_v2_idx"]
   }
 ];
 
