@@ -1441,6 +1441,13 @@ export interface CompiledSmithersWorkflow {
   replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
+  /**
+   * Execution-only prompt bindings by attempt ID. Emitted into the task-spec
+   * literal, never into the compiled task manifest -- the manifest must stay
+   * byte-identical to the sealed base so verifyDynamicRuntimeMaterialization
+   * can re-derive the published tasks.json from it.
+   */
+  retainedPromptPaths?: Readonly<Record<string, string>>;
   projectRoot: string;
   runRoot: string;
   sourceRevision?: string;
@@ -1466,13 +1473,30 @@ export interface RefreshedSmithersControllerSnapshot {
   semanticFingerprint: string;
 }
 
-function currentControllerTasks(
+/**
+ * Bind a continuation's plan-time prompts to their authenticated retained
+ * snapshots WITHOUT moving the binding into the task manifest.
+ *
+ * The compiled task keeps `plan.json`'s sealed launch path, because the
+ * controller publishes that manifest into `smithers/tasks.json` and
+ * `verifyDynamicRuntimeMaterialization` re-derives it from the sealed
+ * `controls/runtime-base-tasks.json` by whole-document fingerprint. Rebinding
+ * the manifest field made the refreshed controller publish a document that no
+ * longer re-derives, so every gated lifecycle command failed
+ * `WORKFLOW_CONTROL_EVIDENCE_INVALID` for the rest of the run's life.
+ *
+ * The retained snapshot is returned alongside instead, and reaches only the
+ * task-spec literal, which is what actually binds the bytes the agent opens.
+ * Nothing ever opens the manifest path.
+ */
+function currentControllerPromptBindings(
   layout: RunLayout,
   tasks: SmithersTaskManifestDocument
-): readonly CompiledSmithersTask[] {
+): { tasks: readonly CompiledSmithersTask[]; retainedPromptPaths: Record<string, string> } {
   const plan = readRunPlanDocument(path.join(layout.root, "plan.json"), layout.runId);
   const plannedPrompts = new Map(plan.rendered_prompts.map((prompt) => [prompt.attempt_id, prompt]));
-  return tasks.tasks.map((task) => {
+  const retainedPromptPaths: Record<string, string> = {};
+  const bound = tasks.tasks.map((task) => {
     if (task.renderedPromptPath === undefined) return task;
     // A prompt deferred to the dynamic runtime is never rendered at plan time, so `plan.json` has
     // no row to rebind it to and no retained snapshot to authenticate against. That covers every
@@ -1501,8 +1525,25 @@ function currentControllerTasks(
     if (sha256Stable(contents) !== planned.rendered_prompt_digest) {
       throw new Error(`retained rendered prompt snapshot digest does not match task ${task.attemptId}`);
     }
-    return { ...task, renderedPromptPath: snapshotPath };
+    retainedPromptPaths[task.attemptId] = snapshotPath;
+    // The manifest keeps the SEALED launch path so the published tasks.json re-derives from
+    // controls/runtime-base-tasks.json. `smithersExecutionControlFiles` rejects any compiled task
+    // whose renderedPromptPath diverges from its plan row, so this normalization is byte-exact for
+    // any run that sealed -- and it also scrubs a manifest already poisoned by a prior refresh.
+    // The authenticated retained snapshot binds the bytes the agent reads, via the task-spec
+    // literal only (see renderWorkflowSource / taskSpecsFromCompiled).
+    return { ...task, renderedPromptPath: planned.rendered_prompt_path };
   });
+  // A silently missing binding would fall back to the launch path, which retry cleanup owns and may
+  // have deleted, and which is read with no digest gate. Fail loudly instead.
+  for (const task of bound) {
+    if (task.renderedPromptPath === undefined) continue;
+    if ((task.deferredPromptGroups ?? []).length > 0) continue;
+    if (!Object.hasOwn(retainedPromptPaths, task.attemptId)) {
+      throw new Error(`continuation prompt binding is missing for ${task.attemptId}`);
+    }
+  }
+  return { tasks: bound, retainedPromptPaths };
 }
 
 /**
@@ -1560,7 +1601,7 @@ export function renderCurrentSmithersController(input: {
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
-  const tasks = currentControllerTasks(input.layout, baseTaskDocument);
+  const { tasks, retainedPromptPaths } = currentControllerPromptBindings(input.layout, baseTaskDocument);
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
@@ -1588,6 +1629,7 @@ export function renderCurrentSmithersController(input: {
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
+    retainedPromptPaths,
     projectRoot,
     runRoot: input.layout.root,
     ...(baseTaskDocument.source_revision === undefined ? {} : { sourceRevision: baseTaskDocument.source_revision }),
@@ -6279,6 +6321,16 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   });
 }
 
+/**
+ * The execution-only retained prompt binding for a task, if the compile produced one. Own-property
+ * only: an attempt ID is never allowed to reach `Object.prototype` and yield a non-path value.
+ */
+function retainedTaskPromptPath(compiled: CompiledSmithersWorkflow, attemptId: string): string | undefined {
+  const bindings = compiled.retainedPromptPaths;
+  if (bindings === undefined || !Object.hasOwn(bindings, attemptId)) return undefined;
+  return bindings[attemptId];
+}
+
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
   const controllerTasks = compiled.replacePromptSchemas
     ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
@@ -6317,7 +6369,12 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined
-          : executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt"),
+          : executionPath(
+              compiled.projectRoot,
+              task,
+              retainedTaskPromptPath(compiled, task.attemptId) ?? task.renderedPromptPath,
+              "rendered prompt"
+            ),
       workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
       artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
