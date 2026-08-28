@@ -852,6 +852,48 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           );
         }`;
 
+// Smithers fences every agent event and stdout/stderr chunk with a durable
+// heartbeat ownership proof before accepting its callback. At high concurrency,
+// independently starting that proof for every callback creates a large queue of
+// redundant database writes. Task completion then waits for the whole queue even
+// after the agent process exits. Share only the proof that is currently in flight:
+// every callback remains fenced by a successful ownership result, while callbacks
+// arriving in the same burst no longer race the shared heartbeat state or repeat
+// the same database write.
+const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE = `  const pendingOwnershipChecks = new Set();
+  const afterHeartbeatOwnership = (callback) => {
+    const check = confirmHeartbeatOwnership()
+      .then((owned) => {
+        if (owned) return callback();
+      })
+      .catch(() => {})
+      .finally(() => {
+        pendingOwnershipChecks.delete(check);
+      });
+    pendingOwnershipChecks.add(check);
+  };`;
+const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChecks = new Set();
+  let heartbeatOwnershipCheckInFlight = null;
+  const sharedHeartbeatOwnershipCheck = () => {
+    if (heartbeatOwnershipCheckInFlight) return heartbeatOwnershipCheckInFlight;
+    const check = confirmHeartbeatOwnership().finally(() => {
+      if (heartbeatOwnershipCheckInFlight === check) heartbeatOwnershipCheckInFlight = null;
+    });
+    heartbeatOwnershipCheckInFlight = check;
+    return check;
+  };
+  const afterHeartbeatOwnership = (callback) => {
+    const check = sharedHeartbeatOwnershipCheck()
+      .then((owned) => {
+        if (owned) return callback();
+      })
+      .catch(() => {})
+      .finally(() => {
+        pendingOwnershipChecks.delete(check);
+      });
+    pendingOwnershipChecks.add(check);
+  };`;
+
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
 // The table's only index is its (run_id, seq) primary key, and the probe's
@@ -881,6 +923,7 @@ export type SmithersCompatibilityPatchId =
   | "resume_snapshot_transfer"
   | "terminal_state_restore"
   | "resume_hydration"
+  | "engine_agent_event_ownership"
   | "workflow_path_import"
   | "workflow_path_persistence"
   | "process_snapshot_anchor"
@@ -988,6 +1031,15 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
     // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
     upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "engine_agent_event_ownership",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
+    patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
+    // Upstream coalescing its own in-flight proof retires this patch.
+    upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
   },
   {
     id: "workflow_path_import",
@@ -4999,7 +5051,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
       "continued workflow path"
     ],
-    [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"]
+    [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"],
+    [
+      SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
+      SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
+      "agent event ownership coalescing"
+    ]
   ] as const) {
     engineContents = applyRequiredSmithersPatch(engineContents, source, patched, label);
   }

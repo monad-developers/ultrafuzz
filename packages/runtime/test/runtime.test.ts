@@ -13999,6 +13999,23 @@ test("event probe compatibility patch adds an optional covering index", async ()
   );
 });
 
+test("agent event ownership compatibility patch coalesces only an in-flight proof", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const ownershipPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_agent_event_ownership");
+  assert.ok(ownershipPatch);
+  assert.match(ownershipPatch.patched, /let heartbeatOwnershipCheckInFlight = null/u);
+  assert.match(
+    ownershipPatch.patched,
+    /if \(heartbeatOwnershipCheckInFlight\) return heartbeatOwnershipCheckInFlight/u
+  );
+  assert.match(ownershipPatch.patched, /const check = confirmHeartbeatOwnership\(\)\.finally/u);
+  assert.match(ownershipPatch.patched, /const check = sharedHeartbeatOwnershipCheck\(\)/u);
+  assert.match(
+    ownershipPatch.patched,
+    /if \(heartbeatOwnershipCheckInFlight === check\) heartbeatOwnershipCheckInFlight = null/u
+  );
+});
+
 test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const resolveFromPinnedRunner = createRequire(
