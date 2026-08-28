@@ -147,6 +147,7 @@ const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const NATIVE_SMITHERS_CONTINUATION: unique symbol = Symbol("ultrafuzz.native-smithers-continuation");
+const NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER = ".ultrafuzz-native-continuation";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
 const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
@@ -4330,9 +4331,12 @@ async function prepareSmithersExecutableEnvironment(
     // Smithers detaches the resumed engine and supervisor. Their patched
     // relaunch paths still refer to this operator-owned package closure after
     // the submitting Ultrafuzz process exits, so it must outlive process-local
-    // controller cleanup. The OS temporary-directory policy remains the outer
-    // reclamation boundary.
-    operatorControllerRoots.delete(controllerRoot);
+    // controller cleanup. Persist the exemption beside the closure as well as
+    // in memory: a refresh/retry command can prepare the same controller across
+    // several subprocess boundaries before detached admission, and process-exit
+    // cleanup must remain fail-safe even if that root is re-registered. The OS
+    // temporary-directory policy remains the outer reclamation boundary.
+    retainNativeSmithersControllerRoot(controllerRoot);
   }
   return prepared;
 }
@@ -4554,6 +4558,7 @@ function registerOperatorControllerRoot(root: string): void {
   operatorControllerCleanupRegistered = true;
   process.once("exit", () => {
     for (const candidate of operatorControllerRoots) {
+      if (isRetainedNativeSmithersControllerRoot(candidate)) continue;
       try {
         makeOperatorControllerTreeRemovable(candidate);
         fs.rmSync(candidate, { recursive: true, force: true });
@@ -4563,6 +4568,29 @@ function registerOperatorControllerRoot(root: string): void {
     }
     operatorControllerRoots.clear();
   });
+}
+
+function retainNativeSmithersControllerRoot(root: string): void {
+  const marker = path.join(root, NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER);
+  if (!fs.existsSync(marker)) {
+    fs.writeFileSync(marker, "retained\n", { encoding: "utf8", flag: "wx", mode: 0o400 });
+  }
+  if (!isRetainedNativeSmithersControllerRoot(root)) {
+    throw new Error("native workflow runner retention marker is invalid");
+  }
+  operatorControllerRoots.delete(root);
+}
+
+function isRetainedNativeSmithersControllerRoot(root: string): boolean {
+  const marker = path.join(root, NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER);
+  try {
+    const stat = fs.lstatSync(marker);
+    return (
+      stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && fs.readFileSync(marker, "utf8") === "retained\n"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function disposeOperatorControllerRoot(root: string): void {
