@@ -1313,6 +1313,10 @@ export interface CompiledSmithersWorkflow {
   workflowName: string;
   tasks: readonly CompiledSmithersTask[];
   dynamicGroups: readonly CompiledSmithersDynamicGroup[];
+  /** Sealed dynamic-runtime authority, when execution tasks have continuation-only bindings. */
+  runtimeBaseTasks?: readonly CompiledSmithersTask[];
+  /** Sealed dynamic-runtime group authority paired with runtimeBaseTasks. */
+  runtimeDynamicGroups?: readonly CompiledSmithersDynamicGroup[];
   maxDynamicNodes: number;
   replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
@@ -1396,6 +1400,13 @@ export function renderCurrentSmithersController(input: {
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const tasks = currentControllerTasks(input.layout, input.tasks);
+  const dynamicBaseTasksPath = path.join(input.layout.root, "smithers", "runtime-base-tasks.json");
+  const runtimeBaseDocument = fs.existsSync(dynamicBaseTasksPath)
+    ? parseSealedTaskDocument(fs.readFileSync(dynamicBaseTasksPath))
+    : undefined;
+  if (runtimeBaseDocument !== undefined && runtimeBaseDocument.run_id !== input.layout.runId) {
+    throw new Error("continuation dynamic-runtime base task manifest does not match the run ID");
+  }
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
@@ -1420,6 +1431,12 @@ export function renderCurrentSmithersController(input: {
     workflowName: input.tasks.workflow_name,
     tasks,
     dynamicGroups: input.tasks.dynamic_groups ?? [],
+    ...(runtimeBaseDocument === undefined
+      ? {}
+      : {
+          runtimeBaseTasks: runtimeBaseDocument.tasks,
+          runtimeDynamicGroups: runtimeBaseDocument.dynamic_groups ?? []
+        }),
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
@@ -6007,8 +6024,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
         taskTemplates: group.taskTemplates.map((task) => taskWithCurrentArtifactSchemas(task))
       }))
     : compiled.dynamicGroups;
-  const compiledTasks = JSON.stringify(controllerTasks, null, 2);
-  const dynamicGroups = JSON.stringify(controllerDynamicGroups, null, 2);
+  const compiledTasks = JSON.stringify(compiled.runtimeBaseTasks ?? controllerTasks, null, 2);
+  const dynamicGroups = JSON.stringify(compiled.runtimeDynamicGroups ?? controllerDynamicGroups, null, 2);
   const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
   const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
   for (const task of controllerTasks) {

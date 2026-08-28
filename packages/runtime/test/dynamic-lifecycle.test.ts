@@ -788,8 +788,15 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
   const taskDocument = parseSmithersTaskManifestBytes(
     fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"))
   );
+  const baseTaskDocument = parseSmithersTaskManifestBytes(
+    fs.readFileSync(path.join(fixture.runRoot, "smithers", "runtime-base-tasks.json"))
+  );
   const plan = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "plan.json"), "utf8")) as {
-    rendered_prompts: Array<{ attempt_id: string }>;
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
   };
   assert.equal(
     taskDocument.tasks.some((task) => task.attemptId === generated.attemptId),
@@ -830,6 +837,36 @@ test("current-controller rendering accepts runtime-materialized dynamic prompts"
   assert.ok(
     workflow.includes(JSON.stringify(generated.renderedPromptPath)),
     "generated prompt path was rebound away from its runtime location"
+  );
+  const compiledTasksPrefix = "const compiledBaseTasks = ";
+  const compiledTasksStart = workflow.indexOf(compiledTasksPrefix);
+  const compiledTasksEnd = workflow.indexOf(";\nconst dynamicGroupSpecs", compiledTasksStart);
+  assert.ok(compiledTasksStart >= 0 && compiledTasksEnd > compiledTasksStart, workflow);
+  const compiledBaseTasks = JSON.parse(
+    workflow.slice(compiledTasksStart + compiledTasksPrefix.length, compiledTasksEnd)
+  ) as CompiledSmithersTask[];
+  const taskSpecsPrefix = "const serializedTaskSpecs = ";
+  const taskSpecsStart = workflow.indexOf(taskSpecsPrefix);
+  const taskSpecsEnd = workflow.indexOf(" as const;", taskSpecsStart);
+  assert.ok(taskSpecsStart >= 0 && taskSpecsEnd > taskSpecsStart, workflow);
+  const taskSpecs = JSON.parse(workflow.slice(taskSpecsStart + taskSpecsPrefix.length, taskSpecsEnd)) as Array<{
+    attemptId: string;
+    promptPath?: string;
+  }>;
+  const plannedPrompt = plan.rendered_prompts[0];
+  assert.ok(plannedPrompt);
+  assert.equal(
+    compiledBaseTasks.find((task) => task.attemptId === plannedPrompt.attempt_id)?.renderedPromptPath,
+    baseTaskDocument.tasks.find((task) => task.attemptId === plannedPrompt.attempt_id)?.renderedPromptPath
+  );
+  assert.equal(
+    taskSpecs.find((task) => task.attemptId === plannedPrompt.attempt_id)?.promptPath,
+    path.join(fixture.runRoot, plannedPrompt.rendered_prompt_snapshot_path)
+  );
+  assert.equal(
+    compiledBaseTasks.some((task) => task.attemptId === generated.attemptId),
+    false,
+    "continuation-only tasks leaked into the sealed dynamic-runtime base"
   );
 
   // A prompt rendered at plan time must still fail closed on retained-prompt drift.
