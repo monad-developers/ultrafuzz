@@ -72,58 +72,40 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pnpm --filter @ultrafuzz/cli test:pr-smoke:prebuilt
 
+  # The lane table lives in scripts/ci/release-validation-lanes.mjs so the
+  # pull-request policy is a tested artifact instead of an invisible `if:`.
+  # While this job was gated off pull requests, every runtime test reported
+  # `skipping` on a PR and resume-path regressions merged with all checks green.
+  release-validation-lanes:
+    name: Select release validation lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lanes: ${{ steps.select.outputs.lanes }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Select release validation lanes
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          echo "lanes=$(node scripts/ci/release-validation-lanes.mjs --event "$EVENT_NAME")" >> "$GITHUB_OUTPUT"
+
   release-validation:
     name: Full release validation (${{ matrix.description }})
-    needs: draft-and-build-gates
-    if: github.event_name != 'pull_request'
+    needs:
+      - draft-and-build-gates
+      - release-validation-lanes
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
-        include:
-          - lane: package-gates
-            description: Package, dependency, and policy gates
-            gates: dependency-advisories,ci-scripts,docs,config,audit-profile-package,packed-install,security,references,topology,prompts,artifacts,dashboard,evals,evmbench,modal
-            timeout_minutes: 45
-            build_modal_dependencies: true
-          - lane: runtime-supporting
-            description: Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts
-            gates: runtime-supporting
-            timeout_minutes: 75
-            build_modal_dependencies: true
-          - lane: runtime-1
-            description: Node.js 24 runtime integration tests, shard 1/4
-            gates: runtime-1
-            timeout_minutes: 75
-            build_modal_dependencies: true
-          - lane: runtime-2
-            description: Node.js 24 runtime integration tests, shard 2/4
-            gates: runtime-2
-            timeout_minutes: 75
-            build_modal_dependencies: true
-          - lane: runtime-3
-            description: Node.js 24 runtime integration tests, shard 3/4
-            gates: runtime-3
-            timeout_minutes: 75
-            build_modal_dependencies: true
-          - lane: runtime-4
-            description: Node.js 24 runtime integration tests, shard 4/4
-            gates: runtime-4
-            timeout_minutes: 75
-            build_modal_dependencies: true
-          - lane: cli
-            description: CLI package tests
-            gates: cli
-            timeout_minutes: 75
-            build_release_reporter: true
-          - lane: benchmark-history-typecheck
-            description: Benchmark history charts and workspace typecheck
-            gates: benchmark-history,workspace-typecheck
-            timeout_minutes: 45
-            build_release_reporter: true
-            build_cli: true
+        include: ${{ fromJSON(needs.release-validation-lanes.outputs.lanes) }}
     env:
       ULTRAFUZZ_CODEX_REAL_DRY_RUN: "0"
       ULTRAFUZZ_RELEASE_DASHBOARD: "0"
@@ -184,6 +166,7 @@ jobs:
   release-gates:
     needs:
       - draft-and-build-gates
+      - release-validation-lanes
       - release-validation
     if: always()
     runs-on: ubuntu-latest
@@ -192,6 +175,10 @@ jobs:
     steps:
       - name: Require draft and build gates
         if: needs.draft-and-build-gates.result != 'success'
+        run: exit 1
+
+      - name: Require the release validation lane selection
+        if: needs.release-validation-lanes.result != 'success'
         run: exit 1
 
       - name: Check out repository
@@ -235,10 +222,7 @@ jobs:
           --report .ultrafuzz/release-validation.report.json
 
       - name: Require release validation lanes
-        if: >-
-          always() &&
-          github.event_name != 'pull_request' &&
-          needs.release-validation.result != 'success'
+        if: always() && needs.release-validation.result != 'success'
         run: exit 1
 
       # validate:release already runs the config, runtime, and eval suites used by
