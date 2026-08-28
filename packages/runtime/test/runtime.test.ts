@@ -13990,10 +13990,13 @@ test("event probe compatibility patch adds an optional covering index", async ()
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const indexPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "event_probe_index");
   assert.ok(indexPatch);
-  assert.match(indexPatch.patched, /CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx/u);
+  assert.match(
+    indexPatch.patched,
+    /CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_v2_idx ON _smithers_events \(run_id, timestamp_ms, type, seq, payload_json\)/u
+  );
   assert.equal(
     SMITHERS_COMPATIBILITY_PATCHES.some((patch) =>
-      patch.patched.includes("INDEXED BY _smithers_events_insert_probe_idx")
+      patch.patched.includes("INDEXED BY _smithers_events_insert_probe_v2_idx")
     ),
     false
   );
