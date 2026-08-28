@@ -1594,3 +1594,89 @@ test("refreshed controller rejects a drifted retained prompt snapshot", async ()
     /retained rendered prompt snapshot digest does not match task/u
   );
 });
+
+/**
+ * The production repair shape, end to end. A run damaged by a refresh on the broken build has the
+ * rebound `prompt-snapshots/` path in its live `smithers/tasks.json` and an INTACT sealed
+ * `controls/runtime-base-tasks.json` -- the only shape a sealed dynamic run can actually be in.
+ * Admission is therefore permanently invalid, and because `submitSmithersContinuation` never calls
+ * `readLinkedWorkflowEvidence`, `resume --refresh-controller` is the one command still able to run.
+ * One refresh plus the materialization its first tick performs must restore admission.
+ */
+test("a refresh repairs control evidence a rebound task manifest permanently invalidated", async () => {
+  const fixture = await createDynamicFixture({ runId: "refresh-repairs-evidence" });
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const { layout, smithersRunId } = evidence;
+  const config = JSON.parse(resolvedConfig.contents.toString("utf8"));
+
+  const plan = readRunPlanDocument(path.join(fixture.runRoot, "plan.json"), fixture.runId);
+  const planned = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "planner");
+  assert.ok(planned, "fixture has no planner prompt plan row");
+
+  // Exactly what a refresh on the broken build left behind: the rebound snapshot path published
+  // into the live manifest, with the sealed base manifest untouched.
+  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
+  const basePath = path.join(fixture.runRoot, "smithers", "runtime-base-tasks.json");
+  assert.equal(fs.existsSync(basePath), true, "sealed dynamic base task manifest is missing");
+  const damaged = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks: Array<{ attemptId: string; renderedPromptPath?: string }>;
+  };
+  const damagedTask = damaged.tasks.find((task) => task.attemptId === planned.attempt_id);
+  assert.ok(damagedTask);
+  assert.equal(damagedTask.renderedPromptPath, planned.rendered_prompt_path);
+  damagedTask.renderedPromptPath = path.join(fixture.runRoot, planned.rendered_prompt_snapshot_path);
+  fs.writeFileSync(tasksPath, `${JSON.stringify(damaged, null, 2)}\n`, "utf8");
+
+  // Every gated lifecycle command -- sync, pause, replay, fork -- now fails, and stays failed.
+  const damagedEvidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(damagedEvidence.ok, false, "a rebound task manifest should invalidate control evidence");
+  assert.ok(
+    !damagedEvidence.ok &&
+      damagedEvidence.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID" &&
+          /published dynamic runtime controls no longer re-derive from their sealed base/u.test(diagnostic.message)
+      ),
+    "diagnostics" in damagedEvidence ? JSON.stringify(damagedEvidence.diagnostics) : ""
+  );
+
+  // The repair: one `resume --refresh-controller`, then the materialization its first tick runs.
+  const workflowPath = renderCurrentSmithersController({
+    projectRoot: fixture.project,
+    layout,
+    smithersRunId,
+    tasks: parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath)),
+    config
+  });
+  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+  materializeDynamicRuntime({
+    runId: fixture.runId,
+    projectRoot: fixture.project,
+    runRoot: fixture.runRoot,
+    graphPath: path.join(fixture.runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: compiled.baseTasks,
+    groups: compiled.groups,
+    readyGroupIds: ["fanout"]
+  });
+
+  const repaired = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(repaired.ok, true, "diagnostics" in repaired ? JSON.stringify(repaired.diagnostics) : "");
+  const republished = parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath));
+  assert.equal(
+    republished.tasks.find((task) => task.attemptId === planned.attempt_id)?.renderedPromptPath,
+    planned.rendered_prompt_path,
+    "repair must republish the sealed launch path into the live manifest"
+  );
+  assert.equal(
+    compiled.taskSpecs.find((spec) => spec.attemptId === planned.attempt_id)?.promptPath,
+    path.join(fixture.runRoot, planned.rendered_prompt_snapshot_path),
+    "the repaired controller must still bind the authenticated retained snapshot"
+  );
+});

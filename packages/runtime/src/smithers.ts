@@ -1487,7 +1487,11 @@ export interface RefreshedSmithersControllerSnapshot {
  *
  * The retained snapshot is returned alongside instead, and reaches only the
  * task-spec literal, which is what actually binds the bytes the agent opens.
- * Nothing ever opens the manifest path.
+ * The manifest field is a NAME that has to re-derive from the seal, not a
+ * pointer to authenticated bytes: no execution path reads it, and the one place
+ * that does open it -- `smithersExecutionControlFiles`, on launch -- hard-requires
+ * it to equal its `plan.json` row, which is exactly what this normalization
+ * restores and what the rebinding used to violate.
  */
 function currentControllerPromptBindings(
   layout: RunLayout,
@@ -2531,6 +2535,10 @@ export async function smithersExecutionControlFiles(
     ) {
       throw new Error(`persisted prompt plan does not match compiled task ${task.attemptId}`);
     }
+    // INVARIANT: reachable on launch only, where these bytes were just rendered and digested by
+    // `plan-run`. It is asserted equal to the plan row above but NOT re-digested here, and it lives
+    // under the agent-writable artifact dir -- so any future lane that re-seals an already-executing
+    // controller must digest it against `planned.rendered_prompt_digest` first.
     add(task.renderedPromptPath, `controls/rendered-prompts/${task.attemptId}.md`);
     add(
       path.resolve(layout.root, planned.rendered_prompt_snapshot_path),
