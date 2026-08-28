@@ -1614,6 +1614,11 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const commandLog = path.join(project, "smithers-commands.log");
   const statusOverride = path.join(project, "fake-smithers-status-override.json");
   const alreadyPausedMarker = path.join(project, "fake-smithers-already-paused");
+  // `inspect` reports a live run by default. Tests that continue a *stopped*
+  // run drop the state they want here, the same way `status` is overridden
+  // above, so the ownership guard (#968/#969) sees the run state a resumed run
+  // actually has instead of an always-active one.
+  const inspectStateOverride = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(
     smithers,
     [
@@ -1684,7 +1689,12 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    fi",
       "    ;;",
       "  inspect)",
-      '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"running","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"running","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n\' "$2" "$2" "$2"',
+      `    if [ -f ${shellQuote(inspectStateOverride)} ]; then`,
+      `      inspect_state=$(cat ${shellQuote(inspectStateOverride)})`,
+      "    else",
+      '      inspect_state="running"',
+      "    fi",
+      '    printf \'{"ok":true,"data":{"run":{"id":"%s","workflow":"%s","status":"%s","started":"2026-07-03T00:00:00.000Z","elapsed":"0s"},"runState":{"runId":"%s","state":"%s","computedAt":"2026-07-03T00:00:03.000Z"},"steps":[],"nodes":[]},"meta":{"command":"inspect","duration":"1ms"}}\\n\' "$2" "$2" "$inspect_state" "$2" "$inspect_state"',
       "    ;;",
       "  ps)",
       '    case "$*" in',
@@ -1729,6 +1739,16 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function setFakeSmithersStatus(project: string, value: unknown): void {
   fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+/**
+ * Make the fake runner's `inspect` report `state`/`status` instead of the
+ * default `running`. Pass a value that is a member of both `SMITHERS_RUN_STATES`
+ * and `SMITHERS_RUN_STATUSES` (for example `paused`), because the fake emits it
+ * in both positions of the full-output envelope.
+ */
+function setFakeSmithersInspectState(project: string, state: string): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), `${state}\n`, "utf8");
 }
 
 function markFakeSmithersAlreadyPaused(project: string): void {
@@ -5522,20 +5542,30 @@ bunAdapterTest(
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
 
+      // A caller deadline this test spends has to cover the fresh attempt, the
+      // failure-path diagnostics Smithers awaits before the 429 surfaces (its
+      // codex strategy probes `${OPENAI_BASE_URL}/models`, which this adapter
+      // points at OpenRouter, so it costs a live round trip), and the resume
+      // child's own start. At 250ms that left ~50ms of headroom on CI, and the
+      // recovery deadline fired before the resume was ever launched — the
+      // counter stayed at "1" and the test measured nothing. 2s keeps the
+      // property under test and stops measuring probe latency.
       resetFixture("resume-hang");
       const timeoutStartedAt = performance.now();
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
           prompt: "Bounded resume timeout fixture",
-          timeout: 250
+          timeout: 2_000
         }),
         (error: unknown) => {
           assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
           return true;
         }
       );
+      // The resume really started, and the hung child it left behind is killed
+      // by the caller deadline rather than running to the test timeout.
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
-      assert.equal(performance.now() - timeoutStartedAt < 1_000, true);
+      assert.equal(performance.now() - timeoutStartedAt < 10_000, true);
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
@@ -22434,10 +22464,20 @@ test("resume continues under a superseded generated manifest without changing ei
   fs.writeFileSync(manifestPath, superseded, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
+  // This criterion is about a *stopped* run, and the fake runner reports every
+  // run as `running` unless told otherwise. An ordinary resume inspects for an
+  // active owner before dispatch and declines one it finds (#968/#969), so
+  // leaving the default in place would assert nothing: the guard would return
+  // before `up`, and "resume did not rewrite the manifest" would be vacuously
+  // true because no resume ever happened. Report the state a stopped run
+  // actually has so the resume reaches the runner.
+  setFakeSmithersInspectState(project, "paused");
+
   const resumed = await resumeRun({ projectRoot: project, runId, env });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.run_id, runId);
+  assert.equal(resumed.value?.submitted, true, "resume declined to dispatch, so it never exercised the manifest");
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up /mu);
   const after = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(after.ok, true, JSON.stringify(after.ok ? [] : after.diagnostics));
