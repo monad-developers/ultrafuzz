@@ -208,9 +208,19 @@ process.stdout.write(JSON.stringify(result));`
     assert.equal(historicalProducerAttempt, 1);
     assert.deepEqual(fs.readFileSync(executionLog, "utf8").trim().split("\n"), ["producer", "downstream"]);
     assert.equal(fs.readFileSync(historicalWorkflowEvidence, "utf8"), historicalWorkflowSource);
-    assert.deepEqual(JSON.parse(fs.readFileSync(downstreamArtifact, "utf8")), {
-      producer_run_id: "historical-embedded-run-id"
-    });
+    const downstream = JSON.parse(fs.readFileSync(downstreamArtifact, "utf8")) as {
+      producer_run_id: string;
+      controller_node_path: string;
+    };
+    assert.equal(downstream.producer_run_id, "historical-embedded-run-id");
+    assert.equal(path.basename(downstream.controller_node_path), "node_modules");
+    assert.equal(
+      fs.readFileSync(
+        path.join(path.dirname(path.dirname(downstream.controller_node_path)), ".ultrafuzz-native-continuation"),
+        "utf8"
+      ),
+      "retained\n"
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -344,7 +354,10 @@ export default smithers((ctx) => (
         const producer = ctx.latest(outputs.producer, "producer");
         if (!producer) throw new Error("persisted producer output is unavailable");
         fs.appendFileSync(executionLog, "downstream\\n", "utf8");
-        fs.writeFileSync(downstreamArtifact, JSON.stringify({ producer_run_id: producer.embedded_run_id }) + "\\n", "utf8");
+        fs.writeFileSync(downstreamArtifact, JSON.stringify({
+          producer_run_id: producer.embedded_run_id,
+          controller_node_path: process.env.NODE_PATH
+        }) + "\\n", "utf8");
         return { producer_run_id: producer.embedded_run_id };
       }}
     </Task>`

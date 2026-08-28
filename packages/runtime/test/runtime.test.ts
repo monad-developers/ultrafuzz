@@ -6631,17 +6631,60 @@ bunAdapterTest(
         : textCompletion;
       assert.equal(textCompleted?.answer, "final answer");
 
+      // Pi can exhaust its own provider retries and still exit zero. Preserve
+      // the terminal assistant failure so Smithers retries the task instead of
+      // accepting a text-free success and failing a downstream artifact gate.
+      const errorInterpreter = agent.createOutputInterpreter();
+      errorInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "A Timeout Occurred",
+            content: []
+          }
+        })
+      );
+      const errorCompletion = errorInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "agent_end",
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "error",
+              errorMessage: "A Timeout Occurred",
+              content: []
+            }
+          ]
+        })
+      );
+      const errorCompleted = Array.isArray(errorCompletion)
+        ? errorCompletion.find((event) => event.type === "completed")
+        : errorCompletion;
+      const typedErrorCompleted = errorCompleted as
+        { type?: string; ok?: boolean; error?: string; answer?: string } | undefined;
+      assert.equal(typedErrorCompleted?.type, "completed");
+      assert.equal(typedErrorCompleted?.ok, false);
+      assert.equal(typedErrorCompleted?.error, "A Timeout Occurred");
+      assert.equal(typedErrorCompleted?.answer, undefined);
+
       // Profile reasoning maps onto pi's existing --thinking level.
       const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
       const thinkingCommand = await thinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
       const thinkingIndex = thinkingCommand.args.indexOf("--thinking");
       assert.notEqual(thinkingIndex, -1);
       assert.equal(thinkingCommand.args[thinkingIndex + 1], "high");
+      const maxThinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "max" });
+      const maxThinkingCommand = await maxThinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
+      const maxThinkingIndex = maxThinkingCommand.args.indexOf("--thinking");
+      assert.notEqual(maxThinkingIndex, -1);
+      assert.equal(maxThinkingCommand.args[maxThinkingIndex + 1], "max");
       // The throw must name the file and the key, not just the range: this is the
-      // error an operator hits copying `reasoning = "max"` off another profile.
+      // error an operator hits when selecting a value outside pi's command surface.
       assert.throws(
         () => createPiAgent({ reasoningEffort: "ludicrous" }),
-        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh/u
+        /models\.<profile>\.reasoning in .*ultrafuzz\.toml is ludicrous, which PiAgent does not support; use one of off, minimal, low, medium, high, xhigh, max/u
       );
 
       // api_key_env names only where ultrafuzz reads the operator's value from;
@@ -13947,12 +13990,32 @@ test("event probe compatibility patch adds an optional covering index", async ()
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const indexPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "event_probe_index");
   assert.ok(indexPatch);
-  assert.match(indexPatch.patched, /CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx/u);
+  assert.match(
+    indexPatch.patched,
+    /CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_v2_idx ON _smithers_events \(run_id, timestamp_ms, type, seq, payload_json\)/u
+  );
   assert.equal(
     SMITHERS_COMPATIBILITY_PATCHES.some((patch) =>
-      patch.patched.includes("INDEXED BY _smithers_events_insert_probe_idx")
+      patch.patched.includes("INDEXED BY _smithers_events_insert_probe_v2_idx")
     ),
     false
+  );
+});
+
+test("agent event ownership compatibility patch coalesces only an in-flight proof", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const ownershipPatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_agent_event_ownership");
+  assert.ok(ownershipPatch);
+  assert.match(ownershipPatch.patched, /let heartbeatOwnershipCheckInFlight = null/u);
+  assert.match(
+    ownershipPatch.patched,
+    /if \(heartbeatOwnershipCheckInFlight\) return heartbeatOwnershipCheckInFlight/u
+  );
+  assert.match(ownershipPatch.patched, /const check = confirmHeartbeatOwnership\(\)\.finally/u);
+  assert.match(ownershipPatch.patched, /const check = sharedHeartbeatOwnershipCheck\(\)/u);
+  assert.match(
+    ownershipPatch.patched,
+    /if \(heartbeatOwnershipCheckInFlight === check\) heartbeatOwnershipCheckInFlight = null/u
   );
 });
 

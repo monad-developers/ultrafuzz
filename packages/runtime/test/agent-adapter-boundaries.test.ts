@@ -141,7 +141,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "39436a3e826abc604eec83de0a6c00fc4e71a1f23ee8818f1abeb40e3b174756",
+    classifiedSourceSha256: "6de012b3c257232df86a346b1076feed2488bb3be084cade7cce2b7769be8854",
     responsibilities: ["argv-construction", "output-interpretation"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/895",
@@ -223,10 +223,13 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "d8c57ddf7ed66f24d969bddc090f9e96bc87ce0796250d5c45349f3a51f8b9fe"
   },
   "pi.tsx": {
-    maxLines: 200,
-    maxSyntaxNodes: 1_100,
+    // Raised for Pi's `max` thinking level and the terminal error/aborted
+    // completion mapping, which replaced the terminal-line predicate with a
+    // state reader that can fail the completion.
+    maxLines: 225,
+    maxSyntaxNodes: 1_300,
     purpose: "adapter",
-    sourceSha256: "39436a3e826abc604eec83de0a6c00fc4e71a1f23ee8818f1abeb40e3b174756"
+    sourceSha256: "6de012b3c257232df86a346b1076feed2488bb3be084cade7cce2b7769be8854"
   },
   "provider-home.tsx": {
     maxLines: 75,

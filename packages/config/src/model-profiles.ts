@@ -12,7 +12,7 @@ export interface DefaultProfileOverrides {
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
-const PI_REASONING_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const PI_REASONING_EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const PROFILE_ID_PATTERN = /^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const OPENROUTER_MODEL_ID_PATTERN = /^[^\s\p{Cc}]+$/u;
 
@@ -258,7 +258,7 @@ function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic
       diagnostics.push(
         diagnostic(
           "CONFIG_MODEL_PI_REASONING_UNSUPPORTED",
-          `Pi model profile \`${id}\` reasoning must be off, minimal, low, medium, high, or xhigh`,
+          `Pi model profile \`${id}\` reasoning must be off, minimal, low, medium, high, xhigh, or max`,
           ["models", id, "reasoning"],
           "validation"
         )

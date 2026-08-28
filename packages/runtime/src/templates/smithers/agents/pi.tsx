@@ -21,7 +21,7 @@ const PI_PROVIDER = "openrouter";
 // operator's value from; the child always receives it under this name.
 const PI_CREDENTIAL_ENV = "OPENROUTER_API_KEY";
 const PI_CONFIG_DIR = ".ultrafuzz/pi-coding-agent";
-const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export class CompatiblePiAgent extends SmithersPiAgent {
   override async buildCommand(params: PiCommandParams): Promise<PiCommand> {
@@ -54,54 +54,80 @@ export class CompatiblePiAgent extends SmithersPiAgent {
   override createOutputInterpreter(): ReturnType<SmithersPiAgent["createOutputInterpreter"]> {
     const interpreter = super.createOutputInterpreter();
     let terminalInterpreter: ReturnType<SmithersPiAgent["createOutputInterpreter"]> | undefined;
+    let terminalError: string | undefined;
     return {
       ...interpreter,
       onStdoutLine: (line) => {
         // A fresh Smithers interpreter sees only the latest authoritative
         // assistant message and subsequent deltas. Reusing it as an oracle
         // avoids duplicating Pi's evolving text-block extraction contract.
-        if (isPiTerminalAssistantLine(line)) terminalInterpreter = super.createOutputInterpreter();
+        const terminalState = piTerminalAssistantState(line);
+        if (terminalState !== undefined) {
+          terminalInterpreter = super.createOutputInterpreter();
+          terminalError = terminalState.error;
+        }
         const terminalEvents = terminalInterpreter?.onStdoutLine?.(line);
-        return applyPiTerminalAnswer(interpreter.onStdoutLine?.(line), terminalEvents);
+        return applyPiTerminalAnswer(interpreter.onStdoutLine?.(line), terminalEvents, terminalError);
       },
       onExit: (result) => {
         const terminalEvents = terminalInterpreter?.onExit?.(result);
-        return applyPiTerminalAnswer(interpreter.onExit?.(result), terminalEvents);
+        return applyPiTerminalAnswer(interpreter.onExit?.(result), terminalEvents, terminalError);
       }
     };
   }
 }
 
-function isPiTerminalAssistantLine(line: string): boolean {
+function piTerminalAssistantState(line: string): { error?: string } | undefined {
   try {
     const parsed: unknown = JSON.parse(line.trim());
     const payload = objectRecord(parsed);
+    let assistant: Record<string, unknown> | undefined;
     if (payload?.type === "message_end" || payload?.type === "turn_end") {
-      return objectRecord(payload.message)?.role === "assistant";
+      const message = objectRecord(payload.message);
+      if (message?.role === "assistant") assistant = message;
     }
-    if (payload?.type === "agent_end" && Array.isArray(payload.messages)) {
-      return payload.messages.some((message) => objectRecord(message)?.role === "assistant");
+    if (assistant === undefined && payload?.type === "agent_end" && Array.isArray(payload.messages)) {
+      for (let index = payload.messages.length - 1; index >= 0; index -= 1) {
+        const message = objectRecord(payload.messages[index]);
+        if (message?.role !== "assistant") continue;
+        assistant = message;
+        break;
+      }
     }
+    if (assistant === undefined) return undefined;
+    const stopReason = assistant.stopReason;
+    if (stopReason !== "error" && stopReason !== "aborted") return {};
+    const errorMessage = assistant.errorMessage;
+    return {
+      error: typeof errorMessage === "string" && errorMessage.trim().length > 0 ? errorMessage : `Request ${stopReason}`
+    };
   } catch {
     // The wrapped interpreter remains authoritative for malformed/non-JSON
     // lines and preserves Smithers' existing behavior.
   }
-  return false;
+  return undefined;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function applyPiTerminalAnswer<T>(events: T, terminalEvents: unknown): T {
+function applyPiTerminalAnswer<T>(events: T, terminalEvents: unknown, terminalError?: string): T {
+  if (events == null) return events;
   const terminalValues = Array.isArray(terminalEvents) ? terminalEvents : [terminalEvents];
   const terminalCompletion = terminalValues
     .map((value) => objectRecord(value))
     .find((event) => event?.type === "completed");
-  if (!terminalCompletion || events == null) return events;
   for (const value of Array.isArray(events) ? events : [events]) {
     const event = objectRecord(value);
     if (event?.type !== "completed") continue;
+    if (terminalError !== undefined) {
+      event.ok = false;
+      event.error = terminalError;
+      delete event.answer;
+      continue;
+    }
+    if (!terminalCompletion) continue;
     if (typeof terminalCompletion.answer === "string" && terminalCompletion.answer.trim().length > 0) {
       event.answer = terminalCompletion.answer;
     } else {

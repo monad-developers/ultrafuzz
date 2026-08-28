@@ -474,13 +474,21 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       task.renderedPromptPath === undefined
         ? undefined
         : path.resolve(process.cwd(), dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"));
+    const compiledPromptPath =
+      compiled?.promptPath === undefined ? undefined : path.resolve(process.cwd(), compiled.promptPath);
+    const retainedPromptPath =
+      compiledPromptPath !== undefined && compiledPromptPath !== runtimePromptPath ? compiledPromptPath : undefined;
     // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
     // cannot exist there, so it stays in the run root and is bound by selected_task plus the handoff
-    // content digest instead.
+    // content digest instead. A continuation may rebind a static prompt to its authenticated retained
+    // snapshot after the cleanup-owned launch path is gone; that execution-only binding takes
+    // precedence without changing the sealed dynamic-runtime task manifest.
     const promptPath =
       compiled?.promptPath === undefined
         ? runtimePromptPath
-        : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ?? runtimePromptPath);
+        : (retainedPromptPath ??
+          sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
+          runtimePromptPath);
     return {
       id: task.smithersNodeId,
       preparationId: `prepare:${task.attemptId}`,
@@ -499,7 +507,7 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
           ? undefined
           : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
             ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
-            : projectRelativePath(task.renderedPromptPath!, "rendered prompt"),
+            : projectRelativePath(retainedPromptPath ?? task.renderedPromptPath!, "rendered prompt"),
       workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
       workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
       artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),

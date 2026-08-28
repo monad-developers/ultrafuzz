@@ -147,6 +147,7 @@ const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const NATIVE_SMITHERS_CONTINUATION: unique symbol = Symbol("ultrafuzz.native-smithers-continuation");
+const NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER = ".ultrafuzz-native-continuation";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
 const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
@@ -851,6 +852,48 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           );
         }`;
 
+// Smithers fences every agent event and stdout/stderr chunk with a durable
+// heartbeat ownership proof before accepting its callback. At high concurrency,
+// independently starting that proof for every callback creates a large queue of
+// redundant database writes. Task completion then waits for the whole queue even
+// after the agent process exits. Share only the proof that is currently in flight:
+// every callback remains fenced by a successful ownership result, while callbacks
+// arriving in the same burst no longer race the shared heartbeat state or repeat
+// the same database write.
+const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE = `  const pendingOwnershipChecks = new Set();
+  const afterHeartbeatOwnership = (callback) => {
+    const check = confirmHeartbeatOwnership()
+      .then((owned) => {
+        if (owned) return callback();
+      })
+      .catch(() => {})
+      .finally(() => {
+        pendingOwnershipChecks.delete(check);
+      });
+    pendingOwnershipChecks.add(check);
+  };`;
+const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChecks = new Set();
+  let heartbeatOwnershipCheckInFlight = null;
+  const sharedHeartbeatOwnershipCheck = () => {
+    if (heartbeatOwnershipCheckInFlight) return heartbeatOwnershipCheckInFlight;
+    const check = confirmHeartbeatOwnership().finally(() => {
+      if (heartbeatOwnershipCheckInFlight === check) heartbeatOwnershipCheckInFlight = null;
+    });
+    heartbeatOwnershipCheckInFlight = check;
+    return check;
+  };
+  const afterHeartbeatOwnership = (callback) => {
+    const check = sharedHeartbeatOwnershipCheck()
+      .then((owned) => {
+        if (owned) return callback();
+      })
+      .catch(() => {})
+      .finally(() => {
+        pendingOwnershipChecks.delete(check);
+      });
+    pendingOwnershipChecks.add(check);
+  };`;
+
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
 // The table's only index is its (run_id, seq) primary key, and the probe's
@@ -861,16 +904,17 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
 // and total cost quadratic in event count; at dynamic fan-out scale the
 // controller's main thread saturates in these page reads (issue #858: ~300%
 // CPU, frozen stream.ndjson, starved node-timeout timers, idle agents).
-// The fix is one covering index, created for new databases only. It is
-// deliberately NOT paired with an `INDEXED BY` hint at the probe sites, even
-// though the planner may still prefer the primary key without one: a hint is a
-// hard requirement, and a historical database that predates the index would
-// stop opening at all. `runtime.test.ts`'s "event probe compatibility patch
-// adds an optional covering index" pins that choice from the other side.
+// The fix is a covering index whose equality prefix matches the probe and whose
+// trailing `seq` satisfies its ordering. Including `payload_json` keeps the final
+// equality check inside the index. SQLite then selects the index without an
+// `INDEXED BY` hint, so historical databases remain readable before a current
+// startup has created the optional index. `runtime.test.ts`'s "event probe
+// compatibility patch adds an optional covering index" pins that choice from the
+// other side.
 const SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE = `const EXTRA_INDEX_STATEMENTS = [
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
 const SMITHERS_DB_EVENT_PROBE_INDEX_PATCH = `const EXTRA_INDEX_STATEMENTS = [
-  \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_idx ON _smithers_events (run_id, timestamp_ms, type)\`,
+  \`CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_v2_idx ON _smithers_events (run_id, timestamp_ms, type, seq, payload_json)\`,
   \`CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)\`,`;
 
 export type SmithersCompatibilityPatchId =
@@ -880,6 +924,7 @@ export type SmithersCompatibilityPatchId =
   | "resume_snapshot_transfer"
   | "terminal_state_restore"
   | "resume_hydration"
+  | "engine_agent_event_ownership"
   | "workflow_path_import"
   | "workflow_path_persistence"
   | "process_snapshot_anchor"
@@ -987,6 +1032,15 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
     // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
     upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "engine_agent_event_ownership",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
+    patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
+    // Upstream coalescing its own in-flight proof retires this patch.
+    upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
   },
   {
     id: "workflow_path_import",
@@ -1192,7 +1246,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_DB_EVENT_PROBE_INDEX_SOURCE,
     patched: SMITHERS_DB_EVENT_PROBE_INDEX_PATCH,
     // Upstream creating its own probe-covering events index retires the family.
-    upstreamAbsent: ["_smithers_events_insert_probe_idx"]
+    upstreamAbsent: ["_smithers_events_insert_probe_v2_idx"]
   }
 ];
 
@@ -4509,9 +4563,12 @@ async function prepareSmithersExecutableEnvironment(
     // Smithers detaches the resumed engine and supervisor. Their patched
     // relaunch paths still refer to this operator-owned package closure after
     // the submitting Ultrafuzz process exits, so it must outlive process-local
-    // controller cleanup. The OS temporary-directory policy remains the outer
-    // reclamation boundary.
-    operatorControllerRoots.delete(controllerRoot);
+    // controller cleanup. Persist the exemption beside the closure as well as
+    // in memory: a refresh/retry command can prepare the same controller across
+    // several subprocess boundaries before detached admission, and process-exit
+    // cleanup must remain fail-safe even if that root is re-registered. The OS
+    // temporary-directory policy remains the outer reclamation boundary.
+    retainNativeSmithersControllerRoot(controllerRoot);
   }
   return prepared;
 }
@@ -4733,6 +4790,7 @@ function registerOperatorControllerRoot(root: string): void {
   operatorControllerCleanupRegistered = true;
   process.once("exit", () => {
     for (const candidate of operatorControllerRoots) {
+      if (isRetainedNativeSmithersControllerRoot(candidate)) continue;
       try {
         makeOperatorControllerTreeRemovable(candidate);
         fs.rmSync(candidate, { recursive: true, force: true });
@@ -4742,6 +4800,29 @@ function registerOperatorControllerRoot(root: string): void {
     }
     operatorControllerRoots.clear();
   });
+}
+
+function retainNativeSmithersControllerRoot(root: string): void {
+  const marker = path.join(root, NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER);
+  if (!fs.existsSync(marker)) {
+    fs.writeFileSync(marker, "retained\n", { encoding: "utf8", flag: "wx", mode: 0o400 });
+  }
+  if (!isRetainedNativeSmithersControllerRoot(root)) {
+    throw new Error("native workflow runner retention marker is invalid");
+  }
+  operatorControllerRoots.delete(root);
+}
+
+function isRetainedNativeSmithersControllerRoot(root: string): boolean {
+  const marker = path.join(root, NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER);
+  try {
+    const stat = fs.lstatSync(marker);
+    return (
+      stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && fs.readFileSync(marker, "utf8") === "retained\n"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function disposeOperatorControllerRoot(root: string): void {
@@ -4971,7 +5052,12 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
       "continued workflow path"
     ],
-    [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"]
+    [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"],
+    [
+      SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
+      SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
+      "agent event ownership coalescing"
+    ]
   ] as const) {
     engineContents = applyRequiredSmithersPatch(engineContents, source, patched, label);
   }
