@@ -6631,6 +6631,44 @@ bunAdapterTest(
         : textCompletion;
       assert.equal(textCompleted?.answer, "final answer");
 
+      // Pi can exhaust its own provider retries and still exit zero. Preserve
+      // the terminal assistant failure so Smithers retries the task instead of
+      // accepting a text-free success and failing a downstream artifact gate.
+      const errorInterpreter = agent.createOutputInterpreter();
+      errorInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "A Timeout Occurred",
+            content: []
+          }
+        })
+      );
+      const errorCompletion = errorInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "agent_end",
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "error",
+              errorMessage: "A Timeout Occurred",
+              content: []
+            }
+          ]
+        })
+      );
+      const errorCompleted = Array.isArray(errorCompletion)
+        ? errorCompletion.find((event) => event.type === "completed")
+        : errorCompletion;
+      const typedErrorCompleted = errorCompleted as
+        { type?: string; ok?: boolean; error?: string; answer?: string } | undefined;
+      assert.equal(typedErrorCompleted?.type, "completed");
+      assert.equal(typedErrorCompleted?.ok, false);
+      assert.equal(typedErrorCompleted?.error, "A Timeout Occurred");
+      assert.equal(typedErrorCompleted?.answer, undefined);
+
       // Profile reasoning maps onto pi's existing --thinking level.
       const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
       const thinkingCommand = await thinkingAgent.buildCommand({ prompt: "x", cwd: project, options: {} });
