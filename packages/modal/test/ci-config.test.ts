@@ -799,7 +799,14 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("uses a fast PR lane and reserves full release validation for integration events", () => {
+  // #994 moved the release-validation matrix out of this workflow and into
+  // `scripts/ci/release-validation-lanes.mjs`, and deleted the
+  // `if: github.event_name != 'pull_request'` that used to skip every runtime
+  // test on pull requests. The lane *table* is now asserted where it lives; what
+  // this workflow contract still owns is the wiring — that the matrix really is
+  // fed by that policy script, and that nothing gates release validation off
+  // pull requests again.
+  it("runs the release validation lanes the policy script selects, on pull requests too", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
       on: {
@@ -815,14 +822,23 @@ describe("public Modal benchmark configuration", () => {
           if?: string;
           needs?: string[];
           "timeout-minutes"?: number | string;
+          outputs?: Record<string, string>;
           strategy?: {
             "fail-fast": boolean;
             "max-parallel": number;
-            matrix: {
-              include: Array<{ lane: string; description: string; gates: string; timeout_minutes: number }>;
-            };
+            // #994 replaced the hard-coded lane table with a matrix expression
+            // expanded from the `release-validation-lanes` job output.
+            matrix: { include: string };
           };
-          steps: Array<{ name?: string; if?: string; run?: string; uses?: string; with?: Record<string, unknown> }>;
+          steps: Array<{
+            name?: string;
+            id?: string;
+            if?: string;
+            run?: string;
+            uses?: string;
+            env?: Record<string, string>;
+            with?: Record<string, unknown>;
+          }>;
         }
       >;
     };
@@ -872,74 +888,28 @@ describe("public Modal benchmark configuration", () => {
 
     expect(workflow.jobs).not.toHaveProperty("pull-request-validation");
 
+    // The selection job is the workflow's only source of lanes, so pin the wiring
+    // end to end: the job publishes what the policy script prints, and the
+    // matrix expands exactly that output.
+    const laneSelection = workflow.jobs["release-validation-lanes"];
+    expect(laneSelection?.outputs?.lanes).toBe("${{ steps.select.outputs.lanes }}");
+    const selectStep = laneSelection?.steps.find((step) => step.name === "Select release validation lanes");
+    expect(selectStep?.id).toBe("select");
+    expect(selectStep?.env?.EVENT_NAME).toBe("${{ github.event_name }}");
+    expect(selectStep?.run).toContain('scripts/ci/release-validation-lanes.mjs --event "$EVENT_NAME"');
+
     const releaseValidation = workflow.jobs["release-validation"];
     expect(releaseValidation?.name).toBe("Full release validation (${{ matrix.description }})");
-    expect(releaseValidation?.if).toBe("github.event_name != 'pull_request'");
+    // Regression guard for the outage this design exists to prevent. While this
+    // job carried `if: github.event_name != 'pull_request'`, every runtime test
+    // reported `skipping` on pull requests, so resume-path regressions merged
+    // with all checks green.
+    expect(releaseValidation?.if, "release validation must not be gated off pull requests").toBeUndefined();
+    expect(releaseValidation?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes"]);
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
       "max-parallel": 8,
-      matrix: {
-        include: [
-          {
-            lane: "package-gates",
-            description: "Package, dependency, and policy gates",
-            gates:
-              "dependency-advisories,ci-scripts,docs,config,audit-profile-package,packed-install,security,references,topology,prompts,artifacts,dashboard,evals,evmbench,modal",
-            timeout_minutes: 45,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "runtime-supporting",
-            description: "Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts",
-            gates: "runtime-supporting",
-            timeout_minutes: 75,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "runtime-1",
-            description: "Node.js 24 runtime integration tests, shard 1/4",
-            gates: "runtime-1",
-            timeout_minutes: 75,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "runtime-2",
-            description: "Node.js 24 runtime integration tests, shard 2/4",
-            gates: "runtime-2",
-            timeout_minutes: 75,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "runtime-3",
-            description: "Node.js 24 runtime integration tests, shard 3/4",
-            gates: "runtime-3",
-            timeout_minutes: 75,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "runtime-4",
-            description: "Node.js 24 runtime integration tests, shard 4/4",
-            gates: "runtime-4",
-            timeout_minutes: 75,
-            build_modal_dependencies: true
-          },
-          {
-            lane: "cli",
-            description: "CLI package tests",
-            gates: "cli",
-            timeout_minutes: 75,
-            build_release_reporter: true
-          },
-          {
-            lane: "benchmark-history-typecheck",
-            description: "Benchmark history charts and workspace typecheck",
-            gates: "benchmark-history,workspace-typecheck",
-            timeout_minutes: 45,
-            build_release_reporter: true,
-            build_cli: true
-          }
-        ]
-      }
+      matrix: { include: "${{ fromJSON(needs.release-validation-lanes.outputs.lanes) }}" }
     });
     expect(releaseValidation?.["timeout-minutes"]).toBe("${{ matrix.timeout_minutes }}");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate release lane")?.run).toContain("--gates");
@@ -958,14 +928,27 @@ describe("public Modal benchmark configuration", () => {
     const cliLaneBuild = releaseValidation?.steps.find((step) => step.name === "Build CLI lane dependencies");
     expect(cliLaneBuild?.if).toBe("matrix.build_cli == true");
     expect(cliLaneBuild?.run).toBe("pnpm --filter @ultrafuzz/cli... build");
-    const laneGateIds = (releaseValidation?.strategy?.matrix.include ?? []).flatMap((entry) => entry.gates.split(","));
+    // The lane table moved out of this file, so read it back the way the
+    // workflow does — by running the policy script for an integration event —
+    // rather than dropping the coverage this test used to carry.
+    const selection = execFileSync(
+      process.execPath,
+      [path.join(workspace, "scripts/ci/release-validation-lanes.mjs"), "--event", "push"],
+      { cwd: workspace, encoding: "utf8" }
+    );
+    const pushLanes = JSON.parse(selection) as Array<{ lane: string; gates: string; timeout_minutes: number }>;
+    const laneGateIds = pushLanes.flatMap((entry) => entry.gates.split(","));
     expect(new Set(laneGateIds).size, "release validation lanes must not repeat a gate").toBe(laneGateIds.length);
     expect(laneGateIds).toContain("cli");
     expect(laneGateIds).toContain("benchmark-history");
     expect(laneGateIds).toContain("workspace-typecheck");
+    expect(pushLanes.map((entry) => entry.lane)).toContain("package-gates");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
-    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation"]);
+    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes", "release-validation"]);
+    expect(releaseGates?.steps.find((step) => step.name === "Require the release validation lane selection")?.if).toBe(
+      "needs.release-validation-lanes.result != 'success'"
+    );
     for (const name of [
       "Check out repository",
       "Set up pnpm",
@@ -986,8 +969,11 @@ describe("public Modal benchmark configuration", () => {
     expect(releaseGates?.steps.find((step) => step.name === "Merge release validation report")?.run).toContain(
       "--merge-report-dir"
     );
-    expect(releaseGates?.steps.find((step) => step.name === "Require release validation lanes")?.if).toContain(
-      "github.event_name != 'pull_request'"
+    // Formerly gated on `github.event_name != 'pull_request'`; #994 made the
+    // lanes required on pull requests, so the requirement must apply to every
+    // event.
+    expect(releaseGates?.steps.find((step) => step.name === "Require release validation lanes")?.if).toBe(
+      "always() && needs.release-validation.result != 'success'"
     );
     expect(releaseGates?.steps.find((step) => step.name === "Upload release validation report")?.if).toBe(
       "always() && github.event_name != 'pull_request'"
