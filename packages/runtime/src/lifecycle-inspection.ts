@@ -1728,7 +1728,9 @@ function adaptToolCall(row: CurrentNodeToolCall, includePayloads: boolean): Work
 }
 
 function downgradedSyncDiagnostics(sync: { ok: boolean; diagnostics: RuntimeDiagnostic[] }): RuntimeDiagnostic[] {
-  return sync.ok ? sync.diagnostics : sync.diagnostics.map((entry) => ({ ...entry, severity: "warning" as const }));
+  return sync.diagnostics.map((entry) =>
+    entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+  );
 }
 
 function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: string): RuntimeDiagnostic {
