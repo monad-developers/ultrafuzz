@@ -52,10 +52,6 @@ function parseHttpsOrigin(value: string, provider: string): URL {
   return parsed;
 }
 
-export async function boundedProviderResponseText(response: Response, provider: string): Promise<string> {
-  return boundedResponseText(response, provider, "EVAL_PROVIDER_RESPONSE_TOO_LARGE");
-}
-
 export async function boundedProviderResponseBytes(response: Response, provider: string): Promise<Buffer> {
   return boundedResponseBytes(response, provider, "EVAL_PROVIDER_RESPONSE_TOO_LARGE");
 }

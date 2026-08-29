@@ -14,16 +14,6 @@ export interface ValidatedReportSnapshot {
   markdown_bytes: Buffer;
 }
 
-/**
- * Locate an agent-authored final report only after current verifier and
- * controller finalization records bind its exact bytes. This compatibility
- * export retains the CLI-local API name while delegating the trust boundary to
- * the shared runtime reader used by other external consumers.
- */
-export function loadValidatedReportArtifacts(runRoot: string): ValidatedReportArtifacts {
-  return loadValidatedReportSnapshot(runRoot).artifacts;
-}
-
 export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot {
   const report = loadVerifiedFinalReportSnapshot(runRoot);
   return {

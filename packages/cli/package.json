@@ -45,7 +45,6 @@
     "tar-stream": "^3.2.0"
   },
   "devDependencies": {
-    "@types/adm-zip": "^0.5.8",
     "@types/tar-stream": "^3.1.4"
   },
   "homepage": "https://github.com/monad-developers/ultrafuzz#readme",

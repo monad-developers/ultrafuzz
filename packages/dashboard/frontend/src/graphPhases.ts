@@ -100,30 +100,6 @@ export function isInvariantStrategy(strategy: StrategyPhaseData | undefined): bo
   return values.some((value) => value.includes("invariant"));
 }
 
-export function phaseLabel(phase: WorkflowPhaseId): string {
-  switch (phase) {
-    case "setup":
-      return "Setup";
-    case "properties":
-      return "Properties";
-    case "strategies":
-      return "Strategies";
-    case "invariants":
-      return "Invariants";
-    case "differential-tests":
-      return "Differential";
-    case "deduplication":
-      return "Dedupe";
-    case "triaging":
-      return "Classification";
-    case "report":
-      return "Report";
-    case "ungrouped":
-    default:
-      return "Node";
-  }
-}
-
 export function showsFindingCount(phase: WorkflowPhaseId): boolean {
   return (
     phase === "strategies" ||

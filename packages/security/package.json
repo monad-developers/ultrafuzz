@@ -22,8 +22,5 @@
     "@scure/bip39": "2.3.0",
     "@secretlint/core": "13.0.4",
     "@secretlint/secretlint-rule-preset-recommend": "13.0.4"
-  },
-  "devDependencies": {
-    "@secretlint/types": "13.0.4"
   }
 }

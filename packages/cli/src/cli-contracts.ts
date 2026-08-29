@@ -112,8 +112,6 @@ export const CLI_KNOWN_COMMANDS = [
 
 export type CliKnownCommand = (typeof CLI_KNOWN_COMMANDS)[number];
 type CliJsonValue = null | boolean | number | string | CliJsonValue[] | { [key: string]: CliJsonValue };
-/** Intentional opaque RFC 8259 value supplied by the operator at the CLI boundary. */
-export type CliOperatorInput = CliJsonValue;
 
 export interface CliDiagnostic {
   code: string;
