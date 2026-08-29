@@ -23,7 +23,7 @@
     "lint": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\"",
     "lint:fix": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --fix",
     "lint:strict": "ULTRAFUZZ_STRICT_LINT=1 eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --max-warnings 0",
-    "lint:strict:ci": ": \"${ESLINT_PLUGIN_DIFF_COMMIT:?required}\"; git diff --name-only --diff-filter=ACMR -z \"$ESLINT_PLUGIN_DIFF_COMMIT\" -- '*.js' '*.mjs' '*.cjs' '*.ts' '*.tsx' | xargs -0 --no-run-if-empty env ULTRAFUZZ_STRICT_LINT=1 eslint --max-warnings 0",
+    "lint:strict:ci": "bash -o pipefail -c ': \"${ESLINT_PLUGIN_DIFF_COMMIT:?required}\"; git diff --name-only --diff-filter=ACMR -z \"$ESLINT_PLUGIN_DIFF_COMMIT\" -- \"*.js\" \"*.mjs\" \"*.cjs\" \"*.ts\" \"*.tsx\" | xargs -0 --no-run-if-empty env ULTRAFUZZ_STRICT_LINT=1 eslint --max-warnings 0'",
     "security:dependency-advisories": "pnpm --filter @ultrafuzz/artifacts... build && node scripts/check-production-dependency-advisories.mjs",
     "size": "size-limit",
     "test": "pnpm run test:ci-scripts && pnpm -r test",
