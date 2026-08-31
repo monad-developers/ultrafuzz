@@ -19029,7 +19029,8 @@ function kimiTokenUsageEvents(workflowRunId: string): string {
       extra: {
         iteration: 0,
         // Kimi wire components map 1:1 onto Ultrafuzz's independent components.
-        inputTokens: 120_000,
+        inputTokens: 540_000,
+        freshInputTokens: 120_000,
         outputTokens: 8_000,
         cacheReadTokens: 400_000,
         cacheWriteTokens: 20_000,
@@ -19166,6 +19167,7 @@ test("syncRun prices Kimi models from Moonshot, not an alphabetically earlier sa
         extra: {
           iteration: 0,
           inputTokens: 1_000_000,
+          freshInputTokens: 1_000_000,
           outputTokens: 100_000,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
