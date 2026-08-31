@@ -13835,14 +13835,23 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 
   {
+    // Bun's startup controls are addressed relative to the inherited descriptor
+    // root instead of a /proc literal, so the same patch works where /proc is
+    // absent. Both patches must route through that helper rather than spell the
+    // arguments themselves.
     for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
       const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
       assert.ok(startup);
-      assert.match(
-        startup.patched,
-        /"--env-file=\/proc\/self\/fd\/3\/controls\/bun-empty\.env".*"--no-addons".*"--preload=\/proc\/self\/fd\/3\/controls\/bun-module-confinement\.js"/u
-      );
+      assert.match(startup.patched, /ultrafuzzBunStartupArgsFor/u);
     }
+    const startupAnchor = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
+    assert.ok(startupAnchor);
+    assert.match(
+      startupAnchor.patched,
+      /"--env-file=" \+ root \+ "\/controls\/bun-empty\.env".*"--no-addons".*"--preload=" \+ root \+ "\/controls\/bun-module-confinement\.js"/u
+    );
+    // The Linux spelling of that root is unchanged; only darwin resolves elsewhere.
+    assert.match(startupAnchor.patched, /: "\/proc\/self\/fd\/3";/u);
     const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
     assert.ok(relaunch);
     assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
