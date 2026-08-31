@@ -15323,7 +15323,7 @@ test("CLI usage compatibility retains authoritative truncated and failed invocat
   );
 });
 
-test("reported CLI cost compatibility preserves zero-token adapter estimates", async () => {
+async function loadPatchedCostEngineInternals() {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const normalization = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_normalize");
   const pricing = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_price");
@@ -15398,8 +15398,12 @@ test("reported CLI cost compatibility preserves zero-token adapter estimates", a
       };
     };
   };
+  return patchedEngine.__engineInternals;
+}
+
+test("reported CLI cost compatibility preserves zero-token adapter estimates", async () => {
   const { normalizeTokenUsage, estimateReportedCostUsd, createCumulativeAgentUsageState } =
-    patchedEngine.__engineInternals;
+    await loadPatchedCostEngineInternals();
   const zeroTokenUsage = {
     inputTokens: 0,
     inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
