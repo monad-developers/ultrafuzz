@@ -549,9 +549,10 @@ when the threshold or priorities are unavailable. Derive each count from the
 corresponding schema-defined collection in the authoritative coverage value;
 `Reference expectation properties` counts the properties carrying a reference
 expectation. Introduce the blocker list with a line reading exactly `Blocker summaries:`.
-Then write one `- ` bullet per authoritative blocker summary, in the same order
+Then write one bullet per authoritative blocker summary, in the same order
 as the coverage value, with no blank line between the heading and the first
-bullet: the list ends at the first line that is not a `- ` bullet. Omit the
+bullet: each bullet begins with a hyphen and a space, and the list ends at the
+first line that is not such a bullet. Omit the
 Markdown heading and list when the authoritative value has no blockers.
 
 Write each blocker bullet from the exact corresponding blocker-summary value.

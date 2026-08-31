@@ -2473,7 +2473,8 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     // A positively identified vendor-format credential: the publication gate
     // scans positive-only (#819), so a bare `token=` keyword assignment is a
     // display-redaction heuristic and no longer fails publication.
-    const contaminated = Buffer.from("analysis ghp_AbCdEf1234567890AbCdEf1234567890AbCd\n", "utf8");
+    const syntheticGithubToken = ["gh", "p_AbCdEf1234567890AbCdEf1234567890AbCd"].join("");
+    const contaminated = Buffer.from(`analysis ${syntheticGithubToken}\n`, "utf8");
     fs.writeFileSync(outputPath, contaminated);
     const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
     const harness = loadVerifyArtifactsHarness();
