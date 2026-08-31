@@ -24,7 +24,7 @@ import {
 } from "../src/launch-state.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
-  appendPublicWorkerLogLine,
+  appendPublicWorkerDiagnosticLogLine,
   assertPublicWorkerInput,
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
@@ -62,7 +62,7 @@ import {
   writePublicBundleAtomic
 } from "../src/public-worker.js";
 import { createPublicBenchmarkBundle, type PublicBenchmarkBundle } from "../src/public-bundle.js";
-import { createExactCandidateSourceArchive } from "../src/runner.js";
+import { assertSanitizedModalCollectedFiles, createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
 import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
@@ -944,21 +944,52 @@ it("settles the flag without ever costing the diagnostics document, and says so 
   expect(withBrokenReporter.diagnostics.summary.scoring_ready).toBe(true);
 });
 
-it("records a corroboration read that threw in the worker log without redacting nothing", () => {
+it("records a corroboration read that threw as a line the collector will actually keep", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-log-"));
   const logPath = path.join(root, "worker.log");
-  fs.writeFileSync(logPath, "");
+  fs.writeFileSync(logPath, "2026-01-01T00:00:00.000Z worker-started\n");
   const secret = "sk-fixture-secret-value";
 
-  appendPublicWorkerLogLine(logPath, `model-work-corroboration-failed opened ${secret}\nsecond line`, [secret]);
+  appendPublicWorkerDiagnosticLogLine(
+    logPath,
+    [{ code: "MODEL_WORK_CORROBORATION_FAILED", message: `opened ${secret}\nsecond line` }],
+    [secret]
+  );
   const written = fs.readFileSync(logPath, "utf8");
 
-  expect(written).toContain("model-work-corroboration-failed");
   expect(written).not.toContain(secret);
-  expect(written.trimEnd().split("\n")).toHaveLength(1);
+  expect(written.trimEnd().split("\n")).toHaveLength(2);
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "MODEL_WORK_CORROBORATION_FAILED", message: "opened <redacted> second line" }
+  ]);
+  // The sanitized free text this used to append matched neither collector production, and one such line
+  // costs the pair its status.json, result.json and recovery lifecycle wholesale.
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 }, [secret])
+  ).not.toThrow();
+  expect(() =>
+    assertSanitizedModalCollectedFiles(
+      { "worker.log": "2026-01-01T00:00:00.000Z model-work-corroboration-failed opened <redacted> second line\n" },
+      { generation: 1, attempt: 2 }
+    )
+  ).toThrow(/unsanitized Modal worker log/u);
 
   // The log is evidence, not an outcome: an unwritable path is swallowed.
-  expect(() => appendPublicWorkerLogLine(path.join(root, "absent-dir", "worker.log"), "anything")).not.toThrow();
+  expect(() =>
+    appendPublicWorkerDiagnosticLogLine(path.join(root, "absent-dir", "worker.log"), [
+      { code: "MODEL_WORK_CORROBORATION_FAILED", message: "anything" }
+    ])
+  ).not.toThrow();
+  // So is a payload that cannot be composed at all: callers append from paths that are already failing for
+  // their own reason, and this must not replace it.
+  expect(() =>
+    appendPublicWorkerDiagnosticLogLine(logPath, [{ code: "MODEL_WORK_CORROBORATION_FAILED", message: "anything" }], {
+      [Symbol.iterator]: () => {
+        throw new Error("the secret values are unavailable");
+      }
+    })
+  ).not.toThrow();
+  expect(fs.readFileSync(logPath, "utf8")).toBe(written);
 });
 
 it("reports an unbuildable diagnostics document without claiming a sandbox exit or model work", async () => {
@@ -1225,6 +1256,55 @@ it("publishes workflow-submission messages from the strict durable eval journal"
   ]);
 });
 
+it("leaves the collector's grammar the only judge of which failure diagnostics a line can carry", () => {
+  // The worker used to re-test the code alphabet here and bound the count before testing it, so one entry the
+  // grammar cannot express consumed a slot that a reportable one needed.
+  const payload = publicEvalFailureDiagnosticLogPayload(
+    JSON.stringify({
+      diagnostics: [
+        { code: "workflow_submission_failed", message: "the code alphabet is fixed", severity: "error" },
+        { code: "WORKFLOW_SUBMISSION_FAILED", message: "first", severity: "error" },
+        { code: "EVAL_ROW_LAUNCH_FAILED", message: "second", severity: "error" },
+        { code: "EVAL_TARGET_PATH_MISSING", message: "third", severity: "error" }
+      ]
+    }),
+    []
+  );
+  expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
+    { code: "WORKFLOW_SUBMISSION_FAILED", message: "first" },
+    { code: "EVAL_ROW_LAUNCH_FAILED", message: "second" },
+    { code: "EVAL_TARGET_PATH_MISSING", message: "third" }
+  ]);
+
+  // Every entry the removed code test rejected is still rejected, by the payload builder or by the shape and
+  // severity test that remains here.
+  expect(
+    publicEvalFailureDiagnosticLogPayload(
+      JSON.stringify({
+        diagnostics: [
+          "not a record",
+          ["not a record"],
+          null,
+          { message: "no code", severity: "error" },
+          { code: 7, message: "the code is not a string", severity: "error" },
+          { code: "WORKFLOW_SUBMISSION_FAILED", message: 7, severity: "error" },
+          { code: "WORKFLOW_SUBMISSION_FAILED", message: "the severity is not error", severity: "warning" },
+          { code: "WORKFLOW_SUBMISSION_FAILED", message: "the severity is absent" },
+          { code: "workflow_submission_failed", message: "the code alphabet is fixed", severity: "error" },
+          { code: `A${"B".repeat(128)}`, message: "the code length is bounded", severity: "error" }
+        ]
+      }),
+      []
+    )
+  ).toBeUndefined();
+  expect(
+    publicEvalFailureDiagnosticLogPayloadFromRecords(
+      [failedRunRecord("row-1", "workflow_submission_failed", "the code alphabet is fixed")],
+      []
+    )
+  ).toBeUndefined();
+});
+
 it("reserves bounded capture independently for the final eval stdout envelope", () => {
   const stdoutStream = new PassThrough();
   const stderrStream = new PassThrough();
@@ -1309,7 +1389,7 @@ it("materializes the private candidate from the image with exact clean Git prove
   }
 });
 
-it("redacts the child stderr tail it attaches as a failure cause", async () => {
+it("redacts the child stderr tail it attaches as a failure cause and logs", async () => {
   const secret = "sk-ant-fixturebakedcandidatearchive";
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-stderr-"));
   const destination = path.join(root, "candidate");
@@ -1319,17 +1399,29 @@ it("redacts the child stderr tail it attaches as a failure cause", async () => {
     "f".repeat(40),
     destination,
     logPath,
-    path.join(root, `${secret}.tgz`)
+    path.join(root, `${secret}.tgz`),
+    undefined,
+    [secret]
   )
     .then(() => undefined)
     .catch((error: unknown) => error);
 
   const cause = (failure as { cause?: unknown }).cause;
   expect(cause).toBeInstanceOf(Error);
-  expect((cause as Error).message).toContain("tar exited");
+  expect((cause as Error).message).toContain("candidate archive extract exited");
   expect((cause as Error).message).toContain("<redacted>");
   expect((cause as Error).message).not.toContain(secret);
   expect((cause as Error).message).not.toContain("\n");
+
+  // The reason reaches the collected log through the same redaction, or not at all.
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(written).not.toContain(secret);
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "WORKER_COMMAND_FAILED", message: (cause as Error).message }
+  ]);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 }, [secret])
+  ).not.toThrow();
 });
 
 it("tells a command it killed apart from one that returned nonzero", async () => {
@@ -1422,6 +1514,84 @@ it("treats a child killed by a signal it did not send as a command that never fi
     restorePath();
   }
 });
+
+it("names the reason a pre-model command failed in a line the collector keeps", async () => {
+  // ultrafuzzbench smoke, every run from 2026-08-27 03:01Z on. A transitive submodule of the pinned smoke
+  // target was flipped private, so `git submodule update --init --recursive` aborted in three seconds and the
+  // collected evidence said `operation-failed` and nothing else: the worker composed the exact reason and
+  // discarded it, because only `diagnostic_code` reaches result.json.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-reason-"));
+  const logPath = path.join(root, "worker.log");
+  const reason = "fatal: Authentication failed for 'https://github.com/aviggiano/console3/'";
+  const restorePath = shimTar(root, `#!/bin/sh\n>&2 echo ${JSON.stringify(reason)}\nexit 1\n`);
+  let written: string;
+  try {
+    const failure = await materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      logPath,
+      path.join(root, "candidate.tgz")
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    expect((failure as { cause?: unknown }).cause).toBeInstanceOf(Error);
+    expect((failure as { cause: Error }).cause.message).toBe(`candidate archive extract exited 1: ${reason}`);
+    written = fs.readFileSync(logPath, "utf8");
+  } finally {
+    restorePath();
+  }
+
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "WORKER_COMMAND_FAILED", message: `candidate archive extract exited 1: ${reason}` }
+  ]);
+  expect(written.trimEnd().split("\n")).toHaveLength(3);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+  ).not.toThrow();
+});
+
+it("names a pre-model command it cut short, and keeps that line collectable too", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-cutshort-reason-"));
+  const logPath = path.join(root, "worker.log");
+  const started = path.join(root, "tar-started");
+  const restorePath = shimTar(root, `#!/bin/sh\ntouch ${JSON.stringify(started)}\nexec sleep 60\n`);
+  try {
+    const controller = new AbortController();
+    const pending = materializeBakedCandidate(
+      "f".repeat(40),
+      path.join(root, "candidate"),
+      logPath,
+      path.join(root, "candidate.tgz"),
+      controller.signal
+    )
+      .then(() => undefined)
+      .catch((error: unknown) => error);
+    while (!fs.existsSync(started)) await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort(new Error("preparation-timeout"));
+    expect(await pending).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+
+    const written = fs.readFileSync(logPath, "utf8");
+    expect(decodedWorkerLogDiagnostics(written)).toEqual([
+      { code: "WORKER_COMMAND_INTERRUPTED", message: "candidate archive extract interrupted: preparation-timeout" }
+    ]);
+    expect(() =>
+      assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+    ).not.toThrow();
+  } finally {
+    restorePath();
+  }
+});
+
+/** Every `eval-failure-diagnostics` payload in a worker log, decoded in order. */
+function decodedWorkerLogDiagnostics(log: string): unknown[] {
+  return log
+    .trimEnd()
+    .split("\n")
+    .flatMap((line) => {
+      const payload = /^\S+ eval-failure-diagnostics (\S+)$/u.exec(line)?.[1];
+      return payload === undefined ? [] : (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown[]);
+    });
+}
 
 /** Put a `tar` of our own ahead of the real one for the duration of one test. */
 function shimTar(root: string, script: string): () => void {

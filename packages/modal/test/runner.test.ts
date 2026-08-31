@@ -37,6 +37,11 @@ import {
   type ModalWorkerStatus
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
+import {
+  workerDiagnosticLogPayload,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE
+} from "../src/worker-diagnostics.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
@@ -840,6 +845,55 @@ describe("Modal result collection", () => {
         context
       )
     ).toThrow(/unsanitized Modal worker log/u);
+  });
+
+  it("collects every line the workers can emit, including the bounds they emit at", () => {
+    const context = { generation: 1, attempt: 2 };
+    const workerLog = (payload: string): Record<string, string> => ({
+      "worker.log": `2026-01-01T00:00:00.000Z worker-started\n2026-01-01T00:00:01.000Z operation-started\n2026-01-01T00:00:02.000Z eval-failure-diagnostics ${payload}\n2026-01-01T00:00:02.000Z operation-failed\n`
+    });
+
+    // The pre-model reason the smoke lane spent nineteen days not reporting.
+    const submoduleFailure = workerDiagnosticLogPayload([
+      {
+        code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+        message:
+          "target very-liquid-vaults-foundry submodule update exited 1: fatal: Authentication failed for" +
+          " 'https://github.com/aviggiano/console3/'"
+      }
+    ]);
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(submoduleFailure!), context)).not.toThrow();
+
+    // A byte-cut sanitizer that lands inside a multi-byte sequence decodes each orphaned byte to U+FFFD,
+    // three bytes for one, so the emitted message could exceed the bound this predicate enforces -- and one
+    // rejected line discards status.json, result.json and the recovery lifecycle along with the log.
+    for (const message of ["€".repeat(400), `${"ก".repeat(400)} tail`, "\u{1f600}".repeat(300)]) {
+      const payload = workerDiagnosticLogPayload([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message }]);
+      // Dropped rather than emitted means the bound above no longer holds on the decoded string.
+      expect(payload).toBeDefined();
+      expect(() => assertSanitizedModalCollectedFiles(workerLog(payload!), context)).not.toThrow();
+    }
+    const oneByteOver = Buffer.from(
+      JSON.stringify([
+        {
+          code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+          message: "a".repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES + 1)
+        }
+      ]),
+      "utf8"
+    ).toString("base64url");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(oneByteOver), context)).toThrow(
+      /unsanitized Modal worker log/u
+    );
+
+    // Three bounded messages overrun the payload bound once JSON escaping doubles them.
+    const escaped = workerDiagnosticLogPayload(
+      Array.from({ length: 3 }, () => ({
+        code: `${WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE}_WITH_A_LONG_CODE`,
+        message: '"'.repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)
+      }))
+    );
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(escaped!), context)).not.toThrow();
   });
 
   it("rejects the removed worker-status shape without retrying", async () => {

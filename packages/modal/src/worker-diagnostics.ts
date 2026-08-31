@@ -6,13 +6,30 @@ import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz
  */
 export const WORKER_STDERR_TAIL_BYTES = 8_192;
 
-const MAX_DIAGNOSTIC_MESSAGE_BYTES = 1_000;
+/**
+ * Byte bound on one diagnostic message. It is the collector's bound, not this module's:
+ * `assertSanitizedModalCollectedFiles` refuses a worker log carrying a longer `message` and discards
+ * status.json, result.json and the recovery lifecycle along with it.
+ */
+export const MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES = 1_000;
 const MAX_TERMINATION_DETAIL_BYTES = 2_000;
 const MAX_CAUSE_CHAIN_DEPTH = 8;
+const MAX_WORKER_DIAGNOSTIC_LOG_ENTRIES = 3;
+const MAX_WORKER_DIAGNOSTIC_LOG_PAYLOAD_CHARACTERS = 8_192;
+const WORKER_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
+
+/** Codes both workers emit for their own children. Every reader greps these, so they are shared, not local. */
+export const WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE = "WORKER_COMMAND_FAILED";
+export const WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE = "WORKER_COMMAND_INTERRUPTED";
+
+export interface WorkerDiagnostic {
+  code: string;
+  message: string;
+}
 
 export interface BoundedStderrTail {
   append: (chunk: Buffer) => void;
-  sanitized: (forbiddenSecretValues?: readonly string[]) => string;
+  sanitized: (forbiddenSecretValues?: readonly string[], maxBytes?: number) => string;
 }
 
 /**
@@ -42,10 +59,73 @@ export function sanitizeWorkerDiagnosticMessage(
     .replace(/\s+/gu, " ")
     .trim();
   const bytes = Buffer.from(sanitized, "utf8");
-  const maxBytes = options.maxBytes ?? MAX_DIAGNOSTIC_MESSAGE_BYTES;
+  const maxBytes = options.maxBytes ?? MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES;
   if (bytes.length <= maxBytes) return sanitized;
-  return (options.keep === "head" ? bytes.subarray(0, maxBytes) : bytes.subarray(bytes.length - maxBytes)).toString(
-    "utf8"
+  return boundedDecodedBytes(bytes, maxBytes, options.keep === "head" ? "head" : "tail");
+}
+
+/**
+ * Decode at most `maxBytes` of UTF-8, cutting from the end being dropped.
+ *
+ * Decoding a byte slice that begins or ends inside a multi-byte sequence substitutes U+FFFD -- three bytes --
+ * for each orphaned byte, so slicing to `maxBytes` and decoding yields up to `maxBytes + 2` bytes keeping the
+ * head and `maxBytes + 6` keeping the tail. The bound has to hold on the decoded string, because that string
+ * is what the collector measures. Dropping whole code points keeps the result a pure function of the input,
+ * which the durable ledgers that compare whole objects for duplicate conflicts require.
+ */
+function boundedDecodedBytes(bytes: Buffer, maxBytes: number, keep: "head" | "tail"): string {
+  const characters = [
+    ...(keep === "head" ? bytes.subarray(0, maxBytes) : bytes.subarray(bytes.length - maxBytes)).toString("utf8")
+  ];
+  let retainedBytes = characters.reduce((total, character) => total + Buffer.byteLength(character, "utf8"), 0);
+  while (retainedBytes > maxBytes) {
+    const dropped = keep === "head" ? characters.pop()! : characters.shift()!;
+    retainedBytes -= Buffer.byteLength(dropped, "utf8");
+  }
+  return characters.join("");
+}
+
+/**
+ * The `eval-failure-diagnostics` payload for one worker log line, or `undefined` when nothing survives.
+ *
+ * Every bound applied here belongs to the collector: `isGenericWorkerLifecycleLine` accepts at most three
+ * `{code, message}` entries, a `^[A-Z][A-Z0-9_]{0,127}$` code, a message of at most
+ * `MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES` that redaction leaves unchanged and holds no forbidden value, and a
+ * payload of at most 8,192 characters -- and `assertSanitizedModalCollectedFiles` discards the entire
+ * collected file set for one line outside that grammar. An entry that cannot be expressed inside it is
+ * dropped here, so a diagnostic that will not fit costs its own reason rather than all of the evidence.
+ */
+export function workerDiagnosticLogPayload(
+  diagnostics: readonly WorkerDiagnostic[],
+  forbiddenSecretValues: readonly string[] = []
+): string | undefined {
+  const entries = diagnostics
+    .filter((diagnostic) => WORKER_DIAGNOSTIC_CODE.test(diagnostic.code))
+    .map((diagnostic) => ({
+      code: diagnostic.code,
+      message: sanitizeWorkerDiagnosticMessage(diagnostic.message, { forbiddenSecretValues })
+    }))
+    .filter((entry) => collectableDiagnosticMessage(entry.message, forbiddenSecretValues))
+    .slice(0, MAX_WORKER_DIAGNOSTIC_LOG_ENTRIES);
+  for (let count = entries.length; count > 0; count -= 1) {
+    const payload = Buffer.from(JSON.stringify(entries.slice(0, count)), "utf8").toString("base64url");
+    if (payload.length <= MAX_WORKER_DIAGNOSTIC_LOG_PAYLOAD_CHARACTERS) return payload;
+  }
+  return undefined;
+}
+
+/**
+ * Whether the collector will accept this message.
+ *
+ * Sanitizing bounds and redacts, but neither property survives composition for free: a bound applied to
+ * redacted text can cut away the context that made a token unremarkable, and the collector re-runs redaction
+ * and demands a fixed point.
+ */
+function collectableDiagnosticMessage(message: string, forbiddenSecretValues: readonly string[]): boolean {
+  return (
+    Buffer.byteLength(message, "utf8") <= MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES &&
+    redactSecretsInText(message) === message &&
+    !forbiddenSecretValues.some((secret) => secret.length > 0 && message.includes(secret))
   );
 }
 
@@ -63,11 +143,14 @@ export function createBoundedStderrTail(maxBytes: number = WORKER_STDERR_TAIL_BY
         retainedBytes -= chunks.shift()!.byteLength;
       }
     },
-    sanitized(forbiddenSecretValues) {
+    sanitized(forbiddenSecretValues, sanitizedMaxBytes) {
       const buffer = Buffer.concat(chunks);
       return sanitizeWorkerDiagnosticMessage(
         buffer.subarray(Math.max(0, buffer.byteLength - maxBytes)).toString("utf8"),
-        { forbiddenSecretValues: forbiddenSecretValues ?? [] }
+        {
+          forbiddenSecretValues: forbiddenSecretValues ?? [],
+          ...(sanitizedMaxBytes === undefined ? {} : { maxBytes: sanitizedMaxBytes })
+        }
       );
     }
   };
@@ -96,15 +179,25 @@ export function drainChildOutput(
   };
 }
 
-/** The `cause` for a child that exited non-zero: what ran, how it exited, and its redacted stderr tail. */
+/**
+ * The `cause` for a child that exited non-zero: what ran, how it exited, and its redacted stderr tail.
+ *
+ * The stderr tail's budget is reduced by the prefix so the whole message fits one collected diagnostic.
+ * Bounding the composed string instead would cut from the tail-kept end and drop the label, the only part
+ * that says which of a worker's sixteen commands this was.
+ */
 export function childExitFailureCause(
   label: string,
   exitCode: number,
   stderrTail: BoundedStderrTail,
   forbiddenSecretValues?: readonly string[]
 ): Error {
-  const detail = stderrTail.sanitized(forbiddenSecretValues);
-  return new Error(`${label} exited ${exitCode}${detail === "" ? "" : `: ${detail}`}`);
+  const prefix = `${label} exited ${exitCode}`;
+  const detail = stderrTail.sanitized(
+    forbiddenSecretValues,
+    Math.max(0, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES - Buffer.byteLength(`${prefix}: `, "utf8"))
+  );
+  return new Error(detail === "" ? prefix : `${prefix}: ${detail}`);
 }
 
 /**
@@ -114,7 +207,7 @@ export function childExitFailureCause(
  * `output`, `stdout` and `stderr` properties holding up to the whole captured stream, which `util.inspect`
  * would dump verbatim. Only `name`, `code` and `message` are read at each link.
  */
-export function describeWorkerTermination(error: unknown): string {
+export function describeWorkerTermination(error: unknown, maxBytes: number = MAX_TERMINATION_DETAIL_BYTES): string {
   const seen = new Set<unknown>();
   const links: string[] = [];
   let current: unknown = error;
@@ -123,10 +216,7 @@ export function describeWorkerTermination(error: unknown): string {
     links.push(describeErrorLink(current));
     current = current instanceof Error ? current.cause : undefined;
   }
-  const described = sanitizeWorkerDiagnosticMessage(links.join(" <- "), {
-    maxBytes: MAX_TERMINATION_DETAIL_BYTES,
-    keep: "head"
-  });
+  const described = sanitizeWorkerDiagnosticMessage(links.join(" <- "), { maxBytes, keep: "head" });
   // A rejection with `undefined`, `null` or an empty string still has to name itself, otherwise the terminal
   // log is the bare prefix again, which is the failure mode this whole module exists to remove.
   return described === "" ? String(error) : described;
