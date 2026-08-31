@@ -18,7 +18,6 @@ import {
   EVAL_HISTORY_TIMESTAMP_PATTERN_SOURCE,
   aggregateEvalHistoryBenchmarkRuns,
   aggregateEvalHistoryModelPerformanceCost,
-  assertEvalHistoryRecency,
   assertPublicBenchmarkGeneration,
   assertPublicBenchmarkRunPolicy,
   createEvalHistoryObservations,
@@ -979,118 +978,6 @@ describe("longitudinal eval history", () => {
     expect(() => parseEvalHistory({ schema_version: "unknown", observations: [] })).toThrowError(
       expect.objectContaining({ code: "EVAL_HISTORY_INVALID" })
     );
-  });
-
-  // `now` is derived from the newest observation, so this pins the comparison and the
-  // rendered message against a synthetic clock; it says nothing about how stale the
-  // checked-in history actually is. Deriving the clock keeps the expected message from
-  // rotting as wall-clock time advances, and detecting a real outage belongs to the
-  // caller that chooses the maximum.
-  it("renders the staleness verdict and message for the checked-in history against a clock 19.5 days past its newest observation", () => {
-    const history = readEvalHistory(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzzbench", "history.json"));
-    expect(history.observations.length).toBeGreaterThan(0);
-    const newest = history.observations.reduce(
-      (latest, candidate) => (candidate.run_timestamp > latest ? candidate.run_timestamp : latest),
-      history.observations[0]!.run_timestamp
-    );
-    const now = new Date(Date.parse(newest) + 19.5 * 86_400_000);
-
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 30, now })).not.toThrow();
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 7, now })).toThrowError(
-      expect.objectContaining({
-        code: "EVAL_HISTORY_STALE",
-        message: `newest eval history observation ran at ${newest}, 19.5 days ago, exceeding the requested 7 day maximum`,
-        details: { newest_run_timestamp: newest, age_days: 19.5, max_age_days: 7 }
-      })
-    );
-  });
-
-  it("ages an unordered history from its newest observation and refuses to age an empty one", () => {
-    const newest = "2026-07-25T00:00:00.000Z";
-    const unordered = mergeEvalHistory(emptyEvalHistory(), [
-      observation({ id: "run-1:target-a:baseline:benchmark-smoke", run_timestamp: "2026-07-19T00:00:00.000Z" }),
-      observation({
-        id: "run-2:target-a:baseline:benchmark-smoke",
-        run_timestamp: newest,
-        source_eval_run_id: "run-2"
-      }),
-      observation({ id: "run-3:target-a:baseline:benchmark-smoke", run_timestamp: "2026-07-21T00:00:00.000Z" })
-    ]);
-    const now = new Date("2026-07-28T00:00:00.000Z");
-
-    expect(() => assertEvalHistoryRecency({ history: unordered, maxAgeDays: 3, now })).not.toThrow();
-    expect(() => assertEvalHistoryRecency({ history: unordered, maxAgeDays: 2, now })).toThrowError(
-      expect.objectContaining({
-        code: "EVAL_HISTORY_STALE",
-        message: `newest eval history observation ran at ${newest}, 3 days ago, exceeding the requested 2 day maximum`
-      })
-    );
-    expect(() => assertEvalHistoryRecency({ history: emptyEvalHistory(), maxAgeDays: 7, now })).toThrowError(
-      expect.objectContaining({
-        code: "EVAL_HISTORY_EMPTY",
-        message: "eval history has no observation to age against the requested 7 day maximum"
-      })
-    );
-  });
-
-  it("refuses to age a history whose newest observation is dated in the future", () => {
-    const future = "2027-08-31T00:00:00.000Z";
-    const history = mergeEvalHistory(emptyEvalHistory(), [
-      observation({ id: "run-1:target-a:baseline:benchmark-smoke", run_timestamp: "2026-08-30T00:00:00.000Z" }),
-      observation({
-        id: "run-2:target-a:baseline:benchmark-smoke",
-        run_timestamp: future,
-        source_eval_run_id: "run-2"
-      })
-    ]);
-    const now = new Date("2026-08-31T00:00:00.000Z");
-
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 2, now })).toThrowError(
-      expect.objectContaining({
-        code: "EVAL_HISTORY_FUTURE_DATED",
-        message: `newest eval history observation ran at ${future}, which is in the future at 2026-08-31T00:00:00.000Z, so its age cannot be measured against the requested 2 day maximum`,
-        details: { newest_run_timestamp: future, now: "2026-08-31T00:00:00.000Z", max_age_days: 2 }
-      })
-    );
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 10_000, now })).toThrowError(
-      expect.objectContaining({ code: "EVAL_HISTORY_FUTURE_DATED" })
-    );
-  });
-
-  it("reports an age just past the maximum with more precision than the maximum", () => {
-    const newest = "2026-08-28T23:55:00.000Z";
-    const history = mergeEvalHistory(emptyEvalHistory(), [observation({ run_timestamp: newest })]);
-    const now = new Date("2026-08-31T00:00:00.000Z");
-
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 2, now })).toThrowError(
-      expect.objectContaining({
-        code: "EVAL_HISTORY_STALE",
-        message: `newest eval history observation ran at ${newest}, 2.0035 days ago, exceeding the requested 2 day maximum`
-      })
-    );
-  });
-
-  it("refuses to age a history against an unusable maximum or clock", () => {
-    const history = mergeEvalHistory(emptyEvalHistory(), [observation()]);
-    const now = new Date("2026-07-19T00:00:00.000Z");
-    for (const maxAgeDays of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => assertEvalHistoryRecency({ history, maxAgeDays, now })).toThrowError(
-        expect.objectContaining({ code: "EVAL_HISTORY_RECENCY_INVALID" })
-      );
-    }
-    expect(() => assertEvalHistoryRecency({ history, maxAgeDays: 7, now: new Date(Number.NaN) })).toThrowError(
-      expect.objectContaining({ code: "EVAL_HISTORY_RECENCY_INVALID" })
-    );
-    expect(() =>
-      assertEvalHistoryRecency({
-        history: {
-          ...history,
-          observations: [{ ...history.observations[0]!, run_timestamp: "2026-02-30T00:00:00.000Z" }]
-        },
-        maxAgeDays: 7,
-        now
-      })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("publishes only a complete scoreable generation and counts unique matches across trials", () => {

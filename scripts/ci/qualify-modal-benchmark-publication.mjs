@@ -185,7 +185,7 @@ function announceSkippedPublication(result) {
     ]);
     return;
   }
-  console.log(`::warning::eval history publication skipped: ${result.reason}; ${STALLED_HISTORY_NOTICE}`);
+  process.stdout.write(`::warning::eval history publication skipped: ${result.reason}; ${STALLED_HISTORY_NOTICE}\n`);
   appendStepSummary([
     "## Eval history publication skipped (unqualified producer attempt)",
     "",

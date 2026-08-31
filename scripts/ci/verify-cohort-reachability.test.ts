@@ -182,7 +182,32 @@ function verify(input: {
   }) as Promise<ReachabilityResult>;
 }
 
-describe("cohort reachability preflight", () => {
+interface WorkflowStep {
+  name?: string;
+  run?: string;
+  env?: Record<string, string>;
+  "continue-on-error"?: boolean;
+}
+
+const producerWorkflowPath = path.join(repoRoot, ".github", "workflows", "eval-benchmarks.yml");
+
+/** The steps of the producer job that pays for every Modal image build and sandbox. */
+function launchSteps(): WorkflowStep[] {
+  const workflow = parseYaml(fs.readFileSync(producerWorkflowPath, "utf8")) as {
+    jobs: Record<string, { steps: WorkflowStep[] } | undefined>;
+  };
+  const launch = workflow.jobs.launch;
+  if (launch === undefined) throw new Error(`${producerWorkflowPath} declares no launch job`);
+  return launch.steps;
+}
+
+function preflightStepScript(): string {
+  const script = launchSteps().find((step) => step.run?.includes("verify-cohort-reachability.mjs") === true)?.run;
+  if (script === undefined) throw new Error(`${producerWorkflowPath} declares no cohort reachability preflight step`);
+  return script;
+}
+
+describe("cohort reachability verdicts", () => {
   it("passes a cohort whose every target and submodule is anonymously reachable", async () => {
     const probe = fakeProbe({
       gitmodules: {
@@ -329,7 +354,9 @@ describe("cohort reachability preflight", () => {
     ]);
     expect(describeCohortReachability(result)).toContain(REVISION);
   });
+});
 
+describe("transient cohort reachability probes and credential redaction", () => {
   it("distinguishes a transient probe failure from a denial", async () => {
     const probe = fakeProbe({
       gitmodules: {
@@ -427,7 +454,9 @@ describe("cohort reachability preflight", () => {
     expect(classifyGitRemoteFailure(RESOLVE_FAILED)).toBe("transient");
     expect(classifyGitRemoteFailure("ssh: connect to host github.com port 22: Connection timed out")).toBe("transient");
   });
+});
 
+describe("cohort selection and manifest validation", () => {
   it("resolves every selector to the cohort it names", async () => {
     const cohortOf = (directory: string) =>
       JSON.parse(fs.readFileSync(path.join(repoRoot, "benchmarks", directory, "cohort.json"), "utf8")) as {
@@ -528,7 +557,9 @@ describe("cohort reachability preflight", () => {
       })
     ).rejects.toThrow(/probe must implement fetchText/u);
   });
+});
 
+describe("submodule url handling", () => {
   it("handles relative, scp-like, non-GitHub, and remote-helper submodule urls", async () => {
     const probe = fakeProbe({
       gitmodules: {
@@ -609,7 +640,9 @@ describe("cohort reachability preflight", () => {
     expect(classifySubmoduleUrl("file:///srv/git/r.git").probeable).toBe(false);
     expect(classifySubmoduleUrl("--upload-pack=touch").probeable).toBe(false);
   });
+});
 
+describe("anonymous probing", () => {
   it("probes with no credential at all, because the sandbox has none", () => {
     // The crux of this gate: `GITHUB_TOKEN`/`gh` in CI would read a private
     // dependency successfully and report the cohort as healthy.
@@ -662,7 +695,9 @@ describe("cohort reachability preflight", () => {
     // the only way to raise it is the token that would defeat this gate.
     expect(source).not.toContain("https://api.github.com");
   });
+});
 
+describe("cohort reachability entrypoint and workflow wiring", () => {
   it("exits non-zero from the entrypoint for an unusable invocation", () => {
     for (const args of [[], ["--lane"], ["--lane", "everything"], ["--cohort", "/nonexistent/cohort.json"]]) {
       const result = spawnSync(process.execPath, [scriptPath, ...args], { cwd: repoRoot, encoding: "utf8" });
@@ -678,23 +713,7 @@ describe("cohort reachability preflight", () => {
   });
 
   it("gates the producer workflow before any Modal spend, and stays out of the general CI gate", () => {
-    const workflowPath = path.join(repoRoot, ".github", "workflows", "eval-benchmarks.yml");
-    const workflowText = fs.readFileSync(workflowPath, "utf8");
-    const workflow = parseYaml(workflowText) as {
-      jobs: Record<
-        string,
-        {
-          steps: Array<{
-            name?: string;
-            run?: string;
-            uses?: string;
-            env?: Record<string, string>;
-            "continue-on-error"?: boolean;
-          }>;
-        }
-      >;
-    };
-    const steps = workflow.jobs.launch!.steps;
+    const steps = launchSteps();
     const indexOf = (name: string) => steps.findIndex((step) => step.name === name);
     const preflight = steps.findIndex((step) => step.run?.includes("verify-cohort-reachability.mjs") === true);
 
@@ -721,12 +740,7 @@ describe("cohort reachability preflight", () => {
   });
 
   it("blocks the workflow on a denial and only annotates an unproven cohort", () => {
-    const workflow = parseYaml(
-      fs.readFileSync(path.join(repoRoot, ".github", "workflows", "eval-benchmarks.yml"), "utf8")
-    ) as { jobs: Record<string, { steps: Array<{ run?: string }> }> };
-    const script = workflow.jobs.launch!.steps.find(
-      (step) => step.run?.includes("verify-cohort-reachability.mjs") === true
-    )?.run;
+    const script = preflightStepScript();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cohort-reachability-wiring-"));
     roots.push(root);
     fs.mkdirSync(path.join(root, "scripts", "ci"), { recursive: true });
@@ -739,7 +753,7 @@ describe("cohort reachability preflight", () => {
     const runStep = (exitCode: string) => {
       const summaryPath = path.join(root, `summary-${exitCode}.md`);
       fs.writeFileSync(summaryPath, "");
-      const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script!], {
+      const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
         cwd: root,
         encoding: "utf8",
         env: {

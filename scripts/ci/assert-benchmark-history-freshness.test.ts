@@ -45,6 +45,12 @@ interface Workflow {
   jobs: Record<string, { permissions?: Record<string, string>; env?: Record<string, string>; steps: WorkflowStep[] }>;
 }
 
+function requireJob(workflow: Workflow, jobId: string): Workflow["jobs"][string] {
+  const job = workflow.jobs[jobId];
+  if (job === undefined) throw new Error(`${workflowPath} declares no ${jobId} job`);
+  return job;
+}
+
 const roots: string[] = [];
 
 afterEach(() => {
@@ -300,7 +306,7 @@ describe("benchmark history freshness entrypoint", () => {
 describe("benchmark history freshness workflow", () => {
   const workflowText = fs.readFileSync(workflowPath, "utf8");
   const workflow = parseYaml(workflowText) as Workflow;
-  const job = workflow.jobs.assert_history_freshness!;
+  const job = requireJob(workflow, "assert_history_freshness");
 
   // The `runner` context exists in `steps.*.env`, `container.env` and
   // `services.env` only. A job-level `env:` that reads it either rejects the

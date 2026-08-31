@@ -1270,7 +1270,8 @@ it("leaves the collector's grammar the only judge of which failure diagnostics a
     }),
     []
   );
-  expect(JSON.parse(Buffer.from(payload!, "base64url").toString("utf8"))).toEqual([
+  if (payload === undefined) throw new Error("three reportable diagnostics emitted no line");
+  expect(JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))).toEqual([
     { code: "WORKFLOW_SUBMISSION_FAILED", message: "first" },
     { code: "EVAL_ROW_LAUNCH_FAILED", message: "second" },
     { code: "EVAL_TARGET_PATH_MISSING", message: "third" }

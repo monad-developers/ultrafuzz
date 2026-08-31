@@ -354,38 +354,8 @@ async function checkTarget(target, context) {
   }
   let gitmodules = raw.status === "found" ? (raw.body ?? "") : undefined;
   if (gitmodules === undefined) {
-    const remote = await attempt(context, () => context.probe.lsRemote(target.repository));
-    if (remote.status !== "reachable") {
-      return [
-        finding(
-          target,
-          undefined,
-          target.repository,
-          remote.status === "unreachable" ? "unreachable" : "unverified",
-          detail("cannot be cloned anonymously", remote.detail)
-        )
-      ];
-    }
-    // codeload rather than api.github.com: the REST API allows 60
-    // unauthenticated requests an hour per IP, which a 40-target cohort exhausts
-    // in two runs, and the only way to raise that ceiling is the token that
-    // would defeat this gate.
-    const revision = await attempt(context, () =>
-      context.probe.headStatus(
-        `https://codeload.github.com/${repository.owner}/${repository.name}/tar.gz/${target.revision}`
-      )
-    );
-    if (revision.status !== "found") {
-      return [
-        finding(
-          target,
-          undefined,
-          target.repository,
-          revision.status === "absent" ? "unreachable" : "unverified",
-          detail(`pins revision ${target.revision}, which is not anonymously resolvable`, revision.detail)
-        )
-      ];
-    }
+    const absence = await explainAbsentGitmodules(target, repository, context);
+    if (absence !== undefined) return [absence];
     gitmodules = "";
   }
   if (Buffer.byteLength(gitmodules, "utf8") > MAX_GITMODULES_BYTES) {
@@ -429,6 +399,44 @@ async function checkTarget(target, context) {
     }
   }
   return findings;
+}
+
+/**
+ * A 404 on the target's `.gitmodules` hides three different states: a
+ * repository no anonymous clone can read, a pinned revision that no longer
+ * resolves, and a revision that legitimately declares no submodule. Two further
+ * anonymous probes separate them. Returns the finding the first two earn, or
+ * undefined for the third.
+ */
+async function explainAbsentGitmodules(target, repository, context) {
+  const remote = await attempt(context, () => context.probe.lsRemote(target.repository));
+  if (remote.status !== "reachable") {
+    return finding(
+      target,
+      undefined,
+      target.repository,
+      remote.status === "unreachable" ? "unreachable" : "unverified",
+      detail("cannot be cloned anonymously", remote.detail)
+    );
+  }
+  // codeload rather than api.github.com: the REST API allows 60 unauthenticated
+  // requests an hour per IP, which a 40-target cohort exhausts in two runs, and
+  // the only way to raise that ceiling is the token that would defeat this gate.
+  const revision = await attempt(context, () =>
+    context.probe.headStatus(
+      `https://codeload.github.com/${repository.owner}/${repository.name}/tar.gz/${target.revision}`
+    )
+  );
+  if (revision.status !== "found") {
+    return finding(
+      target,
+      undefined,
+      target.repository,
+      revision.status === "absent" ? "unreachable" : "unverified",
+      detail(`pins revision ${target.revision}, which is not anonymously resolvable`, revision.detail)
+    );
+  }
+  return undefined;
 }
 
 /** Both cohort schemas pin `https://github.com/<owner>/<name>` exactly. */
@@ -566,10 +574,10 @@ async function main(args) {
   if (lane === undefined) throw usageError();
   const result = await verifyCohortReachability({ lane, ...(cohortPath === undefined ? {} : { cohortPath }) });
   const report = describeCohortReachability(result);
-  if (json) console.log(JSON.stringify(result));
-  else if (result.status === "reachable") console.log(report);
+  if (json) process.stdout.write(`${JSON.stringify(result)}\n`);
+  else if (result.status === "reachable") process.stdout.write(`${report}\n`);
   if (result.status === "reachable") return;
-  console.error(report);
+  process.stderr.write(`${report}\n`);
   process.exitCode = cohortReachabilityExitCode(result.status);
 }
 

@@ -154,7 +154,9 @@ function announceSkippedPublication(result) {
     (entry) =>
       `${entry.pair} (terminal_status=${entry.terminal_status}, category=${entry.category}, diagnostic_collection_status=${entry.diagnostic_collection_status})`
   );
-  console.log(`::warning::${result.reason}; incomplete pairs: ${details.join("; ")}; ${STALLED_HISTORY_NOTICE}`);
+  process.stdout.write(
+    `::warning::${result.reason}; incomplete pairs: ${details.join("; ")}; ${STALLED_HISTORY_NOTICE}\n`
+  );
   appendStepSummary([
     "## Eval history publication skipped (incomplete benchmark generation)",
     "",

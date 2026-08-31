@@ -862,7 +862,8 @@ describe("Modal result collection", () => {
           " 'https://github.com/aviggiano/console3/'"
       }
     ]);
-    expect(() => assertSanitizedModalCollectedFiles(workerLog(submoduleFailure!), context)).not.toThrow();
+    if (submoduleFailure === undefined) throw new Error("the submodule authentication failure emitted no line");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(submoduleFailure), context)).not.toThrow();
 
     // A byte-cut sanitizer that lands inside a multi-byte sequence decodes each orphaned byte to U+FFFD,
     // three bytes for one, so the emitted message could exceed the bound this predicate enforces -- and one
@@ -870,8 +871,8 @@ describe("Modal result collection", () => {
     for (const message of ["€".repeat(400), `${"ก".repeat(400)} tail`, "\u{1f600}".repeat(300)]) {
       const payload = workerDiagnosticLogPayload([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message }]);
       // Dropped rather than emitted means the bound above no longer holds on the decoded string.
-      expect(payload).toBeDefined();
-      expect(() => assertSanitizedModalCollectedFiles(workerLog(payload!), context)).not.toThrow();
+      if (payload === undefined) throw new Error("a bounded multi-byte message emitted no diagnostics line");
+      expect(() => assertSanitizedModalCollectedFiles(workerLog(payload), context)).not.toThrow();
     }
     const oneByteOver = Buffer.from(
       JSON.stringify([
@@ -893,7 +894,8 @@ describe("Modal result collection", () => {
         message: '"'.repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)
       }))
     );
-    expect(() => assertSanitizedModalCollectedFiles(workerLog(escaped!), context)).not.toThrow();
+    if (escaped === undefined) throw new Error("entries go before the line does, so a line is still emitted");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(escaped), context)).not.toThrow();
   });
 
   it("rejects the removed worker-status shape without retrying", async () => {

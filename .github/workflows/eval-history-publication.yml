@@ -1,6 +1,14 @@
 name: Publish Eval History
 
 on:
+  # scripts/ci/qualify-modal-benchmark-publication.mjs runs from a trusted main
+  # checkout and refuses any producer run whose head_repository is not this
+  # repository, whose head_branch is not the default branch, or whose event is
+  # not push/workflow_dispatch, so neither a fork nor a pull request reaches
+  # this workflow. Both jobs then execute only main's tooling, read the
+  # candidate tree as data, re-verify the candidate is still reachable from
+  # main, and mint the contents:write publisher token after that.
+  # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows:
       - Modal Eval Benchmarks

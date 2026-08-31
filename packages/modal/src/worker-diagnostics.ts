@@ -74,15 +74,48 @@ export function sanitizeWorkerDiagnosticMessage(
  * which the durable ledgers that compare whole objects for duplicate conflicts require.
  */
 function boundedDecodedBytes(bytes: Buffer, maxBytes: number, keep: "head" | "tail"): string {
-  const characters = [
-    ...(keep === "head" ? bytes.subarray(0, maxBytes) : bytes.subarray(bytes.length - maxBytes)).toString("utf8")
-  ];
-  let retainedBytes = characters.reduce((total, character) => total + Buffer.byteLength(character, "utf8"), 0);
-  while (retainedBytes > maxBytes) {
-    const dropped = keep === "head" ? characters.pop()! : characters.shift()!;
-    retainedBytes -= Buffer.byteLength(dropped, "utf8");
+  const decoded = (keep === "head" ? bytes.subarray(0, maxBytes) : bytes.subarray(bytes.length - maxBytes)).toString(
+    "utf8"
+  );
+  return keep === "head" ? boundedPrefix(decoded, maxBytes) : boundedSuffix(decoded, maxBytes);
+}
+
+/** The longest prefix of `text` ending on a code point boundary whose UTF-8 encoding fits `maxBytes`. */
+function boundedPrefix(text: string, maxBytes: number): string {
+  let retainedBytes = 0;
+  let end = 0;
+  while (end < text.length) {
+    const next = end + codePointUnits(text, end);
+    const codePointBytes = Buffer.byteLength(text.slice(end, next), "utf8");
+    if (retainedBytes + codePointBytes > maxBytes) break;
+    retainedBytes += codePointBytes;
+    end = next;
   }
-  return characters.join("");
+  return text.slice(0, end);
+}
+
+/** The longest suffix of `text` starting on a code point boundary whose UTF-8 encoding fits `maxBytes`. */
+function boundedSuffix(text: string, maxBytes: number): string {
+  let retainedBytes = Buffer.byteLength(text, "utf8");
+  let start = 0;
+  while (retainedBytes > maxBytes && start < text.length) {
+    const next = start + codePointUnits(text, start);
+    retainedBytes -= Buffer.byteLength(text.slice(start, next), "utf8");
+    start = next;
+  }
+  return text.slice(start);
+}
+
+/**
+ * UTF-16 code units the code point at `index` occupies.
+ *
+ * A cut has to land on a code point boundary: splitting a surrogate pair would leave a lone surrogate, which
+ * `Buffer.byteLength` charges three bytes for, so the byte accounting above would undercount its own output.
+ */
+function codePointUnits(text: string, index: number): number {
+  const lead = text.charCodeAt(index);
+  const trail = text.charCodeAt(index + 1);
+  return lead >= 0xd800 && lead <= 0xdbff && trail >= 0xdc00 && trail <= 0xdfff ? 2 : 1;
 }
 
 /**
@@ -192,7 +225,7 @@ export function childExitFailureCause(
   stderrTail: BoundedStderrTail,
   forbiddenSecretValues?: readonly string[]
 ): Error {
-  const prefix = `${label} exited ${exitCode}`;
+  const prefix = `${label} exited ${String(exitCode)}`;
   const detail = stderrTail.sanitized(
     forbiddenSecretValues,
     Math.max(0, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES - Buffer.byteLength(`${prefix}: `, "utf8"))

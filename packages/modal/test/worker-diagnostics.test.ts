@@ -69,7 +69,8 @@ it("drops a diagnostic the collected log grammar cannot carry, never the log its
       message: `reason ${index}`
     }))
   );
-  expect(JSON.parse(Buffer.from(capped!, "base64url").toString("utf8"))).toEqual([
+  if (capped === undefined) throw new Error("five reportable entries emitted no diagnostics line");
+  expect(JSON.parse(Buffer.from(capped, "base64url").toString("utf8"))).toEqual([
     { code: "WORKER_COMMAND_FAILED_0", message: "reason 0" },
     { code: "WORKER_COMMAND_FAILED_1", message: "reason 1" },
     { code: "WORKER_COMMAND_FAILED_2", message: "reason 2" }
@@ -83,8 +84,9 @@ it("drops a diagnostic the collected log grammar cannot carry, never the log its
       message: '"'.repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)
     }))
   );
-  expect(escaped!.length).toBeLessThanOrEqual(8_192);
-  expect((JSON.parse(Buffer.from(escaped!, "base64url").toString("utf8")) as unknown[]).length).toBeLessThan(3);
+  if (escaped === undefined) throw new Error("entries go before the line does, so a line is still emitted");
+  expect(escaped.length).toBeLessThanOrEqual(8_192);
+  expect((JSON.parse(Buffer.from(escaped, "base64url").toString("utf8")) as unknown[]).length).toBeLessThan(3);
 });
 
 it("carries a bounded redacted stderr tail into the cause of a child that exits non-zero", async () => {
@@ -234,13 +236,13 @@ it("carries a private worker child-exit reason into a line the collector keeps",
   expect(cause.message).toContain("references sync exited 128: fatal: could not read Username");
   expect(cause.message).toContain("<redacted>");
   expect(cause.message).not.toContain(secret);
-  expect(payload).toBeDefined();
+  if (payload === undefined) throw new Error("the child-exit reason emitted no diagnostics line");
   expect(() =>
     assertSanitizedModalCollectedFiles(
       {
         "worker.log":
           "2026-01-01T00:00:00.000Z worker-started\n" +
-          `2026-01-01T00:00:01.000Z eval-failure-diagnostics ${payload!}\n` +
+          `2026-01-01T00:00:01.000Z eval-failure-diagnostics ${payload}\n` +
           "2026-01-01T00:00:01.000Z operation-failed\n"
       },
       { generation: 1, attempt: 2 },
