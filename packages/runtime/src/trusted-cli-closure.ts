@@ -173,12 +173,6 @@ export function readTrustedCliClosureForEntrypoint(input: {
   return closure;
 }
 
-export function trustedCliClosurePackageRoot(closure: TrustedCliClosure, packageName: string): string {
-  const matches = closure.manifest.packages.filter((entry) => entry.name === packageName);
-  if (matches.length !== 1) throw new Error(`trusted CLI closure does not contain exactly one ${packageName} package`);
-  return path.join(closure.root, ...matches[0]!.snapshot_path.split("/"));
-}
-
 export function trustedCliClosuresRoot(layout: RunLayout): string {
   return safeClosuresRoot(layout);
 }

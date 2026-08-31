@@ -36,25 +36,6 @@ const reviewKindLabels: Record<string, string> = {
   "aggregate-test-files": "Test aggregation"
 };
 
-const internalDashboardTokens = [
-  "project-discovery",
-  "prepare-foundry-harness",
-  "discover-base-test",
-  "agent-attempt",
-  "consolidate",
-  "0kn0t-lens",
-  "certora-thinking-lens",
-  "aviggiano-lens",
-  "josselin-feist-lens",
-  "property-specification-fanin",
-  "encode-decode",
-  "expand-coverage",
-  "stateful-invariant-setup",
-  "stateful-invariant-handlers",
-  "stateful-invariant-coverage",
-  "kind:"
-];
-
 export function nodeCardEyebrow(data: NodeCardDisplayData): string | null {
   const eyebrow = nodeCardEyebrowLabel(data);
   return displayValueKey(eyebrow) === displayValueKey(data.label) ? null : eyebrow;
@@ -110,20 +91,6 @@ export function phaseGroupDetailLabel(memberCount: number, propertyCount?: numbe
   return details.join(" · ");
 }
 
-export function visibleNodeCardText(data: NodeCardDisplayData): string {
-  return uniqueDisplayValues([
-    nodeCardEyebrow(data),
-    data.label,
-    data.strategy?.display_name,
-    data.strategy ? strategyCategoryLabel(data.strategy.category) : undefined
-  ]).join(" ");
-}
-
-export function hasInternalDashboardToken(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return internalDashboardTokens.some((token) => normalized.includes(token));
-}
-
 function taskCountLabel(value: number): string {
   return `${formatNumber(value)} ${value === 1 ? "task" : "tasks"}`;
 }
@@ -160,19 +127,4 @@ function isPropertyLensKind(value: string): boolean {
     value.startsWith("property-specification lens") ||
     (value.startsWith("property-specification-") && value !== "property-specification-fanin")
   );
-}
-
-function uniqueDisplayValues(values: Array<string | null | undefined>): string[] {
-  const seen = new Set<string>();
-  return values.filter((value): value is string => {
-    if (!value) {
-      return false;
-    }
-    const key = value.toLowerCase();
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
 }

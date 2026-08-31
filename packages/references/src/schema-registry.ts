@@ -9,9 +9,7 @@ import {
   DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
-  runValidator,
   schemaRegistryBundleDigest,
-  type JsonSchemaValidationResult,
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 
@@ -110,12 +108,6 @@ export function referenceSchemaEntry(schemaId: string): SchemaRegistryEntry {
   const entry = referenceSchemaRegistry().find((candidate) => candidate.id === schemaId);
   if (entry === undefined) throw new Error(`registered reference schema is unavailable: ${schemaId}`);
   return entry;
-}
-
-export function validateReferenceJsonSchema(schemaId: string, value: unknown): JsonSchemaValidationResult {
-  const validator = compileRegistry(referenceSchemaRegistry()).getSchema(schemaId);
-  if (validator === undefined) throw new Error(`registered reference schema is unavailable: ${schemaId}`);
-  return runValidator(validator, value);
 }
 
 function compileRegistry(registry: readonly SchemaRegistryEntry[]): ReturnType<typeof createStrictAjv> {

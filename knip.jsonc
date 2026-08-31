@@ -1,0 +1,28 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": { "entry": ["scripts/validate-audit-profile-package.mjs"] },
+    "packages/dashboard": {
+      "entry": ["frontend/public/theme-bootstrap.js"]
+    },
+    "packages/evals": {
+      "entry": ["src/index.ts", "test/append-eval-run-record-child.ts"]
+    },
+    "packages/evmbench": {
+      "entry": ["src/{index,cli,adapter-cli,update-lock}.ts"]
+    },
+    "packages/modal": {
+      "entry": [
+        "src/index.ts",
+        "scripts/prepare-smithers-seed.mjs",
+        "src/worker.ts",
+        "test/modal-download-helper-fixture.mjs"
+      ]
+    },
+    "packages/runtime": {
+      "entry": ["src/templates/**/*.tsx"],
+      "ignoreDependencies": ["@moonshot-ai/kimi-code", "react"],
+      "ignoreUnresolved": ["^__ULTRAFUZZ_WORKFLOW_IMPORT__$", "^\\.\\./agents/index\\.ts$"]
+    }
+  }
+}

@@ -25,7 +25,6 @@
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
-    "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
     "yaml": "^2.8.0"
   },

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
-import type { TemplateValidation } from "./templateValidation";
 import { dashboardRequest, parseDashboardHttpResponse, throwDashboardHttpError } from "./wireContracts";
 
 export const promptAutosaveDelayMs = 1500;
@@ -254,12 +253,3 @@ export function useManagedPromptEditor({
     setPromptDraft
   };
 }
-
-export type ManagedPromptEditorState = {
-  prompt: ManagedPromptDetail | null;
-  promptDraft: string;
-  promptError: string;
-  promptSaving: boolean;
-  promptTemplateValidation: TemplateValidation;
-  setPromptDraft: (value: string) => void;
-};

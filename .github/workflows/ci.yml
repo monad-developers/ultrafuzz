@@ -29,6 +29,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -61,8 +64,19 @@ jobs:
       - name: Lint
         run: pnpm -w lint
 
+      - name: Find dead code and dependencies
+        run: pnpm -w knip
+
       - name: Build
         run: pnpm -w build
+
+      - name: Lint changed code strictly
+        env:
+          ESLINT_PLUGIN_DIFF_COMMIT: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+        run: pnpm -w lint:strict:ci
+
+      - name: Enforce dashboard bundle budgets
+        run: pnpm -w size
 
       - name: Run PR runtime smoke tests
         if: github.event_name == 'pull_request'
@@ -71,6 +85,39 @@ jobs:
       - name: Run PR CLI status contract smoke tests
         if: github.event_name == 'pull_request'
         run: pnpm --filter @ultrafuzz/cli test:pr-smoke:prebuilt
+
+  external-static-analysis:
+    name: External static analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Super-Linter
+        uses: super-linter/super-linter/slim@4ce20838b8ab83717e78138c5b3a1407148e0918 # v8.7.0
+        env:
+          ENABLE_GITHUB_PULL_REQUEST_SUMMARY_COMMENT: false
+          MULTI_STATUS: false
+          VALIDATE_ALL_CODEBASE: false
+          VALIDATE_BASH: true
+          VALIDATE_BASH_EXEC: true
+          VALIDATE_CSS: true
+          VALIDATE_DOCKERFILE_HADOLINT: true
+          VALIDATE_ENV: true
+          VALIDATE_GITHUB_ACTIONS: true
+          VALIDATE_GITHUB_ACTIONS_ZIZMOR: true
+          VALIDATE_GITLEAKS: true
+          VALIDATE_HTML: true
+          VALIDATE_JSON: true
+          VALIDATE_JSONC: true
+          VALIDATE_MARKDOWN: true
+          VALIDATE_SHELL_SHFMT: true
+          VALIDATE_YAML: true
 
   # The lane table lives in scripts/ci/release-validation-lanes.mjs so the
   # pull-request policy is a tested artifact instead of an invisible `if:`.
@@ -86,6 +133,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Select release validation lanes
         id: select
@@ -98,6 +147,7 @@ jobs:
     name: Full release validation (${{ matrix.description }})
     needs:
       - draft-and-build-gates
+      - external-static-analysis
       - release-validation-lanes
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -113,6 +163,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -166,6 +218,7 @@ jobs:
   release-gates:
     needs:
       - draft-and-build-gates
+      - external-static-analysis
       - release-validation-lanes
       - release-validation
     if: always()
@@ -177,6 +230,10 @@ jobs:
         if: needs.draft-and-build-gates.result != 'success'
         run: exit 1
 
+      - name: Require external static analysis
+        if: needs.external-static-analysis.result != 'success'
+        run: exit 1
+
       - name: Require the release validation lane selection
         if: needs.release-validation-lanes.result != 'success'
         run: exit 1
@@ -184,6 +241,8 @@ jobs:
       - name: Check out repository
         if: github.event_name != 'pull_request'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Set up pnpm
         if: github.event_name != 'pull_request'
