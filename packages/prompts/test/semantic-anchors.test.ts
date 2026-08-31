@@ -1409,6 +1409,44 @@ describe("prompt semantic anchors", () => {
     expect(markdown).not.toContain("when the finding has no dedupe key");
   });
 
+  it("binds every bounded disposition to its classification in the report prompt", () => {
+    const markdown = prompt("review/final-report.md");
+    const flatMarkdown = normalized(markdown);
+
+    // The bounded gate derives the disposition from the row's own enriched
+    // classification, so a `true-positive` sitting in `non_production_outcomes`
+    // fails the report. Only `issues` is scored, so licensing that pairing
+    // would let a report assert a credible production bug from an unscored
+    // array (#1026). A finding that must not be promoted is reclassified.
+    expect(flatMarkdown).toContain("derive `final_disposition` from the chosen `triage_classification` alone");
+    expect(flatMarkdown).toContain(
+      "`true-positive` is `promoted`, `false-positive` is `dropped`, and every other classification is `non-production`"
+    );
+    expect(flatMarkdown).toContain("Never pair a `true-positive` with a non-promoted disposition");
+    expect(flatMarkdown).toContain(
+      "When a finding must not be promoted, choose any other classification from the list above"
+    );
+    expect(flatMarkdown).toContain("Omit `canonical_severity` from every non-promoted record");
+    expect(flatMarkdown).toContain(
+      "copy the enriched `triage_classification` onto the report row itself as well as into that row's `lifecycle` object"
+    );
+    expect(flatMarkdown).toContain("in every `issues` row and every `non_production_outcomes` row");
+    expect(flatMarkdown).toContain(
+      "emit `non_production_outcomes` in the exact relative order of the authenticated deduped findings"
+    );
+    expect(flatMarkdown).toContain("Only `issues` are re-sorted High, Medium, then Low");
+    // The trusted-role boundary reaches the same failing state on its own when
+    // it names a report array instead of a classification.
+    expect(flatMarkdown).toContain(
+      "Classify them `defensive-hardening`, or `spec-gated` when an explicit product decision governs the behavior"
+    );
+    expect(flatMarkdown).toContain("Direct misuse of a trusted role is a `true-positive` at Low severity");
+    expect(flatMarkdown).toContain("This boundary never selects a report array directly; it selects a classification");
+    expect(flatMarkdown).not.toContain("every reportability and evidence gate in this prompt");
+    expect(flatMarkdown).not.toContain("Reckless mistakes by a trusted administrator are non-production outcomes");
+    expect(flatMarkdown).not.toContain("`non-production` for every other actionable class");
+  });
+
   it("keeps findings semantics beside the schema-owned JSON shape", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/findings.mdx", import.meta.url)

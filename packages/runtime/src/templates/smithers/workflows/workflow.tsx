@@ -2897,6 +2897,18 @@ function rememberFinalReportAgentExecutionAuthority(
   finalReportAgentExecutionAuthority.set(task.attemptId, execution);
 }
 
+/**
+ * How long `smithers node` may take to hand back the report-producer authority.
+ *
+ * This runs on the finalizer path of a multi-rung chain, concurrently with every other agent's
+ * build work, and a CLI start that is well under a second on an idle box stretches by more than an
+ * order of magnitude once a dozen of them contend for the same cores -- the contention that made a
+ * 15 s budget fatal to the validator preflight in #1026. Bounded apart from that preflight because
+ * this call also serializes the node's whole attempt history (`--full-output`, up to 64 MiB), and
+ * still an order of magnitude under this lane's 1800 s `node_timeout_seconds`.
+ */
+const SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS = 180_000;
+
 function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
   const current = finalReportAgentExecutionAuthority.get(task.attemptId);
   if (current !== undefined) return current;
@@ -2905,16 +2917,23 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
   // inner worker to the controller's distinct Smithers run ID.
   if (task.agentChain.length === 1) return finalReportAgentExecution(task, 0);
   let stdout: string;
+  const startedAt = Date.now();
   try {
     stdout = execFileSync(
       "smithers",
       ["node", task.id, "-r", task.smithersRunId, "--format", "json", "--full-output"],
-      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 15_000, windowsHide: true }
+      {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS,
+        windowsHide: true
+      }
     );
   } catch (error) {
-    throw new Error("artifact-contract failure: Smithers report-producer authority is unavailable", {
-      cause: error
-    });
+    throw new Error(
+      `artifact-contract failure: Smithers report-producer authority is unavailable after ${Date.now() - startedAt}ms against a ${SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS}ms budget`,
+      { cause: error }
+    );
   }
   let detail: unknown;
   try {
@@ -3777,12 +3796,26 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
   }
 }
 
+/**
+ * How long the per-node validator preflight may spend inside the Ultrafuzz CLI.
+ *
+ * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
+ * first on PATH, so every node preparation pays the CLI's own cold start: ~2.5 s on an idle box,
+ * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
+ * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
+ * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
+ * and a tenth of this lane's 1800 s `node_timeout_seconds`, so a genuine hang still dies well
+ * inside the attempt.
+ */
+const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
+
 function preflightJsonValidator(schemaDirectory: string): void {
   const findings = artifactSchemaRegistry().find(
     (entry: { filename: string }) => entry.filename === "findings.schema.json"
   );
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
   let stdout: string;
+  const startedAt = Date.now();
   try {
     stdout = execFileSync(
       "ultrafuzz",
@@ -3795,11 +3828,11 @@ function preflightJsonValidator(schemaDirectory: string): void {
         artifactValidatorSmokeFixturePath(),
         "--json"
       ],
-      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 15_000, windowsHide: true }
+      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS, windowsHide: true }
     );
   } catch (error) {
     throw new Error(
-      `artifact-contract failure: JSON validator preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget (only the launcher is signalled on timeout, and its grandchild CLI holds the inherited pipes open, so elapsed can overrun the budget): ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
   }

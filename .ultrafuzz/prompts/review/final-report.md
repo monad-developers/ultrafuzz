@@ -33,12 +33,21 @@ In bounded classification mode:
   `false-positive`, `undetermined`, `incomplete-spec`, `harness-defect`,
   `repair-candidate`, `spec-gated`, or `defensive-hardening`;
 - set a concise source-backed `triage_reason` on every record;
-- set `final_disposition` to `promoted` only for a `true-positive` that passes
-  every reportability and evidence gate in this prompt, to `dropped` for a
-  `false-positive`, and to `non-production` for every other actionable class;
+- derive `final_disposition` from the chosen `triage_classification` alone:
+  `true-positive` is `promoted`, `false-positive` is `dropped`, and every other
+  classification is `non-production`. Never pair a `true-positive` with a
+  non-promoted disposition. When a finding must not be promoted, choose any
+  other classification from the list above, such as `undetermined`,
+  `spec-gated`, or `defensive-hardening`, and let this mapping demote it;
 - set a concise `demotion_reason` for every `non-production` or `dropped`
   record, and set `canonical_severity` after applying the matrix to every
-  promoted record;
+  promoted record. Omit `canonical_severity` from every non-promoted record;
+- copy the enriched `triage_classification` onto the report row itself as well
+  as into that row's `lifecycle` object, in every `issues` row and every
+  `non_production_outcomes` row, and keep the two values identical;
+- emit `non_production_outcomes` in the exact relative order of the
+  authenticated deduped findings. Only `issues` are re-sorted High, Medium,
+  then Low;
 - for every promoted finding, author source-backed `impact`, `likelihood`, and
   their rationales, compute `severity` from the matrix, and set a concise
   `severity_rationale`; and
@@ -245,15 +254,27 @@ Use these risk boundaries before applying the matrix:
 
 Apply this trusted-role boundary explicitly:
 
-- Reckless mistakes by a trusted administrator are non-production outcomes.
-- Direct misuse of a trusted role, and code defects reachable only after an
-  administrator makes a mistake, are Low.
+- Reckless mistakes by a trusted administrator, and code defects reachable only
+  after an administrator makes such a mistake, are not production bugs.
+  Classify them `defensive-hardening`, or `spec-gated` when an explicit product
+  decision governs the behavior, and let the classification mapping set their
+  disposition. Do not author a severity for them.
+- Direct misuse of a trusted role is a `true-positive` at Low severity, and a
+  `true-positive` is promoted.
 - A privileged function used under reasonable, intended assumptions can be
   Medium only when it exposes a genuine protocol bug. Because a trusted role is
   required, assign Low likelihood, so even High impact maps to Medium.
 - Privilege escalation is assessed normally from its impact and likelihood.
 - High severity requires a path that does not depend solely on an already
   trusted role choosing, supplying, or executing the harmful action.
+
+The first bullet decides first. When an administrator mistake is anywhere in
+the required path, that bullet governs even if a severity bullet below it would
+otherwise apply, and the finding carries no severity. A severity bullet applies
+only to a finding the first bullet leaves as a `true-positive`, and such a
+finding is promoted into `issues`. This boundary never selects a report array
+directly; it selects a classification, and the classification mapping decides
+the disposition and the array.
 
 Apply this Impact x Likelihood matrix before publishing any production issue:
 

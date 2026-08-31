@@ -1,0 +1,17 @@
+# Super-Linter lints only changed files but lints each changed file in full, so
+# editing a file anywhere drags its existing fixtures into this scan.
+#
+# The redaction and publication gates are tested with vendor-format credentials
+# that must look real enough for the detectors under test to fire. Allowlisting
+# the exact synthetic literals keeps those tests linting cleanly while any other
+# value matching the same rules still fails the scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic vendor-format credentials used as secret-detection fixtures"
+regexes = [
+  '''ghp_AbCdEf1234567890AbCdEf1234567890AbCd''',
+  '''gho_AbCdEf1234567890AbCdEf1234567890AbCd'''
+]
