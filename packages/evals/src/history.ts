@@ -47,6 +47,10 @@ export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.o
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
 const MAX_EVAL_HISTORY_BYTES = 64 * 1024 * 1024;
+const MILLISECONDS_PER_DAY = 86_400_000;
+// The rendered age must carry more precision than the rendered maximum, so an age
+// barely over the budget cannot print as the budget itself.
+const EVAL_HISTORY_AGE_FRACTION_DIGITS = 4;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = BenchmarkLaneName;
@@ -575,6 +579,53 @@ function assertCompletenessValue(value: number | null, completeness: EvalHistory
   }
   if (value !== null || completeness.reasons.length === 0) {
     throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be null with at least one reason when unavailable`);
+  }
+}
+
+export function assertEvalHistoryRecency(input: { history: EvalHistory; maxAgeDays: number; now: Date }): void {
+  if (!Number.isFinite(input.maxAgeDays) || input.maxAgeDays <= 0) {
+    throw new EvalError("EVAL_HISTORY_RECENCY_INVALID", "maximum eval history age must be a positive number of days", {
+      max_age_days: input.maxAgeDays
+    });
+  }
+  const now = input.now.getTime();
+  if (!Number.isFinite(now)) {
+    throw new EvalError("EVAL_HISTORY_RECENCY_INVALID", "maximum eval history age requires a valid current instant");
+  }
+  let newest: { timestamp: string; milliseconds: number } | undefined;
+  for (const observation of input.history.observations) {
+    if (!isValidTimestamp(observation.run_timestamp)) {
+      throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid run timestamp`);
+    }
+    const milliseconds = Date.parse(observation.run_timestamp);
+    if (newest === undefined || milliseconds > newest.milliseconds) {
+      newest = { timestamp: observation.run_timestamp, milliseconds };
+    }
+  }
+  if (newest === undefined) {
+    throw new EvalError(
+      "EVAL_HISTORY_EMPTY",
+      `eval history has no observation to age against the requested ${format(input.maxAgeDays)} day maximum`,
+      { max_age_days: input.maxAgeDays }
+    );
+  }
+  // A future-dated observation would otherwise yield a negative age that passes every
+  // maximum, so one bad producer clock would silence this assertion permanently.
+  if (newest.milliseconds > now) {
+    const nowTimestamp = new Date(now).toISOString();
+    throw new EvalError(
+      "EVAL_HISTORY_FUTURE_DATED",
+      `newest eval history observation ran at ${newest.timestamp}, which is in the future at ${nowTimestamp}, so its age cannot be measured against the requested ${format(input.maxAgeDays)} day maximum`,
+      { newest_run_timestamp: newest.timestamp, now: nowTimestamp, max_age_days: input.maxAgeDays }
+    );
+  }
+  const ageDays = (now - newest.milliseconds) / MILLISECONDS_PER_DAY;
+  if (ageDays > input.maxAgeDays) {
+    throw new EvalError(
+      "EVAL_HISTORY_STALE",
+      `newest eval history observation ran at ${newest.timestamp}, ${format(ageDays, EVAL_HISTORY_AGE_FRACTION_DIGITS)} days ago, exceeding the requested ${format(input.maxAgeDays)} day maximum`,
+      { newest_run_timestamp: newest.timestamp, age_days: ageDays, max_age_days: input.maxAgeDays }
+    );
   }
 }
 
@@ -2771,8 +2822,8 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
-function format(value: number): string {
-  const rounded = Number(value.toFixed(2));
+function format(value: number, fractionDigits = 2): string {
+  const rounded = Number(value.toFixed(fractionDigits));
   return Object.is(rounded, -0) ? "0" : String(rounded);
 }
 
