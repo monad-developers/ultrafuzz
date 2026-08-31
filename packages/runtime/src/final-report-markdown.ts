@@ -200,9 +200,7 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   }
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
   const proseViolation = finalReportProseDirectiveViolation(prose);
-  if (proseViolation !== undefined) {
-    return proseViolation;
-  }
+  if (proseViolation !== undefined) return proseViolation;
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
   const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
@@ -240,43 +238,25 @@ function finalReportProseDirectiveViolation(prose: string): string | undefined {
   // Critical is not a supported report severity, but the word remains valid in explanatory prose
   // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
   // rewriting or discarding the validated finding text.
-  if (/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu.test(prose)) {
-    return "contains the unsupported Critical severity";
-  }
-  if (/(?:^|\n)#### Sources\s*$/imu.test(prose)) {
-    return "contains a legacy Sources section";
-  }
-  if (/\*\*Source (?:Node|Property) Id\*\*/iu.test(prose)) {
-    return "contains a legacy source identifier field";
-  }
-  if (/(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose)) {
-    return "contains a legacy numbered-item field";
-  }
-  if (/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose)) {
-    return "contains a legacy report section";
-  }
-  if (/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu.test(prose)) {
-    return "contains a legacy issue subsection";
-  }
-  if (
-    /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu.test(
-      prose
-    )
-  ) {
-    return "contains legacy run metadata";
-  }
-  if (/<[A-Za-z][^>]*>/u.test(prose)) {
-    return "contains raw HTML outside fenced code";
-  }
-  if (/!\[[^\]]*\]\(/u.test(prose)) {
-    return "contains an embedded image outside fenced code";
-  }
-  if (
-    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu.test(prose)
-  ) {
-    return "contains a disallowed Markdown link outside fenced code";
-  }
-  return undefined;
+  const forbiddenPatterns: ReadonlyArray<readonly [RegExp, string]> = [
+    [/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu, "contains the unsupported Critical severity"],
+    [/(?:^|\n)#### Sources\s*$/imu, "contains a legacy Sources section"],
+    [/\*\*Source (?:Node|Property) Id\*\*/iu, "contains a legacy source identifier field"],
+    [/(?:^|\n)- \*\*Item \d+\*\*/imu, "contains a legacy numbered-item field"],
+    [/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu, "contains a legacy report section"],
+    [/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu, "contains a legacy issue subsection"],
+    [
+      /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu,
+      "contains legacy run metadata"
+    ],
+    [/<[A-Za-z][^>]*>/u, "contains raw HTML outside fenced code"],
+    [/!\[[^\]]*\]\(/u, "contains an embedded image outside fenced code"],
+    [
+      /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu,
+      "contains a disallowed Markdown link outside fenced code"
+    ]
+  ];
+  return forbiddenPatterns.find(([pattern]) => pattern.test(prose))?.[1];
 }
 
 function validateReport(report: unknown): JsonRecord {

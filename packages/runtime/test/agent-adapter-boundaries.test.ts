@@ -132,18 +132,20 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "openrouter.tsx": {
-    classifiedSourceSha256: "d8c57ddf7ed66f24d969bddc090f9e96bc87ce0796250d5c45349f3a51f8b9fe",
-    responsibilities: ["argv-construction", "output-interpretation", "session-handling"],
+    classifiedSourceSha256: "2a33857f10cc683919925234009a09e91799c6f1441c2d2f96bfaabc218faf4a",
+    responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
+      "https://github.com/monad-developers/ultrafuzz/issues/1006",
       "https://github.com/monad-developers/ultrafuzz/issues/972",
       "https://github.com/smithersai/smithers/issues/1622",
       "https://github.com/smithersai/smithers/issues/1625"
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "6de012b3c257232df86a346b1076feed2488bb3be084cade7cce2b7769be8854",
-    responsibilities: ["argv-construction", "output-interpretation"],
+    classifiedSourceSha256: "da8b929f54f4db4af3c973b73699ab69d189556726b9aeb34e8b31aaaf6211c4",
+    responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
+      "https://github.com/monad-developers/ultrafuzz/issues/1006",
       "https://github.com/monad-developers/ultrafuzz/issues/895",
       "https://github.com/smithersai/smithers/issues/1629"
     ]
@@ -217,19 +219,20 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489"
   },
   "openrouter.tsx": {
-    maxLines: 1_325,
-    maxSyntaxNodes: 7_049,
+    // Raised after the accounting review for cumulative response aggregation,
+    // retry/failure usage, and adapter-recorded cost preservation (#1006).
+    maxLines: 1_725,
+    maxSyntaxNodes: 8_925,
     purpose: "adapter",
-    sourceSha256: "d8c57ddf7ed66f24d969bddc090f9e96bc87ce0796250d5c45349f3a51f8b9fe"
+    sourceSha256: "2a33857f10cc683919925234009a09e91799c6f1441c2d2f96bfaabc218faf4a"
   },
   "pi.tsx": {
-    // Raised for Pi's `max` thinking level and the terminal error/aborted
-    // completion mapping, which replaced the terminal-line predicate with a
-    // state reader that can fail the completion.
-    maxLines: 225,
-    maxSyntaxNodes: 1_300,
+    // Raised for cumulative per-response usage, session-aware progress, and
+    // adapter-recorded cost preservation in addition to terminal mapping.
+    maxLines: 475,
+    maxSyntaxNodes: 2_625,
     purpose: "adapter",
-    sourceSha256: "6de012b3c257232df86a346b1076feed2488bb3be084cade7cce2b7769be8854"
+    sourceSha256: "da8b929f54f4db4af3c973b73699ab69d189556726b9aeb34e8b31aaaf6211c4"
   },
   "provider-home.tsx": {
     maxLines: 75,

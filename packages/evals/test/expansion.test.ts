@@ -191,7 +191,7 @@ function goalPlanGraph(): PlannedGraphDocument {
  */
 function usageLedger(
   runRoot: string,
-  entries: Array<{ nodeId: string; tokens: number }>,
+  entries: Array<{ nodeId: string; tokens: number; iteration?: number; attempt?: number }>,
   options: { priced?: boolean } = {}
 ): void {
   const lines = entries.map((entry, index) =>
@@ -204,8 +204,8 @@ function usageLedger(
           sourceEventSequence: index,
           observedTimestampMs: Date.parse("2026-07-09T00:00:03.000Z"),
           nodeId: entry.nodeId,
-          iteration: 0,
-          attempt: 1,
+          iteration: entry.iteration ?? 0,
+          attempt: entry.attempt ?? 1,
           usage: {
             model: `test-model-${index}`,
             agent: "CodexAgent",
@@ -253,13 +253,22 @@ function malformedUsageLedgerWithoutNodeId(runRoot: string, entries: Array<{ nod
 
 function writePricingMetadata(
   runRoot: string,
-  entries: Array<{ nodeId: string; tokens: number }>,
+  entries: Array<{ nodeId: string; tokens: number; iteration?: number; attempt?: number }>,
   priced: boolean
 ): void {
   const workflowRunId = "ultrafuzz-expansion-run";
-  const totalTokens = entries.reduce((total, entry) => total + entry.tokens, 0);
+  const latestByAttempt = new Map<string, { entry: (typeof entries)[number]; index: number }>();
+  for (const [index, entry] of entries.entries()) {
+    latestByAttempt.set(JSON.stringify([workflowRunId, entry.nodeId, entry.iteration ?? 0, entry.attempt ?? 1]), {
+      entry,
+      index
+    });
+  }
+  const accountedEntries = [...latestByAttempt.values()].sort((left, right) => left.index - right.index);
+  const totalTokens = accountedEntries.reduce((total, { entry }) => total + entry.tokens, 0);
   const totalCost = totalTokens / 1_000_000;
   const models = entries.map((_, index) => `test-model-${index}`);
+  const accountedModels = accountedEntries.map(({ index }) => `test-model-${index}`);
   const summary: RunAccountingSummary = {
     uncached_input_tokens: totalTokens,
     input_tokens: totalTokens,
@@ -286,10 +295,10 @@ function writePricingMetadata(
     pricing_incomplete_reasons: priced ? [] : [{ code: "model-pricing-unavailable" }],
     partial_pricing: !priced,
     cache_read_pricing_estimated: false,
-    event_count: entries.length,
-    priced_event_count: priced ? entries.length : 0,
-    unpriced_event_count: priced ? 0 : entries.length,
-    models,
+    event_count: accountedEntries.length,
+    priced_event_count: priced ? accountedEntries.length : 0,
+    unpriced_event_count: priced ? 0 : accountedEntries.length,
+    models: accountedModels,
     agents: ["CodexAgent"]
   };
   const segment = {
@@ -297,7 +306,11 @@ function writePricingMetadata(
     control_generation: "0".repeat(64),
     workflow_run_id: workflowRunId,
     source_event_sequences: entries.map((_, index) => index),
-    attempts: entries.map((entry) => ({ node_id: entry.nodeId, iteration: 0, attempt: 1 }))
+    attempts: accountedEntries.map(({ entry }) => ({
+      node_id: entry.nodeId,
+      iteration: entry.iteration ?? 0,
+      attempt: entry.attempt ?? 1
+    }))
   };
   const metadata: RunMetadataDocument = {
     schema_version: "ultrafuzz.run-metadata.v2",
@@ -321,10 +334,10 @@ function writePricingMetadata(
       control_generation: "0".repeat(64),
       workflow_link_id: "00000000-0000-4000-8000-000000000001",
       execution_snapshot_path: "smithers/execution-snapshots/current",
-      task_node_ids: entries.map((entry) => entry.nodeId)
+      task_node_ids: [...new Set(entries.map((entry) => entry.nodeId))]
     },
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: workflowRunId,
       current: structuredClone(segment),
@@ -538,6 +551,59 @@ describe("eval run expansion", () => {
     expect(lanes[2]?.wall_time_seconds).toBe(4);
     expect(lanes.every((lane) => lane.cost_evidence.status === "complete")).toBe(true);
     expect(observed.lane_cost_evidence).toEqual({ status: "complete", reason: null });
+  });
+
+  it("counts only the latest cumulative usage snapshot for each lane attempt", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-cumulative-usage-"));
+    const state = runState({
+      "goal-plan": node("goal-plan"),
+      "dynamic-threat-goals-aaaa": node("dynamic-threat-goals-aaaa", {
+        provenance: { producer_node_id: `dynamic:threat:${THREAT_ID}` }
+      })
+    });
+    writeGoalPlanRun({ runRoot, state });
+    usageLedger(runRoot, [
+      { nodeId: "dynamic-threat-goals-aaaa", tokens: 400, attempt: 1 },
+      { nodeId: "dynamic-threat-goals-aaaa", tokens: 1_200, attempt: 1 },
+      { nodeId: "dynamic-threat-goals-aaaa", tokens: 300, attempt: 2 }
+    ]);
+
+    const threatLane = summarizeEvalTerminal(record(runRoot)).expansion.goal_lanes?.[0];
+    expect(threatLane?.total_tokens).toBe(1_500);
+    expect(threatLane?.cost_usd).toBeCloseTo(0.0015);
+    expect(threatLane?.cost_evidence).toEqual({ status: "complete", reason: null });
+  });
+
+  it("never applies a source-run cumulative cache ratio to current-run lane usage", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-inherited-cache-ratio-"));
+    const state = runState({
+      "goal-plan": node("goal-plan"),
+      "dynamic-threat-goals-aaaa": node("dynamic-threat-goals-aaaa", {
+        provenance: { producer_node_id: `dynamic:threat:${THREAT_ID}` }
+      })
+    });
+    writeGoalPlanRun({ runRoot, state });
+    usageLedger(runRoot, [{ nodeId: "dynamic-threat-goals-aaaa", tokens: 100 }]);
+
+    const usagePath = path.join(runRoot, "usage.jsonl");
+    const usageEntry = JSON.parse(fs.readFileSync(usagePath, "utf8")) as {
+      usage: Record<string, unknown>;
+    };
+    delete usageEntry.usage.cache_read_tokens;
+    writeFileSync(usagePath, `${JSON.stringify(usageEntry)}\n`, "utf8");
+
+    const metadataPath = path.join(runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as RunMetadataDocument;
+    const accounting = metadata.accounting;
+    if (accounting === undefined) throw new Error("fixture accounting is unavailable");
+    accounting.cumulative.cache_read_pricing_estimated = true;
+    accounting.cumulative.cache_read_ratio_used = 0.9;
+    writeRunMetadataDocument(metadataPath, metadata);
+
+    const threatLane = summarizeEvalTerminal(record(runRoot)).expansion.goal_lanes?.[0];
+    expect(threatLane?.total_tokens).toBe(100);
+    expect(threatLane?.cost_usd).toBeNull();
+    expect(threatLane?.cost_evidence).toEqual({ status: "partial", reason: "usage-incomplete" });
   });
 
   it("rejects a usage row missing the current mandatory node identity", () => {

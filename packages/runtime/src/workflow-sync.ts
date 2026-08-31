@@ -184,6 +184,7 @@ interface AccountingSummary {
   estimated_spend: string;
   estimated_spend_usd?: number;
   component_costs_usd: UsageComponentCosts;
+  provided_cost_usd?: number;
   usage_complete: boolean;
   usage_incomplete_reasons: UsageCompletenessMarker[];
   pricing_complete: boolean;
@@ -239,6 +240,7 @@ interface PreparedUsageLedgerAppend {
 }
 
 interface AccountingTotals {
+  uncachedInputTokens: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -247,6 +249,7 @@ interface AccountingTotals {
   totalTokens: number;
   billableTokens: number;
   estimatedSpendUsd?: number;
+  providedCostUsd?: number;
   componentCostsUsd: UsageComponentCosts;
   usageIncompleteReasons: ComponentUsageIncompleteReason[];
   pricingIncompleteReasons: PricingIncompleteReason[];
@@ -265,7 +268,7 @@ export type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "
 type UsageComponentCosts = Record<UsageComponent, number>;
 
 interface ComponentUsageIncompleteReason {
-  code: "component-usage-unavailable" | "component-usage-estimated";
+  code: "component-usage-unavailable" | "component-usage-estimated" | "component-breakdown-incomplete";
   component?: UsageComponent;
   model?: string;
 }
@@ -298,6 +301,7 @@ export interface NormalizedUsageAccountingProjection {
   usage_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
   pricing_complete: boolean;
   pricing_incomplete_reasons: Array<{ code: string; component?: UsageComponent; model?: string }>;
+  partial_pricing: boolean;
 }
 
 interface NodeWorkflowEvidence {
@@ -764,7 +768,7 @@ const PREPARATION_FAILURE_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]
 // A node that reached one of these did not fail, so a failure attribution from
 // an earlier attempt must not survive on it.
 const NODE_RECOVERED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
-const ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.accounting.v3";
+const ACCOUNTING_SCHEMA_VERSION = "ultrafuzz.accounting.v4";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "ultrafuzz.accounting-checkpoint.v1";
 const ACCOUNTING_USD_PRECISION = 12;
 const MAX_VERIFIER_AUTHORITY_BYTES = 64 * 1024 * 1024;
@@ -1875,8 +1879,8 @@ async function synchronizeWorkflowAccounting(input: {
   const storedPricing = storedAccounting?.pricing ?? new Map<string, ModelPricing>();
   const previouslyUnresolvedModels =
     storedPricingCatalog?.status === "disabled" ? new Set(storedPricingCatalog.unresolved_models) : new Set<string>();
-  const ledgerEvents = workflowEventsFromUsageLedger(preparedUsage.entries);
-  const requiredModels = modelsRequiringPricing(ledgerEvents);
+  const latestLedgerEvents = workflowEventsFromUsageLedger(latestUsageLedgerEntriesByAttempt(preparedUsage.entries));
+  const requiredModels = modelsRequiringPricing(latestLedgerEvents);
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
@@ -1984,12 +1988,16 @@ function accountingFromWorkflowEvents(
   cacheReadRatio: number | undefined
 ): AccountingSummary | undefined {
   const totals = emptyAccountingTotals();
-  for (const event of events) {
+  for (const event of latestUsageEventsByAttempt(events)) {
     if (event.type !== "TokenUsageReported") {
       continue;
     }
     const payload = event.payload;
     const inputTokens = requiredWorkflowEventCount(payload.inputTokens, "TokenUsageReported inputTokens");
+    const freshInputTokens =
+      payload.freshInputTokens === undefined
+        ? undefined
+        : requiredWorkflowEventCount(payload.freshInputTokens, "TokenUsageReported freshInputTokens");
     const outputTokens = requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens");
     const cacheReadTokens =
       payload.cacheReadTokens === undefined
@@ -2004,31 +2012,37 @@ function accountingFromWorkflowEvents(
         ? undefined
         : requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens");
     const model = requiredWorkflowEventString(payload.model, "TokenUsageReported model");
+    const recordedCostUsd =
+      payload.costUsd === undefined
+        ? undefined
+        : requiredWorkflowEventCostUsd(payload.costUsd, "TokenUsageReported costUsd");
     const normalizedUsage = normalizeUsageComponents({
       model,
       inputTokens,
+      freshInputTokens,
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens: cacheWriteTokens ?? 0,
       reasoningTokens: reasoningTokens ?? 0,
       cacheReadRatio
     });
-    const componentTokenCount = sumUsageComponents(normalizedUsage.components);
-    const tokenCount = componentTokenCount;
+    const tokenCount = normalizedUsage.totalTokens;
     const usageIncompleteReasons = [...normalizedUsage.incompleteReasons];
     const componentPricing = priceUsageComponents({
       model,
       components: normalizedUsage.components,
       modelPricing
     });
-    const pricingIncompleteReasons = [...componentPricing.incompleteReasons];
-    const usageUnavailable = usageIncompleteReasons.some((reason) => reason.code === "component-usage-unavailable");
-    const estimatedCostUsd = usageUnavailable ? undefined : componentPricing.costUsd;
-    if (tokenCount <= 0 && estimatedCostUsd === undefined) {
-      continue;
-    }
+    const pricingIncompleteReasons = recordedCostUsd === undefined ? [...componentPricing.incompleteReasons] : [];
+    const usageUnavailable = usageIncompleteReasons.some(
+      (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
+    );
+    const hasComponentActivity = Object.values(normalizedUsage.components).some((tokens) => tokens > 0);
+    const estimatedCostUsd =
+      recordedCostUsd ?? (!hasComponentActivity ? 0 : usageUnavailable ? undefined : componentPricing.costUsd);
 
-    totals.inputTokens += normalizedUsage.components.uncached_input;
+    totals.uncachedInputTokens += normalizedUsage.components.uncached_input;
+    totals.inputTokens += normalizedUsage.providerInputTokens;
     totals.outputTokens += normalizedUsage.components.output;
     totals.cacheReadTokens += normalizedUsage.components.cache_read;
     totals.cacheWriteTokens += normalizedUsage.components.cache_write;
@@ -2036,14 +2050,16 @@ function accountingFromWorkflowEvents(
     totals.totalTokens += tokenCount;
     totals.billableTokens += componentPricing.billableTokens;
     totals.eventCount += 1;
-    if (pricingIncompleteReasons.length === 0) {
+    if (estimatedCostUsd !== undefined) {
       totals.pricedEventCount += 1;
     } else {
       totals.unpricedEventCount += 1;
     }
     if (estimatedCostUsd !== undefined) {
       totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, estimatedCostUsd);
-      addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
+      if (recordedCostUsd === undefined)
+        addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
+      else totals.providedCostUsd = addUsd(totals.providedCostUsd, recordedCostUsd);
     }
     totals.usageIncompleteReasons.push(...usageIncompleteReasons);
     totals.pricingIncompleteReasons.push(...pricingIncompleteReasons);
@@ -2056,6 +2072,22 @@ function accountingFromWorkflowEvents(
     totals.agents.add(requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"));
   }
   return accountingSummaryFromTotals(totals);
+}
+
+function latestUsageEventsByAttempt(events: readonly WorkflowEvent[]): WorkflowEvent[] {
+  const latest = new Map<string, WorkflowEvent>();
+  for (const event of events) {
+    if (event.type !== "TokenUsageReported") continue;
+    const payload = event.payload;
+    const identity = JSON.stringify([
+      event.workflowRunId,
+      requiredWorkflowEventString(payload.nodeId, "TokenUsageReported nodeId"),
+      requiredWorkflowEventCount(payload.iteration, "TokenUsageReported iteration"),
+      requiredWorkflowEventCount(payload.attempt, "TokenUsageReported attempt")
+    ]);
+    latest.set(identity, event);
+  }
+  return [...latest.values()].sort((left, right) => left.sourceEventSequence - right.sourceEventSequence);
 }
 
 function prepareWorkflowUsageEvents(
@@ -2083,8 +2115,11 @@ function prepareWorkflowUsageEvents(
       continue;
     }
     const existing = existingByIdentity.get(identity);
-    if (existing !== undefined && !isDeepStrictEqual(existing, candidate)) {
-      throw new Error(`usage event ${identity} was already recorded with different immutable data`);
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, candidate)) {
+        throw new Error(`usage event ${identity} was already recorded with different immutable data`);
+      }
+      continue;
     }
     candidates.set(identity, candidate);
     candidateInputs.set(identity, candidateInput);
@@ -2146,6 +2181,14 @@ function normalizedUsageLedgerInput(
       model: requiredWorkflowEventString(payload.model, "TokenUsageReported model"),
       agent: requiredWorkflowEventString(payload.agent, "TokenUsageReported agent"),
       input_tokens: requiredWorkflowEventCount(payload.inputTokens, "TokenUsageReported inputTokens"),
+      ...(payload.freshInputTokens === undefined
+        ? {}
+        : {
+            fresh_input_tokens: requiredWorkflowEventCount(
+              payload.freshInputTokens,
+              "TokenUsageReported freshInputTokens"
+            )
+          }),
       output_tokens: requiredWorkflowEventCount(payload.outputTokens, "TokenUsageReported outputTokens"),
       ...(payload.cacheReadTokens === undefined
         ? {}
@@ -2164,7 +2207,10 @@ function normalizedUsageLedgerInput(
         ? {}
         : {
             reasoning_tokens: requiredWorkflowEventCount(payload.reasoningTokens, "TokenUsageReported reasoningTokens")
-          })
+          }),
+      ...(payload.costUsd === undefined
+        ? {}
+        : { recorded_cost_usd: requiredWorkflowEventCostUsd(payload.costUsd, "TokenUsageReported costUsd") })
     }
   };
 }
@@ -2181,10 +2227,12 @@ function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): Wo
       model: entry.usage.model,
       agent: entry.usage.agent,
       inputTokens: entry.usage.input_tokens,
+      freshInputTokens: entry.usage.fresh_input_tokens,
       outputTokens: entry.usage.output_tokens,
       cacheReadTokens: entry.usage.cache_read_tokens,
       cacheWriteTokens: entry.usage.cache_write_tokens,
-      reasoningTokens: entry.usage.reasoning_tokens
+      reasoningTokens: entry.usage.reasoning_tokens,
+      costUsd: entry.usage.recorded_cost_usd
     };
     return {
       type: "TokenUsageReported",
@@ -2201,6 +2249,9 @@ function accountingSegmentsFromUsageLedger(
   modelPricing: ReadonlyMap<string, ModelPricing>,
   cacheReadRatio: number | undefined
 ): AccountingSegment[] {
+  const accountedEventIdentities = new Set(
+    latestUsageLedgerEntriesByAttempt(entries).map((entry) => usageLedgerIdentity(entry))
+  );
   const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
   for (const [ledgerIndex, entry] of entries.entries()) {
     const key = JSON.stringify([entry.workflow_run_id, entry.control_generation]);
@@ -2212,10 +2263,14 @@ function accountingSegmentsFromUsageLedger(
   const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
   return groups.map((generation) => {
     const generationEntries = generation.entries;
+    const accountedEntries = generationEntries.filter((entry) =>
+      accountedEventIdentities.has(usageLedgerIdentity(entry))
+    );
     const firstEntry = generationEntries[0]!;
     return accountingSummaryWithCompleteness(
-      accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
+      accountingFromWorkflowEvents(workflowEventsFromUsageLedger(accountedEntries), modelPricing, cacheReadRatio),
       generationEntries,
+      accountedEntries,
       {
         controlGeneration: firstEntry.control_generation,
         workflowRunId: firstEntry.workflow_run_id
@@ -2224,30 +2279,39 @@ function accountingSegmentsFromUsageLedger(
   });
 }
 
+function latestUsageLedgerEntriesByAttempt(entries: readonly UsageLedgerEntry[]): UsageLedgerEntry[] {
+  const latest = new Map<string, UsageLedgerEntry>();
+  for (const entry of entries) {
+    latest.set(JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]), entry);
+  }
+  return [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence);
+}
+
 function accountingSummaryWithCompleteness(
   summary: AccountingSummary | undefined,
   entries: readonly UsageLedgerEntry[],
+  accountedEntries: readonly UsageLedgerEntry[],
   identity: { controlGeneration: string; workflowRunId: string }
 ): AccountingSegment {
   const base = summary ?? emptyAccountingSummary();
   const usageIncompleteReasons = uniqueUsageCompletenessMarkers(base.usage_incomplete_reasons);
   const uniquePricingReasons = uniquePricingCompletenessMarkers(base.pricing_incomplete_reasons);
-  const partialPricing = uniquePricingReasons.length > 0;
+  const partialPricing = base.partial_pricing || base.unpriced_event_count > 0 || uniquePricingReasons.length > 0;
   return {
     ...base,
     estimated_spend:
       base.estimated_spend_usd === undefined ? "unavailable" : formatUsd(base.estimated_spend_usd, partialPricing),
     usage_complete: usageIncompleteReasons.length === 0,
     usage_incomplete_reasons: usageIncompleteReasons,
-    pricing_complete: !partialPricing,
+    pricing_complete: uniquePricingReasons.length === 0,
     pricing_incomplete_reasons: uniquePricingReasons,
     partial_pricing: partialPricing,
-    event_count: Math.max(base.event_count, entries.length),
+    event_count: base.event_count,
     control_generation: identity.controlGeneration,
     workflow_run_id: identity.workflowRunId,
     source_event_sequences: entries.map((entry) => entry.source_event_sequence),
     attempts: uniqueByJson(
-      entries.map((entry) => ({ node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt }))
+      accountedEntries.map((entry) => ({ node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt }))
     )
   };
 }
@@ -2370,9 +2434,7 @@ function storedAccountingSegment(value: unknown, label: string): AccountingSegme
       throw new Error(`${label}.source_event_sequences must be strictly increasing`);
     }
   }
-  if (!Array.isArray(stored.attempts) || stored.attempts.length === 0) {
-    throw new Error(`${label}.attempts must be a non-empty array`);
-  }
+  if (!Array.isArray(stored.attempts)) throw new Error(`${label}.attempts must be an array`);
   const attempts = stored.attempts.map((attempt, index) => {
     const attemptLabel = `${label}.attempts[${index}]`;
     const candidate = exactStoredRecord(attempt, attemptLabel, ["node_id", "iteration", "attempt"], []);
@@ -2385,8 +2447,8 @@ function storedAccountingSegment(value: unknown, label: string): AccountingSegme
   if (new Set(attempts.map((attempt) => JSON.stringify(attempt))).size !== attempts.length) {
     throw new Error(`${label}.attempts must not contain duplicate coordinates`);
   }
-  if (summary.event_count !== sourceEventSequences.length) {
-    throw new Error(`${label}.event_count must equal source_event_sequences.length`);
+  if (summary.event_count !== attempts.length || summary.event_count > sourceEventSequences.length) {
+    throw new Error(`${label}.event_count must equal distinct accounted attempts and not exceed audit sequences`);
   }
   return {
     ...summary,
@@ -2463,6 +2525,9 @@ function assertAccountingMatchesUsageLedger(
   entries: readonly UsageLedgerEntry[],
   label: string
 ): void {
+  const accountedEntryIdentities = new Set(
+    latestUsageLedgerEntriesByAttempt(entries).map((entry) => usageLedgerIdentity(entry))
+  );
   const grouped = new Map<
     string,
     {
@@ -2485,11 +2550,13 @@ function assertAccountingMatchesUsageLedger(
       lastLedgerIndex: ledgerIndex
     };
     group.sourceEventSequences.push(entry.source_event_sequence);
-    const attempt = { node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt };
-    const attemptIdentity = JSON.stringify(attempt);
-    if (!group.attemptIdentities.has(attemptIdentity)) {
-      group.attemptIdentities.add(attemptIdentity);
-      group.attempts.push(attempt);
+    if (accountedEntryIdentities.has(usageLedgerIdentity(entry))) {
+      const attempt = { node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt };
+      const attemptIdentity = JSON.stringify(attempt);
+      if (!group.attemptIdentities.has(attemptIdentity)) {
+        group.attemptIdentities.add(attemptIdentity);
+        group.attempts.push(attempt);
+      }
     }
     group.lastLedgerIndex = ledgerIndex;
     grouped.set(identity, group);
@@ -2662,6 +2729,12 @@ function assertCumulativeAccountingContainsCurrentRun(
   ) {
     throw new Error(`${label}.cumulative.estimated_spend_usd is smaller than the current-run contribution`);
   }
+  if (
+    current.provided_cost_usd !== undefined &&
+    (cumulative.provided_cost_usd === undefined || cumulative.provided_cost_usd < current.provided_cost_usd)
+  ) {
+    throw new Error(`${label}.cumulative.provided_cost_usd is smaller than the current-run contribution`);
+  }
 }
 
 function storedPricingCatalog(value: unknown, label: string): StoredPricingCatalog {
@@ -2819,7 +2892,7 @@ function cumulativeAccountingForSourceRun(
     throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} links to itself`);
   }
   if (sourceMetadata.accounting === undefined) {
-    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v3 evidence`);
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v4 evidence`);
   }
   if (sourceMetadata.workflow === undefined) {
     throw new Error(
@@ -2858,6 +2931,7 @@ function cumulativeAccountingSummary(
   const usageIncompleteReasons: UsageCompletenessMarker[] = [];
   const pricingIncompleteReasons: PricingCompletenessMarker[] = [];
   for (const summary of summaries) {
+    totals.uncachedInputTokens += summary.uncached_input_tokens;
     totals.inputTokens += summary.input_tokens;
     totals.outputTokens += summary.output_tokens;
     totals.cacheReadTokens += summary.cache_read_tokens;
@@ -2873,6 +2947,9 @@ function cumulativeAccountingSummary(
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
     addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd);
+    if (summary.provided_cost_usd !== undefined) {
+      totals.providedCostUsd = addUsd(totals.providedCostUsd, summary.provided_cost_usd);
+    }
     usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
     pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
@@ -2929,7 +3006,11 @@ const ACCOUNTING_SUMMARY_REQUIRED_FIELDS = [
   "agents"
 ] as const;
 
-const ACCOUNTING_SUMMARY_OPTIONAL_FIELDS = ["estimated_spend_usd", "cache_read_ratio_used"] as const;
+const ACCOUNTING_SUMMARY_OPTIONAL_FIELDS = [
+  "estimated_spend_usd",
+  "provided_cost_usd",
+  "cache_read_ratio_used"
+] as const;
 
 function storedAccountingSummary(value: unknown, label: string): AccountingSummary {
   const stored = exactStoredRecord(
@@ -2951,6 +3032,7 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
   const estimatedSpend = requiredStoredString(stored.estimated_spend, `${label}.estimated_spend`);
   const estimatedSpendUsd = optionalStoredNonNegativeNumber(stored, "estimated_spend_usd", label);
   const componentCosts = storedComponentCosts(stored.component_costs_usd, `${label}.component_costs_usd`);
+  const providedCostUsd = optionalStoredNonNegativeNumber(stored, "provided_cost_usd", label);
   const usageComplete = requiredStoredBoolean(stored.usage_complete, `${label}.usage_complete`);
   const usageIncompleteReasons = storedUsageCompletenessMarkers(
     stored.usage_incomplete_reasons,
@@ -2973,17 +3055,30 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
   const models = requiredStoredStringArray(stored.models, `${label}.models`, { sorted: true });
   const agents = requiredStoredStringArray(stored.agents, `${label}.agents`, { sorted: true });
 
-  if (inputTokens !== uncachedInputTokens) throw new Error(`${label}.input_tokens must equal uncached_input_tokens`);
-  const calculatedInclusive = uncachedInputTokens + cacheReadTokens + cacheWriteTokens + outputTokens + reasoningTokens;
-  if (inclusiveTokenTotal !== calculatedInclusive || totalTokens !== inclusiveTokenTotal) {
-    throw new Error(`${label} token totals do not equal the exact component sum`);
+  const hasIncompleteBreakdown = usageIncompleteReasons.some(
+    (reason) => reason.code === "component-breakdown-incomplete"
+  );
+  if (uncachedInputTokens > inputTokens && !hasIncompleteBreakdown) {
+    throw new Error(`${label}.uncached_input_tokens cannot exceed input_tokens without an incomplete breakdown marker`);
   }
-  if (billableTokenTotal > inclusiveTokenTotal) {
-    throw new Error(`${label}.billable_token_total cannot exceed inclusive_token_total`);
+  const calculatedInclusive = inputTokens + outputTokens;
+  if (inclusiveTokenTotal !== calculatedInclusive || totalTokens !== inclusiveTokenTotal) {
+    throw new Error(`${label} token totals do not match provider-inclusive accounting semantics`);
+  }
+  if (billableTokenTotal > inclusiveTokenTotal && !hasIncompleteBreakdown) {
+    throw new Error(
+      `${label}.billable_token_total cannot exceed inclusive_token_total without an incomplete breakdown marker`
+    );
   }
   if (tokensUsed !== formatInteger(totalTokens)) throw new Error(`${label}.tokens_used does not match total_tokens`);
-  if (pricedEventCount + unpricedEventCount > eventCount) {
-    throw new Error(`${label} priced and unpriced event counts exceed event_count`);
+  if (pricedEventCount + unpricedEventCount !== eventCount) {
+    throw new Error(`${label} priced and unpriced event counts must equal event_count`);
+  }
+  if (unpricedEventCount > 0 && !partialPricing) {
+    throw new Error(`${label}.partial_pricing must identify unpriced events`);
+  }
+  if (pricingIncompleteReasons.length > 0 && !partialPricing) {
+    throw new Error(`${label}.partial_pricing must identify incomplete component pricing`);
   }
   if (usageComplete !== (usageIncompleteReasons.length === 0)) {
     throw new Error(`${label}.usage_complete disagrees with usage_incomplete_reasons`);
@@ -2998,15 +3093,27 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
     throw new Error(`${label}.cache_read_ratio_used must not exceed 1`);
   }
   if (estimatedSpendUsd === undefined) {
-    if (estimatedSpend !== "unavailable" || sumComponentCosts(componentCosts) !== 0) {
+    if (pricedEventCount > 0) {
+      throw new Error(`${label}.estimated_spend_usd is required when an event has cost evidence`);
+    }
+    if (eventCount > 0 && !partialPricing) {
+      throw new Error(`${label}.partial_pricing must identify unavailable spend`);
+    }
+    if (estimatedSpend !== "unavailable" || sumComponentCosts(componentCosts) !== 0 || providedCostUsd !== undefined) {
       throw new Error(`${label} unavailable spend must omit estimated_spend_usd and carry zero component costs`);
     }
   } else {
+    if (pricedEventCount === 0) {
+      throw new Error(`${label}.estimated_spend_usd requires at least one event with cost evidence`);
+    }
     if (estimatedSpend !== formatUsd(estimatedSpendUsd, partialPricing)) {
       throw new Error(`${label}.estimated_spend does not match estimated_spend_usd`);
     }
-    if (roundAccountingUsd(sumComponentCosts(componentCosts)) !== roundAccountingUsd(estimatedSpendUsd)) {
-      throw new Error(`${label}.component_costs_usd does not sum to estimated_spend_usd`);
+    if (
+      roundAccountingUsd(sumComponentCosts(componentCosts) + (providedCostUsd ?? 0)) !==
+      roundAccountingUsd(estimatedSpendUsd)
+    ) {
+      throw new Error(`${label} local component costs plus provided_cost_usd do not sum to estimated_spend_usd`);
     }
   }
 
@@ -3024,6 +3131,7 @@ function storedAccountingSummary(value: unknown, label: string): AccountingSumma
     estimated_spend: estimatedSpend,
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     component_costs_usd: componentCosts,
+    ...(providedCostUsd === undefined ? {} : { provided_cost_usd: providedCostUsd }),
     usage_complete: usageComplete,
     usage_incomplete_reasons: usageIncompleteReasons,
     pricing_complete: pricingComplete,
@@ -3048,7 +3156,7 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
   const pricingIncompleteReasons = uniqueReasons(totals.pricingIncompleteReasons);
   const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0 || pricingIncompleteReasons.length > 0;
   return {
-    uncached_input_tokens: totals.inputTokens,
+    uncached_input_tokens: totals.uncachedInputTokens,
     input_tokens: totals.inputTokens,
     output_tokens: totals.outputTokens,
     cache_read_tokens: totals.cacheReadTokens,
@@ -3061,6 +3169,7 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     estimated_spend: estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, partialPricing),
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     component_costs_usd: roundedComponentCosts(totals.componentCostsUsd),
+    ...(totals.providedCostUsd === undefined ? {} : { provided_cost_usd: totals.providedCostUsd }),
     usage_complete: usageIncompleteReasons.length === 0,
     usage_incomplete_reasons: usageIncompleteReasons,
     pricing_complete: pricingIncompleteReasons.length === 0,
@@ -3078,6 +3187,7 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
 
 function emptyAccountingTotals(): AccountingTotals {
   return {
+    uncachedInputTokens: 0,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
@@ -3101,6 +3211,7 @@ function emptyAccountingTotals(): AccountingTotals {
 function normalizeUsageComponents(input: {
   model: string | undefined;
   inputTokens: number;
+  freshInputTokens?: number;
   outputTokens: number;
   cacheReadTokens: number | undefined;
   cacheWriteTokens: number;
@@ -3108,34 +3219,76 @@ function normalizeUsageComponents(input: {
   cacheReadRatio: number | undefined;
 }): {
   components: NormalizedUsageComponents;
+  providerInputTokens: number;
+  totalTokens: number;
   incompleteReasons: ComponentUsageIncompleteReason[];
   cacheReadPricingEstimated: boolean;
   cacheReadRatioUsed?: number;
 } {
-  const uncachedInputTokens = Math.max(input.inputTokens, 0);
+  const providerInputTokens = Math.max(input.inputTokens, 0);
   const cacheWriteTokens = Math.max(input.cacheWriteTokens, 0);
   const outputTokens = Math.max(input.outputTokens, 0);
   const reasoningTokens = Math.max(input.reasoningTokens, 0);
+  const reportedFreshInputTokens =
+    input.freshInputTokens === undefined ? undefined : Math.max(input.freshInputTokens, 0);
+  const explicitCacheReadTokens = input.cacheReadTokens === undefined ? undefined : Math.max(input.cacheReadTokens, 0);
+  const estimatedCacheReadTokens =
+    providerInputTokens > 0 &&
+    explicitCacheReadTokens === undefined &&
+    reportedFreshInputTokens === undefined &&
+    input.cacheReadRatio !== undefined
+      ? providerInputTokens * input.cacheReadRatio
+      : undefined;
+  const canonicalCacheReadTokens =
+    explicitCacheReadTokens ??
+    (providerInputTokens === 0
+      ? 0
+      : reportedFreshInputTokens === undefined
+        ? estimatedCacheReadTokens
+        : Math.max(providerInputTokens - reportedFreshInputTokens - cacheWriteTokens, 0));
+  const uncachedInputTokens =
+    reportedFreshInputTokens ??
+    (canonicalCacheReadTokens === undefined
+      ? Math.max(providerInputTokens - cacheWriteTokens, 0)
+      : Math.max(providerInputTokens - canonicalCacheReadTokens - cacheWriteTokens, 0));
   const hasTokenActivity = uncachedInputTokens > 0 || cacheWriteTokens > 0 || outputTokens > 0 || reasoningTokens > 0;
-  const cacheReadUsageUnknown = input.cacheReadTokens === undefined && hasTokenActivity;
-  const cacheReadPricingEstimated =
-    cacheReadUsageUnknown && uncachedInputTokens > 0 && input.cacheReadRatio !== undefined;
+  const cacheReadUsageUnknown = canonicalCacheReadTokens === undefined && hasTokenActivity;
+  const cacheReadPricingEstimated = estimatedCacheReadTokens !== undefined;
   const incompleteReasons: ComponentUsageIncompleteReason[] = [];
-  if (cacheReadUsageUnknown) {
+  if (cacheReadPricingEstimated || cacheReadUsageUnknown) {
     incompleteReasons.push({
       code: cacheReadPricingEstimated ? "component-usage-estimated" : "component-usage-unavailable",
       component: "cache_read",
       ...(input.model === undefined ? {} : { model: input.model })
     });
   }
+  if (
+    canonicalCacheReadTokens !== undefined &&
+    uncachedInputTokens + canonicalCacheReadTokens + cacheWriteTokens !== providerInputTokens
+  ) {
+    incompleteReasons.push({
+      code: "component-breakdown-incomplete",
+      component: "uncached_input",
+      ...(input.model === undefined ? {} : { model: input.model })
+    });
+  }
+  if (reasoningTokens > outputTokens) {
+    incompleteReasons.push({
+      code: "component-breakdown-incomplete",
+      component: "reasoning",
+      ...(input.model === undefined ? {} : { model: input.model })
+    });
+  }
   return {
     components: {
       uncached_input: uncachedInputTokens,
-      cache_read: Math.max(input.cacheReadTokens ?? uncachedInputTokens * (input.cacheReadRatio ?? 0), 0),
+      cache_read: Math.max(canonicalCacheReadTokens ?? 0, 0),
       cache_write: cacheWriteTokens,
       output: outputTokens,
       reasoning: reasoningTokens
     },
+    providerInputTokens,
+    totalTokens: providerInputTokens + outputTokens,
     incompleteReasons,
     cacheReadPricingEstimated,
     ...(cacheReadPricingEstimated ? { cacheReadRatioUsed: input.cacheReadRatio } : {})
@@ -3158,7 +3311,7 @@ function priceUsageComponents(input: {
   const componentEntries = Object.entries(input.components) as Array<[UsageComponent, number]>;
   if (basePricing === undefined) {
     for (const [component, tokens] of componentEntries) {
-      if (tokens > 0) {
+      if (tokens > 0 && component !== "reasoning") {
         incompleteReasons.push({
           code: "model-pricing-unavailable",
           component,
@@ -3178,7 +3331,9 @@ function priceUsageComponents(input: {
     cache_read: pricing.cachedInputUsdPerMillion,
     cache_write: pricing.cacheWriteUsdPerMillion,
     output: pricing.outputUsdPerMillion,
-    reasoning: pricing.outputUsdPerMillion
+    // Provider output counters already include reasoning. Keep the breakdown for
+    // diagnostics, but never bill or total it a second time.
+    reasoning: 0
   };
   let billableTokens = 0;
   let pricedComponents = 0;
@@ -3216,52 +3371,81 @@ export function projectNormalizedUsageAccounting(input: {
 }): NormalizedUsageAccountingProjection {
   const usage = input.usage;
   const inputTokens = usage.input_tokens;
+  const freshInputTokens = usage.fresh_input_tokens;
   const outputTokens = usage.output_tokens;
   const cacheWriteTokens = usage.cache_write_tokens ?? 0;
   const reasoningTokens = usage.reasoning_tokens ?? 0;
   const normalized = normalizeUsageComponents({
     model: usage.model,
     inputTokens,
+    freshInputTokens,
     outputTokens,
     cacheReadTokens: usage.cache_read_tokens,
     cacheWriteTokens,
     reasoningTokens,
     cacheReadRatio: input.cacheReadRatio
   });
-  const componentTotal = sumUsageComponents(normalized.components);
+  const componentTotal = normalized.totalTokens;
   const componentReasons = normalized.incompleteReasons;
-  const usageUnavailable = componentReasons.some((reason) => reason.code === "component-usage-unavailable");
+  const usageUnavailable = componentReasons.some(
+    (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
+  );
   const pricing = priceUsageComponents({
     model: usage.model,
     components: normalized.components,
     modelPricing: input.modelPricing
   });
-  const estimatedSpendUsd = usageUnavailable ? undefined : pricing.costUsd;
+  const hasComponentActivity = Object.values(normalized.components).some((tokens) => tokens > 0);
+  const estimatedSpendUsd =
+    usage.recorded_cost_usd ?? (!hasComponentActivity ? 0 : usageUnavailable ? undefined : pricing.costUsd);
+  const pricingIncompleteReasons = usage.recorded_cost_usd === undefined ? pricing.incompleteReasons : [];
   const cacheReadUnavailable = componentReasons.some(
     (reason) => reason.code === "component-usage-unavailable" && reason.component === "cache_read"
   );
+  const independent = boundedIndependentUsageComponents(normalized);
   return {
     components: {
-      input_tokens: normalized.components.uncached_input,
-      cache_read_tokens:
-        cacheReadUnavailable || (usage.cache_read_tokens === undefined && !normalized.cacheReadPricingEstimated)
-          ? null
-          : normalized.components.cache_read,
-      cache_write_tokens: normalized.components.cache_write,
-      output_tokens: normalized.components.output,
-      reasoning_tokens: normalized.components.reasoning
+      input_tokens: independent.inputTokens,
+      cache_read_tokens: cacheReadUnavailable ? null : independent.cacheReadTokens,
+      cache_write_tokens: independent.cacheWriteTokens,
+      output_tokens: independent.outputTokens,
+      reasoning_tokens: independent.reasoningTokens
     },
-    total_tokens: usageUnavailable ? null : componentTotal,
+    total_tokens: componentTotal,
     estimated_spend_usd: estimatedSpendUsd ?? null,
     usage_complete: componentReasons.length === 0,
     usage_incomplete_reasons: componentReasons,
-    pricing_complete: pricing.incompleteReasons.length === 0,
-    pricing_incomplete_reasons: pricing.incompleteReasons
+    pricing_complete: pricingIncompleteReasons.length === 0,
+    pricing_incomplete_reasons: pricingIncompleteReasons,
+    partial_pricing: estimatedSpendUsd === undefined || pricingIncompleteReasons.length > 0
   };
 }
 
-function sumUsageComponents(components: NormalizedUsageComponents): number {
-  return Object.values(components).reduce((total, tokens) => total + tokens, 0);
+function boundedIndependentUsageComponents(normalized: {
+  components: NormalizedUsageComponents;
+  providerInputTokens: number;
+}): {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+} {
+  let inputTokens = Math.min(normalized.components.uncached_input, normalized.providerInputTokens);
+  let remainingInputTokens = normalized.providerInputTokens - inputTokens;
+  const cacheReadTokens = Math.min(normalized.components.cache_read, remainingInputTokens);
+  remainingInputTokens -= cacheReadTokens;
+  const cacheWriteTokens = Math.min(normalized.components.cache_write, remainingInputTokens);
+  remainingInputTokens -= cacheWriteTokens;
+  inputTokens += remainingInputTokens;
+  const reasoningTokens = Math.min(normalized.components.reasoning, normalized.components.output);
+  return {
+    inputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    outputTokens: normalized.components.output - reasoningTokens,
+    reasoningTokens
+  };
 }
 
 function emptyComponentCosts(): UsageComponentCosts {
@@ -3389,6 +3573,13 @@ function mergedPricingCatalogMetadata(input: {
 }): PricingCatalogMetadata & { model_prices: Record<string, ModelPricing> } {
   const resolvedModels = input.requiredModels.filter((model) => input.resolvedPricing.has(model));
   const unresolvedModels = input.requiredModels.filter((model) => !input.resolvedPricing.has(model));
+  const requiredPricing = new Map<string, ModelPricing>();
+  for (const model of resolvedModels) {
+    const pricing = input.resolvedPricing.get(model);
+    if (pricing === undefined)
+      throw new Error(`resolved pricing disappeared for required model ${JSON.stringify(model)}`);
+    requiredPricing.set(model, pricing);
+  }
   const source = input.live?.source ?? input.stored?.source;
   if (source === undefined) throw new Error("pricing catalog source is unavailable for non-empty usage");
   const fetchedAt = input.live?.fetched_at ?? input.stored?.fetched_at;
@@ -3400,7 +3591,10 @@ function mergedPricingCatalogMetadata(input: {
     ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
     resolved_models: resolvedModels,
     unresolved_models: unresolvedModels,
-    model_prices: modelPricingSnapshot(input.resolvedPricing)
+    // Stored prices remain useful as a lookup cache above, but the immutable
+    // accounting document describes only the latest selected snapshots. A
+    // superseded model must not survive here after one attempt switches model.
+    model_prices: modelPricingSnapshot(requiredPricing)
   };
 }
 
@@ -6244,7 +6438,11 @@ function storedUsageCompletenessMarkers(value: unknown, label: string): UsageCom
   return storedCompletenessMarkers(
     value,
     label,
-    new Set<ComponentUsageIncompleteReason["code"]>(["component-usage-unavailable", "component-usage-estimated"])
+    new Set<ComponentUsageIncompleteReason["code"]>([
+      "component-usage-unavailable",
+      "component-usage-estimated",
+      "component-breakdown-incomplete"
+    ])
   );
 }
 

@@ -14,6 +14,11 @@ export interface CurrentTaskWorkflowMetrics {
 }
 
 interface WorkflowUsageEvent extends NormalizedUsage {
+  node_id: string;
+  iteration: number;
+  attempt: number;
+  source_event_sequence?: number;
+  fresh_input_tokens?: number;
   recorded_cost_usd?: number;
   observed_at_ms: number;
 }
@@ -45,6 +50,10 @@ function optionalNonNegativeFiniteNumber(value: unknown, label: string): number 
   return value === undefined || value === null ? undefined : nonNegativeFiniteNumber(value, label);
 }
 
+function optionalNonNegativeSafeInteger(value: unknown, label: string): number | undefined {
+  return value === undefined || value === null ? undefined : nonNegativeSafeInteger(value, label);
+}
+
 function workflowEvent(row: unknown): WorkflowUsageEvent {
   if (!isRecord(row)) {
     throw new Error("artifact-contract failure: final-report workflow usage event is malformed");
@@ -64,13 +73,29 @@ function workflowEvent(row: unknown): WorkflowUsageEvent {
   }
   const model = payload.model;
   const agent = payload.agent;
-  if (typeof model !== "string" || model.length === 0 || typeof agent !== "string" || agent.length === 0) {
+  const nodeId = payload.nodeId;
+  if (
+    typeof model !== "string" ||
+    model.length === 0 ||
+    typeof agent !== "string" ||
+    agent.length === 0 ||
+    typeof nodeId !== "string" ||
+    nodeId.length === 0
+  ) {
     throw new Error("artifact-contract failure: final-report workflow usage event identity is malformed");
   }
+  const reportedInputTokens = nonNegativeSafeInteger(payload.inputTokens, "workflow input tokens");
+  const freshInputTokens = optionalNonNegativeSafeInteger(payload.freshInputTokens, "workflow fresh-input tokens");
+  const sourceEventSequence = optionalNonNegativeSafeInteger(row.seq ?? row.sequence, "workflow usage sequence");
   return {
     model,
     agent,
-    input_tokens: nonNegativeSafeInteger(payload.inputTokens, "workflow input tokens"),
+    node_id: nodeId,
+    iteration: nonNegativeSafeInteger(payload.iteration, "workflow usage iteration"),
+    attempt: nonNegativeSafeInteger(payload.attempt, "workflow usage attempt"),
+    ...(sourceEventSequence === undefined ? {} : { source_event_sequence: sourceEventSequence }),
+    ...(freshInputTokens === undefined ? {} : { fresh_input_tokens: freshInputTokens }),
+    input_tokens: reportedInputTokens,
     output_tokens: nonNegativeSafeInteger(payload.outputTokens, "workflow output tokens"),
     ...(payload.cacheReadTokens === undefined
       ? {}
@@ -89,6 +114,26 @@ function workflowEvent(row: unknown): WorkflowUsageEvent {
       "workflow usage timestamp"
     )
   };
+}
+
+function dedupeWorkflowUsageEvents(events: WorkflowUsageEvent[]): WorkflowUsageEvent[] {
+  const latest = new Map<string, WorkflowUsageEvent>();
+  for (const event of events) {
+    const key = JSON.stringify([event.node_id, event.iteration, event.attempt]);
+    const previous = latest.get(key);
+    if (previous === undefined) {
+      latest.set(key, event);
+      continue;
+    }
+    const previousSequence = previous.source_event_sequence;
+    const eventSequence = event.source_event_sequence;
+    const eventIsLatest =
+      previousSequence !== undefined && eventSequence !== undefined
+        ? eventSequence >= previousSequence
+        : event.observed_at_ms >= previous.observed_at_ms;
+    if (eventIsLatest) latest.set(key, event);
+  }
+  return [...latest.values()];
 }
 
 function latestNodeStartedAt(rows: unknown[], nodeId: string): number | undefined {
@@ -174,12 +219,13 @@ async function deriveWorkflowSpend(input: {
   events: WorkflowUsageEvent[];
   models: string[];
   signal: AbortSignal;
+  coverage_partial: boolean;
 }): Promise<{ estimated_spend?: string; partial_pricing: boolean }> {
   if (input.aggregate_cost !== undefined && input.priced_attempts === input.attempts) {
     return { estimated_spend: formatUsd(input.aggregate_cost, false), partial_pricing: false };
   }
   if (input.events.length === 0) {
-    return { partial_pricing: input.priced_attempts < input.attempts };
+    return { partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts };
   }
 
   const pricing = await resolveLiveModelPricing({ models: input.models, env: process.env, signal: input.signal });
@@ -193,14 +239,17 @@ async function deriveWorkflowSpend(input: {
       fullyPricedEvents += 1;
       continue;
     }
-    const projected = projectNormalizedUsageAccounting({ usage: event, modelPricing: pricing.prices });
+    const projected = projectNormalizedUsageAccounting({
+      usage: event,
+      modelPricing: pricing.prices
+    });
     if (projected.estimated_spend_usd !== null) {
       knownCost += projected.estimated_spend_usd;
       knownCostEvents += 1;
     }
-    if (projected.pricing_complete) fullyPricedEvents += 1;
+    if (!projected.partial_pricing) fullyPricedEvents += 1;
   }
-  const partialPricing = fullyPricedEvents < input.events.length;
+  const partialPricing = input.coverage_partial || fullyPricedEvents < input.events.length;
   return {
     ...(knownCostEvents === 0 ? {} : { estimated_spend: formatUsd(knownCost, partialPricing) }),
     partial_pricing: partialPricing
@@ -226,7 +275,7 @@ export async function deriveCurrentTaskWorkflowMetrics(): Promise<CurrentTaskWor
     throw new Error("artifact-contract failure: final-report workflow priced attempts exceed usage attempts");
   }
 
-  const usageEvents = evidence.usage_rows.map(workflowEvent);
+  const usageEvents = dedupeWorkflowUsageEvents(evidence.usage_rows.map(workflowEvent));
   const models = [...new Set(usageEvents.map((event) => event.model))].sort();
   const latestUsageAt = usageEvents.reduce<number | undefined>(
     (latest, event) => Math.max(latest ?? 0, event.observed_at_ms),
@@ -242,7 +291,8 @@ export async function deriveCurrentTaskWorkflowMetrics(): Promise<CurrentTaskWor
     priced_attempts: pricedAttempts,
     events: usageEvents,
     models,
-    signal: evidence.signal
+    signal: evidence.signal,
+    coverage_partial: usageEvents.length < attempts || pricedAttempts < attempts
   });
 
   const elapsedThroughMs = reportStartedAt ?? latestUsageAt;

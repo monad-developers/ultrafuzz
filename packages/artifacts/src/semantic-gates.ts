@@ -7138,10 +7138,12 @@ function usageSourceEventJoinIssues(document: unknown, context: SemanticGateCont
     model: source.payload.model,
     agent: source.payload.agent,
     input_tokens: source.payload.inputTokens,
+    ...(source.payload.freshInputTokens === undefined ? {} : { fresh_input_tokens: source.payload.freshInputTokens }),
     output_tokens: source.payload.outputTokens,
     ...(source.payload.cacheReadTokens === undefined ? {} : { cache_read_tokens: source.payload.cacheReadTokens }),
     ...(source.payload.cacheWriteTokens === undefined ? {} : { cache_write_tokens: source.payload.cacheWriteTokens }),
-    ...(source.payload.reasoningTokens === undefined ? {} : { reasoning_tokens: source.payload.reasoningTokens })
+    ...(source.payload.reasoningTokens === undefined ? {} : { reasoning_tokens: source.payload.reasoningTokens }),
+    ...(source.payload.costUsd === undefined ? {} : { recorded_cost_usd: source.payload.costUsd })
   };
   const issues: SemanticGateIssue[] = [];
   if (

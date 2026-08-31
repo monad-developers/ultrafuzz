@@ -3442,7 +3442,14 @@ test("every contextual registration executes real positive and negative checks",
           node_id: "node:a",
           iteration: 0,
           attempt: 1,
-          usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
+          usage: {
+            model: "model",
+            agent: "agent",
+            input_tokens: 1,
+            fresh_input_tokens: 1,
+            output_tokens: 2,
+            recorded_cost_usd: 0.000_1
+          }
         },
         negative: { workflow_run_id: "workflow-a", source_event_sequence: 3 },
         context: {
@@ -3460,7 +3467,9 @@ test("every contextual registration executes real positive and negative checks",
                   model: "model",
                   agent: "agent",
                   inputTokens: 1,
-                  outputTokens: 2
+                  freshInputTokens: 1,
+                  outputTokens: 2,
+                  costUsd: 0.000_1
                 }
               }
             ]

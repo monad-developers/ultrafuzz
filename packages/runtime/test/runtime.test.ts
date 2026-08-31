@@ -525,22 +525,33 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   };
 }
 
-async function loadGeneratedPiAgent(project: string): Promise<{
-  createPiAgent(options?: Record<string, unknown>): {
-    opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
-    createOutputInterpreter(): {
-      onStdoutLine?: (
-        line: string
-      ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
-    };
-    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
-      command: string;
-      args: string[];
-      stdin?: string;
-      env?: Record<string, string>;
-      outputFormat?: string;
-    }>;
+interface LoadedPiAgent {
+  opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
+  createOutputInterpreter(): {
+    onStdoutLine?: (
+      line: string
+    ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
   };
+  buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+    command: string;
+    args: string[];
+    stdin?: string;
+    env?: Record<string, string>;
+    outputFormat?: string;
+  }>;
+  generate(options?: Record<string, unknown>): Promise<{
+    text?: string;
+    usage?: unknown;
+    totalUsage?: unknown;
+  }>;
+  stream(options?: Record<string, unknown>): Promise<{
+    usage: Promise<unknown>;
+    totalUsage: Promise<unknown>;
+  }>;
+}
+
+async function loadGeneratedPiAgent(project: string): Promise<{
+  createPiAgent(options?: Record<string, unknown>): LoadedPiAgent;
 }> {
   const fixture = path.join(project, "pi-agent-executable-test");
   fs.mkdirSync(fixture, { recursive: true });
@@ -579,21 +590,7 @@ async function loadGeneratedPiAgent(project: string): Promise<{
   );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   const piModule = (await import(pathToFileURL(path.join(fixture, "pi.mjs")).href)) as {
-    createPiAgent(options?: Record<string, unknown>): {
-      opts: { env: Record<string, string>; sessionDir?: string; apiKey?: string };
-      createOutputInterpreter(): {
-        onStdoutLine?: (
-          line: string
-        ) => { type?: string; answer?: string } | Array<{ type?: string; answer?: string }> | null | undefined;
-      };
-      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
-        command: string;
-        args: string[];
-        stdin?: string;
-        env?: Record<string, string>;
-        outputFormat?: string;
-      }>;
-    };
+    createPiAgent(options?: Record<string, unknown>): LoadedPiAgent;
   };
   return { createPiAgent: piModule.createPiAgent };
 }
@@ -666,6 +663,10 @@ async function loadGeneratedOpenRouterAgent(
 ): Promise<{
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
     generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+    withOpenRouterRecovery<T>(
+      options: Record<string, unknown> | undefined,
+      operation: (attemptOptions: Record<string, unknown>) => Promise<T>
+    ): Promise<T>;
     buildCommand: (params: {
       prompt: string;
       cwd: string;
@@ -690,14 +691,43 @@ async function loadGeneratedOpenRouterAgent(
       onStderr?: (text: string) => void;
       abortSignal?: AbortSignal;
       [key: string]: unknown;
-    }): Promise<{ text: string }>;
+    }): Promise<{
+      text: string;
+      usage: {
+        inputTokens?: number;
+        outputTokens?: number;
+        outputTokenDetails: { reasoningTokens?: number };
+        totalTokens?: number;
+      };
+      totalUsage: {
+        inputTokens?: number;
+        outputTokens?: number;
+        outputTokenDetails: { reasoningTokens?: number };
+        totalTokens?: number;
+      };
+    }>;
     stream(options?: {
       prompt?: unknown;
       onEvent?: (event: Record<string, unknown>) => unknown;
       onStderr?: (text: string) => void;
       abortSignal?: AbortSignal;
       [key: string]: unknown;
-    }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
+    }): Promise<{
+      text: Promise<string>;
+      textStream: ReadableStream<string> & AsyncIterable<string>;
+      usage: Promise<{
+        inputTokens?: number;
+        outputTokens?: number;
+        outputTokenDetails: { reasoningTokens?: number };
+        totalTokens?: number;
+      }>;
+      totalUsage: Promise<{
+        inputTokens?: number;
+        outputTokens?: number;
+        outputTokenDetails: { reasoningTokens?: number };
+        totalTokens?: number;
+      }>;
+    }>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command?: string;
       args: string[];
@@ -845,6 +875,10 @@ ${deadlineFrom}`
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
     OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
       generate(options?: Record<string, unknown>): Promise<{ text: string }>;
+      withOpenRouterRecovery<T>(
+        options: Record<string, unknown> | undefined,
+        operation: (attemptOptions: Record<string, unknown>) => Promise<T>
+      ): Promise<T>;
       buildCommand: (params: {
         prompt: string;
         cwd: string;
@@ -871,7 +905,21 @@ ${deadlineFrom}`
         onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
-      }): Promise<{ text: string }>;
+      }): Promise<{
+        text: string;
+        usage: {
+          inputTokens?: number;
+          outputTokens?: number;
+          outputTokenDetails: { reasoningTokens?: number };
+          totalTokens?: number;
+        };
+        totalUsage: {
+          inputTokens?: number;
+          outputTokens?: number;
+          outputTokenDetails: { reasoningTokens?: number };
+          totalTokens?: number;
+        };
+      }>;
       stream(options?: {
         prompt?: unknown;
         onEvent?: (event: Record<string, unknown>) => unknown;
@@ -880,7 +928,22 @@ ${deadlineFrom}`
         onProcess?: (event: { phase: "started" | "exited"; pid: number | undefined }) => void;
         abortSignal?: AbortSignal;
         [key: string]: unknown;
-      }): Promise<{ text: Promise<string>; textStream: ReadableStream<string> & AsyncIterable<string> }>;
+      }): Promise<{
+        text: Promise<string>;
+        textStream: ReadableStream<string> & AsyncIterable<string>;
+        usage: Promise<{
+          inputTokens?: number;
+          outputTokens?: number;
+          outputTokenDetails: { reasoningTokens?: number };
+          totalTokens?: number;
+        }>;
+        totalUsage: Promise<{
+          inputTokens?: number;
+          outputTokens?: number;
+          outputTokenDetails: { reasoningTokens?: number };
+          totalTokens?: number;
+        }>;
+      }>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command?: string;
         args: string[];
@@ -945,6 +1008,8 @@ process.stdin.on("end", () => {
       "stderr-only",
       "resume-hang",
       "terminal-null-resume",
+      "terminal-null-rate-limit-usage",
+      "terminal-null-failed-usage",
       "terminal-null-no-session",
       "terminal-null-repeat",
       "terminal-null-late-callback"
@@ -969,6 +1034,27 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({ type: "turn.started" }) + "\\n");
   if (mode.startsWith("terminal-null-")) {
     const outputIndex = process.argv.indexOf("--output-last-message");
+    const terminalUsage = resumed
+      ? { input_tokens: 5, output_tokens: 7, reasoning_tokens: 4 }
+      : { input_tokens: 2, output_tokens: 3, reasoning_tokens: 2 };
+    if (mode === "terminal-null-rate-limit-usage" && resumed && count === 2) {
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 11, output_tokens: 13, reasoning_tokens: 5 }
+      }) + "\\n");
+      process.stderr.write("HTTP 429 request id: terminal-null-usage\\n");
+      process.exitCode = 1;
+      return;
+    }
+    if (mode === "terminal-null-failed-usage" && resumed && count === 2) {
+      process.stdout.write(JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 11, output_tokens: 13, reasoning_tokens: 5 }
+      }) + "\\n");
+      process.stderr.write("fatal provider failure after billed continuation\\n");
+      process.exitCode = 1;
+      return;
+    }
     if (mode === "terminal-null-late-callback") {
       process.stdout.write(JSON.stringify({
         type: "item.started",
@@ -976,7 +1062,7 @@ process.stdin.on("end", () => {
       }) + "\\n");
       process.stdout.write(JSON.stringify({
         type: "turn.completed",
-        usage: { input_tokens: 2, output_tokens: 1 }
+        usage: terminalUsage
       }) + "\\n");
       return;
     }
@@ -993,7 +1079,7 @@ process.stdin.on("end", () => {
       }) + "\\n");
       process.stdout.write(JSON.stringify({
         type: "turn.completed",
-        usage: { input_tokens: 2, output_tokens: 1 }
+        usage: terminalUsage
       }) + "\\n");
       return;
     }
@@ -1004,7 +1090,7 @@ process.stdin.on("end", () => {
     }) + "\\n");
     process.stdout.write(JSON.stringify({
       type: "turn.completed",
-      usage: { input_tokens: 2, output_tokens: 1 }
+      usage: terminalUsage
     }) + "\\n");
     return;
   }
@@ -4331,6 +4417,70 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated OpenRouter recovery telemetry cannot replace the original provider failure",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const expectedUsage = {
+      inputTokens: 2,
+      inputTokenDetails: {},
+      outputTokens: 3,
+      outputTokenDetails: { reasoningTokens: 1 },
+      totalTokens: 5
+    };
+    const assertPreservedFailure = async (failure: () => Error) => {
+      const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+      let invocation = 0;
+      let originalFailure: Error | undefined;
+      let observedFailure: unknown;
+      try {
+        await agent.withOpenRouterRecovery(undefined, async () => {
+          invocation += 1;
+          if (invocation === 1) {
+            throw Object.assign(new Error("HTTP 429 request id: telemetry-robustness"), {
+              usage: { input_tokens: 2, output_tokens: 3, reasoning_tokens: 1 }
+            });
+          }
+          originalFailure = failure();
+          throw originalFailure;
+        });
+        assert.fail("expected recovery to preserve the terminal provider failure");
+      } catch (error) {
+        observedFailure = error;
+      }
+      assert.equal(invocation, 2);
+      assert.ok(originalFailure);
+      assert.equal(observedFailure, originalFailure);
+      assert.deepEqual((observedFailure as { usage?: unknown }).usage, expectedUsage);
+    };
+
+    await assertPreservedFailure(() => {
+      const error = new Error("provider failure with a throwing telemetry getter");
+      Object.defineProperty(error, "totalUsage", {
+        configurable: true,
+        get: () => {
+          throw new Error("throwing usage getter must stay hidden");
+        }
+      });
+      return error;
+    });
+    await assertPreservedFailure(() =>
+      Object.assign(new Error("provider failure with rejected telemetry"), {
+        totalUsage: Promise.reject(new Error("rejected usage promise must stay hidden"))
+      })
+    );
+  }
+);
+
+bunAdapterTest(
   "generated OpenRouter adapter decreases one caller timeout across exact-session recovery",
   { timeout: 10_000 },
   async () => {
@@ -4754,6 +4904,14 @@ bunAdapterTest(
         }
       });
       assert.equal(result.text, "DONE");
+      assert.deepEqual(result.usage, {
+        inputTokens: 7,
+        inputTokenDetails: {},
+        outputTokens: 10,
+        outputTokenDetails: { reasoningTokens: 6 },
+        totalTokens: 17
+      });
+      assert.deepEqual(result.totalUsage, result.usage);
       assert.match(stderr, /ended without a final assistant message after substantive work/u);
       assert.match(JSON.stringify(events), /I will inspect the task before I finish it\./u);
       assert.match(JSON.stringify(events), /substantive work without a final/u);
@@ -4775,6 +4933,45 @@ bunAdapterTest(
         ["mutation\n", "mutation\n"]
       );
 
+      resetFixture("terminal-null-rate-limit-usage");
+      const recoveredUsageResult = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+        prompt: "Include discarded and recoverable continuation usage"
+      });
+      assert.equal(recoveredUsageResult.text, "DONE");
+      assert.deepEqual(recoveredUsageResult.usage, {
+        inputTokens: 18,
+        inputTokenDetails: {},
+        outputTokens: 23,
+        outputTokenDetails: { reasoningTokens: 11 },
+        totalTokens: 41
+      });
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume", "resume"]
+      );
+
+      resetFixture("terminal-null-failed-usage");
+      await assert.rejects(
+        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+          prompt: "Retain usage when exact-session recovery ultimately fails"
+        }),
+        (error: unknown) => {
+          assert.deepEqual((error as { usage?: unknown }).usage, {
+            inputTokens: 13,
+            inputTokenDetails: {},
+            outputTokens: 16,
+            outputTokenDetails: { reasoningTokens: 7 },
+            totalTokens: 29
+          });
+          assert.deepEqual((error as { totalUsage?: unknown }).totalUsage, (error as { usage?: unknown }).usage);
+          return true;
+        }
+      );
+      assert.deepEqual(
+        readOpenRouterRetryFixtureJournal(fixture.journal).map((entry) => entry.invocation),
+        ["fresh", "resume"]
+      );
+
       resetFixture("terminal-null-resume");
       const streamPrompt = "Finish the streamed null-final fixture exactly once";
       const streamEvents: Record<string, unknown>[] = [];
@@ -4783,6 +4980,14 @@ bunAdapterTest(
         onEvent: (event) => streamEvents.push(event)
       });
       assert.equal(await streamResult.text, "DONE");
+      assert.deepEqual(await streamResult.usage, {
+        inputTokens: 7,
+        inputTokenDetails: {},
+        outputTokens: 10,
+        outputTokenDetails: { reasoningTokens: 6 },
+        totalTokens: 17
+      });
+      assert.deepEqual(await streamResult.totalUsage, await streamResult.usage);
       assert.deepEqual(await streamResult.textStream.getReader().read(), { value: "DONE", done: false });
       const streamJournal = readOpenRouterRetryFixtureJournal(fixture.journal);
       assert.deepEqual(
@@ -6502,7 +6707,7 @@ bunAdapterTest(
 
 bunAdapterTest(
   "generated Pi adapter binds OpenRouter through env and keeps the credential out of argv",
-  { timeout: 30_000 },
+  { timeout: 60_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
@@ -6698,6 +6903,207 @@ bunAdapterTest(
       assert.equal(typedErrorCompleted?.ok, false);
       assert.equal(typedErrorCompleted?.error, "A Timeout Occurred");
       assert.equal(typedErrorCompleted?.answer, undefined);
+
+      const piUsageLines = [
+        { type: "session", id: "usage-session" },
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: "usage-response-1",
+            content: [{ type: "toolCall", name: "read", arguments: { path: "one" } }],
+            usage: {
+              input: 2,
+              output: 3,
+              cacheRead: 4,
+              cacheWrite: 0,
+              // `reasoning` is optional in Pi's usage protocol. Its absence is
+              // an exact zero breakdown, not a malformed provider response.
+              totalTokens: 9,
+              cost: { input: 0.001, output: 0.002, cacheRead: 0.003, cacheWrite: 0, total: 0.006 }
+            }
+          }
+        },
+        {
+          // turn_end repeats the authoritative message_end usage and must not
+          // turn one billed response into two.
+          type: "turn_end",
+          message: {
+            role: "assistant",
+            responseId: "usage-response-1",
+            content: [{ type: "toolCall", name: "read", arguments: { path: "one" } }],
+            usage: {
+              input: 2,
+              output: 3,
+              cacheRead: 4,
+              cacheWrite: 0,
+              reasoning: 1,
+              totalTokens: 9,
+              cost: { input: 0.001, output: 0.002, cacheRead: 0.003, cacheWrite: 0, total: 0.006 }
+            }
+          }
+        },
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: "usage-response-2",
+            content: [{ type: "text", text: "usage complete" }],
+            usage: {
+              input: 5,
+              output: 7,
+              cacheRead: 11,
+              cacheWrite: 13,
+              reasoning: 2,
+              totalTokens: 36,
+              cost: { input: 0.005, output: 0.006, cacheRead: 0.007, cacheWrite: 0.008, total: 0.026 }
+            }
+          }
+        },
+        {
+          type: "agent_end",
+          messages: [{ role: "assistant", content: [{ type: "text", text: "usage complete" }] }]
+        }
+      ];
+      const progressInterpreter = agent.createOutputInterpreter();
+      const progressEvents = piUsageLines
+        .slice(0, 4)
+        .flatMap((line) => {
+          const events = progressInterpreter.onStdoutLine?.(JSON.stringify(line));
+          return events == null ? [] : Array.isArray(events) ? events : [events];
+        })
+        .filter((event) => event.type === "usage") as Array<{
+        type: string;
+        resume?: string;
+        usage?: Record<string, unknown>;
+      }>;
+      assert.equal(progressEvents.length, 2);
+      assert.equal(progressEvents[0]?.resume, "usage-session");
+      assert.deepEqual(progressEvents[0]?.usage, {
+        inputTokens: 6,
+        inputTokenDetails: { noCacheTokens: 2, cacheReadTokens: 4, cacheWriteTokens: 0 },
+        outputTokens: 3,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 0 },
+        totalTokens: 9,
+        reportedCostUsd: 0.006
+      });
+      assert.equal(progressEvents[1]?.resume, "usage-session");
+      assert.deepEqual(progressEvents[1]?.usage, {
+        inputTokens: 35,
+        inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 15, cacheWriteTokens: 13 },
+        outputTokens: 10,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 2 },
+        totalTokens: 45,
+        reportedCostUsd: 0.032
+      });
+
+      // A provider response becomes observable at message_end, before either
+      // agent_end or process settlement. This is the ordering the engine uses
+      // to durably checkpoint usage when a child then hangs or dies.
+      const interruptedAgent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      const interruptedController = new AbortController();
+      const interruptedLines = piUsageLines.slice(0, 2);
+      const interruptedScript = `${interruptedLines
+        .map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`)
+        .join("")}setTimeout(() => process.exit(17), 10_000);`;
+      interruptedAgent.buildCommand = async () => ({
+        command: process.execPath,
+        args: ["-e", interruptedScript],
+        outputFormat: "stream-json"
+      });
+      let interruptedUsage: Record<string, unknown> | undefined;
+      await assert.rejects(
+        interruptedAgent.generate({
+          prompt: "emit usage before interruption",
+          abortSignal: interruptedController.signal,
+          onEvent: (rawEvent: unknown) => {
+            const event = rawEvent as unknown as Record<string, unknown>;
+            if (event.type !== "usage") return;
+            interruptedUsage = event;
+            interruptedController.abort(new Error("synthetic watchdog interruption"));
+          }
+        }),
+        /synthetic watchdog interruption|abort/u
+      );
+      assert.equal(interruptedUsage?.resume, "usage-session");
+      assert.deepEqual(interruptedUsage?.usage, progressEvents[0]?.usage);
+
+      const usageScript = piUsageLines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("");
+      agent.buildCommand = async () => ({
+        command: process.execPath,
+        args: ["-e", usageScript],
+        outputFormat: "stream-json"
+      });
+      const usageResult = await agent.generate({ prompt: "account for every Pi response" });
+      const expectedUsage = {
+        inputTokens: 35,
+        inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 15, cacheWriteTokens: 13 },
+        outputTokens: 10,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 2 },
+        totalTokens: 45,
+        reportedCostUsd: 0.032
+      };
+      assert.deepEqual(usageResult.usage, expectedUsage);
+      assert.deepEqual(usageResult.totalUsage, expectedUsage);
+
+      const streamAgent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      streamAgent.buildCommand = agent.buildCommand;
+      const usageStream = await streamAgent.stream({ prompt: "stream every Pi response" });
+      assert.deepEqual(await usageStream.usage, expectedUsage);
+      assert.deepEqual(await usageStream.totalUsage, expectedUsage);
+
+      const failedUsage = {
+        input: 17,
+        output: 5,
+        cacheRead: 19,
+        cacheWrite: 0,
+        // Exercise the same optional-field compatibility on Smithers' failure
+        // telemetry path, where the adapter attaches usage to the thrown error.
+        totalTokens: 41,
+        cost: { input: 0.017, output: 0.005, cacheRead: 0.019, cacheWrite: 0, total: 0.041 }
+      };
+      const failedLines = [
+        { type: "session", id: "failed-usage-session" },
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: "failed-usage-response",
+            stopReason: "error",
+            errorMessage: "A Timeout Occurred",
+            content: [],
+            usage: failedUsage
+          }
+        },
+        {
+          type: "agent_end",
+          messages: [
+            {
+              role: "assistant",
+              stopReason: "error",
+              errorMessage: "A Timeout Occurred",
+              content: [],
+              usage: failedUsage
+            }
+          ]
+        }
+      ];
+      const failedScript = failedLines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("");
+      const failedAgent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      failedAgent.buildCommand = async () => ({
+        command: process.execPath,
+        args: ["-e", failedScript],
+        outputFormat: "stream-json"
+      });
+      await assert.rejects(failedAgent.generate({ prompt: "retain failed usage" }), (error: unknown) => {
+        const usage = (error as { usage?: Record<string, unknown> }).usage;
+        assert.equal(usage?.inputTokens, 36);
+        assert.equal(usage?.outputTokens, 5);
+        assert.equal(usage?.totalTokens, 41);
+        assert.equal(usage?.reportedCostUsd, 0.041);
+        assert.deepEqual(usage?.outputTokenDetails, { textTokens: undefined, reasoningTokens: 0 });
+        return true;
+      });
 
       // Profile reasoning maps onto pi's existing --thinking level.
       const thinkingAgent = createPiAgent({ model: "openai/gpt-mini-latest", reasoningEffort: "high" });
@@ -11568,6 +11974,46 @@ test("getRunHealth reports a terminal product status while workflow health is li
   assert.equal(unattributed?.severity, "error");
 });
 
+test("getRunHealth reports a live product status while workflow health is terminal", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "reverse-lifecycle-status-divergence";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const terminalStatus = currentStatusEnvelope(workflowRunId);
+  const terminalStatusData = terminalStatus.data as Record<string, unknown>;
+  terminalStatusData.status = "failed";
+  terminalStatusData.verdict = "failed";
+  terminalStatusData.reason = "workflow runner recorded a terminal failure";
+  terminalStatusData.liveness = { state: "failed" };
+  terminalStatusData.finishedAtMs = 2_000;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    status: terminalStatus
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.status, "running");
+  assert.equal(health.value?.workflow_status, "failed");
+  const divergence = health.diagnostics.filter((diagnostic) => diagnostic.code === "RUN_WORKFLOW_STATUS_DIVERGED");
+  assert.equal(divergence.length, 1, JSON.stringify(health.diagnostics));
+  assert.equal(divergence[0]?.severity, "warning");
+  assert.deepEqual(divergence[0]?.details, {
+    run_status: "running",
+    workflow_status: "failed"
+  });
+  assert.match(divergence[0]?.message ?? "", /must not be treated as current/u);
+});
+
 test("a divergent published control file leaves status readable while native resume delegates", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -14013,6 +14459,289 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
+type OwnedUsageRow = {
+  inputTokens?: number;
+  freshInputTokens?: number | null;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number | null;
+  updatedAtMs: number;
+  runtimeOwnerId?: string | null;
+  attempt?: number;
+};
+
+type OwnedUsageTotal = {
+  inputTokens: number;
+  freshInputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  costUsd: number | null;
+  attempts: number;
+};
+
+type OwnedUsageAdapter = {
+  recordRunTokenUsageOwned: (row: Record<string, unknown>) => PromiseLike<boolean>;
+  getRunTokenUsage: (runId: string) => PromiseLike<OwnedUsageTotal>;
+};
+
+type OwnedUsageFixture = {
+  adapter: OwnedUsageAdapter;
+  sqlite: BunSqliteHandle;
+  persist: (row: OwnedUsageRow) => PromiseLike<boolean>;
+  tokenEvents: () => Array<{ timestamp_ms: number; payload_json: string }>;
+  usageRowsForAttempt: (attempt: number) => number;
+  close: () => void;
+};
+
+function persistOwnedUsage(adapter: OwnedUsageAdapter, row: OwnedUsageRow): PromiseLike<boolean> {
+  const resolved = {
+    runId: "run-owned-usage",
+    nodeId: "node:usage",
+    iteration: 0,
+    attempt: row.attempt ?? 1,
+    runtimeOwnerId: row.runtimeOwnerId ?? "owner-a",
+    model: "provider/model",
+    agent: "PiAgent",
+    ...row
+  };
+  const event = {
+    type: "TokenUsageReported",
+    runId: resolved.runId,
+    nodeId: resolved.nodeId,
+    iteration: resolved.iteration,
+    attempt: resolved.attempt,
+    model: resolved.model,
+    agent: resolved.agent,
+    inputTokens: resolved.inputTokens ?? 0,
+    ...(resolved.freshInputTokens == null ? {} : { freshInputTokens: resolved.freshInputTokens }),
+    outputTokens: resolved.outputTokens ?? 0,
+    ...(resolved.cacheReadTokens === undefined ? {} : { cacheReadTokens: resolved.cacheReadTokens }),
+    ...(resolved.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: resolved.cacheWriteTokens }),
+    ...(resolved.reasoningTokens === undefined ? {} : { reasoningTokens: resolved.reasoningTokens }),
+    ...(resolved.costUsd == null ? {} : { costUsd: resolved.costUsd }),
+    timestampMs: resolved.updatedAtMs
+  };
+  return adapter.recordRunTokenUsageOwned({ ...resolved, event });
+}
+
+async function openOwnedUsageFixture(): Promise<OwnedUsageFixture> {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const ownedUsagePatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "owned_usage");
+  assert.ok(ownedUsagePatch);
+  const pinnedDbSource = pinnedRunnerSourceDir("@smthrs/db", "adapter");
+  const pinnedDbRoot = path.dirname(pinnedDbSource);
+  const isolatedDbRoot = path.join(tempProject(), "node_modules", "@smthrs", "db");
+  fs.mkdirSync(path.dirname(isolatedDbRoot), { recursive: true });
+  fs.cpSync(pinnedDbRoot, isolatedDbRoot, { recursive: true });
+  fs.rmSync(path.join(isolatedDbRoot, "node_modules"), { recursive: true, force: true });
+  fs.symlinkSync(path.dirname(path.dirname(pinnedDbRoot)), path.join(isolatedDbRoot, "node_modules"), "dir");
+  const adapterSource = path.join(isolatedDbRoot, "src", "adapter.js");
+  const stockAdapter = fs.readFileSync(adapterSource, "utf8");
+  assert.equal(stockAdapter.split(ownedUsagePatch.patchable).length, 2);
+  fs.writeFileSync(adapterSource, stockAdapter.replace(ownedUsagePatch.patchable, ownedUsagePatch.patched), "utf8");
+  const { openDurableSqliteDatabase } = (await import(
+    pathToFileURL(path.join(isolatedDbRoot, "src", "openDurableSqliteDatabase.js")).href
+  )) as { openDurableSqliteDatabase: (file: string) => { db: unknown; close: () => void } };
+  const { ensureSqlMessageStorage } = (await import(
+    pathToFileURL(path.join(isolatedDbRoot, "src", "sql-message-storage.js")).href
+  )) as { ensureSqlMessageStorage: (db: unknown) => Promise<void> };
+  const { SmithersDb } = (await import(pathToFileURL(adapterSource).href)) as {
+    SmithersDb: new (db: unknown) => OwnedUsageAdapter;
+  };
+  const handle = openDurableSqliteDatabase(path.join(tempProject(), "owned-usage.db"));
+  await ensureSqlMessageStorage(handle.db);
+  const sqlite = (handle.db as { $client: BunSqliteHandle }).$client;
+  sqlite
+    .query(
+      `INSERT INTO _smithers_runs
+       (run_id, workflow_name, status, created_at_ms, runtime_owner_id)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run("run-owned-usage", "workflow", "running", 1, "owner-a");
+  for (const attempt of [1, 2]) {
+    sqlite
+      .query(
+        `INSERT INTO _smithers_attempts
+         (run_id, node_id, iteration, attempt, state, started_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run("run-owned-usage", "node:usage", 0, attempt, "in-progress", attempt);
+  }
+  const adapter = new SmithersDb(handle.db);
+  return {
+    adapter,
+    sqlite,
+    persist: (row) => persistOwnedUsage(adapter, row),
+    tokenEvents: () =>
+      sqlite
+        .query(
+          `SELECT timestamp_ms, payload_json FROM _smithers_events
+           WHERE run_id = ? AND type = 'TokenUsageReported' ORDER BY seq ASC`
+        )
+        .all(["run-owned-usage"]) as Array<{ timestamp_ms: number; payload_json: string }>,
+    usageRowsForAttempt: (attempt) =>
+      Number(
+        sqlite
+          .query(
+            `SELECT COUNT(*) AS count FROM _smithers_run_usage
+             WHERE run_id = ? AND node_id = ? AND iteration = ? AND attempt = ?`
+          )
+          .get("run-owned-usage", "node:usage", 0, attempt)?.count ?? 0
+      ),
+    close: handle.close
+  };
+}
+
+async function assertOwnedUsageMonotonicity(fixture: OwnedUsageFixture): Promise<void> {
+  const { persist, sqlite, tokenEvents } = fixture;
+  const initial: OwnedUsageRow = {
+    inputTokens: 10,
+    freshInputTokens: null,
+    outputTokens: 5,
+    cacheReadTokens: 6,
+    cacheWriteTokens: 0,
+    reasoningTokens: 2,
+    costUsd: 0.5,
+    updatedAtMs: 10
+  };
+  assert.equal(await persist(initial), true);
+  const initialEvent = tokenEvents()[0];
+  assert.ok(initialEvent);
+  assert.equal(JSON.parse(initialEvent.payload_json).inputTokens, 10);
+  // Equal terminal telemetry is accepted and atomically includes its event.
+  assert.equal(await persist({ ...initial, updatedAtMs: 11 }), true);
+  assert.equal(tokenEvents().length, 2);
+  assert.equal(await persist({ ...initial, inputTokens: 9, updatedAtMs: 12 }), false);
+  const upgraded = { ...initial, inputTokens: 11, freshInputTokens: 5, updatedAtMs: 13 };
+  assert.equal(await persist(upgraded), true);
+  assert.equal(await persist({ ...upgraded, inputTokens: 12, freshInputTokens: null, updatedAtMs: 14 }), false);
+  assert.equal(
+    await persist({
+      ...upgraded,
+      inputTokens: 12,
+      outputTokens: 6,
+      cacheReadTokens: undefined,
+      reasoningTokens: undefined,
+      costUsd: null,
+      updatedAtMs: 15
+    }),
+    true
+  );
+  const lastEvent = tokenEvents().at(-1);
+  assert.ok(lastEvent);
+  const incompleteEvent = JSON.parse(lastEvent.payload_json) as Record<string, unknown>;
+  assert.equal(incompleteEvent.inputTokens, 12);
+  assert.equal("cacheReadTokens" in incompleteEvent, false);
+  assert.equal("reasoningTokens" in incompleteEvent, false);
+  assert.equal("costUsd" in incompleteEvent, false);
+  assert.equal(
+    await persist({
+      inputTokens: 20,
+      freshInputTokens: 8,
+      outputTokens: 7,
+      cacheReadTokens: 9,
+      cacheWriteTokens: 1,
+      reasoningTokens: 3,
+      costUsd: 0.75,
+      updatedAtMs: 16
+    }),
+    true
+  );
+  assert.equal(await persist({ ...upgraded, runtimeOwnerId: "stale-owner", updatedAtMs: 17 }), false);
+  sqlite.query("UPDATE _smithers_runs SET cancel_requested_at_ms = ? WHERE run_id = ?").run(18, "run-owned-usage");
+  assert.equal(await persist({ ...upgraded, updatedAtMs: 18 }), false);
+  sqlite.query("UPDATE _smithers_runs SET cancel_requested_at_ms = NULL WHERE run_id = ?").run("run-owned-usage");
+  sqlite
+    .query("UPDATE _smithers_attempts SET state = ? WHERE run_id = ? AND node_id = ? AND attempt = ?")
+    .run("finished", "run-owned-usage", "node:usage", 1);
+  assert.equal(await persist({ ...upgraded, updatedAtMs: 19 }), false);
+}
+
+async function assertOwnedUsageAtomicity(fixture: OwnedUsageFixture): Promise<void> {
+  const { adapter, persist, tokenEvents, usageRowsForAttempt } = fixture;
+  const event = {
+    type: "TokenUsageReported",
+    runId: "run-owned-usage",
+    nodeId: "node:usage",
+    iteration: 0,
+    attempt: 2,
+    model: "provider/model",
+    agent: "PiAgent",
+    inputTokens: 98,
+    outputTokens: 99,
+    timestampMs: 19
+  };
+  const row = {
+    runId: "run-owned-usage",
+    nodeId: "node:usage",
+    iteration: 0,
+    attempt: 2,
+    runtimeOwnerId: "owner-a",
+    model: "provider/model",
+    agent: "PiAgent",
+    inputTokens: 99,
+    outputTokens: 99,
+    updatedAtMs: 19
+  };
+  const eventsBeforeRejectedAttempt = tokenEvents().length;
+  await assert.rejects(
+    Promise.resolve(adapter.recordRunTokenUsageOwned({ ...row, event })),
+    /does not match its normalized usage snapshot/u
+  );
+  assert.equal(tokenEvents().length, eventsBeforeRejectedAttempt);
+  assert.equal(usageRowsForAttempt(2), 0);
+  // A serialization failure after the upsert must roll the whole transaction back.
+  const circularEvent: Record<string, unknown> = { ...event, inputTokens: 99 };
+  circularEvent.self = circularEvent;
+  await assert.rejects(Promise.resolve(adapter.recordRunTokenUsageOwned({ ...row, event: circularEvent })));
+  assert.equal(usageRowsForAttempt(2), 0);
+  assert.equal(
+    await persist({
+      attempt: 2,
+      inputTokens: 3,
+      freshInputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 0,
+      reasoningTokens: 1,
+      costUsd: 0.25,
+      updatedAtMs: 20
+    }),
+    true
+  );
+  assert.equal(tokenEvents().length, 6);
+  assert.deepEqual(await adapter.getRunTokenUsage("run-owned-usage"), {
+    runId: "run-owned-usage",
+    inputTokens: 23,
+    freshInputTokens: 9,
+    outputTokens: 9,
+    cacheReadTokens: 11,
+    cacheWriteTokens: 1,
+    reasoningTokens: 4,
+    totalTokens: 32,
+    costUsd: 1,
+    pricedAttempts: 2,
+    attempts: 2
+  });
+}
+
+// Usage snapshots are cumulative within one attempt. The compatibility method
+// must accept forward/equal snapshots, reject regressions, and atomically
+// enforce the live run owner plus exact attempt and event.
+bunAdapterTest("owned usage snapshots are fenced and component-monotonic", async () => {
+  const fixture = await openOwnedUsageFixture();
+  try {
+    await assertOwnedUsageMonotonicity(fixture);
+    await assertOwnedUsageAtomicity(fixture);
+  } finally {
+    fixture.close();
+  }
+});
+
 // Keep creating the covering index for new databases. Do not force queries to
 // use it: historical Smithers databases may predate the index and must remain
 // resumable before any current startup migration runs.
@@ -14047,6 +14776,216 @@ test("agent event ownership compatibility patch coalesces only an in-flight proo
     ownershipPatch.patched,
     /if \(heartbeatOwnershipCheckInFlight === check\) heartbeatOwnershipCheckInFlight = null/u
   );
+});
+
+test("agent usage compatibility persists an owned snapshot before publishing telemetry", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const progress = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_agent_usage_progress");
+  const mainInvocation = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_main_usage_invocation");
+  const jsonInvocation = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (patch) => patch.id === "engine_json_correction_usage_invocation"
+  );
+  const jsonResult = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_json_correction_usage_result");
+  const schemaInvocation = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (patch) => patch.id === "engine_schema_correction_usage_invocation"
+  );
+  const schemaResult = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (patch) => patch.id === "engine_schema_correction_usage_result"
+  );
+  const failed = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_failed_usage_ownership");
+  const final = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_final_usage_ownership");
+  assert.ok(progress);
+  assert.ok(mainInvocation);
+  assert.ok(jsonInvocation);
+  assert.ok(jsonResult);
+  assert.ok(schemaInvocation);
+  assert.ok(schemaResult);
+  assert.ok(failed);
+  assert.ok(final);
+  const tokenEvent = progress.patched.indexOf('type: "TokenUsageReported"');
+  const ownedWrite = progress.patched.indexOf("adapter.recordRunTokenUsageOwned({");
+  const atomicEvent = progress.patched.indexOf("event: tokenUsageEvent", ownedWrite);
+  const agentEvent = progress.patched.indexOf('type: "AgentEvent"', ownedWrite);
+  const tokenPublication = progress.patched.indexOf("eventBus.emitEventQueued(tokenUsageEvent)", ownedWrite);
+  assert.notEqual(tokenEvent, -1);
+  assert.notEqual(ownedWrite, -1);
+  assert.equal(tokenEvent < ownedWrite, true);
+  assert.equal(atomicEvent > ownedWrite, true);
+  assert.equal(agentEvent > ownedWrite, true);
+  assert.equal(tokenPublication > agentEvent, true);
+  assert.match(progress.patched, /runtimeOwnerId: executionOwnerId/u);
+  assert.match(progress.patched, /if \(!stored\) return false/u);
+  assert.match(mainInvocation.patched, /beginAgentUsageInvocation\(\);/u);
+  assert.match(jsonInvocation.patched, /beginAgentUsageInvocation\(\);/u);
+  assert.match(schemaInvocation.patched, /beginAgentUsageInvocation\(\);/u);
+  assert.match(jsonResult.patched, /await persistAgentResultUsage\(retryResult\);/u);
+  assert.match(schemaResult.patched, /await persistAgentResultUsage\(schemaRetryResult\);/u);
+  assert.match(failed.patched, /await persistOwnedAgentUsage\(failedUsage/u);
+  assert.match(final.patched, /await persistOwnedAgentUsage\(usage/u);
+  assert.doesNotMatch(progress.patched, /adapter\.recordRunTokenUsage\(/u);
+  assert.doesNotMatch(failed.patched, /adapter\.recordRunTokenUsage\(/u);
+  assert.doesNotMatch(final.patched, /adapter\.recordRunTokenUsage\(/u);
+});
+
+test("reported CLI cost compatibility patches validate and prefer the adapter estimate", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const normalization = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_normalize");
+  const pricing = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_price");
+  assert.ok(normalization);
+  assert.ok(pricing);
+  assert.match(normalization.patched, /Number\.isFinite\(reportedCostUsd\).*reportedCostUsd >= 0/su);
+  assert.match(pricing.patched, /if \(usage\.reportedCostUsd !== undefined\) return usage\.reportedCostUsd/u);
+});
+
+test("reported CLI cost compatibility preserves zero-token adapter estimates", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const normalization = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_normalize");
+  const pricing = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_price");
+  assert.ok(normalization);
+  assert.ok(pricing);
+
+  const resolveFromPinnedRunner = createRequire(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+  );
+  const pinnedEngineSource = resolveFromPinnedRunner.resolve("@smthrs/engine/engine");
+  const pinnedEngineRoot = path.dirname(path.dirname(pinnedEngineSource));
+  const isolatedEngineRoot = path.join(tempProject(), "node_modules", "@smthrs", "engine");
+  fs.mkdirSync(path.dirname(isolatedEngineRoot), { recursive: true });
+  fs.cpSync(pinnedEngineRoot, isolatedEngineRoot, { recursive: true });
+  fs.rmSync(path.join(isolatedEngineRoot, "node_modules"), { recursive: true, force: true });
+  fs.symlinkSync(path.dirname(path.dirname(pinnedEngineRoot)), path.join(isolatedEngineRoot, "node_modules"), "dir");
+
+  const sourcePath = path.join(isolatedEngineRoot, "src", "engine.js");
+  let source = fs.readFileSync(sourcePath, "utf8");
+  for (const patch of [normalization, pricing]) {
+    assert.equal(source.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in the pinned engine`);
+    source = source.replace(patch.patchable, patch.patched);
+  }
+  const internalsAnchor = "export const __engineInternals = {";
+  assert.equal(source.split(internalsAnchor).length, 2);
+  source = source.replace(
+    internalsAnchor,
+    `${internalsAnchor}\n  normalizeTokenUsage,\n  estimateReportedCostUsd,\n  createCumulativeAgentUsageState,`
+  );
+  fs.writeFileSync(sourcePath, source, "utf8");
+
+  const patchedEngine = (await import(pathToFileURL(sourcePath).href)) as {
+    __engineInternals: {
+      normalizeTokenUsage: (usage: Record<string, unknown>) => {
+        inputTokens: number;
+        freshInputTokens: number;
+        outputTokens: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+        reasoningTokens?: number;
+        reportedCostUsd?: number;
+      } | null;
+      estimateReportedCostUsd: (model: string, usage: Record<string, unknown>) => number | undefined;
+      createCumulativeAgentUsageState: () => {
+        begin: () => void;
+        snapshot: (
+          usage: {
+            inputTokens: number;
+            freshInputTokens: number;
+            outputTokens: number;
+            cacheReadTokens?: number;
+            cacheWriteTokens?: number;
+            reasoningTokens?: number;
+            reportedCostUsd?: number;
+          },
+          model: string,
+          agent: string,
+          finalize?: boolean
+        ) => {
+          usage: {
+            inputTokens: number;
+            freshInputTokens: number;
+            outputTokens: number;
+            cacheReadTokens?: number;
+            cacheWriteTokens?: number;
+            reasoningTokens?: number;
+          };
+          costUsd?: number;
+          reportedModelId: string;
+          agentId: string;
+        };
+      };
+    };
+  };
+  const { normalizeTokenUsage, estimateReportedCostUsd, createCumulativeAgentUsageState } =
+    patchedEngine.__engineInternals;
+  const zeroTokenUsage = {
+    inputTokens: 0,
+    inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    outputTokens: 0,
+    totalTokens: 0
+  };
+  const free = normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: 0 });
+  assert.ok(free);
+  assert.equal(free.reportedCostUsd, 0);
+  assert.equal(estimateReportedCostUsd("model-absent-from-smithers", free), 0);
+
+  const charged = normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: 0.125 });
+  assert.ok(charged);
+  assert.equal(charged.reportedCostUsd, 0.125);
+  assert.equal(estimateReportedCostUsd("model-absent-from-smithers", charged), 0.125);
+
+  assert.equal(normalizeTokenUsage(zeroTokenUsage), null);
+  assert.equal(normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: -1 }), null);
+  assert.equal(normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: Number.NaN }), null);
+
+  const accumulator = createCumulativeAgentUsageState();
+  accumulator.begin();
+  const progress = normalizeTokenUsage({
+    inputTokens: 10,
+    inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 2, cacheWriteTokens: 1 },
+    outputTokens: 5,
+    outputTokenDetails: { reasoningTokens: 1 },
+    reportedCostUsd: 0.1
+  });
+  assert.ok(progress);
+  assert.equal(accumulator.snapshot(progress, "provider/model", "PiAgent").usage.inputTokens, 10);
+
+  // The terminal result replaces this invocation's progress total; it is not
+  // another billed call. Finalizing then makes the next generate() additive.
+  const firstResult = normalizeTokenUsage({
+    inputTokens: 12,
+    inputTokenDetails: { noCacheTokens: 9, cacheReadTokens: 2, cacheWriteTokens: 1 },
+    outputTokens: 6,
+    outputTokenDetails: { reasoningTokens: 1 },
+    reportedCostUsd: 0.12
+  });
+  assert.ok(firstResult);
+  assert.equal(accumulator.snapshot(firstResult, "provider/model", "PiAgent", true).costUsd, 0.12);
+
+  accumulator.begin();
+  const correction = normalizeTokenUsage({
+    inputTokens: 3,
+    outputTokens: 2,
+    reportedCostUsd: 0.03
+  });
+  assert.ok(correction);
+  const corrected = accumulator.snapshot(correction, "provider/model", "PiAgent", true);
+  assert.deepEqual(corrected.usage, {
+    inputTokens: 15,
+    freshInputTokens: 12,
+    outputTokens: 8
+  });
+  assert.equal(corrected.costUsd, 0.15);
+
+  // One invocation omitted cache/reasoning details, so their known subset is
+  // not presented as a complete cumulative breakdown. Adding an unpriced call
+  // also makes the complete cumulative cost unknown without losing tokens.
+  accumulator.begin();
+  const unpriced = normalizeTokenUsage({ inputTokens: 1, outputTokens: 1 });
+  assert.ok(unpriced);
+  const incomplete = accumulator.snapshot(unpriced, "model-absent-from-smithers", "PiAgent", true);
+  assert.deepEqual(incomplete.usage, {
+    inputTokens: 16,
+    freshInputTokens: 13,
+    outputTokens: 9
+  });
+  assert.equal(incomplete.costUsd, undefined);
 });
 
 test("patched engine admits authenticated controller path changes without accepting VCS relocation", async () => {
@@ -15098,7 +16037,11 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
 // literal `bun:` import.
 interface BunSqliteHandle {
   run: (sql: string, params?: readonly unknown[]) => unknown;
-  query: (sql: string) => { all: (params?: readonly unknown[]) => Array<Record<string, unknown>> };
+  query: (sql: string) => {
+    all: (params?: readonly unknown[]) => Array<Record<string, unknown>>;
+    get: (...params: unknown[]) => Record<string, unknown> | null;
+    run: (...params: unknown[]) => unknown;
+  };
   close: () => void;
 }
 
@@ -17058,25 +18001,85 @@ test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new f
     return { runRoot: run.value!.run_root, result: await syncRun({ projectRoot: project, runId, env }) };
   };
 
-  // `freshInputTokens` is the uncached share of `inputTokens`, not an addition
-  // to it, and `costUsd` is a fractional estimate. Both are accepted, and the
-  // ledger totals stay derived from `inputTokens`/`outputTokens` alone.
+  // `freshInputTokens` is the uncached share of inclusive `inputTokens`, while
+  // cache and reasoning counters are breakdowns. The recorded cost is retained
+  // as the pricing authority instead of being discarded and re-estimated.
   const accepted = await syncWithUsage("fresh-input-usage", {
     inputTokens: 512,
     freshInputTokens: 112,
     outputTokens: 23,
     cacheReadTokens: 400,
     cacheWriteTokens: 0,
+    reasoningTokens: 7,
     costUsd: 0.001_234_5
   });
   assert.equal(accepted.result.ok, true, JSON.stringify(accepted.result.diagnostics));
   const metadata = JSON.parse(fs.readFileSync(path.join(accepted.runRoot, "run.json"), "utf8")) as {
-    accounting?: { current?: { total_tokens?: number; cache_read_tokens?: number } };
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        uncached_input_tokens?: number;
+        cache_read_tokens?: number;
+        reasoning_tokens?: number;
+        provided_cost_usd?: number;
+        estimated_spend_usd?: number;
+        pricing_complete?: boolean;
+      };
+    };
   };
-  // 512 input + 23 output + 400 cache read: `freshInputTokens` is the uncached
-  // share of `inputTokens`, so counting it would double-count the same tokens.
-  assert.equal(metadata.accounting?.current?.total_tokens, 935);
+  assert.equal(metadata.accounting?.current?.total_tokens, 535);
+  assert.equal(metadata.accounting?.current?.uncached_input_tokens, 112);
   assert.equal(metadata.accounting?.current?.cache_read_tokens, 400);
+  assert.equal(metadata.accounting?.current?.reasoning_tokens, 7);
+  assert.equal(metadata.accounting?.current?.provided_cost_usd, 0.001_234_5);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.001_234_5);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
+  const usageLedger = JSON.parse(fs.readFileSync(path.join(accepted.runRoot, "usage.jsonl"), "utf8")) as {
+    usage?: { fresh_input_tokens?: number; recorded_cost_usd?: number };
+  };
+  assert.equal(usageLedger.usage?.fresh_input_tokens, 112);
+  assert.equal(usageLedger.usage?.recorded_cost_usd, 0.001_234_5);
+
+  const outputOnly = await syncWithUsage("output-only-usage", { inputTokens: 0, outputTokens: 7 });
+  assert.equal(outputOnly.result.ok, true, JSON.stringify(outputOnly.result.diagnostics));
+  const outputOnlyMetadata = JSON.parse(fs.readFileSync(path.join(outputOnly.runRoot, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { total_tokens?: number; cache_read_tokens?: number; usage_complete?: boolean };
+    };
+  };
+  assert.equal(outputOnlyMetadata.accounting?.current?.total_tokens, 7);
+  assert.equal(outputOnlyMetadata.accounting?.current?.cache_read_tokens, 0);
+  assert.equal(outputOnlyMetadata.accounting?.current?.usage_complete, true);
+
+  const contradictory = await syncWithUsage("contradictory-usage-breakdown", {
+    inputTokens: 5,
+    freshInputTokens: 6,
+    outputTokens: 1,
+    reasoningTokens: 2,
+    costUsd: 0.01
+  });
+  assert.equal(contradictory.result.ok, true, JSON.stringify(contradictory.result.diagnostics));
+  const contradictoryMetadata = JSON.parse(fs.readFileSync(path.join(contradictory.runRoot, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        uncached_input_tokens?: number;
+        estimated_spend_usd?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string; component?: string }>;
+        pricing_complete?: boolean;
+      };
+    };
+  };
+  assert.equal(contradictoryMetadata.accounting?.current?.total_tokens, 6);
+  assert.equal(contradictoryMetadata.accounting?.current?.uncached_input_tokens, 6);
+  assert.equal(contradictoryMetadata.accounting?.current?.estimated_spend_usd, 0.01);
+  assert.equal(contradictoryMetadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(
+    contradictoryMetadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.component),
+    ["reasoning", "uncached_input"]
+  );
+  assert.equal(contradictoryMetadata.accounting?.current?.pricing_complete, true);
 
   // Both new fields stay bounded: a non-integer token count and a negative cost
   // are contract violations, not values to coerce.
@@ -17124,7 +18127,11 @@ test("syncRun counts cache-only usage when aggregate input is explicitly zero", 
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
           model: "gpt-cache-only",
-          agent: "codex"
+          agent: "codex",
+          // This synthetic model is absent from Smithers' built-in table, so
+          // the real event omits adapter-recorded cost and exercises the host
+          // pricing/contradictory-breakdown path below.
+          costUsd: undefined
         }
       },
       { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
@@ -17152,18 +18159,85 @@ test("syncRun counts cache-only usage when aggregate input is explicitly zero", 
         cache_write_tokens?: number;
         event_count?: number;
         usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
         pricing_complete?: boolean;
         estimated_spend_usd?: number;
       };
     };
   };
-  assert.equal(metadata.accounting?.current?.total_tokens, 15);
+  assert.equal(metadata.accounting?.current?.total_tokens, 0);
   assert.equal(metadata.accounting?.current?.cache_read_tokens, 12);
   assert.equal(metadata.accounting?.current?.cache_write_tokens, 3);
   assert.equal(metadata.accounting?.current?.event_count, 1);
-  assert.equal(metadata.accounting?.current?.usage_complete, true);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(metadata.accounting?.current?.usage_incomplete_reasons, [
+    {
+      code: "component-breakdown-incomplete",
+      component: "uncached_input",
+      model: "gpt-cache-only"
+    }
+  ]);
   assert.equal(metadata.accounting?.current?.pricing_complete, true);
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.000012);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, undefined);
+});
+
+test("syncRun retains a deduplicated zero-usage snapshot as a priced attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-zero-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          model: "gpt-zero",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "zero-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "zero-usage", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        event_count?: number;
+        priced_event_count?: number;
+        estimated_spend_usd?: number;
+        attempts?: unknown[];
+        source_event_sequences?: number[];
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.total_tokens, 0);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0);
+  assert.equal(metadata.accounting?.current?.attempts?.length, 1);
+  assert.equal(metadata.accounting?.current?.source_event_sequences?.length, 1);
 });
 
 test("syncRun uses durable event sequence for the current accounting segment", async () => {
@@ -17191,7 +18265,7 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       reasoningTokens: 0,
-      model: "generated-model",
+      model: "superseded-model",
       agent: "generated-agent"
     }),
     event(2, 200, "TokenUsageReported", {
@@ -17203,11 +18277,25 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       reasoningTokens: 0,
-      model: "generated-model",
+      model: "authoritative-model",
       agent: "generated-agent"
     }),
-    event(3, 400, "NodeFinished", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
-    event(4, 500, "RunFinished")
+    // A replay after the owned DB write committed but its first event publish
+    // failed is still one cumulative attempt, never a second billed response.
+    event(3, 350, "TokenUsageReported", {
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      attempt: 1,
+      inputTokens: 20,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      model: "authoritative-model",
+      agent: "generated-agent"
+    }),
+    event(4, 400, "NodeFinished", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
+    event(5, 500, "RunFinished")
   ].join("\n")}\n`;
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -17215,6 +18303,13 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
     }),
     events
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "authoritative-model": { cost: { input: 1, output: 1, cache_read: 0.5, cache_write: 1.5 } }
+      }
+    }
   });
   const run = await startRun({ projectRoot: project, runId: "sequenced-usage", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -17224,13 +18319,24 @@ test("syncRun uses durable event sequence for the current accounting segment", a
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     accounting?: {
-      current?: { control_generation?: string; source_event_sequences?: number[]; total_tokens?: number };
+      current?: {
+        control_generation?: string;
+        source_event_sequences?: number[];
+        total_tokens?: number;
+        event_count?: number;
+        attempts?: unknown[];
+      };
       segments?: Array<{ control_generation?: string; source_event_sequences?: number[]; total_tokens?: number }>;
+      pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
     };
   };
   assert.equal(metadata.accounting?.segments?.length, 1);
-  assert.deepEqual(metadata.accounting?.current?.source_event_sequences, [1, 2]);
-  assert.equal(metadata.accounting?.current?.total_tokens, 30);
+  assert.deepEqual(metadata.accounting?.current?.source_event_sequences, [1, 2, 3]);
+  assert.equal(metadata.accounting?.current?.total_tokens, 20);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.attempts?.length, 1);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["authoritative-model"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, []);
   assert.match(metadata.accounting?.current?.control_generation ?? "", /^[a-f0-9]{64}$/u);
   assert.equal(
     metadata.accounting?.segments?.[0]?.control_generation,
@@ -17244,7 +18350,7 @@ test("syncRun appends unseen usage events to the current control segment", async
   writeSmallTopology(project);
 
   const workflowRunId = "ultrafuzz-implicit-usage";
-  const tokenEvent = (inputTokens: number, outputTokens: number) => ({
+  const tokenEvent = (inputTokens: number, outputTokens: number, model: string) => ({
     type: "TokenUsageReported",
     nodeId: "node:project-discovery",
     attempt: 1,
@@ -17252,13 +18358,13 @@ test("syncRun appends unseen usage events to the current control segment", async
       iteration: 0,
       inputTokens,
       outputTokens,
-      model: "generated-model",
+      model,
       agent: "generated-agent"
     }
   });
   const firstSegment = [
     { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-    tokenEvent(10, 5),
+    tokenEvent(10, 5, "initial-model"),
     { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
     { type: "RunFinished" }
   ];
@@ -17269,16 +18375,31 @@ test("syncRun appends unseen usage events to the current control segment", async
     }),
     events: workflowEvents(workflowRunId, firstSegment)
   });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    test: {
+      models: {
+        "initial-model": { cost: { input: 1, output: 1 } },
+        "replacement-model": { cost: { input: 2, output: 2 } }
+      }
+    }
+  });
   const run = await startRun({ projectRoot: project, runId: "implicit-usage", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
 
   const first = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
   assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const firstMetadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+    accounting?: { pricing_catalog?: { resolved_models?: string[]; model_prices?: Record<string, unknown> } };
+  };
+  assert.deepEqual(firstMetadata.accounting?.pricing_catalog?.resolved_models, ["initial-model"]);
+  assert.deepEqual(Object.keys(firstMetadata.accounting?.pricing_catalog?.model_prices ?? {}), ["initial-model"]);
 
   fs.writeFileSync(
     path.join(project, "fake-smithers-events.ndjson"),
-    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10)]),
+    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, "replacement-model")]),
     "utf8"
   );
   const second = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
@@ -17286,7 +18407,7 @@ test("syncRun appends unseen usage events to the current control segment", async
   assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
 
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
     accounting?: {
       segments?: Array<{
         control_generation?: string;
@@ -17295,17 +18416,20 @@ test("syncRun appends unseen usage events to the current control segment", async
         event_count?: number;
       }>;
       cumulative?: { total_tokens?: number; event_count?: number };
+      pricing_catalog?: { resolved_models?: string[]; model_prices?: Record<string, unknown> };
     };
   };
   const segments = metadata.accounting?.segments ?? [];
   assert.equal(segments.length, 1);
-  assert.equal(segments[0]?.total_tokens, 45);
-  assert.equal(segments[0]?.event_count, 2);
+  assert.equal(segments[0]?.total_tokens, 30);
+  assert.equal(segments[0]?.event_count, 1);
   assert.deepEqual(segments[0]?.source_event_sequences, [1, 4]);
   assert.match(segments[0]?.control_generation ?? "", /^[a-f0-9]{64}$/u);
-  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
-  assert.equal(metadata.accounting?.cumulative?.event_count, 2);
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
+  assert.equal(metadata.accounting?.cumulative?.total_tokens, 30);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 1);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["replacement-model"]);
+  assert.deepEqual(Object.keys(metadata.accounting?.pricing_catalog?.model_prices ?? {}), ["replacement-model"]);
+  assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
 test("syncRun rejects a malformed-present usage ledger without accounting fallback", async () => {
@@ -17363,6 +18487,7 @@ test("syncRun records unavailable spend when workflow token events are unpriced"
           iteration: 0,
           inputTokens: 10,
           outputTokens: 20,
+          costUsd: undefined,
           model: "gpt-test",
           agent: "codex"
         }
@@ -17433,6 +18558,7 @@ test("syncRun retries transient pricing catalog failures", async () => {
           outputTokens: 10_000,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          costUsd: undefined,
           model: "gpt-test",
           agent: "codex"
         }
@@ -17498,11 +18624,13 @@ test("syncRun prices independent usage components when cache reads exceed uncach
         attempt: 1,
         extra: {
           iteration: 0,
-          inputTokens: 100_000,
+          inputTokens: 310_000,
+          freshInputTokens: 100_000,
           outputTokens: 10_000,
           cacheReadTokens: 200_000,
           cacheWriteTokens: 10_000,
           reasoningTokens: 5_000,
+          costUsd: undefined,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -17510,13 +18638,15 @@ test("syncRun prices independent usage components when cache reads exceed uncach
       {
         type: "TokenUsageReported",
         nodeId: "node:project-discovery",
-        attempt: 1,
+        attempt: 2,
         extra: {
           iteration: 0,
-          inputTokens: 0,
+          inputTokens: 15,
+          freshInputTokens: 0,
           outputTokens: 0,
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
+          costUsd: undefined,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -17571,17 +18701,17 @@ test("syncRun prices independent usage components when cache reads exceed uncach
       updated_at?: string;
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "325,015");
-  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_015);
-  assert.equal(metadata.accounting?.current?.billable_token_total, 325_015);
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$1.11");
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.11252475);
+  assert.equal(metadata.accounting?.current?.tokens_used, "320,015");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 320_015);
+  assert.equal(metadata.accounting?.current?.billable_token_total, 320_015);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.96");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.96252475);
   assert.deepEqual(metadata.accounting?.current?.component_costs_usd, {
     uncached_input: 0.5,
     cache_read: 0.100006,
     cache_write: 0.06251875,
     output: 0.3,
-    reasoning: 0.15
+    reasoning: 0
   });
   assert.equal(
     Number(
@@ -17596,9 +18726,9 @@ test("syncRun prices independent usage components when cache reads exceed uncach
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 2);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
-  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_015);
-  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_015);
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.11252475);
+  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 320_015);
+  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 320_015);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.96252475);
   assert.deepEqual(
     metadata.accounting?.cumulative?.component_costs_usd,
     metadata.accounting?.current?.component_costs_usd
@@ -17622,7 +18752,7 @@ test("syncRun prices independent usage components when cache reads exceed uncach
   const resyncedMetadata = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")
   ) as typeof metadata;
-  assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$1.11");
+  assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$0.96");
   assert.deepEqual(resyncedMetadata.accounting?.current, metadata.accounting?.current);
   assert.deepEqual(resyncedMetadata.accounting?.cumulative, metadata.accounting?.cumulative);
   assert.equal(resyncedMetadata.accounting?.updated_at, metadata.accounting?.updated_at);
@@ -17651,6 +18781,7 @@ test("syncRun records a typed incomplete-pricing reason for a missing component 
           cacheReadTokens: 20_000,
           cacheWriteTokens: 0,
           reasoningTokens: 0,
+          costUsd: undefined,
           model: "gpt-component-test",
           agent: "codex"
         }
@@ -17731,6 +18862,7 @@ test("syncRun applies context-tier pricing from the live catalog", async () => {
           outputTokens: 10_000,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          costUsd: undefined,
           model: "gpt-tiered",
           agent: "codex"
         }
@@ -17797,6 +18929,7 @@ test("syncRun publishes complete DeepSeek V4 telemetry at first-party list rates
           outputTokens: 8_000,
           cacheReadTokens: 400_000,
           cacheWriteTokens: 0,
+          costUsd: undefined,
           // DeepSeek output already includes thinking tokens; emitting another
           // reasoning component would double-count the provider's completion.
           model: "deepseek-v4-pro",
@@ -17900,6 +19033,7 @@ function kimiTokenUsageEvents(workflowRunId: string): string {
         outputTokens: 8_000,
         cacheReadTokens: 400_000,
         cacheWriteTokens: 20_000,
+        costUsd: undefined,
         model: "kimi-k3",
         agent: "KimiAgent"
       }
@@ -18035,6 +19169,7 @@ test("syncRun prices Kimi models from Moonshot, not an alphabetically earlier sa
           outputTokens: 100_000,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
+          costUsd: undefined,
           model: "kimi-k3",
           agent: "KimiAgent"
         }
@@ -18144,7 +19279,9 @@ test("syncRun does not assume zero cache reads when cache telemetry is missing",
         extra: {
           iteration: 0,
           inputTokens: 100_000,
+          freshInputTokens: undefined,
           outputTokens: 10_000,
+          costUsd: undefined,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -18191,9 +19328,9 @@ test("syncRun does not assume zero cache reads when cache telemetry is missing",
     }
   ]);
   assert.equal(metadata.accounting?.current?.pricing_complete, true);
-  assert.equal(metadata.accounting?.current?.partial_pricing, false);
-  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
-  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 0);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
   assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, false);
 });
 
@@ -18216,7 +19353,9 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
         extra: {
           iteration: 0,
           inputTokens: 100_000,
+          freshInputTokens: undefined,
           outputTokens: 10_000,
+          costUsd: undefined,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -18256,8 +19395,8 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
       };
     };
   };
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.84");
-  assert.equal(metadata.accounting?.current?.inclusive_token_total, 200_000);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 110_000);
   assert.equal(metadata.accounting?.current?.usage_complete, false);
   assert.deepEqual(metadata.accounting?.current?.usage_incomplete_reasons, [
     {

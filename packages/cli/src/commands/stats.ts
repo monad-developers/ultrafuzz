@@ -524,7 +524,7 @@ function renderStatistics(value: RunStatisticsValue, diagnostics: RuntimeDiagnos
     ...(cumulativeTokens === undefined
       ? []
       : [
-          `Cumulative accounting: ${formatInteger(cumulativeTokens)} tokens${cumulativeCost === undefined ? "" : `, $${cumulativeCost.toFixed(2)}`}`
+          `Cumulative accounting: ${formatInteger(cumulativeTokens)} tokens${cumulativeCost === undefined ? "" : `, $${cumulativeCost.toFixed(2)}${accounting?.pricing_complete === false ? "+" : ""}`}`
         ]),
     "",
     line(headers),

@@ -40,6 +40,45 @@ type OpenRouter429RecoveryDecision =
   | { kind: "total-timeout" }
   | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
 
+type OpenRouterRecoveryUsage = {
+  inputTokens?: number;
+  inputTokenDetails: {
+    noCacheTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
+  outputTokens?: number;
+  outputTokenDetails: {
+    textTokens?: number;
+    reasoningTokens?: number;
+  };
+  totalTokens?: number;
+};
+
+type OpenRouterRecoveryContext<T> = {
+  options: OpenRouterGenerateOptions | undefined;
+  operation: (attemptOptions: OpenRouterGenerateOptions) => Promise<T>;
+  totalTimeoutMs: number | undefined;
+  totalDeadline: number | undefined;
+  retryDeadline: number;
+  retryAttempt: number;
+  recoveryResumeSession: string | undefined;
+  recoveryMarker: string | undefined;
+  terminalRecoveryMarker: string | undefined;
+  observedRateLimit: boolean;
+  lastRateLimitError: unknown;
+  retainedRateLimitRelay: BufferedAttemptRelay | undefined;
+  accumulatedUsage: OpenRouterRecoveryUsageAccumulator;
+  originalResumeSession: string | undefined;
+  priorAttemptActionSnapshots: BoundedActionSnapshots;
+};
+
+type OpenRouterRecoveryAttempt = {
+  relay: BufferedAttemptRelay;
+  expectedResumeSession: string | undefined;
+  terminal: boolean;
+};
+
 /**
  * Route Codex's Responses client through OpenRouter while retaining Codex's
  * command, JSONL usage accounting, resume behavior, and workspace controls.
@@ -136,278 +175,253 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     options: OpenRouterGenerateOptions | undefined,
     operation: (attemptOptions: OpenRouterGenerateOptions) => Promise<T>
   ): Promise<T> {
-    let retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
     const totalTimeoutMs = resolveTotalTimeoutMs(options?.timeout, this.timeoutMs);
     const totalDeadline =
       totalTimeoutMs !== undefined && totalTimeoutMs !== 0 && Number.isFinite(totalTimeoutMs)
         ? performance.now() + Math.max(0, totalTimeoutMs)
         : undefined;
-    let retryAttempt = 0;
-    let recoveryResumeSession: string | undefined;
-    let recoveryMarker: string | undefined;
-    let terminalRecoveryMarker: string | undefined;
-    let observedRateLimit = false;
-    let lastRateLimitError: unknown;
-    let retainedRateLimitRelay: BufferedAttemptRelay | undefined;
-    const originalResumeSession = normalizedResumeSession(options?.resumeSession);
-    const priorAttemptActionSnapshots = new BoundedActionSnapshots();
-    const discardRetainedRateLimitRelay = () => {
-      const retainedRelay = retainedRateLimitRelay;
-      retainedRateLimitRelay = undefined;
-      retainedRelay?.discard();
+    const context: OpenRouterRecoveryContext<T> = {
+      options,
+      operation,
+      totalTimeoutMs,
+      totalDeadline,
+      retryDeadline: performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS,
+      retryAttempt: 0,
+      recoveryResumeSession: undefined,
+      recoveryMarker: undefined,
+      terminalRecoveryMarker: undefined,
+      observedRateLimit: false,
+      lastRateLimitError: undefined,
+      retainedRateLimitRelay: undefined,
+      accumulatedUsage: new OpenRouterRecoveryUsageAccumulator(),
+      originalResumeSession: normalizedResumeSession(options?.resumeSession),
+      priorAttemptActionSnapshots: new BoundedActionSnapshots()
     };
-    const releaseRetainedRateLimitRelay = (): { error: unknown } | undefined => {
-      const retainedRelay = retainedRateLimitRelay;
-      retainedRateLimitRelay = undefined;
-      if (retainedRelay === undefined) return undefined;
-      retainedRelay.release();
-      return retainedRelay.callerCallbackError();
-    };
+    try {
+      return await this.runOpenRouterRecovery(context);
+    } catch (error) {
+      throw context.accumulatedUsage.applyToError(error);
+    }
+  }
+
+  private async runOpenRouterRecovery<T>(context: OpenRouterRecoveryContext<T>): Promise<T> {
     for (;;) {
-      if (options?.abortSignal?.aborted === true) {
-        discardRetainedRateLimitRelay();
-        throw abortReason(options.abortSignal);
-      }
-      const remainingTimeoutMs = remainingUntil(totalDeadline);
-      if (remainingTimeoutMs !== undefined && remainingTimeoutMs <= 0) {
-        discardRetainedRateLimitRelay();
-        throw this.retryTimeout(totalTimeoutMs, options);
-      }
-      if (observedRateLimit && performance.now() >= retryDeadline) {
-        const callbackError = releaseRetainedRateLimitRelay();
-        if (callbackError !== undefined) throw callbackError.error;
-        throw lastRateLimitError;
-      }
-      const relay = new BufferedAttemptRelay(options, priorAttemptActionSnapshots);
-      const expectedResumeSession = recoveryResumeSession ?? originalResumeSession;
-      const isTerminalRecoveryAttempt = terminalRecoveryMarker !== undefined;
+      const remainingTimeoutMs = this.openRouterRecoveryRemaining(context);
+      const attempt = openRouterRecoveryAttempt(context);
       let result: T;
       try {
-        result = await operation(
-          relay.options(
-            remainingTimeoutMs,
-            expectedResumeSession,
-            terminalRecoveryMarker !== undefined
-              ? terminalContinuationPrompt(terminalRecoveryMarker)
-              : recoveryMarker === undefined
-                ? undefined
-                : sessionContinuationPrompt(recoveryMarker),
-            {
-              ...(observedRateLimit ? { retryDeadlineMs: retryDeadline } : {}),
-              ...(totalDeadline === undefined ? {} : { totalDeadlineMs: totalDeadline })
-            }
-          )
-        );
+        result = await context.operation(openRouterAttemptOptions(context, attempt, remainingTimeoutMs));
       } catch (error) {
-        if (options?.abortSignal?.aborted === true) {
-          relay.discard();
-          discardRetainedRateLimitRelay();
-          throw abortReason(options.abortSignal);
-        }
-        const conflict = relay.resumeSessionConflict();
-        if (conflict !== undefined) {
-          relay.discard();
-          discardRetainedRateLimitRelay();
-          throw conflict;
-        }
-        const callbackError = relay.callerCallbackError();
-        if (callbackError !== undefined) {
-          relay.discard();
-          discardRetainedRateLimitRelay();
-          throw callbackError.error;
-        }
-        if (relay.totalDeadlineExceeded()) {
-          relay.discard();
-          discardRetainedRateLimitRelay();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        if (hasOpenRouterDeadlineMarker(error, OPENROUTER_TOTAL_DEADLINE_MARKER)) {
-          relay.discard();
-          discardRetainedRateLimitRelay();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        if (hasOpenRouterDeadlineMarker(error, OPENROUTER_RECOVERY_DEADLINE_MARKER)) {
-          relay.discard();
-          const retainedCallbackError = releaseRetainedRateLimitRelay();
-          if (retainedCallbackError !== undefined) throw retainedCallbackError.error;
-          throw lastRateLimitError ?? error;
-        }
-        // Any outcome from a replacement operation supersedes the prior 429.
-        // Keep that bounded diagnostic only when buildCommand rejects the
-        // replacement before its provider child can start.
-        discardRetainedRateLimitRelay();
-        const terminalRateLimitError = relay.terminalRateLimitError(error);
-        const terminalRateLimitObserved = terminalRateLimitError !== undefined;
-        const classificationCallbackError = relay.callerCallbackError();
-        if (classificationCallbackError !== undefined) {
-          relay.discard();
-          throw classificationCallbackError.error;
-        }
-        if (!isOpenRouterRateLimit(error) && !terminalRateLimitObserved) {
-          relay.release();
-          const releasedCallbackError = relay.callerCallbackError();
-          if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
-          throw error;
-        }
-        observedRateLimit = true;
-        const effectiveRateLimitError = isOpenRouterRateLimit(error) ? error : (terminalRateLimitError ?? error);
-        lastRateLimitError = effectiveRateLimitError;
-        if (relay.sawSubstantiveEvent) {
-          const resumeSession = relay.resumeSession ?? expectedResumeSession;
-          if (resumeSession === undefined) {
-            relay.release();
-            const releasedCallbackError = relay.callerCallbackError();
-            if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
-            throw effectiveRateLimitError;
-          }
-          recoveryResumeSession = resumeSession;
-          recoveryMarker = randomUUID();
-          retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
-          retryAttempt = 0;
-        } else if (recoveryResumeSession !== undefined) {
-          recoveryResumeSession = relay.resumeSession ?? recoveryResumeSession;
-        } else if (originalResumeSession !== undefined) {
-          recoveryResumeSession = relay.resumeSession ?? originalResumeSession;
-          recoveryMarker = randomUUID();
-        }
-        const decision = decideOpenRouter429Recovery({
-          retryAttempt,
-          nowMs: performance.now(),
-          retryDeadlineMs: retryDeadline,
-          totalDeadlineMs: totalDeadline,
-          random: Math.random()
-        });
-        if (decision.kind === "rate-limit-exhausted") {
-          relay.release();
-          const releasedCallbackError = relay.callerCallbackError();
-          if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
-          throw effectiveRateLimitError;
-        }
-        if (decision.kind === "total-timeout") {
-          relay.discard();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        relay.rememberActionSnapshotsForResume();
-        const retryDescription =
-          recoveryResumeSession === undefined
-            ? "before model output; retrying"
-            : "after model activity; resuming the existing Codex session";
-        try {
-          options?.onStderr?.(
-            `[ultrafuzz] OpenRouter returned HTTP 429 ${retryDescription} in ${decision.delayMs}ms ` +
-              `(attempt ${retryAttempt + 2}, ${OPENROUTER_429_RECOVERY_WINDOW_MS}ms recovery window).\n`
-          );
-        } catch (callbackError) {
-          relay.discard();
-          throw callbackError;
-        }
-        const timeoutRemainingAfterNotice = remainingUntil(totalDeadline);
-        if (timeoutRemainingAfterNotice !== undefined && timeoutRemainingAfterNotice <= 0) {
-          relay.discardRetryOutput();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        if (performance.now() >= retryDeadline) {
-          relay.release();
-          const releasedCallbackError = relay.callerCallbackError();
-          if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
-          throw effectiveRateLimitError;
-        }
-        const retryRemainingAfterNotice = Math.max(0, retryDeadline - performance.now());
-        const waitDelayMs =
-          timeoutRemainingAfterNotice === undefined
-            ? Math.min(decision.delayMs, retryRemainingAfterNotice)
-            : Math.min(decision.delayMs, retryRemainingAfterNotice, timeoutRemainingAfterNotice);
-        try {
-          await waitForRetry(waitDelayMs, combineAbortSignals(options?.abortSignal, relay.attemptSignal()));
-        } catch (waitError) {
-          if (options?.abortSignal?.aborted === true) {
-            relay.discard();
-            throw abortReason(options.abortSignal);
-          }
-          if (relay.totalDeadlineExceeded()) {
-            relay.discard();
-            throw this.retryTimeout(totalTimeoutMs, options);
-          }
-          relay.discard();
-          throw waitError;
-        }
-        if (decision.afterDelay === "total-timeout") {
-          relay.discardRetryOutput();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        const timeoutRemainingAfterDelay = remainingUntil(totalDeadline);
-        if (timeoutRemainingAfterDelay !== undefined && timeoutRemainingAfterDelay <= 0) {
-          relay.discardRetryOutput();
-          throw this.retryTimeout(totalTimeoutMs, options);
-        }
-        if (performance.now() >= retryDeadline) {
-          relay.release();
-          const releasedCallbackError = relay.callerCallbackError();
-          if (releasedCallbackError !== undefined) throw releasedCallbackError.error;
-          throw effectiveRateLimitError;
-        }
-        // The backoff decision was made from this attempt, but buildCommand
-        // can cross the recovery deadline before the replacement child starts.
-        // Retain one bounded relay until that child produces an authoritative
-        // outcome so the actual final 429 remains caller-visible in that race.
-        discardRetainedRateLimitRelay();
-        relay.retainRetryOutput();
-        retainedRateLimitRelay = relay;
-        retryAttempt += 1;
+        await context.accumulatedUsage.addAttempt(attempt.relay.reportedUsage(), error);
+        await this.handleOpenRouterRecoveryFailure(context, attempt, error);
         continue;
       }
-      discardRetainedRateLimitRelay();
-      const successTimeoutRemaining = remainingUntil(totalDeadline);
-      if (relay.totalDeadlineExceeded() || (successTimeoutRemaining !== undefined && successTimeoutRemaining <= 0)) {
-        relay.discard();
-        throw this.retryTimeout(totalTimeoutMs, options);
-      }
-      const conflict = relay.resumeSessionConflict();
-      if (conflict !== undefined) {
-        relay.discard();
-        throw conflict;
-      }
-      const preRecoveryCallbackError = relay.callerCallbackError();
-      if (preRecoveryCallbackError !== undefined) {
-        relay.discard();
-        throw preRecoveryCallbackError.error;
-      }
-      if ((relay.sawSubstantiveEvent || isTerminalRecoveryAttempt) && !relay.hasAuthoritativeTerminalMessage()) {
-        const resumeSession = relay.resumeSession ?? expectedResumeSession;
-        relay.rememberActionSnapshotsForResume();
-        relay.discard();
-        if (isTerminalRecoveryAttempt) {
-          throw this.missingTerminalAnswer(
-            options,
-            "exact-session continuation also ended without a final assistant message"
-          );
-        }
-        if (resumeSession === undefined) {
-          throw this.missingTerminalAnswer(
-            options,
-            "turn ended without a final assistant message after substantive work and no exact session was available"
-          );
-        }
-        options?.onStderr?.(
-          `[ultrafuzz] OpenRouter Codex ended without a final assistant message after substantive work; ` +
-            `resuming exact session ${resumeSession}.\n`
-        );
-        recoveryResumeSession = resumeSession;
-        recoveryMarker = undefined;
-        terminalRecoveryMarker = randomUUID();
-        observedRateLimit = false;
-        lastRateLimitError = undefined;
-        retryAttempt = 0;
-        retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
-        continue;
-      }
-      // Keep caller callbacks outside the provider-error catch. A callback may
-      // throw synchronously, but that must never make us replay successful work.
-      relay.release();
-      const callbackError = relay.callerCallbackError();
-      if (callbackError !== undefined) throw callbackError.error;
-      return result;
+      await context.accumulatedUsage.addAttempt(attempt.relay.reportedUsage(), result);
+      if (this.handleOpenRouterRecoverySuccess(context, attempt)) continue;
+      return context.accumulatedUsage.applyToResult(result);
     }
+  }
+
+  private openRouterRecoveryRemaining<T>(context: OpenRouterRecoveryContext<T>): number | undefined {
+    if (context.options?.abortSignal?.aborted === true) {
+      discardRetainedRateLimitRelay(context);
+      throw abortReason(context.options.abortSignal);
+    }
+    const remainingTimeoutMs = remainingUntil(context.totalDeadline);
+    if (remainingTimeoutMs !== undefined && remainingTimeoutMs <= 0) {
+      discardRetainedRateLimitRelay(context);
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    if (context.observedRateLimit && performance.now() >= context.retryDeadline) {
+      const callbackError = releaseRetainedRateLimitRelay(context);
+      if (callbackError !== undefined) throw callbackError.error;
+      throw context.lastRateLimitError;
+    }
+    return remainingTimeoutMs;
+  }
+
+  private async handleOpenRouterRecoveryFailure<T>(
+    context: OpenRouterRecoveryContext<T>,
+    attempt: OpenRouterRecoveryAttempt,
+    error: unknown
+  ): Promise<void> {
+    this.assertOpenRouterFailurePrecedence(context, attempt.relay, error);
+    const effectiveRateLimitError = classifyOpenRouterRateLimit(context, attempt.relay, error);
+    context.observedRateLimit = true;
+    context.lastRateLimitError = effectiveRateLimitError;
+    recordOpenRouterRecoverySession(context, attempt, effectiveRateLimitError);
+    const decision = decideOpenRouter429Recovery({
+      retryAttempt: context.retryAttempt,
+      nowMs: performance.now(),
+      retryDeadlineMs: context.retryDeadline,
+      totalDeadlineMs: context.totalDeadline,
+      random: Math.random()
+    });
+    await this.prepareOpenRouterRetry(context, attempt.relay, effectiveRateLimitError, decision);
+  }
+
+  private assertOpenRouterFailurePrecedence<T>(
+    context: OpenRouterRecoveryContext<T>,
+    relay: BufferedAttemptRelay,
+    error: unknown
+  ): void {
+    if (context.options?.abortSignal?.aborted === true) {
+      discardAttemptAndRetained(context, relay);
+      throw abortReason(context.options.abortSignal);
+    }
+    const conflict = relay.resumeSessionConflict();
+    if (conflict !== undefined) {
+      discardAttemptAndRetained(context, relay);
+      throw conflict;
+    }
+    const callbackError = relay.callerCallbackError();
+    if (callbackError !== undefined) {
+      discardAttemptAndRetained(context, relay);
+      throw callbackError.error;
+    }
+    if (relay.totalDeadlineExceeded() || hasOpenRouterDeadlineMarker(error, OPENROUTER_TOTAL_DEADLINE_MARKER)) {
+      discardAttemptAndRetained(context, relay);
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    if (hasOpenRouterDeadlineMarker(error, OPENROUTER_RECOVERY_DEADLINE_MARKER)) {
+      relay.discard();
+      const retainedCallbackError = releaseRetainedRateLimitRelay(context);
+      if (retainedCallbackError !== undefined) throw retainedCallbackError.error;
+      throw context.lastRateLimitError ?? error;
+    }
+  }
+
+  private async prepareOpenRouterRetry<T>(
+    context: OpenRouterRecoveryContext<T>,
+    relay: BufferedAttemptRelay,
+    effectiveRateLimitError: unknown,
+    decision: OpenRouter429RecoveryDecision
+  ): Promise<void> {
+    if (decision.kind === "rate-limit-exhausted") {
+      releaseRelayOrThrow(relay);
+      throw effectiveRateLimitError;
+    }
+    if (decision.kind === "total-timeout") {
+      relay.discard();
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    relay.rememberActionSnapshotsForResume();
+    notifyOpenRouterRetry(context, relay, decision.delayMs);
+    const timeoutRemaining = this.assertOpenRouterRetryDeadline(context, relay, effectiveRateLimitError, false);
+    const retryRemaining = Math.max(0, context.retryDeadline - performance.now());
+    const waitDelayMs = minimumDefined(decision.delayMs, retryRemaining, timeoutRemaining);
+    await this.waitForOpenRouterRetry(context, relay, waitDelayMs);
+    if (decision.afterDelay === "total-timeout") {
+      relay.discardRetryOutput();
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    this.assertOpenRouterRetryDeadline(context, relay, effectiveRateLimitError, true);
+    // The backoff decision was made from this attempt, but buildCommand can
+    // cross the recovery deadline before the replacement child starts. Retain
+    // one bounded relay until that child has an authoritative outcome.
+    discardRetainedRateLimitRelay(context);
+    relay.retainRetryOutput();
+    context.retainedRateLimitRelay = relay;
+    context.retryAttempt += 1;
+  }
+
+  private assertOpenRouterRetryDeadline<T>(
+    context: OpenRouterRecoveryContext<T>,
+    relay: BufferedAttemptRelay,
+    effectiveRateLimitError: unknown,
+    afterDelay: boolean
+  ): number | undefined {
+    const timeoutRemaining = remainingUntil(context.totalDeadline);
+    if (timeoutRemaining !== undefined && timeoutRemaining <= 0) {
+      relay.discardRetryOutput();
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    if (performance.now() >= context.retryDeadline) {
+      releaseRelayOrThrow(relay);
+      throw effectiveRateLimitError;
+    }
+    if (afterDelay) return undefined;
+    return timeoutRemaining;
+  }
+
+  private async waitForOpenRouterRetry<T>(
+    context: OpenRouterRecoveryContext<T>,
+    relay: BufferedAttemptRelay,
+    delayMs: number
+  ): Promise<void> {
+    try {
+      await waitForRetry(delayMs, combineAbortSignals(context.options?.abortSignal, relay.attemptSignal()));
+    } catch (waitError) {
+      relay.discard();
+      if (context.options?.abortSignal?.aborted === true) throw abortReason(context.options.abortSignal);
+      if (relay.totalDeadlineExceeded()) throw this.retryTimeout(context.totalTimeoutMs, context.options);
+      throw waitError;
+    }
+  }
+
+  private handleOpenRouterRecoverySuccess<T>(
+    context: OpenRouterRecoveryContext<T>,
+    attempt: OpenRouterRecoveryAttempt
+  ): boolean {
+    discardRetainedRateLimitRelay(context);
+    const successTimeoutRemaining = remainingUntil(context.totalDeadline);
+    if (
+      attempt.relay.totalDeadlineExceeded() ||
+      (successTimeoutRemaining !== undefined && successTimeoutRemaining <= 0)
+    ) {
+      attempt.relay.discard();
+      throw this.retryTimeout(context.totalTimeoutMs, context.options);
+    }
+    const conflict = attempt.relay.resumeSessionConflict();
+    if (conflict !== undefined) {
+      attempt.relay.discard();
+      throw conflict;
+    }
+    const callbackError = attempt.relay.callerCallbackError();
+    if (callbackError !== undefined) {
+      attempt.relay.discard();
+      throw callbackError.error;
+    }
+    if (shouldContinueForTerminalAnswer(attempt)) {
+      this.continueForTerminalAnswer(context, attempt);
+      return true;
+    }
+    // Caller callbacks remain outside the provider-error catch so a callback
+    // cannot replay successful model work.
+    releaseRelayOrThrow(attempt.relay);
+    return false;
+  }
+
+  private continueForTerminalAnswer<T>(
+    context: OpenRouterRecoveryContext<T>,
+    attempt: OpenRouterRecoveryAttempt
+  ): void {
+    const resumeSession = attempt.relay.resumeSession ?? attempt.expectedResumeSession;
+    attempt.relay.rememberActionSnapshotsForResume();
+    attempt.relay.discard();
+    if (attempt.terminal) {
+      throw this.missingTerminalAnswer(
+        context.options,
+        "exact-session continuation also ended without a final assistant message"
+      );
+    }
+    if (resumeSession === undefined) {
+      throw this.missingTerminalAnswer(
+        context.options,
+        "turn ended without a final assistant message after substantive work and no exact session was available"
+      );
+    }
+    context.options?.onStderr?.(
+      `[ultrafuzz] OpenRouter Codex ended without a final assistant message after substantive work; ` +
+        `resuming exact session ${resumeSession}.\n`
+    );
+    context.recoveryResumeSession = resumeSession;
+    context.recoveryMarker = undefined;
+    context.terminalRecoveryMarker = randomUUID();
+    context.observedRateLimit = false;
+    context.lastRateLimitError = undefined;
+    context.retryAttempt = 0;
+    context.retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
   }
 
   private retryTimeout(totalTimeoutMs: number | undefined, options: OpenRouterGenerateOptions | undefined): Error {
@@ -430,6 +444,374 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       cwd: this.cwd ?? options?.rootDir ?? process.cwd()
     });
   }
+}
+
+function openRouterRecoveryAttempt<T>(context: OpenRouterRecoveryContext<T>): OpenRouterRecoveryAttempt {
+  return {
+    relay: new BufferedAttemptRelay(context.options, context.priorAttemptActionSnapshots),
+    expectedResumeSession: context.recoveryResumeSession ?? context.originalResumeSession,
+    terminal: context.terminalRecoveryMarker !== undefined
+  };
+}
+
+function openRouterAttemptOptions<T>(
+  context: OpenRouterRecoveryContext<T>,
+  attempt: OpenRouterRecoveryAttempt,
+  remainingTimeoutMs: number | undefined
+): OpenRouterGenerateOptions {
+  const continuationPrompt =
+    context.terminalRecoveryMarker !== undefined
+      ? terminalContinuationPrompt(context.terminalRecoveryMarker)
+      : context.recoveryMarker === undefined
+        ? undefined
+        : sessionContinuationPrompt(context.recoveryMarker);
+  return attempt.relay.options(remainingTimeoutMs, attempt.expectedResumeSession, continuationPrompt, {
+    ...(context.observedRateLimit ? { retryDeadlineMs: context.retryDeadline } : {}),
+    ...(context.totalDeadline === undefined ? {} : { totalDeadlineMs: context.totalDeadline })
+  });
+}
+
+function discardRetainedRateLimitRelay<T>(context: OpenRouterRecoveryContext<T>): void {
+  const retainedRelay = context.retainedRateLimitRelay;
+  context.retainedRateLimitRelay = undefined;
+  retainedRelay?.discard();
+}
+
+function releaseRetainedRateLimitRelay<T>(context: OpenRouterRecoveryContext<T>): { error: unknown } | undefined {
+  const retainedRelay = context.retainedRateLimitRelay;
+  context.retainedRateLimitRelay = undefined;
+  if (retainedRelay === undefined) return undefined;
+  retainedRelay.release();
+  return retainedRelay.callerCallbackError();
+}
+
+function discardAttemptAndRetained<T>(context: OpenRouterRecoveryContext<T>, relay: BufferedAttemptRelay): void {
+  relay.discard();
+  discardRetainedRateLimitRelay(context);
+}
+
+function releaseRelayOrThrow(relay: BufferedAttemptRelay): void {
+  relay.release();
+  const callbackError = relay.callerCallbackError();
+  if (callbackError !== undefined) throw callbackError.error;
+}
+
+function classifyOpenRouterRateLimit<T>(
+  context: OpenRouterRecoveryContext<T>,
+  relay: BufferedAttemptRelay,
+  error: unknown
+): unknown {
+  // A replacement outcome supersedes the prior 429. The retained diagnostic
+  // survives only until this attempt produces an authoritative outcome.
+  discardRetainedRateLimitRelay(context);
+  const terminalRateLimitError = relay.terminalRateLimitError(error);
+  const classificationCallbackError = relay.callerCallbackError();
+  if (classificationCallbackError !== undefined) {
+    relay.discard();
+    throw classificationCallbackError.error;
+  }
+  if (!isOpenRouterRateLimit(error) && terminalRateLimitError === undefined) {
+    releaseRelayOrThrow(relay);
+    throw error;
+  }
+  return isOpenRouterRateLimit(error) ? error : (terminalRateLimitError ?? error);
+}
+
+function recordOpenRouterRecoverySession<T>(
+  context: OpenRouterRecoveryContext<T>,
+  attempt: OpenRouterRecoveryAttempt,
+  effectiveRateLimitError: unknown
+): void {
+  if (attempt.relay.sawSubstantiveEvent) {
+    const resumeSession = attempt.relay.resumeSession ?? attempt.expectedResumeSession;
+    if (resumeSession === undefined) {
+      releaseRelayOrThrow(attempt.relay);
+      throw effectiveRateLimitError;
+    }
+    context.recoveryResumeSession = resumeSession;
+    context.recoveryMarker = randomUUID();
+    context.retryDeadline = performance.now() + OPENROUTER_429_RECOVERY_WINDOW_MS;
+    context.retryAttempt = 0;
+    return;
+  }
+  if (context.recoveryResumeSession !== undefined) {
+    context.recoveryResumeSession = attempt.relay.resumeSession ?? context.recoveryResumeSession;
+    return;
+  }
+  if (context.originalResumeSession !== undefined) {
+    context.recoveryResumeSession = attempt.relay.resumeSession ?? context.originalResumeSession;
+    context.recoveryMarker = randomUUID();
+  }
+}
+
+function notifyOpenRouterRetry<T>(
+  context: OpenRouterRecoveryContext<T>,
+  relay: BufferedAttemptRelay,
+  delayMs: number
+): void {
+  const retryDescription =
+    context.recoveryResumeSession === undefined
+      ? "before model output; retrying"
+      : "after model activity; resuming the existing Codex session";
+  try {
+    context.options?.onStderr?.(
+      `[ultrafuzz] OpenRouter returned HTTP 429 ${retryDescription} in ${delayMs}ms ` +
+        `(attempt ${context.retryAttempt + 2}, ${OPENROUTER_429_RECOVERY_WINDOW_MS}ms recovery window).\n`
+    );
+  } catch (callbackError) {
+    relay.discard();
+    throw callbackError;
+  }
+}
+
+function minimumDefined(first: number, second: number, third: number | undefined): number {
+  return third === undefined ? Math.min(first, second) : Math.min(first, second, third);
+}
+
+function shouldContinueForTerminalAnswer(attempt: OpenRouterRecoveryAttempt): boolean {
+  return (attempt.relay.sawSubstantiveEvent || attempt.terminal) && !attempt.relay.hasAuthoritativeTerminalMessage();
+}
+
+class OpenRouterRecoveryUsageAccumulator {
+  #usage: OpenRouterRecoveryUsage | undefined;
+
+  async addAttempt(preferredUsage: unknown, source: unknown): Promise<void> {
+    try {
+      const usage = safeNormalizeOpenRouterRecoveryUsage(preferredUsage) ?? (await recoveryUsageFromSource(source));
+      if (usage !== undefined) this.#usage = mergeOpenRouterRecoveryUsage(this.#usage, usage);
+    } catch {
+      // Usage telemetry is best effort and must never replace the provider's
+      // authoritative success or failure.
+    }
+  }
+
+  applyToResult<T>(result: T): T {
+    const record = openRouterRecord(result);
+    if (this.#usage === undefined || record === undefined) return result;
+    try {
+      const asynchronousUsage =
+        isPromiseLike(safeOpenRouterProperty(record, "usage")) ||
+        isPromiseLike(safeOpenRouterProperty(record, "totalUsage"));
+      return {
+        ...record,
+        usage: asynchronousUsage ? Promise.resolve(this.#usage) : this.#usage,
+        totalUsage: asynchronousUsage ? Promise.resolve(this.#usage) : this.#usage
+      } as T;
+    } catch {
+      return result;
+    }
+  }
+
+  applyToError(error: unknown): unknown {
+    const record = openRouterRecord(error);
+    if (this.#usage === undefined || record === undefined) return error;
+    try {
+      record.usage = this.#usage;
+      record.totalUsage = this.#usage;
+    } catch {
+      // Usage accounting must not replace the provider or caller failure when
+      // an exotic thrown object is immutable.
+    }
+    return error;
+  }
+}
+
+async function recoveryUsageFromSource(source: unknown): Promise<OpenRouterRecoveryUsage | undefined> {
+  const pending: unknown[] = [source];
+  const visited = new Set<object>();
+  while (pending.length > 0) {
+    const candidate = pending.shift();
+    const record = openRouterRecord(candidate);
+    if (record === undefined || visited.has(record)) continue;
+    visited.add(record);
+    for (const key of ["totalUsage", "usage"] as const) {
+      const attached = safeOpenRouterProperty(record, key);
+      let resolved = attached;
+      if (isPromiseLike(attached)) {
+        try {
+          resolved = await attached;
+        } catch {
+          continue;
+        }
+      }
+      const usage = safeNormalizeOpenRouterRecoveryUsage(resolved);
+      if (usage !== undefined) return usage;
+    }
+    const directUsage = safeNormalizeOpenRouterRecoveryUsage(record);
+    if (directUsage !== undefined) return directUsage;
+    pending.push(safeOpenRouterProperty(record, "details"), safeOpenRouterProperty(record, "cause"));
+  }
+  return undefined;
+}
+
+function safeNormalizeOpenRouterRecoveryUsage(value: unknown): OpenRouterRecoveryUsage | undefined {
+  try {
+    return normalizeOpenRouterRecoveryUsage(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeOpenRouterRecoveryUsage(value: unknown): OpenRouterRecoveryUsage | undefined {
+  const record = openRouterRecord(value);
+  if (record === undefined) return undefined;
+  const inputDetails = openRouterRecord(record.inputTokenDetails);
+  const outputDetails = openRouterRecord(record.outputTokenDetails);
+  const inputTokens = openRouterUsageCount(firstOpenRouterValue(record.inputTokens, record.input_tokens));
+  const outputTokens = openRouterUsageCount(firstOpenRouterValue(record.outputTokens, record.output_tokens));
+  const noCacheTokens = openRouterUsageCount(
+    firstOpenRouterValue(inputDetails?.noCacheTokens, record.freshInputTokens)
+  );
+  const cacheReadTokens = openRouterUsageCount(
+    firstOpenRouterValue(
+      inputDetails?.cacheReadTokens,
+      record.cacheReadTokens,
+      record.cache_read_input_tokens,
+      record.cached_input_tokens
+    )
+  );
+  const cacheWriteTokens = openRouterUsageCount(
+    firstOpenRouterValue(inputDetails?.cacheWriteTokens, record.cacheWriteTokens, record.cache_creation_input_tokens)
+  );
+  const textTokens = openRouterUsageCount(outputDetails?.textTokens);
+  const reasoningTokens = openRouterUsageCount(
+    firstOpenRouterValue(outputDetails?.reasoningTokens, record.reasoningTokens, record.reasoning_tokens)
+  );
+  const reportedTotalTokens = openRouterUsageCount(firstOpenRouterValue(record.totalTokens, record.total_tokens));
+  const totalTokens = reportedTotalTokens ?? inferredOpenRouterUsageTotal(inputTokens, outputTokens);
+  if (
+    [
+      inputTokens,
+      outputTokens,
+      noCacheTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      textTokens,
+      reasoningTokens,
+      totalTokens
+    ].every(isUndefined)
+  ) {
+    return undefined;
+  }
+  return {
+    ...optionalOpenRouterUsageField("inputTokens", inputTokens),
+    inputTokenDetails: {
+      ...optionalOpenRouterUsageField("noCacheTokens", noCacheTokens),
+      ...optionalOpenRouterUsageField("cacheReadTokens", cacheReadTokens),
+      ...optionalOpenRouterUsageField("cacheWriteTokens", cacheWriteTokens)
+    },
+    ...optionalOpenRouterUsageField("outputTokens", outputTokens),
+    outputTokenDetails: {
+      ...optionalOpenRouterUsageField("textTokens", textTokens),
+      ...optionalOpenRouterUsageField("reasoningTokens", reasoningTokens)
+    },
+    ...optionalOpenRouterUsageField("totalTokens", totalTokens)
+  };
+}
+
+function firstOpenRouterValue(...values: unknown[]): unknown {
+  return values.find((candidate) => candidate !== undefined && candidate !== null);
+}
+
+function inferredOpenRouterUsageTotal(
+  inputTokens: number | undefined,
+  outputTokens: number | undefined
+): number | undefined {
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  return addOpenRouterUsageCounts(inputTokens, outputTokens);
+}
+
+function isUndefined(value: unknown): value is undefined {
+  return value === undefined;
+}
+
+function optionalOpenRouterUsageField<Key extends string>(
+  key: Key,
+  value: number | undefined
+): { [Property in Key]?: number } {
+  return value === undefined ? {} : ({ [key]: value } as { [Property in Key]: number });
+}
+
+function mergeOpenRouterRecoveryUsage(
+  left: OpenRouterRecoveryUsage | undefined,
+  right: OpenRouterRecoveryUsage | undefined
+): OpenRouterRecoveryUsage | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return {
+    ...optionalOpenRouterUsageCount("inputTokens", left.inputTokens, right.inputTokens),
+    inputTokenDetails: {
+      ...optionalOpenRouterUsageCount(
+        "noCacheTokens",
+        left.inputTokenDetails.noCacheTokens,
+        right.inputTokenDetails.noCacheTokens
+      ),
+      ...optionalOpenRouterUsageCount(
+        "cacheReadTokens",
+        left.inputTokenDetails.cacheReadTokens,
+        right.inputTokenDetails.cacheReadTokens
+      ),
+      ...optionalOpenRouterUsageCount(
+        "cacheWriteTokens",
+        left.inputTokenDetails.cacheWriteTokens,
+        right.inputTokenDetails.cacheWriteTokens
+      )
+    },
+    ...optionalOpenRouterUsageCount("outputTokens", left.outputTokens, right.outputTokens),
+    outputTokenDetails: {
+      ...optionalOpenRouterUsageCount(
+        "textTokens",
+        left.outputTokenDetails.textTokens,
+        right.outputTokenDetails.textTokens
+      ),
+      ...optionalOpenRouterUsageCount(
+        "reasoningTokens",
+        left.outputTokenDetails.reasoningTokens,
+        right.outputTokenDetails.reasoningTokens
+      )
+    },
+    ...optionalOpenRouterUsageCount("totalTokens", left.totalTokens, right.totalTokens)
+  };
+}
+
+function optionalOpenRouterUsageCount<Key extends string>(
+  key: Key,
+  left: number | undefined,
+  right: number | undefined
+): { [Property in Key]?: number } {
+  const value = addOpenRouterUsageCounts(left, right);
+  return value === undefined ? {} : ({ [key]: value } as { [Property in Key]: number });
+}
+
+function addOpenRouterUsageCounts(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  const total = left + right;
+  if (!Number.isSafeInteger(total)) throw new Error("OpenRouter recovery token usage exceeds the safe integer range");
+  return total;
+}
+
+function openRouterUsageCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function openRouterRecord(value: unknown): Record<PropertyKey, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<PropertyKey, unknown>)
+    : undefined;
+}
+
+function safeOpenRouterProperty(record: Record<PropertyKey, unknown>, key: PropertyKey): unknown {
+  try {
+    return record[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  const record = openRouterRecord(value);
+  return record !== undefined && typeof safeOpenRouterProperty(record, "then") === "function";
 }
 
 export function decideOpenRouter429Recovery(input: {
@@ -494,6 +876,7 @@ class BufferedAttemptRelay {
   #conflictingResumeSession: string | undefined;
   #callerCallbackError: { error: unknown } | undefined;
   #lastNewSubstantiveEventWasAssistantMessage = false;
+  #reportedUsage: unknown;
   sawSubstantiveEvent = false;
   resumeSession: string | undefined;
 
@@ -539,6 +922,9 @@ class BufferedAttemptRelay {
       },
       onEvent: (event) => {
         if (this.#isQuarantined()) return;
+        if (event.type === "completed" && event.usage !== undefined) {
+          this.#reportedUsage = event.usage;
+        }
         const observedResumeSession = resumeSessionFromCodexEvent(event);
         if (observedResumeSession !== undefined) {
           const knownResumeSession = this.resumeSession ?? this.#expectedResumeSession;
@@ -706,6 +1092,10 @@ class BufferedAttemptRelay {
 
   hasAuthoritativeTerminalMessage(): boolean {
     return this.#lastNewSubstantiveEventWasAssistantMessage;
+  }
+
+  reportedUsage(): unknown {
+    return this.#reportedUsage;
   }
 
   attemptSignal(): AbortSignal {
