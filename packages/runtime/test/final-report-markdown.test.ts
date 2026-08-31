@@ -124,8 +124,9 @@ test("canonical final-report validation renders Markdown without rewriting the v
     first.markdown,
     /Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint/u
   );
-  assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
-  assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);
+  assert.match(first.markdown, /synthetic-final-report-secret/u);
+  assert.match(first.markdown, /\/home\/runner\/private/u);
+  assert.doesNotMatch(first.markdown, /<redacted>|\[redacted-path\]/u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(first.markdown, first.report), true);
 });
 
@@ -133,7 +134,7 @@ test("public final-report projection redacts private paths without changing inte
   const input = renderableReport();
   const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
   issue.description =
-    "Inspect /srv/customer/private/reproducer.sol, C:\\Users\\runner\\secret.log, " +
+    "token=synthetic-public-report-secret. Inspect /srv/customer/private/reproducer.sol, C:\\Users\\runner\\secret.log, " +
     "\\\\internal-host\\customer\\proof.sol, reproducer:file:///home/runner/private/proof.sol, " +
     ".ultrafuzz/runs/private/report.json, marker;/var/private/semicolon.sol, " +
     "and https://github.com/example/public.";
@@ -154,6 +155,7 @@ test("public final-report projection redacts private paths without changing inte
   assert.match(JSON.stringify(published.report), /https:\/\/github\.com\/example\/public/u);
   assert.match(JSON.stringify(published.report), /retain this comment/u);
   assert.match(JSON.stringify(published.report), /and this block comment/u);
+  assert.doesNotMatch(published.markdown, /synthetic-public-report-secret|\/srv\/customer\/private/u);
   assert.deepEqual(projectCanonicalFinalReport(published.report), published);
 });
 
@@ -360,10 +362,17 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
   const [issue] = report.issues as Array<Record<string, unknown>>;
   assert.ok(issue);
   issue.strategy_provenance = {
-    detection_rates: [{ strategy: "stateful-invariant", detections: 2, configured_loops: 3 }],
+    detection_rates: [
+      { strategy: "stateful-invariant", detections: 1, configured_loops: 3 },
+      { strategy: "class-goals", detections: 1, configured_loops: 4 }
+    ],
     attempts: [
       { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
-      { strategy: "stateful-invariant", attempt_index: 2, loop_index: 2 }
+      {
+        strategy: "Class-goal hunt for a detailed target-specific hypothesis",
+        attempt_index: 2,
+        loop_index: 2
+      }
     ]
   };
 
@@ -374,7 +383,7 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
     issue.strategy_provenance,
     "execution observations remain available to machine-readable consumers"
   );
-  assert.doesNotMatch(projection.markdown, /2\/3|stateful-invariant|### Strategy|Detection rate/u);
+  assert.doesNotMatch(projection.markdown, /1\/3|1\/4|stateful-invariant|class-goals|### Strategy|Detection rate/u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
 
   const missingObservation = structuredClone(report);
@@ -385,6 +394,15 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
     () => projectCanonicalFinalReport(missingObservation),
     /1 distinct contributing executions, which does not match 2 detections/u
   );
+
+  const duplicateObservation = structuredClone(report);
+  const duplicateProvenance = (duplicateObservation.issues as Array<Record<string, unknown>>)[0]
+    ?.strategy_provenance as Record<string, unknown>;
+  duplicateProvenance.attempts = [
+    { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
+    { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 }
+  ];
+  assert.throws(() => projectCanonicalFinalReport(duplicateObservation), /repeats contributing execution provenance/u);
 
   const impossibleRate = structuredClone(report);
   (
@@ -469,6 +487,14 @@ test("directive validation treats fenced proof code as code while retaining pros
     ),
     false
   );
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("Prepare the bounded state.", "Prepare the critical invariant state."),
+      projection.report
+    ),
+    true,
+    "the unsupported severity label must not ban ordinary explanatory prose"
+  );
 });
 
 test("directive validation recognizes CommonMark tilde fences and matching closers", () => {
@@ -513,7 +539,7 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   );
 });
 
-test("directive validation scans tilde-fenced code for secrets and private paths", () => {
+test("developer-report directive validation allows private content inside fenced code", () => {
   const projection = projectCanonicalFinalReport(renderableReport());
   const insertProofBlock = (code: string): string =>
     projection.markdown.replace(
@@ -523,14 +549,14 @@ test("directive validation scans tilde-fenced code for secrets and private paths
 
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(insertProofBlock("token=synthetic-tilde-fence-secret"), projection.report),
-    false
+    true
   );
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
       insertProofBlock("/home/runner/private/reproducer.sol"),
       projection.report
     ),
-    false
+    true
   );
 });
 

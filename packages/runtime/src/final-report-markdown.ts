@@ -91,21 +91,27 @@ export interface CanonicalFinalReportContext {
  *
  * Internal report.json remains the immutable agent/controller authority used by
  * scoring and lifecycle consumers. Public publication instead receives a deep
- * copy with private filesystem paths redacted, then re-validates and renders
- * that copy as an exact canonical JSON/Markdown pair.
+ * copy with secrets and private filesystem paths redacted, then re-validates
+ * and renders that copy as an exact canonical JSON/Markdown pair. The ordinary
+ * canonical projection remains the unredacted developer report.
  */
 export function projectPublicCanonicalFinalReport(
   report: unknown,
   context: CanonicalFinalReportContext = {}
 ): CanonicalFinalReportProjection {
   const internal = projectCanonicalFinalReport(report, context);
-  const publicReport = redactPrivatePathsInValue(internal.report);
+  const publicReport = redactSecretsInStringValues(redactPrivatePathsInValue(internal.report));
   if (!isRecord(publicReport)) {
     throw new Error("public final-report projection did not produce an object");
   }
   const projection = projectCanonicalFinalReport(publicReport, context);
-  if (containsPrivatePathInValue(projection.report)) {
-    throw new Error("public final-report projection contains a private filesystem path");
+  if (
+    containsPrivatePathInValue(projection.report) ||
+    containsPrivatePath(projection.markdown) ||
+    containsUnredactedSecretInValue(projection.report) ||
+    containsUnredactedSecret(projection.markdown)
+  ) {
+    throw new Error("public final-report projection contains private report content");
   }
   return projection;
 }
@@ -156,8 +162,11 @@ export function projectCanonicalFinalReport(
   if (Buffer.byteLength(markdown, "utf8") > MAX_FINAL_REPORT_MARKDOWN_BYTES) {
     throw new Error(`canonical final report Markdown exceeds ${MAX_FINAL_REPORT_MARKDOWN_BYTES} bytes`);
   }
-  if (!isDirectiveConformingFinalReportMarkdown(markdown, input)) {
-    throw new Error("canonical final report Markdown does not satisfy the final-review report shape");
+  const directiveViolation = finalReportMarkdownDirectiveViolation(markdown, input);
+  if (directiveViolation !== undefined) {
+    throw new Error(
+      `canonical final report Markdown does not satisfy the final-review report shape: ${directiveViolation}`
+    );
   }
   const markdownValidation = validateArtifactContract("ultrafuzz/nonempty-markdown@1", markdown, "report.md");
   if (!markdownValidation.ok) {
@@ -167,11 +176,15 @@ export function projectCanonicalFinalReport(
 }
 
 export function isDirectiveConformingFinalReportMarkdown(markdown: string, report: JsonRecord): boolean {
+  return finalReportMarkdownDirectiveViolation(markdown, report) === undefined;
+}
+
+function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRecord): string | undefined {
   if (!markdown.startsWith("# Ultrafuzz report\n") || !markdown.includes("\n## Run summary\n")) {
-    return false;
+    return "missing report title or run summary";
   }
   if (!markdown.includes("\n## Property implementation coverage\n")) {
-    return false;
+    return "missing property implementation coverage";
   }
   // A current-run projection always states its goal-search coverage, even when that statement is
   // "coverage is unknown". Requiring the heading keeps a future edit from turning a partial hunt back
@@ -180,33 +193,50 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
   // parameter had no remaining caller and coupled the goal-coverage requirement to the
   // property-implementation one, so a single flag could silently drop both (issue #702).
   if (!markdown.includes("\n## Goal search coverage\n")) {
-    return false;
+    return "missing goal search coverage";
   }
   if (!markdown.includes("\n## Property provenance\n")) {
-    return false;
+    return "missing property provenance";
   }
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
+  // Critical is not a supported report severity, but the word remains valid in explanatory prose
+  // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
+  // rewriting or discarding the validated finding text.
+  if (/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu.test(prose)) {
+    return "contains the unsupported Critical severity";
+  }
+  if (/(?:^|\n)#### Sources\s*$/imu.test(prose)) {
+    return "contains a legacy Sources section";
+  }
+  if (/\*\*Source (?:Node|Property) Id\*\*/iu.test(prose)) {
+    return "contains a legacy source identifier field";
+  }
+  if (/(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose)) {
+    return "contains a legacy numbered-item field";
+  }
+  if (/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose)) {
+    return "contains a legacy report section";
+  }
+  if (/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu.test(prose)) {
+    return "contains a legacy issue subsection";
+  }
   if (
-    /\bCritical\b/iu.test(prose) ||
-    /(?:^|\n)#### Sources\s*$/imu.test(prose) ||
-    /\*\*Source (?:Node|Property) Id\*\*/iu.test(prose) ||
-    /(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose) ||
-    /(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose) ||
-    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu.test(prose) ||
     /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu.test(
       prose
     )
   ) {
-    return false;
+    return "contains legacy run metadata";
+  }
+  if (/<[A-Za-z][^>]*>/u.test(prose)) {
+    return "contains raw HTML outside fenced code";
+  }
+  if (/!\[[^\]]*\]\(/u.test(prose)) {
+    return "contains an embedded image outside fenced code";
   }
   if (
-    containsUnredactedSecret(markdown) ||
-    containsPrivatePath(markdown) ||
-    /<[A-Za-z][^>]*>/u.test(prose) ||
-    /!\[[^\]]*\]\(/u.test(prose) ||
     /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu.test(prose)
   ) {
-    return false;
+    return "contains a disallowed Markdown link outside fenced code";
   }
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
@@ -215,15 +245,15 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
     headings.length !== expectedHeadings.length ||
     headings.some((heading, index) => heading !== expectedHeadings[index])
   ) {
-    return false;
+    return "issue headings do not match the validated report order";
   }
   // Exact equality above proves the Markdown kept the validated JSON order,
   // IDs, and titles. Presentation never assigns severity-local identities.
   if (expectedHeadings.length === 0) {
-    return !markdown.includes("| Issue id | Title |");
+    return markdown.includes("| Issue id | Title |") ? "contains an issue index without rendered issues" : undefined;
   }
   if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
-    return false;
+    return "issue index is missing or malformed";
   }
   const issueBlocks = expectedHeadings.map((heading, index) => {
     const start = markdown.indexOf(`${heading}\n`);
@@ -236,7 +266,9 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
     const severityIndex = block.indexOf("\n### Severity\n");
     const proofIndex = block.indexOf("\n### Proof of Concept\n");
     return severityIndex >= 0 && proofIndex > severityIndex;
-  });
+  })
+    ? undefined
+    : "an issue is missing severity or proof-of-concept ordering";
 }
 
 function validateReport(report: unknown): JsonRecord {
@@ -389,29 +421,20 @@ function assertStrategyAttempts(
   recordIndex: number
 ): void {
   if (!Array.isArray(value)) return;
-  const contributingByStrategy = new Map<string, number>();
   const identities = new Set<string>();
   for (const attempt of (value as unknown[]).filter(isRecord)) {
-    addStrategyAttempt(attempt, detectionsByStrategy, contributingByStrategy, identities, recordIndex);
+    addStrategyAttempt(attempt, identities, recordIndex);
   }
-  for (const [strategy, detections] of detectionsByStrategy) {
-    assertDetectionCountMatchesAttempts(strategy, detections, contributingByStrategy, recordIndex);
+  const detections = [...detectionsByStrategy.values()].reduce((total, count) => total + count, 0);
+  if (identities.size !== detections) {
+    throw new Error(
+      `final report record ${String(recordIndex)} has ${String(identities.size)} distinct contributing executions, which does not match ${String(detections)} detections`
+    );
   }
 }
 
-function addStrategyAttempt(
-  attempt: JsonRecord,
-  detectionsByStrategy: ReadonlyMap<string, number>,
-  contributingByStrategy: Map<string, number>,
-  identities: Set<string>,
-  recordIndex: number
-): void {
+function addStrategyAttempt(attempt: JsonRecord, identities: Set<string>, recordIndex: number): void {
   const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
-  if (!detectionsByStrategy.has(strategy)) {
-    throw new Error(
-      `final report record ${String(recordIndex)} has attempt provenance for undeclared strategy ${JSON.stringify(strategy)}`
-    );
-  }
   const identity = strategyAttemptIdentity(attempt, strategy);
   if (identities.has(identity)) {
     throw new Error(
@@ -419,7 +442,6 @@ function addStrategyAttempt(
     );
   }
   identities.add(identity);
-  contributingByStrategy.set(strategy, (contributingByStrategy.get(strategy) ?? 0) + 1);
 }
 
 function strategyAttemptIdentity(attempt: JsonRecord, strategy: string): string {
@@ -431,19 +453,6 @@ function strategyAttemptIdentity(attempt: JsonRecord, strategy: string): string 
     attempt.model_index ?? null,
     attempt.loop_index ?? null
   ]);
-}
-
-function assertDetectionCountMatchesAttempts(
-  strategy: string,
-  detections: number,
-  contributingByStrategy: ReadonlyMap<string, number>,
-  recordIndex: number
-): void {
-  const contributingExecutions = contributingByStrategy.get(strategy) ?? 0;
-  if (contributingExecutions === detections) return;
-  throw new Error(
-    `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} has ${String(contributingExecutions)} distinct contributing executions, which does not match ${String(detections)} detections`
-  );
 }
 
 function requiredAssessment(
@@ -1182,7 +1191,7 @@ function evidenceSummary(value: unknown, fallback: unknown): string {
 
 function publicEvidenceText(value: string): string {
   const text = value.trim();
-  return containsPrivatePath(text) ? "Evidence retained in structured report." : text;
+  return text;
 }
 
 function inlineValue(value: unknown): string {
@@ -1232,15 +1241,13 @@ function recordTitle(record: JsonRecord, fallback: string): string {
 }
 
 function publicProse(value: string): string {
-  return redactPrivatePaths(redactSecrets(value))
+  return value
     .replace(/\s+/gu, " ")
     .trim()
     .replaceAll("\\", "\\\\")
     .replaceAll("`", "\\`")
     .replaceAll("*", "\\*")
     .replaceAll("_", "\\_")
-    .replaceAll("[", "\\[")
-    .replaceAll("]", "\\]")
     .replaceAll("!", "\\!")
     .replaceAll("#", "\\#")
     .replaceAll("~", "\\~")
@@ -1249,11 +1256,11 @@ function publicProse(value: string): string {
 }
 
 function publicCode(value: string): string {
-  return redactPrivatePaths(redactSecrets(value));
+  return value;
 }
 
 function publicInlineCode(value: string): string {
-  return redactPrivatePaths(redactSecrets(value)).replace(/\s+/gu, " ").trim().replaceAll("`", "'");
+  return value.replace(/\s+/gu, " ").trim().replaceAll("`", "'");
 }
 
 function redactSecrets(value: string): string {
@@ -1264,6 +1271,19 @@ function redactSecrets(value: string): string {
 function containsUnredactedSecret(value: string): boolean {
   const normalizedPlaceholders = value.replaceAll("&lt;redacted&gt;", "<redacted>");
   return redactValue(normalizedPlaceholders) !== normalizedPlaceholders;
+}
+
+function containsUnredactedSecretInValue(value: unknown): boolean {
+  if (typeof value === "string") return containsUnredactedSecret(value);
+  if (Array.isArray(value)) return value.some(containsUnredactedSecretInValue);
+  return isRecord(value) && Object.values(value).some(containsUnredactedSecretInValue);
+}
+
+function redactSecretsInStringValues(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactSecretsInStringValues);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry)]));
 }
 
 function containsPrivatePath(value: string): boolean {
