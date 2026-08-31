@@ -26,6 +26,7 @@ overrides:
 allowBuilds:
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false
+  "@smthrs/jj-darwin-arm64": false
   "@smthrs/jj-linux-arm64": false
   "@smthrs/jj-linux-x64": false
   cbor-extract: true

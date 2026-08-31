@@ -66,7 +66,7 @@ ancestors, so a topology can omit stages without leaving stale paths or
 exposing unrelated patches, raw campaign plans, or generated-test bundles. It
 does not expand a path or source array into this prompt:
 
-{{ancestor_artifact_path_authority:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json}}
+{{ancestor_artifact_path_authority:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json,coverage-evidence.json}}
 
 Read these fixed setup or smoke context handoffs when the topology declares
 them:
@@ -94,6 +94,16 @@ manifest identity, preserve its byte size, digest, language, and provenance,
 and never infer a framework from an extension or mix different bundles. These
 joins and byte-preservation rules are contextual requirements beyond JSON
 Schema.
+
+When `coverage-evidence.json` is present in the selected set, validate it
+against the exact pinned `{{schema_path}}/coverage-evidence.schema.json` and
+copy its complete parsed value exactly to `report.json.coverage_evidence`.
+Render the corresponding `## Scoped coverage evidence` section using the
+canonical projection below. When no coverage-evidence producer is selected,
+omit both the optional JSON member and the Markdown section; do not invent an
+unavailable result.
+
+{{coverage_evidence_markdown_projection}}
 
 Use `properties.json`, `implemented-properties.json`,
 `recon-fuzzer-results.json`, and `campaign-summary.json` as property provenance
@@ -480,36 +490,17 @@ Preserve that same array in the `report.json` issue and keep compatibility
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Goal search coverage`. Read the implementation handoff's
-`selection` object and property records. When
-the handoff is historical or lacks `selection`, render `unavailable` instead
-of guessing. In `report.json`, emit `property_implementation_coverage` with
-this exact shape:
-
-{{coverage_evidence_markdown_projection}}
-
-Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. The runtime supplies the authoritative
+and before `## Goal search coverage`. The runtime supplies the authoritative
 current-run value in this prompt. Copy that JSON value exactly; do not derive,
 repair, normalize, omit, or convert it. The exact pinned
 `{{schema_path}}/report.schema.json` alone defines the tracked and not-planned
 JSON variants. When the topology declares the property-implementation track,
 preserve the runtime-supplied tracked value.
 
-Use the canonical catalog order for every ID array. Keep the arrays as the
-machine-readable source of truth; counts in Markdown must match them exactly.
-When the canonical catalog contains `reference_expectations`, include every
-corresponding canonical property ID in `reference_expected_property_ids` and
-every distinct expectation identifier in `reference_expectation_ids`, in
-catalog order. Preserve these arrays even when the property priority is below
-the configured threshold.
-For every selected record whose status is `blocked`, `pending`, or `deferred`,
-preserve its blocker summary in `blocker_summaries` as
-`<property-id>: <the record's blocker summary text>`, in canonical catalog
-order. Copy that summary text verbatim from the handoff record's
-`blocker.summary` — do not shorten, rephrase, re-punctuate, or re-case it. The
-typed blocker's other fields stay in the handoff record; do not copy the blocker
-object into the report.
+In the tracked object, preserve every ID array and blocker summary in the
+runtime-supplied order, including `reference_expected_property_ids`,
+`reference_expectation_ids`, and `blocker_summaries`.
+
 When the current topology does not declare a property-implementation track,
 preserve the runtime-supplied schema-defined not-planned value exactly.
 
@@ -520,15 +511,11 @@ Render that runtime value in Markdown as exactly:
 - Reason: `property-implementation-track-not-declared`
 ```
 
-Missing or invalid current selection metadata is a contract failure. It is not
-an absence case and must never be converted to the `not-planned` variant.
-
-The Markdown body of `## Property implementation coverage` is compared line by
-line against the JSON above, so write exactly these bullets, in this order, with
-these labels and backticks, and nothing else before the blocker list:
-
-These bullets are the Markdown rendering of exactly the JSON above, so read the
-two together:
+For a tracked value, the Markdown body of
+`## Property implementation coverage` is compared line by line against that
+authoritative JSON. These bullets are the Markdown rendering format: use these
+labels, order, and backticks while substituting the runtime-supplied values;
+the values below are only a format example:
 
 ```markdown
 - Priority threshold: `medium`
@@ -544,16 +531,15 @@ Blocker summaries:
 - property-2: The handler cannot observe the premium delta returned by the Hub.
 ```
 
-Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
-when the threshold or priorities are unavailable. Derive each count from the
-corresponding schema-defined collection in the authoritative coverage value;
+Join `Included priorities` with `<br>`. Derive each count from the corresponding
+schema-defined collection in the authoritative coverage value;
 `Reference expectation properties` counts the properties carrying a reference
 expectation. Introduce the blocker list with a line reading exactly `Blocker summaries:`.
-Then write one bullet per authoritative blocker summary, in the same order
-as the coverage value, with no blank line between the heading and the first
-bullet: each bullet begins with a hyphen and a space, and the list ends at the
-first line that is not such a bullet. Omit the
-Markdown heading and list when the authoritative value has no blockers.
+Then write one bullet, beginning with a hyphen and one space, per authoritative
+blocker summary, in the same order as the coverage value, with no blank line
+between the heading and the first bullet. The list ends at the first line that
+does not begin with that prefix. Omit the Markdown heading and list when the
+authoritative value has no blockers.
 
 Write each blocker bullet from the exact corresponding blocker-summary value.
 Collapsing runs of whitespace to single spaces is fine; rewording, truncating,
@@ -769,15 +755,14 @@ Before finishing, verify that:
   findings.
 - `report.md` renders the fixed `## Audit context` section for every artifact
   the run produced, without copying their detailed analysis.
-- `report.md` contains `## Property implementation coverage` with counts that
-  match the implementation handoff, or the literal `unavailable` for
-  historical artifacts.
+- `report.md` contains `## Property implementation coverage` rendered from the
+  exact runtime-authoritative coverage object.
 - `report.md` contains `## Goal search coverage` with counts recomputed from the
   census, or unknown coverage when none is readable, and states no absence of
   findings without them.
 - `report.json` contains no agent-authored `goal_search_coverage` value.
-- `report.json.property_implementation_coverage` is either the exact
-  machine-readable coverage object or the string `unavailable`.
+- `report.json.property_implementation_coverage` is the exact
+  runtime-authoritative tracked or not-planned object.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact values from the injected sanitized

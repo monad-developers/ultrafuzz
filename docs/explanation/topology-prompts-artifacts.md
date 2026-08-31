@@ -23,6 +23,8 @@ that downstream agentic nodes can consume.
 ## Prompts Own Agent Instructions
 
 Project prompts are Markdown-compatible files under `.ultrafuzz/prompts/**`.
+The [prompt catalog](../reference/prompt-catalog.md) inventories the default,
+specialist-profile, and runtime composition prompt assets.
 They can use frontmatter only for identity and display metadata:
 
 ```md

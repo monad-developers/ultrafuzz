@@ -630,21 +630,15 @@ describe("prompt semantic anchors", () => {
     expect(discovery).toMatch(/JSON escaping is serialization only/iu);
   });
 
-  it("requires final reports to preserve benchmark expectation coverage", () => {
+  it("requires final reports to preserve runtime-authoritative property coverage", () => {
     const finalReport = prompt("review/final-report.md");
     const flatFinalReport = finalReport.replace(/\s+/gu, " ");
     expect(finalReport).toContain("reference_expected_property_ids");
     expect(finalReport).toContain("reference_expectation_ids");
-    expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
-    // The runtime derives blocker summaries from the selected implementation
-    // records. Preserve that semantic projection without redefining the JSON
-    // member type owned by the pinned report schema.
-    expect(finalReport).toContain("<property-id>: <the record's blocker summary text>");
-    expect(flatFinalReport).toContain("in canonical catalog order");
-    // The gate compares blocker_summaries byte-for-byte with
-    // `${propertyId}: ${record.blocker.summary}`, so a paraphrase fails it just
-    // as surely as an object does.
-    expect(finalReport).toContain("Copy that summary text verbatim");
+    expect(finalReport).toMatch(/Copy that JSON value exactly; do not derive/u);
+    expect(finalReport).toMatch(/preserve every ID array and blocker summary in the\s+runtime-supplied order/u);
+    expect(finalReport).toContain("tracked and not-planned");
+    expect(finalReport).not.toMatch(/implementation handoff's\s+`selection` object/u);
     // The Markdown half of the same coverage block is compared line by line and
     // was documented nowhere. Pin every label the gate matches on, not a sample.
     for (const label of [
@@ -669,6 +663,7 @@ describe("prompt semantic anchors", () => {
     // reportPublicProse in prose was tried and was wrong in three ways, so the
     // prompt must keep promising the laxer contract the gate actually applies.
     expect(finalReport).toMatch(/Markdown-escaping the special characters is\s+accepted but not\s+required/u);
+    expect(flatFinalReport).toContain("the values below are only a format example");
   });
 
   it("requires renumbered property findings to retain authenticated campaign identity", () => {
@@ -1012,6 +1007,12 @@ describe("prompt semantic anchors", () => {
       expect(markdown.split(placeholder), relativePath).toHaveLength(2);
       expect(markdown, relativePath).not.toContain("docs/reference/artifacts-reports.md");
     }
+
+    const report = prompt("review/final-report.md");
+    expect(report).toContain("campaign-summary.json,coverage-evidence.json}}");
+    expect(report).toContain("copy its complete parsed value exactly to `report.json.coverage_evidence`");
+    expect(report).toMatch(/When no coverage-evidence producer is selected,\s+omit both the optional JSON member/u);
+    expect(report.indexOf(placeholder)).toBeLessThan(report.indexOf("## Additional Sections"));
 
     const partialPath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/coverage-evidence-markdown.mdx", import.meta.url)
@@ -1638,6 +1639,11 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("Add `## Goal search coverage` after `## Property implementation coverage` and");
     expect(report).toContain("and before `## Goal search coverage`");
     expect(report).toContain("Add `## Property provenance` after the goal search coverage section.");
+    expect(report.match(/Add `## Property implementation coverage`/gu)).toHaveLength(1);
+    expect(report).toContain("runtime-authoritative tracked or not-planned object");
+    expect(report).toContain("the values below are only a format example");
+    expect(report).not.toContain("or the string `unavailable`");
+    expect(report).not.toMatch(/implementation handoff's\s+`selection` object/u);
     expect(report).toMatch(/in every report, including a report with no\s+issues/u);
     expect(report).toMatch(/Never state or imply that no vulnerabilities were found without stating goal/u);
     expect(report).toMatch(/write that goal search coverage is unknown/u);

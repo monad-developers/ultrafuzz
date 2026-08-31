@@ -1,6 +1,14 @@
 name: Publish Eval History
 
 on:
+  # scripts/ci/qualify-modal-benchmark-publication.mjs runs from a trusted main
+  # checkout and refuses any producer run whose head_repository is not this
+  # repository, whose head_branch is not the default branch, or whose event is
+  # not push/workflow_dispatch, so neither a fork nor a pull request reaches
+  # this workflow. Both jobs then execute only main's tooling, read the
+  # candidate tree as data, re-verify the candidate is still reachable from
+  # main, and mint the contents:write publisher token after that.
+  # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows:
       - Modal Eval Benchmarks
@@ -67,6 +75,23 @@ jobs:
             "$artifacts_path" \
             "$GITHUB_OUTPUT" \
             "$GITHUB_REPOSITORY"
+
+      - name: Attribute an unqualified producer attempt
+        if: always() && steps.qualify.outputs.eligible != 'true'
+        env:
+          PRODUCER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+          SKIP_REASON: ${{ steps.qualify.outputs.skip_reason }}
+        run: |
+          {
+            echo "## Eval history publication did not start"
+            echo
+            echo "- Producer: [run $PRODUCER_RUN_ID, attempt $PRODUCER_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT) concluded $PRODUCER_CONCLUSION"
+            echo "- Refusal: ${SKIP_REASON:-qualification did not reach a verdict}"
+            echo
+            echo "No benchmark generation was downloaded, validated, or published by this run."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish_modal_benchmark:
     needs: qualify_modal_benchmark
@@ -225,3 +250,41 @@ jobs:
               "$PUBLICATION_GENERATION" \
               "$PUBLICATION_UNPACKED" \
               "$PUBLICATION_POLICY_ROOT"
+
+      # A classify step that threw or never ran leaves every one of its outputs
+      # empty, so only its own outcome separates a deliberate refusal from a
+      # hard failure. Attribute the two states in separate steps rather than
+      # inferring either from an absent output.
+      - name: Attribute a refused publication
+        if: always() && steps.publication-readiness.outcome == 'success' && steps.publication-readiness.outputs.ready != 'true'
+        env:
+          SKIP_REASON: ${{ steps.publication-readiness.outputs.skip_reason }}
+        run: |
+          {
+            echo "## Published eval history did not advance"
+            echo
+            echo "- Candidate tree: [$CANDIDATE_COMMIT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$CANDIDATE_COMMIT)"
+            echo "- Producer: [run $PRODUCER_RUN_ID, attempt $PRODUCER_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT) in $BENCHMARK_MODE mode"
+            echo "- Refusal: ${SKIP_REASON:-the classifier recorded no refusal reason}"
+            echo
+            echo "Refusing an incomplete generation is deliberate; this job stays green so an operational"
+            echo "pair failure does not turn main red. Persistent staleness escalates through the scheduled"
+            echo "Benchmark History Freshness monitor, not through this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attribute an unreached publication readiness verdict
+        if: always() && steps.publication-readiness.outcome != 'success'
+        env:
+          READINESS_OUTCOME: ${{ steps.publication-readiness.outcome }}
+        run: |
+          {
+            echo "## Publication readiness classification did not reach a verdict"
+            echo
+            echo "- Candidate tree: [$CANDIDATE_COMMIT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$CANDIDATE_COMMIT)"
+            echo "- Producer: [run $PRODUCER_RUN_ID, attempt $PRODUCER_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT) in $BENCHMARK_MODE mode"
+            echo "- Classification step outcome: ${READINESS_OUTCOME:-never ran}"
+            echo
+            echo "This is not the deliberate green no-op for an incomplete generation. Either the classifier"
+            echo "rejected the downloaded generation outright or an earlier step failed, so this job is red"
+            echo "and the producer attempt needs a human."
+          } >> "$GITHUB_STEP_SUMMARY"

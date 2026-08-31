@@ -139,6 +139,44 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm -w build
 
+      # Runs before any Modal image build or sandbox launch: the sandbox clones
+      # every pinned target and submodule with NO credential, so one dependency
+      # that has gone private aborts preparation before the model starts and
+      # produces a generation that cannot be published. Probing it here costs
+      # seconds instead of a paid run that ends unpublishable. This step is
+      # deliberately given no token: an authenticated probe reads a private
+      # dependency successfully and reports the cohort as healthy.
+      #
+      # Exit 1 is a named anonymous denial and blocks the lane: a red check in
+      # four seconds is the point, and beats a four-hour paid run that reports
+      # success while publishing nothing. Exit 2 is the gate's own "proved
+      # nothing" verdict (a resolver blip, a 403 throttle), which must not block
+      # a run on inconclusive evidence, so it warns loudly and continues.
+      #
+      # The gate proves every dependency REPOSITORY is anonymously readable. It
+      # does not prove the gitlink commit each submodule pins still exists.
+      - name: Verify the pinned cohort is anonymously reachable
+        run: |
+          report="$(node scripts/ci/verify-cohort-reachability.mjs --lane "$BENCHMARK_MODE" 2>&1)" && verdict=0 || verdict=$?
+          printf '%s\n' "$report"
+          if [ "$verdict" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$verdict" -ne 2 ]; then
+            exit "$verdict"
+          fi
+          echo "::warning title=Cohort reachability unverified::The $BENCHMARK_MODE cohort could not be proven anonymously reachable and the benchmark run is continuing on inconclusive evidence. A repeated warning is a real outage of a dependency host."
+          {
+            echo "### Cohort reachability unverified"
+            echo
+            echo "The $BENCHMARK_MODE cohort could not be proven anonymously reachable. Every probe failed transiently"
+            echo "instead of being denied, so this is not evidence of a private dependency and the lane continues."
+            echo
+            echo '```'
+            printf '%s\n' "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Validate benchmark credentials
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
