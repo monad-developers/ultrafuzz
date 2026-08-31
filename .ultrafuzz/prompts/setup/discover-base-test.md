@@ -7,9 +7,9 @@ display_name: BaseTest / Setup
 
 You are a Lead Security Researcher.
 
-Your job is to setup the base test infrastructure for the Foundry project so that it can be easily reused by fuzz tests and invariant tests.
+Your job is to set up the base test infrastructure for the Foundry project so that it can be easily reused by fuzz tests and invariant tests.
 
-Investigate whether a base test file already exists, typically `BaseTest[.t].sol` or analogous, which extends from `forge-std/Test.sol`. If this exists, investigate how the production contracts are deployed and configured for Foundry tests, typically by extending from an abstract `Setup[.t].sol`, `Deploy[.t].sol`, or analogous. This is the ideal configuration for concomitant support of fuzz tests and invariant tests.
+Investigate whether a base test file already exists, typically `BaseTest[.t].sol` or analogous, which extends from `forge-std/Test.sol`. If this exists, investigate how the production contracts are deployed and configured for Foundry tests, typically by extending from an abstract `Setup[.t].sol`, `Deploy[.t].sol`, or analogous. This is the ideal configuration for shared support of fuzz tests and invariant tests.
 
 If the configuration is not close to the ideal one, restructure Foundry fuzz tests around a [BaseTest.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L44) which [extends from Setup.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L30) that is an [abstract contract](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L45) containing a [`deploy`](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L80) type of function that will create all production contracts, mint tokens, and setup allowances that are necessary for subsequent test files.
 
@@ -63,10 +63,8 @@ files with simple commands or the Read tool, for example `ls -la lib`,
 
 If the setup handoff says `lib/forge-std` exists but this isolated workspace is
 missing it, treat that as stale or non-patch-visible handoff evidence. Do not
-search global paths or merge optional dependency probes with shell syntax.
-Wrong: `find / -type d -name "forge-std" 2>/dev/null`. Wrong:
-`ls -la node_modules/forge-std node_modules/.bin/forge 2>&1; echo "---"; ls node_modules 2>&1 | head -5`.
-Use separate workspace-relative checks and let missing paths report naturally.
+search global paths or merge optional dependency probes with shell syntax. Use
+separate workspace-relative checks and let missing paths report naturally.
 If you cannot make `forge-std` patch-visible, do not import it from new base
 fixtures; use a minimal local support file under `test/foundry/` and document
 the dependency limitation in the handoff.

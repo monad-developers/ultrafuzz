@@ -23,8 +23,8 @@ Use these review handoffs:
 Prefer the Read tool for the exact manifest files selected below. If you use
 Bash to inspect artifact directories or copied files, run one command at a
 time and inspect the output as-is. Do not use shell pipelines or chained
-commands. Wrong: `ls {{artifact_path}} | sort`. Use `ls {{artifact_path}}` by
-itself, or read the exact manifest path directly. For copied-file size checks,
+commands. Use `ls {{artifact_path}}` by itself, or read the exact manifest path
+directly. For copied-file size checks,
 use standalone `wc -c <path>` commands. Do not use `stat`, `find ... -printf`,
 or any other shell command outside the provided allowed tool list.
 
