@@ -20,8 +20,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Fragment } from "react";
-import { Effect } from "effect";
-import { requireTaskRuntime } from "@smthrs/driver/task-runtime";
 import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
@@ -97,6 +95,7 @@ const {
   derivePromptArtifactAuthority,
   deriveWorkspacePatchGitFacts,
   dynamicStorageId,
+  deriveCurrentTaskWorkflowMetrics,
   GOAL_SEARCH_COVERAGE_FILE,
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
@@ -115,8 +114,6 @@ const {
   verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
   parsePromptArtifactAuthorityBytes,
-  projectNormalizedUsageAccounting,
-  resolveLiveModelPricing,
   serializeRuntimeDocument,
   serializePromptArtifactAuthority,
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
@@ -2231,18 +2228,6 @@ type FinalReportRunMetadataProjection = {
   source_run_ids?: string[];
 };
 
-type FinalReportWorkflowUsageEvent = {
-  model: string;
-  agent: string;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens?: number;
-  cache_write_tokens?: number;
-  reasoning_tokens?: number;
-  recorded_cost_usd?: number;
-  observed_at_ms: number;
-};
-
 type FinalReportWorkflowMetricsProjection = {
   elapsed_through?: string;
   models_used: string[];
@@ -2409,173 +2394,31 @@ function finalReportElapsedTime(createdAt: unknown, updatedAt: unknown): string 
   return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
 }
 
+function finalReportLatestElapsedThrough(...values: unknown[]): string | undefined {
+  let latest: { value: string; timestamp: number } | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    if (typeof value !== "string") {
+      throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+    }
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
+      throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+    }
+    if (latest === undefined || timestamp > latest.timestamp) latest = { value, timestamp };
+  }
+  return latest?.value;
+}
+
 function finalReportAvailableLabel(value: string): string | undefined {
   return value === "unavailable" ? undefined : value;
-}
-
-function finalReportFormatInteger(value: number): string {
-  return Math.trunc(value)
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
-}
-
-function finalReportFormatUsd(value: number, partial: boolean): string {
-  const suffix = partial ? "+" : "";
-  return value > 0 && value < 0.01 ? `$${value.toFixed(4)}${suffix}` : `$${value.toFixed(2)}${suffix}`;
-}
-
-function finalReportNonNegativeNumber(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
-  }
-  return value;
-}
-
-function finalReportOptionalNonNegativeNumber(value: unknown, label: string): number | undefined {
-  return value === undefined || value === null ? undefined : finalReportNonNegativeNumber(value, label);
-}
-
-function finalReportWorkflowEvent(row: unknown): FinalReportWorkflowUsageEvent {
-  if (!isPlainJsonRecord(row)) {
-    throw new Error("artifact-contract failure: final-report workflow usage event is malformed");
-  }
-  const rawPayload = row.payloadJson ?? row.payload_json;
-  let payload: unknown;
-  if (typeof rawPayload === "string") {
-    payload = parseStrictJsonBytes(Buffer.from(rawPayload, "utf8"), {
-      maxBytes: 4 * 1024 * 1024,
-      maxDepth: 128,
-      maxItems: 100_000,
-      maxProperties: 100_000
-    });
-  } else {
-    payload = rawPayload;
-  }
-  if (!isPlainJsonRecord(payload)) {
-    throw new Error("artifact-contract failure: final-report workflow usage event payload is malformed");
-  }
-  const model = payload.model;
-  const agent = payload.agent;
-  if (typeof model !== "string" || model.length === 0 || typeof agent !== "string" || agent.length === 0) {
-    throw new Error("artifact-contract failure: final-report workflow usage event identity is malformed");
-  }
-  return {
-    model,
-    agent,
-    input_tokens: finalReportNonNegativeNumber(payload.inputTokens, "workflow input tokens"),
-    output_tokens: finalReportNonNegativeNumber(payload.outputTokens, "workflow output tokens"),
-    ...(payload.cacheReadTokens === undefined
-      ? {}
-      : { cache_read_tokens: finalReportNonNegativeNumber(payload.cacheReadTokens, "workflow cache-read tokens") }),
-    ...(payload.cacheWriteTokens === undefined
-      ? {}
-      : {
-          cache_write_tokens: finalReportNonNegativeNumber(payload.cacheWriteTokens, "workflow cache-write tokens")
-        }),
-    ...(payload.reasoningTokens === undefined
-      ? {}
-      : { reasoning_tokens: finalReportNonNegativeNumber(payload.reasoningTokens, "workflow reasoning tokens") }),
-    ...(payload.costUsd === undefined
-      ? {}
-      : { recorded_cost_usd: finalReportNonNegativeNumber(payload.costUsd, "workflow recorded cost") }),
-    observed_at_ms: finalReportNonNegativeNumber(
-      row.timestampMs ?? row.timestamp_ms ?? payload.timestampMs,
-      "workflow usage timestamp"
-    )
-  };
-}
-
-function finalReportWorkflowNodeStartedAt(rows: unknown[], nodeId: string): number | undefined {
-  let observedAt: number | undefined;
-  for (const row of rows) {
-    if (!isPlainJsonRecord(row)) continue;
-    const rawPayload = row.payloadJson ?? row.payload_json;
-    let payload: unknown;
-    try {
-      payload =
-        typeof rawPayload === "string"
-          ? parseStrictJsonBytes(Buffer.from(rawPayload, "utf8"), {
-              maxBytes: 4 * 1024 * 1024,
-              maxDepth: 128,
-              maxItems: 100_000,
-              maxProperties: 100_000
-            })
-          : rawPayload;
-    } catch {
-      continue;
-    }
-    if (!isPlainJsonRecord(payload) || payload.nodeId !== nodeId) continue;
-    const timestamp = row.timestampMs ?? row.timestamp_ms ?? payload.timestampMs;
-    if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0) {
-      observedAt = Math.max(observedAt ?? 0, timestamp);
-    }
-  }
-  return observedAt;
 }
 
 async function deriveAuthoritativeFinalReportWorkflowMetrics(
   task: (typeof taskSpecs)[number]
 ): Promise<FinalReportWorkflowMetricsProjection | undefined> {
   if (declaredFinalReportOutputPair(task) === undefined) return undefined;
-  const runtime = requireTaskRuntime();
-  const db = runtime.db as {
-    getRunTokenUsage?: (runId: string) => Effect.Effect<unknown, unknown, never>;
-    listEventsByType?: (runId: string, type: string) => Effect.Effect<unknown, unknown, never>;
-  };
-  if (typeof db.getRunTokenUsage !== "function" || typeof db.listEventsByType !== "function") return undefined;
-
-  const [rawUsage, rawUsageRows, rawNodeRows] = await Promise.all([
-    Effect.runPromise(db.getRunTokenUsage(runtime.runId)),
-    Effect.runPromise(db.listEventsByType(runtime.runId, "TokenUsageReported")),
-    Effect.runPromise(db.listEventsByType(runtime.runId, "NodeStarted"))
-  ]);
-  if (!isPlainJsonRecord(rawUsage) || !Array.isArray(rawUsageRows) || !Array.isArray(rawNodeRows)) {
-    throw new Error("artifact-contract failure: final-report workflow metrics authority is malformed");
-  }
-  const attempts = finalReportNonNegativeNumber(rawUsage.attempts, "workflow usage attempts");
-  const totalTokens = finalReportNonNegativeNumber(rawUsage.totalTokens, "workflow total tokens");
-  const pricedAttempts = finalReportNonNegativeNumber(rawUsage.pricedAttempts, "workflow priced attempts");
-  if (pricedAttempts > attempts) {
-    throw new Error("artifact-contract failure: final-report workflow priced attempts exceed usage attempts");
-  }
-  const usageEvents = rawUsageRows.map(finalReportWorkflowEvent);
-  if (attempts === 0 && usageEvents.length === 0) return undefined;
-  const models = [...new Set(usageEvents.map((event) => event.model))].sort();
-  const latestUsageAt = usageEvents.reduce<number | undefined>(
-    (latest, event) => Math.max(latest ?? 0, event.observed_at_ms),
-    undefined
-  );
-  const reportStartedAt = finalReportWorkflowNodeStartedAt(rawNodeRows, runtime.stepId);
-
-  const aggregateCost = finalReportOptionalNonNegativeNumber(rawUsage.costUsd, "workflow aggregate cost");
-  let estimatedSpend: string | undefined;
-  let partialPricing = pricedAttempts < attempts;
-  if (aggregateCost !== undefined && pricedAttempts === attempts) {
-    estimatedSpend = finalReportFormatUsd(aggregateCost, false);
-    partialPricing = false;
-  } else if (usageEvents.length > 0) {
-    const pricing = await resolveLiveModelPricing({ models, env: process.env, signal: runtime.signal });
-    let knownCost = 0;
-    let pricedEvents = 0;
-    for (const event of usageEvents) {
-      const projected = projectNormalizedUsageAccounting({ usage: event, modelPricing: pricing.prices });
-      const cost = event.recorded_cost_usd ?? projected.estimated_spend_usd ?? undefined;
-      if (cost !== undefined) {
-        knownCost += cost;
-        pricedEvents += 1;
-      }
-    }
-    partialPricing = pricedEvents < usageEvents.length;
-    if (pricedEvents > 0) estimatedSpend = finalReportFormatUsd(knownCost, partialPricing);
-  }
-  const elapsedThroughMs = reportStartedAt ?? latestUsageAt;
-  return {
-    ...(elapsedThroughMs === undefined ? {} : { elapsed_through: new Date(elapsedThroughMs).toISOString() }),
-    models_used: models,
-    ...(attempts > 0 || totalTokens > 0 ? { tokens_used: finalReportFormatInteger(totalTokens) } : {}),
-    ...(estimatedSpend === undefined ? {} : { estimated_spend: estimatedSpend }),
-    partial_pricing: partialPricing
-  };
+  return (await deriveCurrentTaskWorkflowMetrics()) as FinalReportWorkflowMetricsProjection | undefined;
 }
 
 function deriveAuthoritativeFinalReportRunMetadata(
@@ -2637,7 +2480,7 @@ function deriveAuthoritativeFinalReportRunMetadata(
   const directWorkflowMetrics = metadata.source_run_id === undefined ? workflowMetrics : undefined;
   const elapsedTime = finalReportElapsedTime(
     metadata.created_at,
-    accountingRoot.updated_at ?? workflowMetrics?.elapsed_through
+    finalReportLatestElapsedThrough(accountingRoot.updated_at, workflowMetrics?.elapsed_through)
   );
   return {
     run_id: task.metadata.run.ultrafuzzRunId,

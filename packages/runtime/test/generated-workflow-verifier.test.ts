@@ -542,14 +542,16 @@ function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 
 
 function loadFinalReportRunMetadataAuthorityHarness(
   remote = "https://github.com/example/project.git?session=private-id\n",
-  workflowEvidence: {
-    usage?: Record<string, unknown>;
-    usageRows?: Record<string, unknown>[];
-    nodeRows?: Record<string, unknown>[];
-    projectedCosts?: Map<string, number | null>;
-  } = {}
+  workflowMetrics?: {
+    elapsed_through?: string;
+    models_used: string[];
+    tokens_used?: string;
+    estimated_spend?: string;
+    partial_pricing: boolean;
+  }
 ): {
   normalize(remoteValue: string): string;
+  latestElapsedThrough(...values: unknown[]): string | undefined;
   derive(task: unknown): unknown;
   materialize(task: unknown): Promise<void>;
   assertUnchanged(task: unknown): void;
@@ -612,12 +614,10 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "Buffer",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     "untrustedContentBoundary",
-    "requireTaskRuntime",
-    "Effect",
-    "resolveLiveModelPricing",
-    "projectNormalizedUsageAccounting",
+    "deriveCurrentTaskWorkflowMetrics",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
+      latestElapsedThrough: finalReportLatestElapsedThrough,
       derive: deriveAuthoritativeFinalReportRunMetadata,
       materialize: materializeFinalReportRunMetadataAuthority,
       assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
@@ -655,22 +655,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     Buffer,
     ".ultrafuzz/authorities",
     "UNTRUSTED CONTENT BOUNDARY",
-    () => ({
-      runId: "workflow-run-1",
-      stepId: "final-report",
-      signal: new AbortController().signal,
-      db: {
-        getRunTokenUsage: async () =>
-          workflowEvidence.usage ?? { attempts: 0, totalTokens: 0, pricedAttempts: 0, costUsd: null },
-        listEventsByType: async (_runId: string, type: string) =>
-          type === "TokenUsageReported" ? (workflowEvidence.usageRows ?? []) : (workflowEvidence.nodeRows ?? [])
-      }
-    }),
-    { runPromise: async (effect: Promise<unknown>) => await effect },
-    async () => ({ prices: new Map() }),
-    ({ usage }: { usage: { model: string } }) => ({
-      estimated_spend_usd: workflowEvidence.projectedCosts?.get(usage.model) ?? null
-    })
+    async () => workflowMetrics
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -8192,51 +8177,22 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    const usageRow = (input: {
-      model: string;
-      inputTokens: number;
-      outputTokens: number;
-      timestampMs: number;
-      costUsd?: number;
-    }) => ({
-      timestamp_ms: input.timestampMs,
-      payload_json: JSON.stringify({
-        type: "TokenUsageReported",
-        runId: "workflow-run-1",
-        timestampMs: input.timestampMs,
-        nodeId: `node-${input.model}`,
-        iteration: 0,
-        attempt: 1,
-        model: input.model,
-        agent: "agent-a",
-        inputTokens: input.inputTokens,
-        outputTokens: input.outputTokens,
-        ...(input.costUsd === undefined ? {} : { costUsd: input.costUsd })
-      })
-    });
-    const nodeStartedRow = (timestampMs: number) => ({
-      timestamp_ms: timestampMs,
-      payload_json: JSON.stringify({ nodeId: "final-report", timestampMs })
-    });
-
     const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      usage: { attempts: 2, totalTokens: 1_234, pricedAttempts: 2, costUsd: 0.456 },
-      usageRows: [
-        usageRow({
-          model: "model-b",
-          inputTokens: 500,
-          outputTokens: 100,
-          timestampMs: Date.parse("2026-08-20T00:30:00.000Z")
-        }),
-        usageRow({
-          model: "model-a",
-          inputTokens: 500,
-          outputTokens: 134,
-          timestampMs: Date.parse("2026-08-20T00:45:00.000Z")
-        })
-      ],
-      nodeRows: [nodeStartedRow(Date.parse("2026-08-20T01:00:00.000Z"))]
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["model-a", "model-b"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
     });
+    assert.equal(
+      full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
+      "2026-08-20T01:00:00.000Z",
+      "the final-report start must supersede a stale accounting checkpoint"
+    );
+    assert.throws(
+      () => full.latestElapsedThrough("2026-08-20T01:00:00.000Z", "not-a-timestamp"),
+      /elapsed-time metadata is malformed/u
+    );
     await full.materialize(task);
     const authorityPath = path.join(
       workspacePath,
@@ -8252,23 +8208,11 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
     assert.equal(fullProjection.partial_pricing, false);
 
     const partial = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      usage: { attempts: 2, totalTokens: 300, pricedAttempts: 1, costUsd: null },
-      usageRows: [
-        usageRow({
-          model: "model-priced",
-          inputTokens: 100,
-          outputTokens: 50,
-          timestampMs: Date.parse("2026-08-20T00:00:30.000Z"),
-          costUsd: 0.05
-        }),
-        usageRow({
-          model: "model-unpriced",
-          inputTokens: 100,
-          outputTokens: 50,
-          timestampMs: Date.parse("2026-08-20T00:01:00.000Z")
-        })
-      ],
-      nodeRows: [nodeStartedRow(Date.parse("2026-08-20T00:01:30.000Z"))]
+      elapsed_through: "2026-08-20T00:01:30.000Z",
+      models_used: ["model-priced", "model-unpriced"],
+      tokens_used: "300",
+      estimated_spend: "$0.05+",
+      partial_pricing: true
     });
     await partial.materialize(task);
     const partialProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
@@ -8297,16 +8241,11 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
       "utf8"
     );
     const lineage = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      usage: { attempts: 2, totalTokens: 1_234, pricedAttempts: 2, costUsd: 0.456 },
-      usageRows: [
-        usageRow({
-          model: "current-run-model",
-          inputTokens: 1_000,
-          outputTokens: 234,
-          timestampMs: Date.parse("2026-08-20T00:45:00.000Z")
-        })
-      ],
-      nodeRows: [nodeStartedRow(Date.parse("2026-08-20T01:00:00.000Z"))]
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["current-run-model"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
     });
     await lineage.materialize(task);
     const lineageProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;

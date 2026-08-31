@@ -25,6 +25,7 @@
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@smthrs/driver": "0.35.0",
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/prompts": "workspace:*",
@@ -32,6 +33,7 @@
     "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
     "entities": "7.0.1",
+    "effect": "4.0.0-beta.105",
     "mdast-util-from-markdown": "2.0.3",
     "npm": "11.19.0",
     "proper-lockfile": "4.1.2",
@@ -40,9 +42,7 @@
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
-    "@smthrs/driver": "0.35.0",
     "@types/proper-lockfile": "^4.1.4",
-    "effect": "4.0.0-beta.105",
     "smthrs": "0.35.0"
   }
 }

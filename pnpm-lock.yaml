@@ -293,6 +293,9 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@smthrs/driver':
+        specifier: 0.35.0
+        version: 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
@@ -311,6 +314,9 @@ importers:
       '@ultrafuzz/topology':
         specifier: workspace:*
         version: link:../topology
+      effect:
+        specifier: 4.0.0-beta.105
+        version: 4.0.0-beta.105
       entities:
         specifier: 7.0.1
         version: 7.0.1
@@ -333,15 +339,9 @@ importers:
       '@moonshot-ai/kimi-code':
         specifier: 0.29.1
         version: 0.29.1
-      '@smthrs/driver':
-        specifier: 0.35.0
-        version: 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       '@types/proper-lockfile':
         specifier: ^4.1.4
         version: 4.1.4
-      effect:
-        specifier: 4.0.0-beta.105
-        version: 4.0.0-beta.105
       smthrs:
         specifier: 0.35.0
         version: 0.35.0(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)
