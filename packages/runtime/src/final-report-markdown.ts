@@ -57,12 +57,7 @@ const reportSummaryFields = [
   ["Models used", "models_used"],
   ["Tokens used", "tokens_used"],
   ["Estimated spend", "estimated_spend"],
-  ["Strategy loops", "strategy_loops"],
-  ["Audit profile", "audit_profile"],
-  ["Audit profile catalog digest", "audit_profile_catalog_digest"],
-  ["Topology digest", "topology_digest"],
-  ["Prompt digest", "prompt_digest"],
-  ["Expanded graph fingerprint", "expanded_graph_fingerprint"]
+  ["Audit profile", "audit_profile"]
 ] as const;
 
 const severityOrder = ["High", "Medium", "Low"] as const;
@@ -130,8 +125,7 @@ export function supportsCanonicalFinalReportProjection(report: unknown): report 
     return (
       requiredAssessmentIfPresent(issue, "impact") !== undefined &&
       requiredAssessmentIfPresent(issue, "likelihood") !== undefined &&
-      proofOfConcept(issue) !== undefined &&
-      (collectStrategyRows(issue)?.length ?? 0) > 0
+      proofOfConcept(issue) !== undefined
     );
   });
 }
@@ -156,6 +150,7 @@ export function projectCanonicalFinalReport(
   }
 
   assertCanonicalIssuePresentation(input);
+  assertStructuredStrategyProvenance(input);
 
   const markdown = renderCanonicalReport(input, context.goalSearchCoverage);
   if (Buffer.byteLength(markdown, "utf8") > MAX_FINAL_REPORT_MARKDOWN_BYTES) {
@@ -197,7 +192,10 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
     /\*\*Source (?:Node|Property) Id\*\*/iu.test(prose) ||
     /(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose) ||
     /(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose) ||
-    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy provenance)\s*$/imu.test(prose)
+    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu.test(prose) ||
+    /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu.test(
+      prose
+    )
   ) {
     return false;
   }
@@ -237,13 +235,7 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
   return issueBlocks.every((block) => {
     const severityIndex = block.indexOf("\n### Severity\n");
     const proofIndex = block.indexOf("\n### Proof of Concept\n");
-    const strategyIndex = block.indexOf("\n### Strategy\n");
-    return (
-      severityIndex >= 0 &&
-      proofIndex > severityIndex &&
-      strategyIndex > proofIndex &&
-      /\| [^|\n]+ \| \d+\/\d+ \|/u.test(block.slice(strategyIndex))
-    );
+    return severityIndex >= 0 && proofIndex > severityIndex;
   });
 }
 
@@ -336,6 +328,76 @@ function assertCanonicalIssuePresentation(report: JsonRecord): void {
     }
     if (candidate.title !== finding.title) {
       throw new Error(`final report property provenance ${index} title does not equal its referenced finding title`);
+    }
+  }
+}
+
+/**
+ * Keep machine-readable execution provenance honest even though it is no longer developer-facing.
+ * A detection is one distinct contributing execution, not one duplicate finding or family member.
+ */
+function assertStructuredStrategyProvenance(report: JsonRecord): void {
+  const records = [
+    ...(Array.isArray(report.issues) ? report.issues : []),
+    ...(Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes : [])
+  ];
+  for (const [recordIndex, candidate] of records.entries()) {
+    if (!isRecord(candidate) || !isRecord(candidate.strategy_provenance)) continue;
+    const rates = Array.isArray(candidate.strategy_provenance.detection_rates)
+      ? candidate.strategy_provenance.detection_rates.filter(isRecord)
+      : [];
+    const detectionsByStrategy = new Map<string, number>();
+    for (const rate of rates) {
+      const strategy = typeof rate.strategy === "string" ? rate.strategy : "";
+      const detections = typeof rate.detections === "number" ? rate.detections : -1;
+      const configuredLoops = typeof rate.configured_loops === "number" ? rate.configured_loops : -1;
+      if (detections > configuredLoops) {
+        throw new Error(
+          `final report record ${recordIndex} strategy ${JSON.stringify(strategy)} reports ${detections} detections from only ${configuredLoops} configured executions`
+        );
+      }
+      if (detectionsByStrategy.has(strategy)) {
+        throw new Error(
+          `final report record ${recordIndex} repeats strategy detection provenance for ${JSON.stringify(strategy)}`
+        );
+      }
+      detectionsByStrategy.set(strategy, detections);
+    }
+
+    const attempts = candidate.strategy_provenance.attempts;
+    if (!Array.isArray(attempts)) continue;
+    const contributingByStrategy = new Map<string, number>();
+    const identities = new Set<string>();
+    for (const attempt of attempts.filter(isRecord)) {
+      const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
+      if (!detectionsByStrategy.has(strategy)) {
+        throw new Error(
+          `final report record ${recordIndex} has attempt provenance for undeclared strategy ${JSON.stringify(strategy)}`
+        );
+      }
+      const identity = JSON.stringify([
+        strategy,
+        attempt.attempt_index ?? null,
+        attempt.model_id ?? null,
+        attempt.model ?? null,
+        attempt.model_index ?? null,
+        attempt.loop_index ?? null
+      ]);
+      if (identities.has(identity)) {
+        throw new Error(
+          `final report record ${recordIndex} repeats contributing execution provenance for strategy ${JSON.stringify(strategy)}`
+        );
+      }
+      identities.add(identity);
+      contributingByStrategy.set(strategy, (contributingByStrategy.get(strategy) ?? 0) + 1);
+    }
+    for (const [strategy, detections] of detectionsByStrategy) {
+      const contributingExecutions = contributingByStrategy.get(strategy) ?? 0;
+      if (contributingExecutions !== detections) {
+        throw new Error(
+          `final report record ${recordIndex} strategy ${JSON.stringify(strategy)} has ${contributingExecutions} distinct contributing executions, which does not match ${detections} detections`
+        );
+      }
     }
   }
 }
@@ -617,10 +679,6 @@ function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   lines.push("", "### Proof of Concept", "");
   appendProofOfConcept(lines, issue);
   appendFamilyVariants(lines, issue.family_variants);
-  lines.push("", "### Strategy", "", "| Strategy | Detection rate |", "| --- | --- |");
-  for (const row of strategyRows(issue)) {
-    lines.push(`| ${tableCell(row.strategy)} | ${tableCell(row.rate)} |`);
-  }
 }
 
 function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
@@ -651,41 +709,6 @@ function appendFamilyVariants(lines: string[], value: unknown): void {
     const summary = firstAvailableString(variant.summary, variant.description);
     lines.push(`- **${publicProse(title)}**${summary === undefined ? "" : `: ${publicProse(summary)}`}`);
   }
-}
-
-function strategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> {
-  const rows = collectStrategyRows(issue);
-  if (rows === undefined || rows.length === 0) {
-    throw new Error("production issue is missing exact strategy detection rates");
-  }
-  return rows;
-}
-
-function collectStrategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> | undefined {
-  const provenance = isRecord(issue.strategy_provenance) ? issue.strategy_provenance : {};
-  const rates = Array.isArray(provenance.detection_rates) ? provenance.detection_rates.filter(isRecord) : [];
-  const rows: Array<{ strategy: string; rate: string }> = [];
-  for (const rate of rates) {
-    const strategy = rate.strategy;
-    if (typeof strategy !== "string" || strategy.length === 0) {
-      return undefined;
-    }
-    const detected = rate.detections;
-    const configured = rate.configured_loops;
-    if (
-      typeof detected !== "number" ||
-      !Number.isInteger(detected) ||
-      detected < 0 ||
-      typeof configured !== "number" ||
-      !Number.isInteger(configured) ||
-      configured <= 0 ||
-      detected > configured
-    ) {
-      return undefined;
-    }
-    rows.push({ strategy, rate: `${detected}/${configured}` });
-  }
-  return rows;
 }
 
 function appendPropertyProvenance(
@@ -1013,12 +1036,12 @@ function appendNonProductionOutcomes(lines: string[], outcomes: JsonRecord[]): v
     "",
     "## Non-production actionable outcomes",
     "",
-    "| Classification | Title | Status | Evidence | Strategy provenance | Recommended next action |",
-    "| --- | --- | --- | --- | --- | --- |"
+    "| Classification | Title | Status | Evidence | Recommended next action |",
+    "| --- | --- | --- | --- | --- |"
   );
   for (const outcome of outcomes) {
     lines.push(
-      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(strategySummary(outcome))} | ${tableCell(outcome.recommended_next_action)} |`
+      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
     );
   }
 }
@@ -1116,14 +1139,6 @@ function evidenceSummary(value: unknown, fallback: unknown): string {
 function publicEvidenceText(value: string): string {
   const text = value.trim();
   return containsPrivatePath(text) ? "Evidence retained in structured report." : text;
-}
-
-function strategySummary(record: JsonRecord): string {
-  const rows = collectStrategyRows(record);
-  if (rows === undefined || rows.length === 0) {
-    return firstAvailableString(record.strategy) ?? "unavailable";
-  }
-  return rows.map((row) => `${row.strategy} (${row.rate})`).join(", ");
 }
 
 function inlineValue(value: unknown): string {

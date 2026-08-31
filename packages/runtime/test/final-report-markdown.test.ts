@@ -118,7 +118,12 @@ test("canonical final-report validation renders Markdown without rewriting the v
 
   assert.match(first.markdown, /^# Ultrafuzz report\n\n\| Issue id \| Title \|/u);
   assert.match(first.markdown, /^## \[L-01\] - State mismatch$/mu);
-  assert.match(first.markdown, /\| stateful-invariant \| 1\/4 \|/u);
+  assert.match(first.markdown, /^- Audit profile: `exhaustive`$/mu);
+  assert.doesNotMatch(first.markdown, /Strategy loops|### Strategy|Detection rate/u);
+  assert.doesNotMatch(
+    first.markdown,
+    /Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint/u
+  );
   assert.doesNotMatch(first.markdown, /synthetic-final-report-secret/u);
   assert.doesNotMatch(first.markdown, /\/home\/runner\/private/u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(first.markdown, first.report), true);
@@ -329,7 +334,7 @@ test("canonical coverage projection escapes exclusion-reason HTML as public pros
   );
 });
 
-test("canonical final-report projection rejects empty, invalid, and unrenderable structured output", () => {
+test("canonical final-report projection rejects empty and invalid structured output", () => {
   assert.throws(
     () =>
       projectCanonicalFinalReport({
@@ -345,9 +350,46 @@ test("canonical final-report projection rejects empty, invalid, and unrenderable
 
   const unrenderable = renderableReport();
   const issue = (unrenderable.issues as Array<Record<string, unknown>>)[0]!;
-  delete issue.strategy_provenance;
+  delete issue.proof_of_concept;
   assert.equal(supportsCanonicalFinalReportProjection(unrenderable), false);
-  assert.throws(() => projectCanonicalFinalReport(unrenderable), /not renderable/u);
+  assert.throws(() => projectCanonicalFinalReport(unrenderable), /validation/u);
+});
+
+test("strategy-loop evidence remains structured but is omitted from developer-facing Markdown", () => {
+  const report = renderableReport();
+  const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+  issue.strategy_provenance = {
+    detection_rates: [{ strategy: "stateful-invariant", detections: 2, configured_loops: 3 }],
+    attempts: [
+      { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
+      { strategy: "stateful-invariant", attempt_index: 2, loop_index: 2 }
+    ]
+  };
+
+  const projection = projectCanonicalFinalReport(report);
+
+  assert.deepEqual(
+    (projection.report.issues as Array<Record<string, unknown>>)[0]?.strategy_provenance,
+    issue.strategy_provenance,
+    "execution observations remain available to machine-readable consumers"
+  );
+  assert.doesNotMatch(projection.markdown, /2\/3|stateful-invariant|### Strategy|Detection rate/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+
+  const missingObservation = structuredClone(report);
+  (
+    (missingObservation.issues as Array<Record<string, unknown>>)[0]?.strategy_provenance as Record<string, unknown>
+  ).attempts = [{ strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 }];
+  assert.throws(
+    () => projectCanonicalFinalReport(missingObservation),
+    /1 distinct contributing executions, which does not match 2 detections/u
+  );
+
+  const impossibleRate = structuredClone(report);
+  (
+    (impossibleRate.issues as Array<Record<string, unknown>>)[0]?.strategy_provenance as Record<string, unknown>
+  ).detection_rates = [{ strategy: "stateful-invariant", detections: 4, configured_loops: 3 }];
+  assert.throws(() => projectCanonicalFinalReport(impossibleRate), /4 detections from only 3 configured executions/u);
 });
 
 test("directive validation rejects injected or presentation-divergent Markdown", () => {
@@ -366,6 +408,17 @@ test("directive validation rejects injected or presentation-divergent Markdown",
     ),
     false
   );
+  for (const obsoleteLine of [
+    "- Strategy loops: `3`",
+    `- Prompt digest: \`${"a".repeat(64)}\``,
+    "### Strategy\n\n| Strategy | Detection rate |\n| --- | --- |\n| stateful-invariant | 2/3 |"
+  ]) {
+    assert.equal(
+      isDirectiveConformingFinalReportMarkdown(`${projection.markdown}\n${obsoleteLine}\n`, projection.report),
+      false,
+      obsoleteLine
+    );
+  }
 });
 
 test("directive conformance requires both coverage headings without an opt-out", () => {
@@ -420,7 +473,10 @@ test("directive validation treats fenced proof code as code while retaining pros
 test("directive validation recognizes CommonMark tilde fences and matching closers", () => {
   const projection = projectCanonicalFinalReport(renderableReport());
   const insertProofBlock = (block: string): string =>
-    projection.markdown.replace("\n### Strategy\n", `\n${block}\n\n### Strategy\n`);
+    projection.markdown.replace(
+      "\n## Property implementation coverage\n",
+      `\n${block}\n\n## Property implementation coverage\n`
+    );
   const tildeProof = insertProofBlock(
     [
       "   ~~~~solidity",
@@ -438,7 +494,10 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   assert.equal(isDirectiveConformingFinalReportMarkdown(tildeProof, projection.report), true);
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      tildeProof.replace("~~~~   \n\n### Strategy", "~~~~   \n\nCritical\n\n### Strategy"),
+      tildeProof.replace(
+        "~~~~   \n\n## Property implementation coverage",
+        "~~~~   \n\nCritical\n\n## Property implementation coverage"
+      ),
       projection.report
     ),
     false
@@ -456,7 +515,10 @@ test("directive validation recognizes CommonMark tilde fences and matching close
 test("directive validation scans tilde-fenced code for secrets and private paths", () => {
   const projection = projectCanonicalFinalReport(renderableReport());
   const insertProofBlock = (code: string): string =>
-    projection.markdown.replace("\n### Strategy\n", `\n~~~text\n${code}\n~~~\n\n### Strategy\n`);
+    projection.markdown.replace(
+      "\n## Property implementation coverage\n",
+      `\n~~~text\n${code}\n~~~\n\n## Property implementation coverage\n`
+    );
 
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(insertProofBlock("token=synthetic-tilde-fence-secret"), projection.report),
