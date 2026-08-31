@@ -1,0 +1,204 @@
+schema_version: 1
+
+prompts:
+  - path: _templates/agent-preamble/agent-prompt.mdx
+    category: Shared preamble
+    description: Assembles the security context, trust boundary, runtime context, operator prompt, and workflow prompt into one agent prompt.
+  - path: _templates/agent-preamble/authorized-defensive-security-context.mdx
+    category: Shared preamble
+    description: Establishes that every task is an authorized local defensive security review.
+  - path: _templates/agent-preamble/retry-failure.mdx
+    category: Shared preamble
+    description: Presents a previous failure as untrusted diagnostic data before restating the current instructions.
+  - path: _templates/agent-preamble/topology-runtime-context.mdx
+    category: Runtime control
+    description: Injects timeout, working-budget, deadline, and finalization-reserve instructions into every node.
+  - path: _templates/agent-preamble/untrusted-content-boundary.mdx
+    category: Trust boundary
+    description: Instructs agents to treat repository content and generated artifacts as data rather than executable instructions.
+  - path: _templates/output-contract/boundary-recipes.mdx
+    category: Output contract
+    description: Defines schema and Markdown-alignment requirements for boundary-recipe outputs.
+  - path: _templates/output-contract/coverage-evidence-markdown.mdx
+    category: Output contract
+    description: Defines the canonical sanitized Markdown rendering for measured or unavailable coverage evidence.
+  - path: _templates/output-contract/findings.mdx
+    category: Output contract
+    description: Defines findings-schema validation, evidence semantics, and preliminary-severity ownership.
+  - path: _templates/output-contract/generated-tests.mdx
+    category: Output contract
+    description: Defines the atomic generated-test manifest, companion-file, framework, and validation rules.
+  - path: _templates/output-contract/output-contract.mdx
+    category: Output contract
+    description: Defines the universal artifact-writing and validation process appended to workflow prompts.
+  - path: properties/0kn0t-lens.md
+    category: Property design
+    description: Derives target properties using the 0kn0t reference.
+  - path: properties/aviggiano-lens.md
+    category: Property design
+    description: Derives target properties using Antonio Viggiano's property reference.
+  - path: properties/certora-thinking-lens.md
+    category: Property design
+    description: Derives target properties using the Certora thinking and sanity references.
+  - path: properties/josselin-feist-lens.md
+    category: Property design
+    description: Derives DeFi rounding properties using the Montyly rounding reference under the Josselin Feist lens identity.
+  - path: properties/property-specification-a16z.md
+    category: Property design
+    description: Derives target properties using the a16z ERC-4626 reference.
+  - path: properties/property-specification-crytic.md
+    category: Property design
+    description: Derives target invariants and liveness properties using the Crytic reference.
+  - path: properties/property-specification-fanin.md
+    category: Property consolidation
+    description: Validates, merges, and deduplicates every property lens into one canonical property catalog.
+  - path: properties/property-specification-runtime-verification.md
+    category: Property design
+    description: Derives target invariants using the Runtime Verification reference.
+  - path: properties/recon-lens.md
+    category: Property design
+    description: Derives target properties and invariant-testing candidates using the Recon reference.
+  - path: review/aggregate-test-files.md
+    category: Review
+    description: Authenticates generated-test bundles and copies valid atomic bundles into the project's native test tree.
+  - path: review/dedupe-findings.md
+    category: Review
+    description: Collapses duplicate and same-root findings while preserving provenance, family variants, tests, and lifecycle records.
+  - path: review/final-report.md
+    category: Reporting
+    description: Produces the final Markdown and JSON audit reports with issues, non-production outcomes, provenance, and run metadata.
+  - path: review/severity-classification.md
+    category: Review
+    description: Applies reportability gates and assigns canonical impact, likelihood, severity, and final disposition.
+  - path: review/triage.md
+    category: Review
+    description: Uses independent review passes to classify findings and audit reachability, dependency scope, rollback, and harness validity.
+  - path: setup/actors-flows.md
+    category: Setup
+    description: Maps actors, trust levels, privileges, external dependencies, and major protocol user flows.
+  - path: setup/discover-base-test.md
+    category: Base fixture
+    description: Finds or creates reusable deployment, actor, asset, and allowance fixtures for fuzz and invariant tests.
+  - path: setup/goal-plan.md
+    category: Goal planning
+    description: Converts modeled threats and applicable vulnerability classes into the dynamic hunting plan.
+  - path: setup/prepare-foundry-harness.md
+    category: Harness setup
+    description: Makes the project minimally Foundry-compatible and emits the setup changes used by downstream strategy workspaces.
+  - path: setup/project-discovery.md
+    category: Setup
+    description: Inventories the repository's framework, contracts, tests, tooling, coverage, and source-backed invariants before fuzzing begins.
+  - path: setup/threat-model.md
+    category: Threat modeling
+    description: Builds canonical Markdown and JSON threat models from repository evidence, actors, flows, and controlled capabilities.
+  - path: smoke/json-validation-correction.md
+    category: Smoke validation
+    description: Proves the producer can observe a schema error, correct its JSON, and successfully revalidate it.
+  - path: smoke/smoke-context.md
+    category: Smoke setup
+    description: Builds a compact framework, actor, surface, and property map for bounded CI security lanes.
+  - path: smoke/smoke-strategy.md
+    category: Smoke strategy
+    description: Runs one bounded, dynamically selected bug-finding strategy against the shared smoke context.
+  - path: strategies/admin-config-boundaries.md
+    category: Strategy
+    description: Checks admin and configuration authorization, selectors, public documentation, boundary values, and getter reflection.
+  - path: strategies/amm-boundary-liquidity.md
+    category: Strategy
+    description: Exercises AMM liquidity edges, final-liquidity mutations, price bounds, and public reads after boundary states.
+  - path: strategies/batch-atomicity-unsupported-actions.md
+    category: Strategy
+    description: Tests batch and multicall atomicity, unsupported actions, field-width boundaries, and complete rollback.
+  - path: strategies/boundary-tests.md
+    category: Strategy
+    description: Turns properties and workflows into adversarial boundary recipes while investigating confirmed production bugs.
+  - path: strategies/differential-library-tests.md
+    category: Strategy
+    description: Performs lightweight public-surface differential checks using independently justified comparators.
+  - path: strategies/differential/differential-lane-author.md
+    category: Differential execution
+    description: Implements one audited lane, runs its focused comparison, and freezes the first strict semantic mismatch.
+  - path: strategies/differential/differential-oracle-planner.md
+    category: Differential planning
+    description: Plans deep differential lanes whose expected behavior is justified independently by public evidence.
+  - path: strategies/differential/differential-red-triage.md
+    category: Differential triage
+    description: Independently classifies semantic mismatches as harness, reference, production, specification, or unknown failures.
+  - path: strategies/differential/differential-repair-and-report-review.md
+    category: Differential review
+    description: Repairs only consensus harness or reference defects and converts credible production reds into standard findings.
+  - path: strategies/differential/reference-and-lane-auditor.md
+    category: Differential audit
+    description: Audits reference independence and narrows or rejects differential lanes before execution.
+  - path: strategies/differential/reference-harness-author.md
+    category: Differential harness
+    description: Authors deliberately simple test-owned reference models and harnesses without copying production internals.
+  - path: strategies/dynamic-strategy-generator.md
+    category: Dynamic strategy
+    description: Uses current-run evidence and enumerator agents to select and execute remaining target-specific investigations.
+  - path: strategies/encode-decode.md
+    category: Strategy
+    description: Investigates encoding, decoding, parsing, serialization, and promised inverse relationships.
+  - path: strategies/expand-coverage.md
+    category: Strategy
+    description: Targets weakly tested code and workflows where existing analysis provides limited security coverage.
+  - path: strategies/external-dependency-boundaries.md
+    category: Strategy
+    description: Investigates external dependencies and callbacks only where repository evidence makes their behavior in scope.
+  - path: strategies/externalized-state-accounting.md
+    category: Strategy
+    description: Tests accounting that depends on pending, claimable, escrowed, or externally represented state beyond raw balances.
+  - path: strategies/goal-hunter.mdx
+    category: Goal hunting
+    description: Performs a focused hunt for one dynamically assigned threat or vulnerability class.
+  - path: strategies/invariants/coverage.md
+    category: Invariant coverage
+    description: Iterates on realistic handler reachability until authenticated Recon-selected coverage reaches its target or a blocker is proven.
+  - path: strategies/invariants/handlers.md
+    category: Invariant handlers
+    description: Implements natural stateful action handlers while preserving reachable protocol failures and anti-vacuity.
+  - path: strategies/invariants/implement-properties.md
+    category: Invariant properties
+    description: Implements selected canonical properties as concrete assertions in the Recon and Chimera suite.
+  - path: strategies/invariants/invariant-testing-campaign.md
+    category: Invariant campaign
+    description: Runs the final supervised Recon fuzzing campaign and records coverage, property results, failures, and reproducible findings.
+  - path: strategies/invariants/setup.md
+    category: Invariant setup
+    description: Scaffolds a Recon and Chimera stateful invariant suite with realistic deployment, actors, assets, and entrypoint coverage.
+  - path: strategies/lifecycle-view-boundaries.md
+    category: Strategy
+    description: Checks whether documented views remain total, static, and consistent in empty, closed, exhausted, or terminal states.
+  - path: strategies/market-exhaustion-boundaries.md
+    category: Strategy
+    description: Tests final-liquidity consumption, price-level traversal, bitmap edges, and terminal market states.
+  - path: strategies/order-replacement-collateral.md
+    category: Strategy
+    description: Investigates order replacement, cancellation, partial fills, collateral release, and owner attribution.
+  - path: strategies/packed-action-parity.md
+    category: Strategy
+    description: Compares packed, compact, or fallback-dispatched actions with their typed public API equivalents.
+  - path: strategies/payable-fallback-accounting.md
+    category: Strategy
+    description: Tests payable and fallback flows, native-token sentinels, stale ETH, funding, and refund ownership.
+  - path: strategies/roaming-goal.md
+    category: Goal hunting
+    description: Searches for vulnerabilities omitted by both the current threat model and curated vulnerability taxonomy.
+  - path: strategies/round-trip.md
+    category: Strategy
+    description: Tests paired operations such as deposit and withdraw for source-backed economic and accounting violations.
+  - path: strategies/rounding-direction-audit.md
+    category: Strategy
+    description: Finds incorrect floor or ceiling choices and cumulative rounding drift in shares, fees, debt, rewards, and rates.
+  - path: strategies/router-exact-accounting.md
+    category: Strategy
+    description: Compares router quotes with execution funding, returned values, and exact balance deltas.
+  - path: strategies/state-machine-boundaries.md
+    category: Strategy
+    description: Tests lifecycle transitions such as pause, lock, close, graduation, finalization, and exact-input fundability.
+  - path: strategies/time-warp-sequences.md
+    category: Strategy
+    description: Investigates time-dependent bugs across stateful sequences, deadlines, accrual, cooldowns, and stale windows.
+  - path: strategies/workflow-property-based-tests.md
+    category: Strategy
+    description: Investigates expected behavior, boundaries, access rules, and state transitions across complete user workflows.

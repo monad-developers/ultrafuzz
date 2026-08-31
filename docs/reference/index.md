@@ -9,6 +9,7 @@ Reference pages describe Ultrafuzz's factual product surfaces.
 - [Topology YAML](topology-yaml.md)
 - [JSON Schemas](../schemas.md)
 - [Strict Artifact Contract Migration](artifact-contract-migration-v2.md)
+- [Prompt Catalog](prompt-catalog.md)
 - [Prompt Variables](prompt-variables.md)
 - [Pinned References](references.md)
 - [Run Artifacts and Reports](artifacts-reports.md)
