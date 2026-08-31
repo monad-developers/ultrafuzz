@@ -26,7 +26,17 @@ This inventory records the compatibility decision for every artifact contract th
 | `ultrafuzz/text@1`                    | Remains `@1`                                     | Its canonical contract is still arbitrary UTF-8 text, including empty text.                                                                                                                                                                                                               |
 | `ultrafuzz/workspace-patch@1`         | Remains `@1`                                     | The manifest fields and v1 literal did not change; the checked-in schema now matches path and uniqueness rules the v1 runtime validator already enforced.                                                                                                                                 |
 
-The migration also introduces named v1 contracts for previously generic workflow artifacts: admin/config boundary matrices, aggregation manifests, audited differential lanes, boundary recipes, coverage evidence, dependency scope matrices, differential plans/results/triage/repair/gap/report review, dynamic enumerator outputs/plans/provenance, externalized-state accounting, finding lifecycle ledgers, harness repairs, reference harnesses/manifests, selected strategies, semantic-red registries, strategy detections, triaged findings, and severity-classified findings. These are new identities rather than version bumps because no earlier canonical contract described their fields. Invariant campaign plans are the exception documented above: only their v2 contract and document identity remain supported.
+The migration also introduces named v1 contracts for previously generic
+workflow artifacts: admin/config boundary matrices, aggregation manifests,
+audited differential lanes, boundary recipes, coverage evidence, dependency
+scope matrices, differential plans/results/triage/repair/gap/report review,
+dynamic enumerator outputs/plans/provenance, externalized-state accounting,
+finding lifecycle ledgers, harness repairs, reference harnesses/manifests,
+selected strategies, semantic-red registries, strategy detections, triaged
+findings, and severity-classified findings. These are new identities rather than
+version bumps because no earlier canonical contract described their fields.
+Invariant campaign plans are the exception documented above: only their v2
+contract and document identity remain supported.
 
 Bare arrays are versioned by their contract and whole-document schema identity. Their items do not gain a synthetic `schema_version`; for example, each harness repair remains an ordinary record inside the versioned `ultrafuzz/harness-repairs@1` array.
 

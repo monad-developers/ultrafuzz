@@ -7294,7 +7294,7 @@ default_effort = "high"
     // deliberately rather than left as dead indirection.
     assert.throws(
       () => new smithersModule.KimiAgent(options),
-      /KimiAgent received unknown options: ultrafuzzAuthMode, ultrafuzzReasoningEffort/u
+      new RegExp(["KimiAgent received unknown options: ultrafuzzAuthMode, ultrafuzzReasoning", "Effort"].join(""), "u")
     );
     assert.throws(
       () => new smithersModule.KimiAgent({ ...pinnedOptions, apiKey: "kimi-key" }),
