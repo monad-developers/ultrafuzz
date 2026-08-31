@@ -430,8 +430,10 @@ function assertStrategyAttempts(
 ): void {
   if (!Array.isArray(value)) return;
   const identities = new Set<string>();
+  const attemptsByStrategy = new Map<string, number>();
   for (const attempt of (value as unknown[]).filter(isRecord)) {
-    addStrategyAttempt(attempt, identities, recordIndex);
+    const strategy = addStrategyAttempt(attempt, identities, recordIndex);
+    attemptsByStrategy.set(strategy, (attemptsByStrategy.get(strategy) ?? 0) + 1);
   }
   const detections = [...detectionsByStrategy.values()].reduce((total, count) => total + count, 0);
   if (identities.size !== detections) {
@@ -439,9 +441,17 @@ function assertStrategyAttempts(
       `final report record ${String(recordIndex)} has ${String(identities.size)} distinct contributing executions, which does not match ${String(detections)} detections`
     );
   }
+  for (const [strategy, strategyDetections] of detectionsByStrategy) {
+    const strategyAttempts = attemptsByStrategy.get(strategy) ?? 0;
+    if (strategyAttempts !== strategyDetections) {
+      throw new Error(
+        `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} has ${String(strategyAttempts)} distinct contributing executions, which does not match ${String(strategyDetections)} detections`
+      );
+    }
+  }
 }
 
-function addStrategyAttempt(attempt: JsonRecord, identities: Set<string>, recordIndex: number): void {
+function addStrategyAttempt(attempt: JsonRecord, identities: Set<string>, recordIndex: number): string {
   const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
   const identity = strategyAttemptIdentity(attempt, strategy);
   if (identities.has(identity)) {
@@ -450,6 +460,7 @@ function addStrategyAttempt(attempt: JsonRecord, identities: Set<string>, record
     );
   }
   identities.add(identity);
+  return strategy;
 }
 
 function strategyAttemptIdentity(attempt: JsonRecord, strategy: string): string {

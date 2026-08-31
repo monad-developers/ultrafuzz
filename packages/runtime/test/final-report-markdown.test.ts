@@ -369,7 +369,7 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
     attempts: [
       { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
       {
-        strategy: "Class-goal hunt for a detailed target-specific hypothesis",
+        strategy: "class-goals",
         attempt_index: 2,
         loop_index: 2
       }
@@ -403,6 +403,21 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
     { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 }
   ];
   assert.throws(() => projectCanonicalFinalReport(duplicateObservation), /repeats contributing execution provenance/u);
+
+  const misattributedObservation = structuredClone(report);
+  (
+    (misattributedObservation.issues as Array<Record<string, unknown>>)[0]?.strategy_provenance as Record<
+      string,
+      unknown
+    >
+  ).attempts = [
+    { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
+    { strategy: "stateful-invariant", attempt_index: 1, loop_index: 1 }
+  ];
+  assert.throws(
+    () => projectCanonicalFinalReport(misattributedObservation),
+    /strategy "stateful-invariant" has 2 distinct contributing executions, which does not match 1 detections/u
+  );
 
   const impossibleRate = structuredClone(report);
   (
