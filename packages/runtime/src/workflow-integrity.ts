@@ -900,11 +900,7 @@ function verifiedSnapshotDescriptorPath(
   // stays open for as long as the path is used, which pins the inode number
   // against reuse, so the volfs path resolves to exactly this directory. The
   // identity check below is applied to it unchanged.
-  for (const candidate of [
-    `/proc/self/fd/${descriptor}`,
-    `/dev/fd/${descriptor}`,
-    `/.vol/${device}/${inode}`
-  ]) {
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`, `/.vol/${device}/${inode}`]) {
     try {
       const stat = fs.statSync(candidate);
       if (stat.isDirectory() && stat.dev === device && stat.ino === inode) return candidate;

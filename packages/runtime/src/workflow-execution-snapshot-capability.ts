@@ -571,7 +571,7 @@ function directoryDescriptorPath(descriptor: number): string | undefined {
   return verifiedCandidateDescriptorPath(descriptor, [
     `/proc/self/fd/${descriptor}`,
     `/dev/fd/${descriptor}`,
-    `/.vol/${opened.dev}/${opened.ino}`
+    `/.vol/${String(opened.dev)}/${String(opened.ino)}`
   ]);
 }
 
@@ -581,7 +581,7 @@ function controllerDirectoryDescriptorPath(descriptor: number): string | undefin
   const opened = fs.fstatSync(descriptor);
   return verifiedCandidateDescriptorPath(descriptor, [
     `/proc/${process.pid}/fd/${descriptor}`,
-    `/.vol/${opened.dev}/${opened.ino}`
+    `/.vol/${String(opened.dev)}/${String(opened.ino)}`
   ]);
 }
 

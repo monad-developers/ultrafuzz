@@ -430,11 +430,11 @@ function assertDescriptorIdentity(descriptor: number, identity: FileIdentity, la
   const mismatch = !stat.isFile()
     ? "not a regular file"
     : stat.dev !== identity.device
-      ? `device ${stat.dev} != ${identity.device}`
+      ? `device ${String(stat.dev)} != ${String(identity.device)}`
       : stat.ino !== identity.inode
-        ? `inode ${stat.ino} != ${identity.inode}`
+        ? `inode ${String(stat.ino)} != ${String(identity.inode)}`
         : stat.size !== identity.size
-          ? `size ${stat.size} != ${identity.size}`
+          ? `size ${String(stat.size)} != ${String(identity.size)}`
           : digestDescriptor(descriptor) !== identity.sha256
             ? "sha256 mismatch"
             : undefined;
@@ -488,9 +488,7 @@ function assertPathIdentity(filePath: string, identity: FileIdentity, label: str
     );
   }
   if (canonical !== identity.path) {
-    throw new Error(
-      `${label} changed at the controller command boundary (canonical ${canonical} != ${identity.path})`
-    );
+    throw new Error(`${label} changed at the controller command boundary (canonical ${canonical} != ${identity.path})`);
   }
   const descriptor = openRegularFileNoFollow(filePath);
   try {
