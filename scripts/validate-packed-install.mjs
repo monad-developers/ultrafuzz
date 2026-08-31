@@ -36,7 +36,7 @@ assertPackageInventory("packed release", packageDirectories, workspacePackageDir
 assertPackageInventory("root package.json workspaces", rootManifest.workspaces, workspacePackageDirectories);
 assertPackageInventory("pnpm-workspace.yaml packages", pnpmWorkspace?.packages, workspacePackageDirectories);
 
-const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-packed-install-"));
+const temporaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-packed-install-"));
 const tarballRoot = path.join(temporaryRoot, "tarballs");
 const consumerRoot = path.join(temporaryRoot, "consumer");
 const projectRoot = path.join(temporaryRoot, "initialized-project");

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function tempProject(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "ufz-prompts-"));
+  const dir = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-prompts-"));
   tmpDirs.push(dir);
   return dir;
 }

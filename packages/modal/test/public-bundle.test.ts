@@ -49,7 +49,7 @@ const TEST_BUNDLE_METADATA = {
 
 describe("public Modal benchmark bundles", () => {
   it("hashes, validates, and extracts the scored generation and public reports", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
     const files = completePublicSources(root, rowIds);
 
@@ -104,7 +104,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("uses the registered v5 schema as the first whole-document acceptance gate", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-schema-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-schema-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -138,7 +138,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects traversal, duplicate paths, and tampered contents", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -171,7 +171,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("bounds encoded file payloads and rejects an oversized local bundle before reading it", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-size-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-size-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -198,7 +198,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("requires the complete report pair for every exact matrix row", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-rows-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-rows-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -216,7 +216,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("requires report.md to be the exact canonical projection of report.json", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-report-projection-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-report-projection-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -229,7 +229,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("fails the smoke no-regression gate when any target row has no finding", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-finding-floor-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-finding-floor-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -242,7 +242,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("allows empty smoke findings only for the single failed datapoint", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-failed-datapoint-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-failed-datapoint-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1", "target-c-runner-trial-1"];
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -302,7 +302,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects malformed entries instead of counting them as smoke findings", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-invalid-finding-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-invalid-finding-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -315,7 +315,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects schema-valid terminal reports that fail document semantic gates", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-semantic-report-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-semantic-report-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -332,7 +332,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("joins each terminal report to its run, target, and scored issue count", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-report-lineage-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-report-lineage-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -367,7 +367,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects duplicate JSON keys at report and eval lineage boundaries", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-duplicate-json-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-duplicate-json-"));
     const rowId = "target-a-runner-trial-1";
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
@@ -392,7 +392,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("requires complete positive result metadata for executed and graded cases", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-counts-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-counts-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -422,7 +422,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("requires ready diagnostics bound to the exact bundle lineage and matrix", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-diagnostics-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-diagnostics-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -487,7 +487,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects reports whose row directory is absent from the embedded matrix", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-unexpected-row-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-unexpected-row-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
@@ -504,7 +504,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects unsafe or duplicate row IDs in the embedded matrix", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-matrix-id-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-matrix-id-"));
     const files = completePublicSources(root, ["target-a-runner-trial-1"]);
     const matrix = files.find((file) => file.path === "eval/matrix.json");
     if (matrix === undefined) throw new Error("missing matrix fixture");
@@ -547,8 +547,8 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("refuses to follow an agent-controlled report symlink", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-symlink-"));
-    const outside = path.join(os.tmpdir(), `ultrafuzz-secret-${process.pid}`);
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-symlink-"));
+    const outside = path.join(fs.realpathSync(os.tmpdir()), `ultrafuzz-secret-${process.pid}`);
     const report = path.join(root, "report.json");
     fs.writeFileSync(outside, "API_KEY=must-not-be-published\n");
     fs.symlinkSync(outside, report);
@@ -569,7 +569,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects a hard-linked public source", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-hardlink-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-hardlink-"));
     const privateSource = path.join(root, "private-report.json");
     const report = path.join(root, "report.json");
     fs.writeFileSync(privateSource, "{}\n");
@@ -591,7 +591,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("rejects a canonical internal report until its JSON crosses the privacy-safe public projection", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-private-report-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-private-report-"));
     const rowId = "target-a-runner-trial-1";
     const files = completePublicSources(root, [rowId]);
     const jsonSource = files.find((source) => source.path === `reports/${rowId}/report.json`);
@@ -619,8 +619,12 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("refuses a pre-existing intermediate output symlink without writing through it", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-output-intermediate-"));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-outside-intermediate-"));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-output-intermediate-")
+    );
+    const outside = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-outside-intermediate-")
+    );
     const output = path.join(root, "output");
     fs.mkdirSync(output);
     fs.writeFileSync(path.join(outside, "sentinel.txt"), "unchanged\n");
@@ -636,7 +640,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("refuses a pre-existing final output symlink without overwriting its target", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-output-final-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-output-final-"));
     const outside = path.join(root, "outside-eval.json");
     const output = path.join(root, "output");
     fs.mkdirSync(path.join(output, "eval"), { recursive: true });
@@ -652,8 +656,8 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("refuses a symlink in the requested output parent without creating files outside it", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-output-parent-"));
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-outside-parent-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-output-parent-"));
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-outside-parent-"));
     const redirectedParent = path.join(root, "redirected-parent");
     fs.symlinkSync(outside, redirectedParent);
     const output = path.join(redirectedParent, "nested", "output");
@@ -667,7 +671,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("replaces a regular existing output tree without retaining stale files", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-output-replace-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-output-replace-"));
     const output = path.join(root, "output");
     fs.mkdirSync(path.join(output, "old"), { recursive: true });
     fs.writeFileSync(path.join(output, "old", "stale.txt"), "remove me\n");
@@ -683,7 +687,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("fails closed when a public source contains generic or exact injected secrets", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-secret-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-secret-"));
     const source = path.join(root, "report.md");
     const bundleInput = {
       benchmark: "evmbench" as const,
@@ -708,7 +712,7 @@ describe("public Modal benchmark bundles", () => {
   });
 
   it("reapplies generic and exact secret checks to a self-consistent remote bundle", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-remote-secret-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-remote-secret-"));
     const bundle = createPublicBenchmarkBundle({
       ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])

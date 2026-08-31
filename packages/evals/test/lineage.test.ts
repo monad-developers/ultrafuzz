@@ -50,7 +50,7 @@ function writeGroundTruth(filePath: string, bugIds: string[] = []): void {
 }
 
 function fixture(): { plan: EvalPlanValue; candidateRoot: string; targetRoot: string; groundTruthPath: string } {
-  const base = mkdtempSync(path.join(tmpdir(), "ufz-eval-lineage-"));
+  const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-lineage-"));
   const candidateRoot = path.join(base, "candidate");
   const targetRoot = path.join(base, "target");
   const groundTruthRoot = path.join(base, "ground-truth");

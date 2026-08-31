@@ -475,7 +475,7 @@ function findFiles(root: string, include: (file: string) => boolean): string[] {
 }
 
 function withTempDir(action: (directory: string) => void): void {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-evmbench-"));
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-evmbench-"));
   try {
     action(directory);
   } finally {

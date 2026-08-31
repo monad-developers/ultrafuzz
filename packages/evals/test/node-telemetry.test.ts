@@ -23,7 +23,7 @@ import {
 } from "./helpers.js";
 
 function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = {}) {
-  const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-pump-"));
+  const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-pump-"));
   const runRoot = path.join(base, "run-1");
   const cursorPath = path.join(base, "cursor.json");
   const suite = testSuite(path.join(base, "gt"));

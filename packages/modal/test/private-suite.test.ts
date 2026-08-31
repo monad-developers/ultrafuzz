@@ -57,7 +57,7 @@ function privateConfig(excludedNodeIds: string[], includeThreatModelGoalFanout?:
 }
 
 function loadRenderedSuite(contents: string) {
-  const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-private-suite-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-private-suite-"));
   const suitePath = path.join(root, "modal-suite.yml");
   fs.writeFileSync(suitePath, contents);
   return loadEvalSuite({ projectRoot: root, suitePath }).suite;

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
+import { chmodSync, closeSync, mkdtempSync, openSync, realpathSync, rmSync } from "node:fs";
 import { access, chmod, lstat, mkdir, mkdtemp, open, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -999,7 +999,7 @@ async function stageLaunchFiles(
   auth: SubscriptionAuthCopy | undefined,
   remoteRoot?: string
 ): Promise<void> {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-lineage-"));
+  const temporary = await mkdtemp(path.join(realpathSync(os.tmpdir()), "ultrafuzz-modal-lineage-"));
   const lineagePath = path.join(temporary, "lineage.json");
   try {
     await writeFile(lineagePath, `${JSON.stringify(lineage, null, 2)}\n`, { mode: 0o600 });
@@ -1119,7 +1119,7 @@ function normalizedSha256(value: string | undefined): string | undefined {
 }
 
 async function stageSubscriptionAuthDirectory(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry): Promise<void> {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-auth-"));
+  const temporary = await mkdtemp(path.join(realpathSync(os.tmpdir()), "ultrafuzz-modal-auth-"));
   const archivePath = path.join(temporary, "auth-entry.tgz");
   const remoteArchive = `${entry.destination}.tgz-${randomUUID()}`;
   const pending = `${entry.destination}.pending-${randomUUID()}`;
@@ -1147,7 +1147,7 @@ async function stageSubscriptionAuthDirectory(sandbox: Sandbox, entry: Subscript
 }
 
 async function publishLaunchReady(sandbox: Sandbox, attemptId: string): Promise<void> {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-ready-"));
+  const temporary = await mkdtemp(path.join(realpathSync(os.tmpdir()), "ultrafuzz-modal-ready-"));
   const readyPath = path.join(temporary, "launch-ready");
   try {
     await writeFile(readyPath, `${attemptId}\n`, { mode: 0o600 });
@@ -2959,7 +2959,7 @@ export function modalSecurityToolchainCommands(): string[] {
 
 export function createTrackedSourceArchive(
   repoRoot: string,
-  archive = path.join(os.tmpdir(), `ultrafuzz-modal-source-${process.pid}.tgz`)
+  archive = path.join(realpathSync(os.tmpdir()), `ultrafuzz-modal-source-${String(process.pid)}.tgz`)
 ): string {
   const trackedFiles = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot });
   if (trackedFiles.length === 0) throw new Error(`no Git-tracked source files found under ${repoRoot}`);
@@ -2994,7 +2994,9 @@ export function createExactCandidateSourceArchive(
   }
 
   const outputRoot =
-    requestedArchive === undefined ? mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-source-")) : undefined;
+    requestedArchive === undefined
+      ? mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-modal-source-"))
+      : undefined;
   if (outputRoot !== undefined) chmodSync(outputRoot, 0o700);
   const archive = path.resolve(requestedArchive ?? path.join(outputRoot!, "candidate.tgz"));
   let staging: string | undefined;
@@ -3005,7 +3007,7 @@ export function createExactCandidateSourceArchive(
     archiveCreated = true;
     closeSync(descriptor);
     chmodSync(archive, 0o600);
-    staging = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-candidate-stage-"));
+    staging = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-modal-candidate-stage-"));
     chmodSync(staging, 0o700);
     const checkout = path.join(staging, "checkout");
     execFileSync("git", ["init", "--quiet", checkout]);

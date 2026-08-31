@@ -1781,7 +1781,7 @@ test("report campaign outcome authority distinguishes absent campaigns from untr
 });
 
 test("generated-test filesystem gate rejects cumulative actual bytes before reading companions", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-bounds-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-generated-test-bounds-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     const generated_tests = Array.from({ length: 5 }, (_, index) => {
@@ -1811,7 +1811,7 @@ test("generated-test filesystem gate rejects cumulative actual bytes before read
 });
 
 test("generated-test filesystem gate rejects hard-linked companions", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-hardlinks-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-generated-test-hardlinks-"));
   try {
     const generatedTestsDir = path.join(root, "generated-tests");
     fs.mkdirSync(generatedTestsDir);
@@ -1866,7 +1866,7 @@ test("generated-test filesystem gate rejects hard-linked companions", () => {
 });
 
 test("aggregation schema gates exactly reconcile authenticated atomic bundles and destinations", () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-gates-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-aggregation-gates-"));
   const workspaceRoot = path.join(temporary, "workspace");
   fs.mkdirSync(workspaceRoot);
 
@@ -2424,7 +2424,7 @@ test("aggregation schema gates exactly reconcile authenticated atomic bundles an
 });
 
 test("every contextual registration executes real positive and negative checks", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-gates-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-semantic-gates-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     fs.writeFileSync(path.join(root, "artifact.json"), "artifact\n");

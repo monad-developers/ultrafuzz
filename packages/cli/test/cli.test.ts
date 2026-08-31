@@ -47,7 +47,7 @@ interface Capture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-"));
 }
 
 function shellQuote(value: string): string {
@@ -483,7 +483,7 @@ async function withInjectedBundleCollectionRead<T>(
   injectedBytes: Buffer,
   operation: () => Promise<T>
 ): Promise<T> {
-  const injectionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-bundle-read-injection-"));
+  const injectionRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-bundle-read-injection-"));
   const injectionPath = path.join(injectionRoot, "injected-bytes");
   fs.writeFileSync(injectionPath, injectedBytes);
   const target = path.resolve(targetPath);

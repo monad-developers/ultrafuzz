@@ -397,7 +397,9 @@ describe("runtime-only subscription auth", () => {
 
   it("resolves Kimi subscription secrets from separate config and credential roots", async () => {
     const configRoot = kimiAuthFixture({ oauthKey: "oauth/selected-kimi" });
-    const credentialRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-credential-root-test-"));
+    const credentialRoot = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-kimi-credential-root-test-")
+    );
     fs.mkdirSync(path.join(credentialRoot, "credentials"), { recursive: true });
     fs.writeFileSync(
       path.join(credentialRoot, "credentials", "selected-kimi.json"),
@@ -636,7 +638,7 @@ function kimiAuthFixture(
     oauthKey?: string;
   } = {}
 ): string {
-  const source = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-auth-test-"));
+  const source = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-kimi-auth-test-"));
   fs.mkdirSync(path.join(source, "credentials"), { recursive: true });
   const oauthKey = options.oauthKey ?? "oauth/kimi-code";
   const tokenName = path.posix.basename(oauthKey.trim());

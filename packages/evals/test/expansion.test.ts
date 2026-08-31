@@ -1,4 +1,4 @@
-import fs, { mkdtempSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -393,7 +393,7 @@ function writeGoalPlanRun(input: { runRoot: string; state: RunState; plan?: stri
 
 describe("eval run expansion", () => {
   it("separates dynamic children from the declared graph and keeps their lineage", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-"));
     const state = runState(
       {
         "threat-model": node("threat-model"),
@@ -451,7 +451,7 @@ describe("eval run expansion", () => {
   });
 
   it("records requested against effective concurrency and the ready queue behind it", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-concurrency-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-concurrency-"));
     const state = runState(
       { a: node("a", { status: "running" }), b: node("b", { status: "ready" }) },
       { requested_concurrency: 12, effective_concurrency: 12, ready_queue_depth: 40, active_work: 12 }
@@ -476,7 +476,7 @@ describe("eval run expansion", () => {
   });
 
   it("reads current planner cardinality and derives per-lane cost from sealed pricing", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-plan-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-plan-"));
     const state = runState({
       "threat-model": node("threat-model"),
       "goal-plan": node("goal-plan"),
@@ -541,7 +541,7 @@ describe("eval run expansion", () => {
   });
 
   it("rejects a usage row missing the current mandatory node identity", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-malformed-usage-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-malformed-usage-"));
     const state = runState({
       "goal-plan": node("goal-plan"),
       "dynamic-threat-goals-aaaa": node("dynamic-threat-goals-aaaa", {
@@ -555,7 +555,7 @@ describe("eval run expansion", () => {
   });
 
   it("reports absent lane rows as unmatched instead of treating them as free", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-unmatched-usage-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-unmatched-usage-"));
     const state = runState({
       "goal-plan": node("goal-plan"),
       "goal-roaming": node("goal-roaming"),
@@ -576,7 +576,7 @@ describe("eval run expansion", () => {
   });
 
   it("keeps joined token evidence partial when the sealed catalog cannot price it", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-unpriced-usage-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-unpriced-usage-"));
     const state = runState({
       "goal-plan": node("goal-plan"),
       "dynamic-threat-goals-aaaa": node("dynamic-threat-goals-aaaa", {
@@ -595,7 +595,7 @@ describe("eval run expansion", () => {
   });
 
   it("reports expected-against-actual mismatch without rewriting planner evidence", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-mismatch-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-mismatch-"));
     const state = runState({
       "goal-plan": node("goal-plan"),
       "dynamic-threat-goals-aaaa": node("dynamic-threat-goals-aaaa", {
@@ -621,7 +621,7 @@ describe("eval run expansion", () => {
   });
 
   it("reports absent or undeclared goal plans as unavailable", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-noplan-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-noplan-"));
     const state = runState({ "threat-model": node("threat-model"), "goal-x": node("goal-x") });
     writeCurrentRunEvidence({
       runRoot,
@@ -646,7 +646,7 @@ describe("eval run expansion", () => {
   });
 
   it("reports a schema-invalid goal plan as unreadable", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-badplan-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-badplan-"));
     writeGoalPlanRun({
       runRoot,
       state: runState({ "goal-plan": node("goal-plan") }),
@@ -660,7 +660,7 @@ describe("eval run expansion", () => {
   });
 
   it("rejects absent or malformed state and graph evidence", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-invalid-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-invalid-"));
     const state = runState({ a: node("a") });
     writeCurrentRunEvidence({ runRoot, runId: "expansion-run", state, graph: currentPlannedGraph([], undefined) });
     fs.rmSync(path.join(runRoot, "graph.json"));
@@ -675,7 +675,7 @@ describe("eval run expansion", () => {
   });
 
   it("keeps counts exact and flags capped identifier lists", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-expansion-cap-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-expansion-cap-"));
     const total = MAX_EVAL_EXPANSION_NODE_IDS + 5;
     const nodes: Record<string, Partial<NodeState>> = {};
     for (let index = 0; index < total; index += 1) {

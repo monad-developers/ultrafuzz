@@ -67,7 +67,7 @@ test("benchmark ZIP parsing applies selected-entry expansion budgets before extr
 });
 
 function temporaryPath(name: string): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-archive-security-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-archive-security-"));
   roots.push(root);
   return path.join(root, name);
 }

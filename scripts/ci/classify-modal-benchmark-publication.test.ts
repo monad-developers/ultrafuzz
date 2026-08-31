@@ -111,7 +111,7 @@ function incomplete(category: string) {
 }
 
 function setup() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-publication-readiness-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-publication-readiness-"));
   roots.push(root);
   const control = path.join(root, "control");
   const results = path.join(root, "results");

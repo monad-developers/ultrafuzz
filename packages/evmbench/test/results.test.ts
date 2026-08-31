@@ -250,7 +250,7 @@ function temporaryFile(filename: string): string {
 }
 
 function temporaryDirectory(): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-evmbench-results-"));
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-evmbench-results-"));
   temporaryDirectories.push(directory);
   return directory;
 }

@@ -16,7 +16,7 @@ import {
 } from "../src/index.js";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-events-tail-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-events-tail-"));
 }
 
 test("a torn event journal is rejected without repair or append", () => {

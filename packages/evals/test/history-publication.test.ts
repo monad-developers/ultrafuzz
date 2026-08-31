@@ -166,7 +166,7 @@ describe("eval-history publication documents", () => {
   it.runIf(process.platform !== "win32")(
     "strict-reads immutable regular files and rejects duplicate keys and symlinks",
     () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-history-publication-"));
+      const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-history-publication-"));
       try {
         const planPath = path.join(root, "plan.json");
         const generationPath = path.join(root, "generation.json");

@@ -133,7 +133,7 @@ test("planned outputs, manifests, markers, and campaign documents share one arti
 });
 
 test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-bundle-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-bundle-"));
   try {
     const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
     const copied = materializePromptSchemas(destination);
@@ -157,7 +157,7 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
 });
 
 test("current-controller schema materialization replaces only an older physical bundle", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-refresh-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-refresh-"));
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
   try {
     materializePromptSchemas(destination);
@@ -179,7 +179,7 @@ test("current-controller schema materialization replaces only an older physical 
 });
 
 test("loads only a complete physical sealed schema bundle", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-sealed-schema-bundle-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-sealed-schema-bundle-"));
   const destination = path.join(root, "schemas");
   try {
     materializePromptSchemas(destination);
@@ -203,7 +203,7 @@ test("loads only a complete physical sealed schema bundle", () => {
 });
 
 test("every contract-to-schema mapping names a file the bundle actually materializes", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-map-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-map-"));
   try {
     const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
     materializePromptSchemas(destination);
@@ -228,7 +228,7 @@ test("every contract-to-schema mapping names a file the bundle actually material
 });
 
 test("materialized schema directory can be removed by its owning worktree cleanup", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-cleanup-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-cleanup-"));
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
   materializePromptSchemas(destination);
 
@@ -238,7 +238,7 @@ test("materialized schema directory can be removed by its owning worktree cleanu
 });
 
 test("rejects a hard-linked schema destination before changing its inode", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-hardlink-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-hardlink-"));
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
   const outside = path.join(root, "outside.json");
   try {
@@ -266,7 +266,7 @@ test("rejects a hard-linked schema destination before changing its inode", () =>
 });
 
 test("rejects a schema destination that crosses an intermediate symlink", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-symlink-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-symlink-"));
   const workspace = path.join(root, "workspace");
   const outside = path.join(root, "outside");
   fs.mkdirSync(workspace);

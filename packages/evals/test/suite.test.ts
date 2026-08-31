@@ -71,7 +71,7 @@ reporting:
 `;
 
 function setup(): { projectRoot: string; groundTruthRoot: string; suitePath: string } {
-  const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-suite-"));
+  const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-suite-"));
   const projectRoot = path.join(base, "project");
   const groundTruthRoot = path.join(base, "ground-truth");
   fs.mkdirSync(path.join(projectRoot, ".ultrafuzz", "evals"), { recursive: true });
@@ -579,7 +579,7 @@ describe("held-out benchmark paths", () => {
   });
 
   it("refuses to launch a target whose held-out paths are still present", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-held-out-target-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-held-out-target-"));
     fs.mkdirSync(path.join(root, "tests", "recon"), { recursive: true });
     fs.writeFileSync(path.join(root, "tests", "recon", "Properties.sol"), "answer key\n");
 

@@ -32,7 +32,7 @@ const DIGEST_B = "b".repeat(64);
 const CREATED_AT = "2026-08-09T12:00:00.000Z";
 
 function temporaryDirectory(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-run-documents-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-run-documents-"));
 }
 
 function canonicalSourceRun(overrides: Partial<SourceRunDocument> = {}): SourceRunDocument {

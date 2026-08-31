@@ -9,7 +9,7 @@ import { emptyEvalHistory } from "@ultrafuzz/evals";
 import { runCli } from "../src/index.js";
 
 test("eval history renders and checks deterministic public charts", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-history-"));
+  const project = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-history-"));
   fs.mkdirSync(path.join(project, "benchmarks", "ultrafuzzbench"), { recursive: true });
   fs.writeFileSync(
     path.join(project, "benchmarks", "ultrafuzzbench", "history.json"),

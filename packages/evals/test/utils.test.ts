@@ -23,7 +23,7 @@ describe("held-out benchmark target refs", () => {
   };
 
   it("accepts a checkout whose hold-out revision was derived from the declared ref", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-holdout-ref-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-holdout-ref-"));
     const head = gitTarget(root);
     const benchmark = "b".repeat(40);
     const recordPath = path.join(root, ".git", "ultrafuzz-pinned-holdout.json");

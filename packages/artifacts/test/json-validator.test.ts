@@ -209,7 +209,7 @@ test("a caller-supplied registry never answers from the pinned validator isolate
 });
 
 test("file validation uses the registered schema and distinguishes instance from setup failures", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-validator-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-validator-"));
   try {
     const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
     const validPath = path.join(temporary, "valid.json");
@@ -352,7 +352,7 @@ test("file validation uses the registered schema and distinguishes instance from
 });
 
 test("registered instance byte budgets reach strict schema validation without relaxing the 64 MiB default", async (t) => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-instance-budget-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-instance-budget-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
   const instancePath = path.join(temporary, "padded-properties.json");
@@ -407,7 +407,7 @@ test("Bun host registered validation preserves strict CLI acceptance for malform
     t.skip("Bun is unavailable");
     return;
   }
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-bun-correctness-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-bun-correctness-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const schemaPath = path.join(artifactSchemaDirectory(), "properties.schema.json");
   const fixtures = [
@@ -466,7 +466,7 @@ test("Bun host registered validation preserves strict CLI acceptance for malform
 });
 
 test("external schemas resolve only local contained references", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-ref-"));
   try {
     const schemaDirectory = path.join(temporary, "schemas");
     fs.mkdirSync(schemaDirectory);
@@ -619,7 +619,7 @@ test("external schemas resolve only local contained references", async () => {
 });
 
 test("external schema references honor nested identifiers and ignore instance-valued reference keys", async (t) => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-scoped-ref-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-scoped-ref-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const nestedDirectory = path.join(temporary, "sub");
   const hashDirectory = path.join(temporary, "sub#scope");
@@ -695,7 +695,7 @@ test("external schema references honor nested identifiers and ignore instance-va
 });
 
 test("repeated external references reuse one bounded file snapshot", async (t) => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-ref-snapshot-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-ref-snapshot-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const root = path.join(temporary, "root.json");
   const child = path.join(temporary, "child.json");

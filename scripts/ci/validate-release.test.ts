@@ -39,7 +39,7 @@ afterEach(() => {
 
 describe("release validation report aggregation", () => {
   it("cannot report success when benchmark-history is the only failed gate", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-release-report-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-release-report-"));
     roots.push(root);
     const fragments = path.join(root, "fragments");
     const reportRoot = fs.mkdtempSync(path.join(repoRoot, ".ultrafuzz", "release-report-test-"));
@@ -85,7 +85,7 @@ describe("release validation report aggregation", () => {
   });
 
   it("cannot report success when a runtime shard result is missing", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-release-report-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-release-report-"));
     roots.push(root);
     const fragments = path.join(root, "fragments");
     const reportRoot = fs.mkdtempSync(path.join(repoRoot, ".ultrafuzz", "release-report-test-"));
@@ -115,7 +115,7 @@ describe("release validation report aggregation", () => {
   });
 
   it("rejects a runtime shard result that appears more than once", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-release-report-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-release-report-"));
     roots.push(root);
     const fragments = path.join(root, "fragments");
     const reportRoot = fs.mkdtempSync(path.join(repoRoot, ".ultrafuzz", "release-report-test-"));

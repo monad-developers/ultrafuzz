@@ -60,7 +60,7 @@ function withModalImageFileStats(run: () => void): void {
 
 describe("Modal JSON validator startup preflight", () => {
   it("accepts only the pinned registered validator identity", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-validator-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-validator-"));
     try {
       const cliPath = fakeValidator(root, preflightEnvelope());
       withModalImageFileStats(() => expect(() => preflightModalJsonValidator(cliPath)).not.toThrow());
@@ -70,7 +70,7 @@ describe("Modal JSON validator startup preflight", () => {
   });
 
   it("rejects duplicate-key output instead of accepting the JSON.parse projection", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-validator-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-validator-"));
     try {
       const duplicateKeyEnvelope = preflightEnvelope().replace(
         '{"schema_version":',
@@ -98,7 +98,7 @@ describe("Modal JSON validator startup preflight", () => {
       (value: Record<string, unknown>) => Object.assign(value.data as Record<string, unknown>, { truncated: true })
     ]
   ] as const)("rejects %s", (_name, mutate) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-validator-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-validator-"));
     try {
       const value = JSON.parse(preflightEnvelope()) as Record<string, unknown>;
       mutate(value);

@@ -42,7 +42,7 @@ describe("patched Modal sandbox filesystem", () => {
   });
 
   it("drains a large download while waiting for the remote process", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-download-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-download-"));
     const destination = path.join(root, "result.tgz");
     const payload = Buffer.alloc(REGRESSION_PAYLOAD_BYTES, 0x5a);
     const process = backpressuredReadProcess(payload, 0);
@@ -58,7 +58,7 @@ describe("patched Modal sandbox filesystem", () => {
   });
 
   it("does not publish partial output when the remote reader exits nonzero", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-download-failure-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-download-failure-"));
     const destination = path.join(root, "result.tgz");
     const prior = Buffer.from("trusted prior publication\n", "utf8");
     fs.writeFileSync(destination, prior);

@@ -299,7 +299,7 @@ interface PublisherResult {
 }
 
 function createRepositoryFixture(): { root: string; bare: string; seed: string; checkoutA: string; checkoutB: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-history-cas-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-history-cas-test-"));
   temporaryRoots.push(root);
   const bare = path.join(root, "remote.git");
   const seed = path.join(root, "seed");
