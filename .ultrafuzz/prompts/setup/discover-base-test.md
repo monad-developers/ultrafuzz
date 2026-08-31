@@ -7,11 +7,25 @@ display_name: BaseTest / Setup
 
 You are a Lead Security Researcher.
 
-Your job is to set up the base test infrastructure for the Foundry project so that it can be easily reused by fuzz tests and invariant tests.
+Your job is to set up the base test infrastructure for the Foundry project so
+that it can be easily reused by fuzz tests and invariant tests.
 
-Investigate whether a base test file already exists, typically `BaseTest[.t].sol` or analogous, which extends from `forge-std/Test.sol`. If this exists, investigate how the production contracts are deployed and configured for Foundry tests, typically by extending from an abstract `Setup[.t].sol`, `Deploy[.t].sol`, or analogous. This is the ideal configuration for shared support of fuzz tests and invariant tests.
+Investigate whether a base test file already exists, typically
+`BaseTest[.t].sol` or analogous, which extends from `forge-std/Test.sol`. If it
+exists, investigate how the production contracts are deployed and configured
+for Foundry tests, typically by extending from an abstract `Setup[.t].sol`,
+`Deploy[.t].sol`, or analogous. This is the ideal configuration for shared
+support of fuzz tests and invariant tests.
 
-If the configuration is not close to the ideal one, restructure Foundry fuzz tests around a [BaseTest.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L44) which [extends from Setup.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L30) that is an [abstract contract](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L45) containing a [`deploy`](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L80) type of function that will create all production contracts, mint tokens, and setup allowances that are necessary for subsequent test files.
+If the configuration is not close to the ideal one, restructure Foundry fuzz
+tests around a
+[BaseTest.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L44) that
+[extends from Setup.t.sol](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/BaseTest.t.sol#L30).
+The setup should be an
+[abstract contract](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L45) containing a
+[`deploy`](https://github.com/rheo-xyz/very-liquid-vaults/blob/main/test/Setup.t.sol#L80)-style
+function that creates all production contracts, mints tokens, and sets up the
+allowances needed by subsequent test files.
 
 The workflow applies the validated setup patch from the preceding Foundry
 setup node before this workspace starts, and captures this node's own tracked

@@ -20,7 +20,7 @@ local dashboard plus final report for review.
 
 Tell your agent:
 
-```
+```text
 Run Ultrafuzz on my project and monitor it from start to finish.
 If any node fails, for example, due to cyber refusals, resume from where it left off.
 Use the same authentication method we're using, and the best model at its highest reasoning effort,

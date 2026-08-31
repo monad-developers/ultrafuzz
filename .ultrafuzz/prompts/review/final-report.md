@@ -537,10 +537,11 @@ Join `Included priorities` with `<br>`. Derive each count from the corresponding
 schema-defined collection in the authoritative coverage value;
 `Reference expectation properties` counts the properties carrying a reference
 expectation. Introduce the blocker list with a line reading exactly `Blocker summaries:`.
-Then write one `- ` bullet per authoritative blocker summary, in the same order
-as the coverage value, with no blank line between the heading and the first
-bullet: the list ends at the first line that is not a `- ` bullet. Omit the
-Markdown heading and list when the authoritative value has no blockers.
+Then write one bullet, beginning with a hyphen and one space, per authoritative
+blocker summary, in the same order as the coverage value, with no blank line
+between the heading and the first bullet. The list ends at the first line that
+does not begin with that prefix. Omit the Markdown heading and list when the
+authoritative value has no blockers.
 
 Write each blocker bullet from the exact corresponding blocker-summary value.
 Collapsing runs of whitespace to single spaces is fine; rewording, truncating,
