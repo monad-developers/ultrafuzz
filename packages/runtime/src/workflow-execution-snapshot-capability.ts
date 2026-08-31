@@ -542,10 +542,23 @@ function assertLexicalDirectoryIdentity(directory: string, device: number, inode
   }
 }
 
-function directoryDescriptorPath(descriptor: number): string | undefined {
-  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+/**
+ * Candidate paths that name an open directory descriptor.
+ *
+ * Linux uses /proc. macOS has none, and its fdesc /dev/fd/<n> entry stats as a
+ * directory with the right inode but reports devfs's own st_dev, so returning
+ * it unchecked hands back a path the caller's identity check must then reject.
+ * macOS volfs, /.vol/<dev>/<ino>, names a path rooted at an inode rather than
+ * at a name, which is the same property /proc/self/fd provides here. Each
+ * candidate is now checked against the descriptor's own device and inode, so
+ * only a path that genuinely names this directory is returned.
+ */
+function verifiedCandidateDescriptorPath(descriptor: number, candidates: readonly string[]): string | undefined {
+  const opened = fs.fstatSync(descriptor);
+  for (const candidate of candidates) {
     try {
-      if (fs.statSync(candidate).isDirectory()) return candidate;
+      const stat = fs.statSync(candidate);
+      if (stat.isDirectory() && stat.dev === opened.dev && stat.ino === opened.ino) return candidate;
     } catch {
       // Continue to the next platform descriptor path.
     }
@@ -553,13 +566,23 @@ function directoryDescriptorPath(descriptor: number): string | undefined {
   return undefined;
 }
 
+function directoryDescriptorPath(descriptor: number): string | undefined {
+  const opened = fs.fstatSync(descriptor);
+  return verifiedCandidateDescriptorPath(descriptor, [
+    `/proc/self/fd/${descriptor}`,
+    `/dev/fd/${descriptor}`,
+    `/.vol/${opened.dev}/${opened.ino}`
+  ]);
+}
+
 function controllerDirectoryDescriptorPath(descriptor: number): string | undefined {
-  const candidate = `/proc/${process.pid}/fd/${descriptor}`;
-  try {
-    return fs.statSync(candidate).isDirectory() ? candidate : undefined;
-  } catch {
-    return undefined;
-  }
+  // Must be openable by another process. /proc/<pid>/fd qualifies on Linux;
+  // a volfs path is process-independent, so it qualifies on macOS.
+  const opened = fs.fstatSync(descriptor);
+  return verifiedCandidateDescriptorPath(descriptor, [
+    `/proc/${process.pid}/fd/${descriptor}`,
+    `/.vol/${opened.dev}/${opened.ino}`
+  ]);
 }
 
 function verifiedDirectoryDescriptorPath(

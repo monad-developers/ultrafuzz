@@ -322,7 +322,7 @@ function verifiedRegularFile(
   if (!path.isAbsolute(executable)) throw new Error(`${label} capability requires an absolute path`);
   if (forbidden !== undefined && pathInside(forbidden.lexical, path.resolve(executable)))
     throw new Error(`${label} cannot be inside the target project`);
-  const resolved = fs.realpathSync(executable);
+  const resolved = canonicalExecutablePath(executable);
   if (forbidden !== undefined && pathInside(forbidden.real, resolved))
     throw new Error(`${label} cannot resolve inside the target project`);
   const descriptor = openRegularFileNoFollow(resolved);
@@ -427,15 +427,50 @@ function digestDescriptor(descriptor: number): string {
 
 function assertDescriptorIdentity(descriptor: number, identity: FileIdentity, label: string): void {
   const stat = fs.fstatSync(descriptor);
-  if (
-    !stat.isFile() ||
-    stat.dev !== identity.device ||
-    stat.ino !== identity.inode ||
-    stat.size !== identity.size ||
-    digestDescriptor(descriptor) !== identity.sha256
-  ) {
-    throw new Error(`${label} changed at the controller command boundary`);
+  const mismatch = !stat.isFile()
+    ? "not a regular file"
+    : stat.dev !== identity.device
+      ? `device ${stat.dev} != ${identity.device}`
+      : stat.ino !== identity.inode
+        ? `inode ${stat.ino} != ${identity.inode}`
+        : stat.size !== identity.size
+          ? `size ${stat.size} != ${identity.size}`
+          : digestDescriptor(descriptor) !== identity.sha256
+            ? "sha256 mismatch"
+            : undefined;
+  if (mismatch !== undefined) {
+    throw new Error(`${label} changed at the controller command boundary (${mismatch}; path ${identity.path})`);
   }
+}
+
+const VOLFS_ROOT = "/.vol";
+
+function isVolfsPath(value: string): boolean {
+  return value === VOLFS_ROOT || value.startsWith(`${VOLFS_ROOT}/`);
+}
+
+/**
+ * Canonicalize an executable path.
+ *
+ * macOS volfs paths (/.vol/<dev>/<ino>/...) are rooted at an inode rather than
+ * at a name and have no realpath(3) resolution, so they are already canonical
+ * in the only sense available: the path cannot be redirected by renaming or
+ * symlinking a component. Callers pair this with assertDescriptorIdentity,
+ * which compares device, inode, size, and the SHA-256 of the bytes, so file
+ * identity is established by content and inode rather than by name.
+ */
+function canonicalExecutablePath(filePath: string, identity?: FileIdentity): string {
+  if (!isVolfsPath(filePath)) return fs.realpathSync(filePath);
+  // A volfs path is inode-rooted and has no realpath(3) resolution, so the
+  // attested canonical name cannot be recovered from it. Accept the attested
+  // name only once the path is shown to name that exact inode; callers pair
+  // this with assertDescriptorIdentity, which also compares size and SHA-256.
+  if (identity === undefined) throw new Error("volfs path cannot be canonicalized without an attested identity");
+  const stat = fs.lstatSync(filePath);
+  if (stat.dev !== identity.device || stat.ino !== identity.inode) {
+    throw new Error("volfs path does not name the attested file");
+  }
+  return identity.path;
 }
 
 function assertPathIdentity(filePath: string, identity: FileIdentity, label: string): void {
@@ -445,12 +480,17 @@ function assertPathIdentity(filePath: string, identity: FileIdentity, label: str
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new Error(`${label} path is no longer a regular file`);
     }
-    canonical = fs.realpathSync(filePath);
+    canonical = canonicalExecutablePath(filePath, identity);
   } catch (error) {
-    throw new Error(`${label} changed at the controller command boundary`, { cause: error });
+    throw new Error(
+      `${label} changed at the controller command boundary (canonicalize ${filePath}: ${String(error)})`,
+      { cause: error }
+    );
   }
   if (canonical !== identity.path) {
-    throw new Error(`${label} changed at the controller command boundary`);
+    throw new Error(
+      `${label} changed at the controller command boundary (canonical ${canonical} != ${identity.path})`
+    );
   }
   const descriptor = openRegularFileNoFollow(filePath);
   try {
