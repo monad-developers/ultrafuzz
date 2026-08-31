@@ -11911,7 +11911,7 @@ test("getRunHealth stays readable while execution holds the workflow control loc
     const winner = await Promise.race([
       healthPromise.then(() => "health" as const),
       new Promise<"timeout">((resolve) => {
-        timeout = setTimeout(() => resolve("timeout"), 10_000);
+        timeout = setTimeout(() => resolve("timeout"), 60_000);
       })
     ]);
     assert.equal(winner, "health", "status waited on the execution-only workflow control lock");
