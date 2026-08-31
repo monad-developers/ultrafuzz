@@ -337,69 +337,113 @@ function assertCanonicalIssuePresentation(report: JsonRecord): void {
  * A detection is one distinct contributing execution, not one duplicate finding or family member.
  */
 function assertStructuredStrategyProvenance(report: JsonRecord): void {
-  const records = [
-    ...(Array.isArray(report.issues) ? report.issues : []),
-    ...(Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes : [])
-  ];
-  for (const [recordIndex, candidate] of records.entries()) {
-    if (!isRecord(candidate) || !isRecord(candidate.strategy_provenance)) continue;
-    const rates = Array.isArray(candidate.strategy_provenance.detection_rates)
-      ? candidate.strategy_provenance.detection_rates.filter(isRecord)
-      : [];
-    const detectionsByStrategy = new Map<string, number>();
-    for (const rate of rates) {
-      const strategy = typeof rate.strategy === "string" ? rate.strategy : "";
-      const detections = typeof rate.detections === "number" ? rate.detections : -1;
-      const configuredLoops = typeof rate.configured_loops === "number" ? rate.configured_loops : -1;
-      if (detections > configuredLoops) {
-        throw new Error(
-          `final report record ${recordIndex} strategy ${JSON.stringify(strategy)} reports ${detections} detections from only ${configuredLoops} configured executions`
-        );
-      }
-      if (detectionsByStrategy.has(strategy)) {
-        throw new Error(
-          `final report record ${recordIndex} repeats strategy detection provenance for ${JSON.stringify(strategy)}`
-        );
-      }
-      detectionsByStrategy.set(strategy, detections);
-    }
-
-    const attempts = candidate.strategy_provenance.attempts;
-    if (!Array.isArray(attempts)) continue;
-    const contributingByStrategy = new Map<string, number>();
-    const identities = new Set<string>();
-    for (const attempt of attempts.filter(isRecord)) {
-      const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
-      if (!detectionsByStrategy.has(strategy)) {
-        throw new Error(
-          `final report record ${recordIndex} has attempt provenance for undeclared strategy ${JSON.stringify(strategy)}`
-        );
-      }
-      const identity = JSON.stringify([
-        strategy,
-        attempt.attempt_index ?? null,
-        attempt.model_id ?? null,
-        attempt.model ?? null,
-        attempt.model_index ?? null,
-        attempt.loop_index ?? null
-      ]);
-      if (identities.has(identity)) {
-        throw new Error(
-          `final report record ${recordIndex} repeats contributing execution provenance for strategy ${JSON.stringify(strategy)}`
-        );
-      }
-      identities.add(identity);
-      contributingByStrategy.set(strategy, (contributingByStrategy.get(strategy) ?? 0) + 1);
-    }
-    for (const [strategy, detections] of detectionsByStrategy) {
-      const contributingExecutions = contributingByStrategy.get(strategy) ?? 0;
-      if (contributingExecutions !== detections) {
-        throw new Error(
-          `final report record ${recordIndex} strategy ${JSON.stringify(strategy)} has ${contributingExecutions} distinct contributing executions, which does not match ${detections} detections`
-        );
-      }
-    }
+  for (const [recordIndex, candidate] of finalReportFindingRecords(report).entries()) {
+    const provenance = recordField(candidate, "strategy_provenance");
+    if (provenance === undefined) continue;
+    const detectionsByStrategy = strategyDetectionCounts(provenance, recordIndex);
+    assertStrategyAttempts(provenance.attempts, detectionsByStrategy, recordIndex);
   }
+}
+
+function finalReportFindingRecords(report: JsonRecord): unknown[] {
+  const issues = Array.isArray(report.issues) ? (report.issues as unknown[]) : [];
+  const outcomes = Array.isArray(report.non_production_outcomes) ? (report.non_production_outcomes as unknown[]) : [];
+  return issues.concat(outcomes);
+}
+
+function strategyDetectionCounts(provenance: JsonRecord, recordIndex: number): Map<string, number> {
+  const rates = Array.isArray(provenance.detection_rates)
+    ? (provenance.detection_rates as unknown[]).filter(isRecord)
+    : [];
+  const detectionsByStrategy = new Map<string, number>();
+  for (const rate of rates) {
+    const strategy = typeof rate.strategy === "string" ? rate.strategy : "";
+    const detections = typeof rate.detections === "number" ? rate.detections : -1;
+    const configuredLoops = typeof rate.configured_loops === "number" ? rate.configured_loops : -1;
+    assertPossibleDetectionCount(strategy, detections, configuredLoops, recordIndex);
+    if (detectionsByStrategy.has(strategy)) {
+      throw new Error(
+        `final report record ${String(recordIndex)} repeats strategy detection provenance for ${JSON.stringify(strategy)}`
+      );
+    }
+    detectionsByStrategy.set(strategy, detections);
+  }
+  return detectionsByStrategy;
+}
+
+function assertPossibleDetectionCount(
+  strategy: string,
+  detections: number,
+  configuredLoops: number,
+  recordIndex: number
+): void {
+  if (detections <= configuredLoops) return;
+  throw new Error(
+    `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} reports ${String(detections)} detections from only ${String(configuredLoops)} configured executions`
+  );
+}
+
+function assertStrategyAttempts(
+  value: unknown,
+  detectionsByStrategy: ReadonlyMap<string, number>,
+  recordIndex: number
+): void {
+  if (!Array.isArray(value)) return;
+  const contributingByStrategy = new Map<string, number>();
+  const identities = new Set<string>();
+  for (const attempt of (value as unknown[]).filter(isRecord)) {
+    addStrategyAttempt(attempt, detectionsByStrategy, contributingByStrategy, identities, recordIndex);
+  }
+  for (const [strategy, detections] of detectionsByStrategy) {
+    assertDetectionCountMatchesAttempts(strategy, detections, contributingByStrategy, recordIndex);
+  }
+}
+
+function addStrategyAttempt(
+  attempt: JsonRecord,
+  detectionsByStrategy: ReadonlyMap<string, number>,
+  contributingByStrategy: Map<string, number>,
+  identities: Set<string>,
+  recordIndex: number
+): void {
+  const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
+  if (!detectionsByStrategy.has(strategy)) {
+    throw new Error(
+      `final report record ${String(recordIndex)} has attempt provenance for undeclared strategy ${JSON.stringify(strategy)}`
+    );
+  }
+  const identity = strategyAttemptIdentity(attempt, strategy);
+  if (identities.has(identity)) {
+    throw new Error(
+      `final report record ${String(recordIndex)} repeats contributing execution provenance for strategy ${JSON.stringify(strategy)}`
+    );
+  }
+  identities.add(identity);
+  contributingByStrategy.set(strategy, (contributingByStrategy.get(strategy) ?? 0) + 1);
+}
+
+function strategyAttemptIdentity(attempt: JsonRecord, strategy: string): string {
+  return JSON.stringify([
+    strategy,
+    attempt.attempt_index ?? null,
+    attempt.model_id ?? null,
+    attempt.model ?? null,
+    attempt.model_index ?? null,
+    attempt.loop_index ?? null
+  ]);
+}
+
+function assertDetectionCountMatchesAttempts(
+  strategy: string,
+  detections: number,
+  contributingByStrategy: ReadonlyMap<string, number>,
+  recordIndex: number
+): void {
+  const contributingExecutions = contributingByStrategy.get(strategy) ?? 0;
+  if (contributingExecutions === detections) return;
+  throw new Error(
+    `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} has ${String(contributingExecutions)} distinct contributing executions, which does not match ${String(detections)} detections`
+  );
 }
 
 function requiredAssessment(

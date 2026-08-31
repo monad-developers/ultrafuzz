@@ -2414,6 +2414,18 @@ function finalReportAvailableLabel(value: string): string | undefined {
   return value === "unavailable" ? undefined : value;
 }
 
+function finalReportStrategyLoops(
+  effectiveSettings: Record<string, unknown>,
+  attemptId: string
+): number | "unavailable" {
+  const configured = effectiveSettings.strategy_loops;
+  if (configured === undefined) return "unavailable";
+  if (typeof configured !== "number" || !Number.isSafeInteger(configured) || configured < 0) {
+    throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${attemptId}`);
+  }
+  return configured;
+}
+
 async function deriveAuthoritativeFinalReportWorkflowMetrics(
   task: (typeof taskSpecs)[number]
 ): Promise<FinalReportWorkflowMetricsProjection | undefined> {
@@ -2452,18 +2464,7 @@ function deriveAuthoritativeFinalReportRunMetadata(
   }
   const auditProfile = finalReportOptionalRecord(metadata.audit_profile, "audit profile");
   const effectiveSettings = finalReportOptionalRecord(auditProfile.effective_settings, "audit-profile settings");
-  const configuredStrategyLoops = effectiveSettings.strategy_loops;
-  let strategyLoops: number | "unavailable" = "unavailable";
-  if (configuredStrategyLoops !== undefined) {
-    if (
-      typeof configuredStrategyLoops !== "number" ||
-      !Number.isSafeInteger(configuredStrategyLoops) ||
-      configuredStrategyLoops < 0
-    ) {
-      throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${task.attemptId}`);
-    }
-    strategyLoops = configuredStrategyLoops;
-  }
+  const strategyLoops = finalReportStrategyLoops(effectiveSettings, task.attemptId);
   const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
   const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
   const models = finalReportOptionalStringArray(accounting.models, "accounting models");

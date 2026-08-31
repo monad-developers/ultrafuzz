@@ -357,7 +357,8 @@ test("canonical final-report projection rejects empty and invalid structured out
 
 test("strategy-loop evidence remains structured but is omitted from developer-facing Markdown", () => {
   const report = renderableReport();
-  const issue = (report.issues as Array<Record<string, unknown>>)[0]!;
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  assert.ok(issue);
   issue.strategy_provenance = {
     detection_rates: [{ strategy: "stateful-invariant", detections: 2, configured_loops: 3 }],
     attempts: [
