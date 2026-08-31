@@ -12,7 +12,7 @@ import {
   referenceGitCredentialEnv
 } from "../src/git-credential.js";
 
-const TOKEN = "ghs_examplereferencetokenvalue0123456789";
+const TOKEN = "ghs_examplereferencetokenvalue0123456789"; // gitleaks:allow -- fake credential fixture for the redaction tests
 const PRIVATE_REPO = "example/private-reference";
 const PRIVATE_REMOTE = `https://github.com/${PRIVATE_REPO}.git`;
 

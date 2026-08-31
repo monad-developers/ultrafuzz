@@ -29,7 +29,7 @@ import {
 import type { ReferenceCacheManifest, ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
 import { fakeGitCommands, fakeGitIsolationEnv, installFakeGit, withProcessEnv } from "./fake-git.js";
 
-const PRIVATE_REFERENCE_TOKEN = "ghs_privatefilteredreferencetoken0123456789";
+const PRIVATE_REFERENCE_TOKEN = "ghs_privatefilteredreferencetoken0123456789"; // gitleaks:allow -- fake credential fixture for the redaction tests
 const PRIVATE_REFERENCE_REPO = "example/private-reference";
 const PRIVATE_REFERENCE_COMMIT = "cccccccccccccccccccccccccccccccccccccccc";
 

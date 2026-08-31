@@ -913,17 +913,17 @@ test("event redaction covers token families, AWS keys, URL credentials, and priv
     status: "failed",
     payload: {
       code: "WORKFLOW_SUBMISSION_FAILED",
-      message: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+      message: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----", // gitleaks:allow -- fake credential fixture for the redaction tests
       severity: "error",
       source: "workflow",
       details: {
-        stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE",
-        stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi"
+        stdout: "Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq AKIAIOSFODNN7EXAMPLE", // gitleaks:allow -- fake credential fixture for the redaction tests
+        stderr: "https://user:pass@example.com xoxb-1234567890-abcdefghi" // gitleaks:allow -- fake credential fixture for the redaction tests
       }
     }
   });
   const serialized = fs.readFileSync(layout.eventsPath, "utf8");
-  assert.doesNotMatch(serialized, /AKIAIOSFODNN7EXAMPLE/);
+  assert.doesNotMatch(serialized, /AKIAIOSFODNN7EXAMPLE/); // gitleaks:allow -- fake credential fixture for the redaction tests
   assert.doesNotMatch(serialized, /xoxb-/);
   assert.doesNotMatch(serialized, /user:pass/);
   assert.doesNotMatch(serialized, /PRIVATE KEY/);
@@ -944,14 +944,14 @@ test("run state redacts secret-looking node errors before persistence", () => {
 const exactAtRestSecret = "exact unknown run credential";
 const mnemonicAtRestSecret =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-const entropyAtRestSecret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q";
+const entropyAtRestSecret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q"; // gitleaks:allow -- fake credential fixture for the redaction tests
 
 function atRestSecretFixture(): string {
   return [
     `private-key=0x${"1a".repeat(32)}`,
     // Real npm tokens are npm_ plus exactly 36 characters; secretlint encodes
     // the true vendor format, so the fixture uses it.
-    "token npm_0123456789abcdefghijklmnopqrstuvwxyz",
+    "token npm_0123456789abcdefghijklmnopqrstuvwxyz", // gitleaks:allow -- fake credential fixture for the redaction tests
     `mnemonic ${mnemonicAtRestSecret}`,
     "rpc https://eth-mainnet.g.alchemy.com/v2/0123456789abcdefghijklmnopqrstuv",
     `opaque ${entropyAtRestSecret}`,
@@ -1064,7 +1064,7 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
   assert.throws(
     () =>
       assertArtifactPublicationsContainNoSecrets(
-        new Map([["raw-key.txt", Buffer.from(`signing key: ${"2b".repeat(32)}\n`, "utf8")]])
+        new Map([["raw-key.txt", Buffer.from(`signing key: ${"2b".repeat(32)}\n`, "utf8")]]) // gitleaks:allow -- fake credential fixture for the redaction tests
       ),
     /raw-key\.txt/u
   );
@@ -1122,21 +1122,21 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
   // still rejected — via a secretlint library finding or a documented
   // supplemental pattern.
   for (const [artifactPath, body] of [
-    ["k01.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"],
-    ["k02.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"],
-    ["k03.txt", "AKIAIOSFODNN7EXAMPLE"],
-    ["k04.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"],
-    ["k05.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"],
-    ["k06.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"],
-    ["k07.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"],
-    ["k08.txt", "https://admin:hunter2hunter2@example.com/x"],
-    ["k09.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"],
-    ["k10.txt", "modal ak-0123456789abcdefghijklmnop"],
-    ["k11.txt", "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop"],
-    ["k12.txt", "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv"],
-    ["k13.txt", `github fine-grained github_pat_${"A1".repeat(41)}`],
-    ["k14.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"],
-    ["k15.txt", `signing key: ${"2b".repeat(32)}`]
+    ["k01.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k02.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
+    ["k03.txt", "AKIAIOSFODNN7EXAMPLE"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k04.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k05.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k06.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k07.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k08.txt", "https://admin:hunter2hunter2@example.com/x"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k09.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k10.txt", "modal ak-0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k11.txt", "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k12.txt", "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k13.txt", `github fine-grained github_pat_${"A1".repeat(41)}`], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k14.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["k15.txt", `signing key: ${"2b".repeat(32)}`] // gitleaks:allow -- fake credential fixture for the redaction tests
   ] as const) {
     assert.throws(
       () => assertArtifactPublicationsContainNoSecrets(new Map([[artifactPath, Buffer.from(body, "utf8")]])),

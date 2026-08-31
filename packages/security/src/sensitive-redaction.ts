@@ -24,9 +24,9 @@ export const MIN_EXACT_SECRET_VALUE_LENGTH = 8;
  */
 const SUPPLEMENTAL_SECRET_PATTERNS: readonly RegExp[] = [
   // secretlint's privatekey rule requires a 100+ character key body, so a
-  // truncated or elided PEM block ("-----BEGIN PRIVATE KEY----- ... -----END
-  // PRIVATE KEY-----" quoting only part of the key) slips through. The BEGIN/
-  // END markers are a positive identification regardless of body length.
+  // truncated or elided PEM block -- one that quotes the BEGIN and END PRIVATE
+  // KEY markers but only part of the body between them -- slips through. Those
+  // markers are a positive identification regardless of body length.
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
   // secretlint's anthropic rule only matches full-length "sk-ant-api0N-"
   // keys (90-128 chars ending in "AA"); partially leaked or older Anthropic
