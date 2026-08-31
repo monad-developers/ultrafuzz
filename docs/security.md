@@ -1,5 +1,23 @@
 # Ultrafuzz Security Posture
 
+## Before You Run
+
+> **Security note**
+>
+> We strongly recommend running Ultrafuzz only on ephemeral, isolated virtual
+> machines that can be safely discarded after use. Agents run in an
+> unrestricted, skip-permissions workflow, which means they may unintentionally
+> install or access dangerous tooling or sensitive credentials. Prompts, model
+> choices, and target behavior can influence the actions agents take on the host
+> and may result in unintended or destructive consequences. Do not run Ultrafuzz
+> on a developer workstation, persistent environment, or any machine containing
+> valuable data or credentials. Ultrafuzz is still under active development and
+> has not necessarily undergone a complete security audit. Its implementation may
+> contain unknown or undiscovered vulnerabilities.
+
+The rest of this page describes what Ultrafuzz does and does not enforce
+once it is running. None of it substitutes for the host being disposable.
+
 Ultrafuzz uses a trusted local execution model. Agents run as the project
 configures them, and the product boundary is prompt review before launch plus
 explicit artifact review before materialization.

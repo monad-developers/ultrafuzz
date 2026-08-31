@@ -10,11 +10,21 @@ This tool initializes a protocol repository with editable prompts and topology, 
 specialized agents, collects generated fuzz tests and findings, and serves a
 local dashboard plus final report for review.
 
-> **Note:** We strongly recommend running Ultrafuzz on a virtual private server (VPS).
-> Agents run in an unrestricted, skip-permissions workflow. Prompts and model choices
-> can influence the actions agents take on the target host and may cause unintended,
-> destructive consequences. Review the checked-in `.ultrafuzz/prompts/` before launching
-> a campaign. See [Security](docs/security.md) for details.
+> **Security note**
+>
+> We strongly recommend running Ultrafuzz only on ephemeral, isolated virtual
+> machines that can be safely discarded after use. Agents run in an
+> unrestricted, skip-permissions workflow, which means they may unintentionally
+> install or access dangerous tooling or sensitive credentials. Prompts, model
+> choices, and target behavior can influence the actions agents take on the host
+> and may result in unintended or destructive consequences. Do not run Ultrafuzz
+> on a developer workstation, persistent environment, or any machine containing
+> valuable data or credentials. Ultrafuzz is still under active development and
+> has not necessarily undergone a complete security audit. Its implementation may
+> contain unknown or undiscovered vulnerabilities.
+>
+> Review the checked-in `.ultrafuzz/prompts/` before launching a campaign. See
+> [Security](docs/security.md) for the full posture.
 
 ## Getting started
 
