@@ -199,6 +199,44 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
     return "missing property provenance";
   }
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
+  const proseViolation = finalReportProseDirectiveViolation(prose);
+  if (proseViolation !== undefined) {
+    return proseViolation;
+  }
+  const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
+  const expectedHeadings = rendered.map(renderedIssueHeading);
+  const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
+  if (
+    headings.length !== expectedHeadings.length ||
+    headings.some((heading, index) => heading !== expectedHeadings[index])
+  ) {
+    return "issue headings do not match the validated report order";
+  }
+  // Exact equality above proves the Markdown kept the validated JSON order,
+  // IDs, and titles. Presentation never assigns severity-local identities.
+  if (expectedHeadings.length === 0) {
+    return markdown.includes("| Issue id | Title |") ? "contains an issue index without rendered issues" : undefined;
+  }
+  if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
+    return "issue index is missing or malformed";
+  }
+  const issueBlocks = expectedHeadings.map((heading, index) => {
+    const start = markdown.indexOf(`${heading}\n`);
+    const nextHeading = expectedHeadings[index + 1];
+    const end =
+      nextHeading === undefined ? markdown.length : markdown.indexOf(`${nextHeading}\n`, start + heading.length);
+    return markdown.slice(start, end < 0 ? markdown.length : end);
+  });
+  return issueBlocks.every((block) => {
+    const severityIndex = block.indexOf("\n### Severity\n");
+    const proofIndex = block.indexOf("\n### Proof of Concept\n");
+    return severityIndex >= 0 && proofIndex > severityIndex;
+  })
+    ? undefined
+    : "an issue is missing severity or proof-of-concept ordering";
+}
+
+function finalReportProseDirectiveViolation(prose: string): string | undefined {
   // Critical is not a supported report severity, but the word remains valid in explanatory prose
   // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
   // rewriting or discarding the validated finding text.
@@ -238,37 +276,7 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   ) {
     return "contains a disallowed Markdown link outside fenced code";
   }
-  const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
-  const expectedHeadings = rendered.map(renderedIssueHeading);
-  const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
-  if (
-    headings.length !== expectedHeadings.length ||
-    headings.some((heading, index) => heading !== expectedHeadings[index])
-  ) {
-    return "issue headings do not match the validated report order";
-  }
-  // Exact equality above proves the Markdown kept the validated JSON order,
-  // IDs, and titles. Presentation never assigns severity-local identities.
-  if (expectedHeadings.length === 0) {
-    return markdown.includes("| Issue id | Title |") ? "contains an issue index without rendered issues" : undefined;
-  }
-  if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
-    return "issue index is missing or malformed";
-  }
-  const issueBlocks = expectedHeadings.map((heading, index) => {
-    const start = markdown.indexOf(`${heading}\n`);
-    const nextHeading = expectedHeadings[index + 1];
-    const end =
-      nextHeading === undefined ? markdown.length : markdown.indexOf(`${nextHeading}\n`, start + heading.length);
-    return markdown.slice(start, end < 0 ? markdown.length : end);
-  });
-  return issueBlocks.every((block) => {
-    const severityIndex = block.indexOf("\n### Severity\n");
-    const proofIndex = block.indexOf("\n### Proof of Concept\n");
-    return severityIndex >= 0 && proofIndex > severityIndex;
-  })
-    ? undefined
-    : "an issue is missing severity or proof-of-concept ordering";
+  return undefined;
 }
 
 function validateReport(report: unknown): JsonRecord {
