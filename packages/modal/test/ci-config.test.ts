@@ -905,7 +905,11 @@ describe("public Modal benchmark configuration", () => {
     // reported `skipping` on pull requests, so resume-path regressions merged
     // with all checks green.
     expect(releaseValidation?.if, "release validation must not be gated off pull requests").toBeUndefined();
-    expect(releaseValidation?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes"]);
+    expect(releaseValidation?.needs).toEqual([
+      "draft-and-build-gates",
+      "external-static-analysis",
+      "release-validation-lanes"
+    ]);
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
       "max-parallel": 8,
@@ -945,7 +949,12 @@ describe("public Modal benchmark configuration", () => {
     expect(pushLanes.map((entry) => entry.lane)).toContain("package-gates");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
-    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes", "release-validation"]);
+    expect(releaseGates?.needs).toEqual([
+      "draft-and-build-gates",
+      "external-static-analysis",
+      "release-validation-lanes",
+      "release-validation"
+    ]);
     expect(releaseGates?.steps.find((step) => step.name === "Require the release validation lane selection")?.if).toBe(
       "needs.release-validation-lanes.result != 'success'"
     );
