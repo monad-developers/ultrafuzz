@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -348,7 +348,7 @@ function withDependencyFixture<T>(
   entries: readonly DependencyFixtureEntry[],
   body: (fixture: DependencyFixture) => T
 ): T {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf312-")));
+  const root = fs.realpathSync(temporaryRoot("uf312-"));
   try {
     const workspaceRoot = path.join(root, "workspace");
     const artifactRoot = path.join(root, "artifacts", "implement-properties");
@@ -483,7 +483,7 @@ test("#312 replay resumes mid-chain from the first dependency the worktree does 
 });
 
 test("#949 a reopened producer restores stale task-local source before dependency replay and on prepare retry", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf949-reopened-producer-")));
+  const root = fs.realpathSync(temporaryRoot("uf949-reopened-producer-"));
   try {
     execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Synthetic Test"], { cwd: root });
@@ -560,7 +560,7 @@ test("#949 a reopened producer restores stale task-local source before dependenc
 });
 
 test("#949 fresh preparation is untouched and modified persisted evidence fails before restoration", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf949-preparation-evidence-")));
+  const root = fs.realpathSync(temporaryRoot("uf949-preparation-evidence-"));
   try {
     execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Synthetic Test"], { cwd: root });

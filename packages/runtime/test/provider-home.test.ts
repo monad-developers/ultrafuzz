@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -8,7 +8,7 @@ import * as ts from "typescript";
 import { loadRuntimeTemplate } from "../src/runtime-template.js";
 type ResolveProviderHome = (provider: string, configured?: string) => string;
 async function loadProviderHome(): Promise<ResolveProviderHome> {
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-home-module-")),
+  const fixture = temporaryRoot("ufz-provider-home-module-"),
     modulePath = path.join(fixture, "provider-home.mjs");
   const compiled = ts.transpileModule(loadRuntimeTemplate("smithers/agents/provider-home.tsx"), {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
@@ -19,7 +19,7 @@ async function loadProviderHome(): Promise<ResolveProviderHome> {
 }
 test("provider homes are private, operator-owned, and link-free", async () => {
   const resolve = await loadProviderHome(),
-    fixture = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-home-root-")),
+    fixture = temporaryRoot("ufz-provider-home-root-"),
     root = path.join(fixture, "operator-state"),
     outside = path.join(fixture, "outside");
   for (const directory of [root, path.join(root, "codex"), outside]) fs.mkdirSync(directory, { mode: 0o700 });

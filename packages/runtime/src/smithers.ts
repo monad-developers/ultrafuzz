@@ -4760,7 +4760,7 @@ async function operatorControllerProjectRoot(
   const fresh = project === undefined;
   if (project === undefined) {
     project = (async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-controller-"));
+      const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-controller-"));
       registerOperatorControllerRoot(root);
       try {
         const timeoutMs = Math.min(

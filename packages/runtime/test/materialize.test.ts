@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { initProject, materializeSelection, planRun } from "../src/index.js";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-materialize-"));
+  return temporaryRoot("ufz-runtime-materialize-");
 }
 
 function git(cwd: string, args: string[]): string {
@@ -120,7 +120,7 @@ test("materializeSelection rejects conflicts, denied destinations, source symlin
   assert.equal(sensitive.ok, false);
   assert.ok(sensitive.diagnostics.some((diagnostic) => diagnostic.code === "MATERIALIZE_SENSITIVE_DESTINATION"));
 
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-materialize-outside-"));
+  const outside = temporaryRoot("ufz-materialize-outside-");
   const outsideFile = path.join(outside, "secret.txt");
   fs.writeFileSync(outsideFile, "outside\n", "utf8");
   fs.symlinkSync(outsideFile, path.join(runRoot, "artifacts", nodeId, "link.txt"));

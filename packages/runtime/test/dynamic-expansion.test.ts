@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -22,7 +22,7 @@ import { projectWorkflowControlState } from "../src/workflow-control.js";
 const digest = (value: string | Uint8Array): string => crypto.createHash("sha256").update(value).digest("hex");
 
 function tempDirectory(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-"));
+  return temporaryRoot("ufz-dynamic-");
 }
 
 function expansionFixture(input: {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import {
   execFileSync,
@@ -153,10 +154,10 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
 ] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
 const TEST_DATA_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:anthropic","model:deepseek","model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","model:moonshot","model:openai","model:openrouter"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:anthropic","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:deepseek","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:moonshot","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openrouter","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":["~anthropic/claude-sonnet-latest:free","~vendor/model.latest:free+preview@2026"]}`;
-process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-homes-"));
+process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = temporaryRoot("ufz-provider-homes-");
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+  return temporaryRoot("ufz-runtime-");
 }
 
 async function runSpawnedCommand(input: {
@@ -272,7 +273,7 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
       env: {
         ...ambientRouteEnvironment,
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
-        ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-start-provider-homes-")),
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-start-provider-homes-"),
         ALL_PROXY: undefined,
         HTTP_PROXY: undefined,
         HTTPS_PROXY: undefined,
@@ -1609,7 +1610,9 @@ function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fake
 
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
+  registerTemporaryPath(binDir);
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-commands.log");
   const statusOverride = path.join(project, "fake-smithers-status-override.json");
@@ -1805,6 +1808,7 @@ function currentStatusEnvelope(workflowRunId = "__RUN_ID__"): Record<string, unk
 
 function fakePsSmithersEnv(project: string, ps: unknown): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-ps-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
   const psPath = path.join(project, "fake-smithers-ps.json");
   fs.writeFileSync(psPath, `${JSON.stringify(ps, null, 2)}\n`, "utf8");
@@ -1879,7 +1883,9 @@ function fakeLifecycleSmithersEnv(
   }
 ): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
+  registerTemporaryPath(binDir);
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const resumeInspectPath = path.join(project, "fake-smithers-resume-inspect.json");
   const inspectCountPath = path.join(project, "fake-smithers-inspect-count");
@@ -3378,7 +3384,7 @@ test("non-force init never follows or overwrites linked adapter paths", () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
     const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), `ufz-init-${linkKind}-`));
+    const outsideRoot = temporaryRoot(`ufz-init-${linkKind}-`);
     const outsidePath = path.join(outsideRoot, "codex.ts");
     fs.writeFileSync(outsidePath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
     fs.unlinkSync(codexPath);
@@ -3423,7 +3429,7 @@ test("init preserves a dangling adapter symlink without writing through it", () 
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-init-dangling-"));
+  const outsideRoot = temporaryRoot("ufz-init-dangling-");
   const outsidePath = path.join(outsideRoot, "codex.ts");
   fs.unlinkSync(codexPath);
   fs.symlinkSync(outsidePath, codexPath);
@@ -3533,7 +3539,7 @@ bunAdapterTest(
 bunAdapterTest("planned routes equal final generated-adapter validation", { timeout: 30_000 }, async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-route-equivalence-")),
+  const homes = temporaryRoot("ufz-route-equivalence-"),
     codexHome = path.join(homes, "codex", "configured"),
     openRouterHome = path.join(homes, "openrouter", "managed"),
     snapshot = path.join(project, "route-snapshot"),
@@ -3647,7 +3653,7 @@ bunAdapterTest(
 bunAdapterTest("quoted TOML provider routes are bound and drift fails closed", { timeout: 30_000 }, async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-quoted-route-")),
+  const homes = temporaryRoot("ufz-quoted-route-"),
     codexHome = path.join(homes, "codex", "configured"),
     configPath = path.join(codexHome, "config.toml"),
     snapshot = path.join(project, "route-snapshot"),
@@ -7394,7 +7400,7 @@ realKimiAdapterTest(
   "generated Kimi subscription config infers managed K3 reasoning efforts",
   { timeout: 15_000 },
   async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-managed-k3-"));
+    const home = temporaryRoot("ultrafuzz-kimi-managed-k3-");
     try {
       fs.mkdirSync(path.join(home, "credentials"), { recursive: true });
       fs.writeFileSync(
@@ -7463,7 +7469,7 @@ display_name = "K3"
 realKimiAdapterTest(
   "generated Kimi subscription path reflects real Kimi Code 0.29.1 rejecting near-refresh access-only credentials",
   () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-frozen-auth-"));
+    const home = temporaryRoot("ultrafuzz-kimi-frozen-auth-");
     try {
       fs.mkdirSync(path.join(home, "credentials"), { recursive: true });
       fs.writeFileSync(
@@ -12948,6 +12954,7 @@ test("startRun submits the exact sealed redacted workflow input bytes", async ()
   writeSmallTopology(project);
 
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-redaction-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-command.log");
@@ -13090,7 +13097,7 @@ test("snapshot recovery rejects matching symlink and non-directory publications 
   const savedSnapshot = `${snapshotsRoot}.saved-${generation}`;
   fs.chmodSync(evidence.executionSnapshot.root, 0o700);
   fs.renameSync(evidence.executionSnapshot.root, savedSnapshot);
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-snapshot-outside-"));
+  const outside = temporaryRoot("ufz-stale-snapshot-outside-");
   const outsideMarker = path.join(outside, "outside.txt");
   fs.writeFileSync(outsideMarker, "outside remains\n", "utf8");
   const symlinkPublication = path.join(snapshotsRoot, `.${generation}.tmp-${process.pid}-${"b".repeat(24)}`);
@@ -13179,7 +13186,7 @@ test(
     const runId = "snapshot-parent-swap";
     const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
     const displacedRoot = `${snapshotsRoot}.displaced`;
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-parent-outside-"));
+    const outside = temporaryRoot("ufz-snapshot-parent-outside-");
     const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "mkdirSync")!;
     const originalMkdirSync = fs.mkdirSync;
     let swapped = false;
@@ -13219,7 +13226,7 @@ test(
     const runId = "snapshot-write-swap";
     const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
     const displacedRoot = `${snapshotsRoot}.displaced`;
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-write-outside-"));
+    const outside = temporaryRoot("ufz-snapshot-write-outside-");
     const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fchmodSync")!;
     const originalFchmodSync = fs.fchmodSync;
     let swapped = false;
@@ -13264,7 +13271,7 @@ test(
     writeSmallTopology(project);
     const runId = "snapshot-intermediate-write-swap";
     const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-intermediate-outside-"));
+    const outside = temporaryRoot("ufz-snapshot-intermediate-outside-");
     const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
     const originalOpenSync = fs.openSync;
     let swapped = false;
@@ -13313,7 +13320,7 @@ test("snapshot permission sealing cannot chmod a swapped outside leaf", { concur
   writeSmallTopology(project);
   const runId = "snapshot-chmod-leaf-swap";
   const snapshotsRoot = path.join(project, ".ultrafuzz", "runs", runId, "smithers", "execution-snapshots");
-  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-chmod-outside-")), "outside.txt");
+  const outside = path.join(temporaryRoot("ufz-snapshot-chmod-outside-"), "outside.txt");
   fs.writeFileSync(outside, "outside\n", { mode: 0o600 });
   const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fchmodSync")!;
   const originalFchmodSync = fs.fchmodSync;
@@ -13548,6 +13555,7 @@ test("snapshot anchors close when executable acquisition rejects a replaced inte
   writeSmallTopology(project);
   const installed = writeFakeInstalledSmithers(project);
   const interpreter = path.join(path.dirname(project), `${path.basename(project)}-sealed-runner-interpreter`);
+  registerTemporaryPath(interpreter);
   fs.copyFileSync("/bin/sh", interpreter);
   fs.chmodSync(interpreter, 0o755);
   fs.writeFileSync(installed.target, `#!${interpreter}\nprintf '%s\\n' '{"ok":true}'\n`, "utf8");
@@ -14527,7 +14535,7 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
     assert.ok(resumeTransferPatch);
 
     const root = tempProject();
-    const coordinationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-snapshot-transfer-"));
+    const coordinationRoot = temporaryRoot("ultrafuzz-snapshot-transfer-");
     const workflowPath = path.join(root, ".smithers", "workflows", "fd-transfer.tsx");
     const configPath = path.join(root, "controls", "ultrafuzz.toml");
     const scriptPath = path.join(root, "descriptor-generations.mjs");
@@ -15637,7 +15645,7 @@ bunAdapterTest("pinned store migrations are additive over a 0.34.0 database", as
   };
   const Database = loadBunSqliteDatabase();
 
-  const store = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ufz-smithers-db-")), "smithers.db");
+  const store = path.join(temporaryRoot("ufz-smithers-db-"), "smithers.db");
   const migrate = async (): Promise<void> => {
     const handle = openDurableSqliteDatabase(store);
     try {
@@ -16269,6 +16277,7 @@ test("startRun creates the workflow log directory before submission", async () =
   writeSmallTopology(project);
 
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-log-dir-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -16310,6 +16319,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   writeSmallTopology(project);
 
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-failed-submit-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -18464,6 +18474,7 @@ test("syncRun aborts or times out a blocked inspection child without durable mut
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-blocked-bin`);
+  registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   const inspectionStartedMarker = path.join(project, "inspection-started");
@@ -20876,7 +20887,7 @@ test("controller refresh sources internal modules from the invoking package clos
   const config = parseResolvedConfigJsonBytes(resolvedConfig.contents);
 
   const invokingRuntimeRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@ultrafuzz/runtime"))));
-  const staleRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stale-runtime-"));
+  const staleRuntimeRoot = temporaryRoot("ufz-stale-runtime-");
   fs.copyFileSync(path.join(invokingRuntimeRoot, "package.json"), path.join(staleRuntimeRoot, "package.json"));
   for (const directory of ["dist", "schema"]) {
     const source = path.join(invokingRuntimeRoot, directory);
@@ -21368,7 +21379,7 @@ test("controller refresh resolves a synthetic sealed module from its authenticat
 
   const moduleName = "@ultrafuzz/synthetic-controller-fixture";
   assert.throws(() => createRequire(import.meta.url).resolve(moduleName), { code: "MODULE_NOT_FOUND" });
-  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-controller-package-"));
+  const packageRoot = temporaryRoot("ufz-controller-package-");
   const packageJsonPath = path.join(packageRoot, "package.json");
   const modulePath = path.join(packageRoot, "dist", "index.js");
   const retiredModulePath = path.join(packageRoot, "dist", "retired-data.json");

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import * as c from "../src/controller-source.js";
 import { initProject } from "../src/init.js";
 const stockProject = (): string => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-controller-source-"));
+  const project = temporaryRoot("ufz-controller-source-");
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   return project;
 };

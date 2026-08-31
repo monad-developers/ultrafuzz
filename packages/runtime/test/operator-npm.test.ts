@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -49,8 +49,8 @@ test("the operator npm backports retain their security behavior", () => {
 });
 
 test("operator npm runs only from a private read-only snapshot", (context) => {
-  const targetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-operator-npm-target-"));
-  const controllerRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-operator-npm-controller-"));
+  const targetRoot = temporaryRoot("ufz-operator-npm-target-");
+  const controllerRoot = temporaryRoot("ufz-operator-npm-controller-");
   context.after(() => {
     makeTreeWritable(controllerRoot);
     fs.rmSync(controllerRoot, { recursive: true, force: true });

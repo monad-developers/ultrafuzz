@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -87,7 +87,7 @@ interface DynamicFixture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-lifecycle-"));
+  return temporaryRoot("ufz-dynamic-lifecycle-");
 }
 
 function shellQuote(value: string): string {
@@ -164,7 +164,7 @@ function lifecycleEnvironment(project: string): {
   inspectPath: string;
   eventsPath: string;
 } {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-lifecycle-runner-"));
+  const binDir = temporaryRoot("ufz-dynamic-lifecycle-runner-");
   const inspectPath = path.join(project, "workflow-inspect.json");
   const eventsPath = path.join(project, "workflow-events.ndjson");
   const smithers = path.join(binDir, "smithers");
@@ -221,7 +221,7 @@ function lifecycleEnvironment(project: string): {
         PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         SMITHERS_BIN: smithers,
         ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
-        ULTRAFUZZ_PROVIDER_HOME_ROOT: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-provider-homes-")),
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-dynamic-provider-homes-"),
         ULTRAFUZZ_PRICING_CATALOG_URL: "off"
       },
       smithers,

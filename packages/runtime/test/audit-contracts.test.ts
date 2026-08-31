@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -65,7 +65,7 @@ test("runtime audit schemas are closed, registered, and enforce exact current ve
 });
 
 test("runtime audit journals validate immutable complete history before append", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-audits-"));
+  const root = temporaryRoot("ufz-runtime-audits-");
   const cleanPath = path.join(root, "clean-audit.jsonl");
   const materializePath = path.join(root, "materialize-audit.jsonl");
   const clean = currentCleanRecord();
