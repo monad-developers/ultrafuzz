@@ -1061,21 +1061,24 @@ const SMITHERS_DB_FENCED_USAGE_PATCH = `  /**
               (existing.cost_usd ?? existing.costUsd) >= 0
                 ? (existing.cost_usd ?? existing.costUsd)
                 : null;
-            const freshInputDominates =
-              oldFreshInputTokens === null
-                ? true
-                : freshInputTokens !== null && freshInputTokens >= oldFreshInputTokens;
             // Missing optional breakdowns mean "unknown for the new
             // invocation", not that an earlier known subtotal regressed.
             cacheReadTokens ??= oldCacheReadTokens;
             cacheWriteTokens ??= oldCacheWriteTokens;
             reasoningTokens ??= oldReasoningTokens;
+            const primaryUsageAdvanced = inputTokens > oldInputTokens || outputTokens > oldOutputTokens;
             const usageAdvanced =
-              inputTokens > oldInputTokens ||
-              outputTokens > oldOutputTokens ||
+              primaryUsageAdvanced ||
               cacheReadTokens > oldCacheReadTokens ||
               cacheWriteTokens > oldCacheWriteTokens ||
               reasoningTokens > oldReasoningTokens;
+            // A later invocation can add primary tokens without an explicit
+            // fresh/cache split. Permit the breakdown to become unknown only
+            // alongside that forward progress, never on an equal stale row.
+            const freshInputDominates =
+              oldFreshInputTokens === null ||
+              (freshInputTokens !== null && freshInputTokens >= oldFreshInputTokens) ||
+              (freshInputTokens === null && primaryUsageAdvanced);
             // A later invocation can add tokens whose price is unavailable.
             // In that case the cumulative price legitimately becomes unknown;
             // require token progress so an equal stale snapshot cannot erase a
@@ -1166,8 +1169,8 @@ const SMITHERS_DB_FENCED_USAGE_PATCH = `  /**
 // adapter has already reported a per-invocation estimate. Pi can route models
 // absent from that table, so preserving its estimate is the only way to avoid
 // turning a fully priced invocation into "unavailable" (or repricing it using a
-// different catalogue). The custom field is attached only by Ultrafuzz's Pi
-// adapter and is bounded here before it reaches TokenUsageReported.
+// different catalogue). Audited CLI adapters attach the custom field, which is
+// bounded here before it reaches TokenUsageReported.
 const SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_SOURCE = `  const cacheWriteTokens = usage.inputTokenDetails?.cacheWriteTokens ?? usage.cacheWriteTokens ?? undefined;
   if (!(inputTokens > 0 || outputTokens > 0)) return null;
   const reportedFreshInputTokens = usage.inputTokenDetails?.noCacheTokens ?? usage.freshInputTokens;
@@ -1185,6 +1188,46 @@ const SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_SOURCE = `  const cacheWriteTokens
   };
 }`;
 const SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PATCH = `  const cacheWriteTokens =
+    usage.inputTokenDetails?.cacheWriteTokens ?? usage.cacheWriteTokens ?? undefined;
+  const reasoningTokens = usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens ?? undefined;
+  const reportedCostUsd = usage.reportedCostUsd;
+  const normalizedReportedCostUsd =
+    typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
+      ? reportedCostUsd
+      : undefined;
+  if (reportedCostUsd !== undefined && normalizedReportedCostUsd === undefined) return null;
+  if (!(inputTokens > 0 || outputTokens > 0 || normalizedReportedCostUsd !== undefined)) return null;
+  const reportedFreshInputTokens = usage.inputTokenDetails?.noCacheTokens ?? usage.freshInputTokens;
+  if (
+    !Number.isSafeInteger(inputTokens) ||
+    inputTokens < 0 ||
+    !Number.isSafeInteger(outputTokens) ||
+    outputTokens < 0 ||
+    (cacheReadTokens !== undefined && (!Number.isSafeInteger(cacheReadTokens) || cacheReadTokens < 0)) ||
+    (cacheWriteTokens !== undefined && (!Number.isSafeInteger(cacheWriteTokens) || cacheWriteTokens < 0)) ||
+    (reasoningTokens !== undefined && (!Number.isSafeInteger(reasoningTokens) || reasoningTokens < 0)) ||
+    (reportedFreshInputTokens !== undefined &&
+      (!Number.isSafeInteger(reportedFreshInputTokens) || reportedFreshInputTokens < 0))
+  )
+    return null;
+  const inputBreakdownComplete = reportedFreshInputTokens !== undefined;
+  const freshInputTokens = inputBreakdownComplete ? reportedFreshInputTokens : inputTokens;
+  const normalizedUsage = {
+    inputTokens,
+    freshInputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    reportedCostUsd: normalizedReportedCostUsd,
+  };
+  Object.defineProperty(normalizedUsage, "inputBreakdownComplete", {
+    value: inputBreakdownComplete,
+    enumerable: false,
+  });
+  return normalizedUsage;
+}`;
+const SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PREDECESSOR_PATCH = `  const cacheWriteTokens =
     usage.inputTokenDetails?.cacheWriteTokens ?? usage.cacheWriteTokens ?? undefined;
   const reportedCostUsd = usage.reportedCostUsd;
   const normalizedReportedCostUsd =
@@ -1220,6 +1263,10 @@ const SMITHERS_ENGINE_REPORTED_COST_PRICE_SOURCE = `function estimateReportedCos
 }`;
 const SMITHERS_ENGINE_REPORTED_COST_PRICE_PATCH = `function estimateReportedCostUsd(model, usage) {
   if (usage.reportedCostUsd !== undefined) return usage.reportedCostUsd;
+  if (usage.inputBreakdownComplete !== true) return undefined;
+  const accountedInputTokens =
+    usage.freshInputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  if (accountedInputTokens !== usage.inputTokens) return undefined;
   const price = modelTokenPrices(model);
   if (![price.input, price.output, price.cacheRead, price.cacheWrite].some((value) => value > 0)) return undefined;
   return estimateCostUsd({
@@ -1243,10 +1290,14 @@ function createCumulativeAgentUsageState() {
    * @param {NonNullable<ReturnType<typeof normalizeTokenUsage>>} right
    */
   const mergeInvocations = (left, right) => {
+    const inputBreakdownComplete =
+      (left === null || left.inputBreakdownComplete === true) && right.inputBreakdownComplete === true;
     const merged = {
       inputTokens: (left?.inputTokens ?? 0) + right.inputTokens,
-      freshInputTokens: (left?.freshInputTokens ?? 0) + right.freshInputTokens,
       outputTokens: (left?.outputTokens ?? 0) + right.outputTokens,
+      ...(inputBreakdownComplete
+        ? { freshInputTokens: (left?.freshInputTokens ?? 0) + right.freshInputTokens }
+        : {}),
     };
     for (const component of optionalComponents) {
       const leftValue = left?.[component];
@@ -1255,6 +1306,10 @@ function createCumulativeAgentUsageState() {
         merged[component] = (leftValue ?? 0) + rightValue;
       }
     }
+    Object.defineProperty(merged, "inputBreakdownComplete", {
+      value: inputBreakdownComplete,
+      enumerable: false,
+    });
     return merged;
   };
   const finalizeActive = () => {
@@ -1295,6 +1350,14 @@ function createCumulativeAgentUsageState() {
     },
   };
 }`;
+const SMITHERS_ENGINE_REPORTED_COST_PRICE_PREDECESSOR_PATCH = SMITHERS_ENGINE_REPORTED_COST_PRICE_PATCH.replace(
+  `  if (usage.inputBreakdownComplete !== true) return undefined;
+  const accountedInputTokens =
+    usage.freshInputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  if (accountedInputTokens !== usage.inputTokens) return undefined;
+`,
+  ""
+);
 
 // A CLI process can report several billed model responses before its terminal
 // agent_end/onExit. The pinned engine records usage only after generate settles,
@@ -1715,6 +1778,515 @@ const SMITHERS_ENGINE_FINAL_USAGE_PATCH = `          const agentId =
             "unknown";
           await persistOwnedAgentUsage(usage, reportedModelId, agentId, null, true);`;
 
+// Smithers 0.35.0 flattens several CLI-specific token formats into one shape
+// before the engine sees them. The providers disagree about whether their
+// input counter includes or excludes cache reads/writes, so inference in the
+// engine is ambiguous. Canonicalize while the wire event type is still known:
+// inputTokens is provider-inclusive and freshInputTokens is the uncached share.
+const SMITHERS_AGENTS_COMPLETED_USAGE_SOURCE = `function usageFromCompletedEvent(completedEvent) {
+  const u = completedEvent?.usage;
+  if (!u || typeof u !== "object" || Array.isArray(u)) return undefined;
+  const num = (value) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+  const usage = {
+    inputTokens: num(u.input_tokens) ?? num(u.inputTokens),
+    outputTokens: num(u.output_tokens) ?? num(u.outputTokens),
+    cacheReadTokens: num(u.cache_read_input_tokens) ?? num(u.cacheReadTokens),
+    cacheWriteTokens: num(u.cache_creation_input_tokens) ?? num(u.cacheWriteTokens),
+    reasoningTokens: num(u.reasoning_tokens) ?? num(u.reasoningTokens) ?? num(u.outputTokenDetails?.reasoningTokens),
+    totalTokens: num(u.total_tokens) ?? num(u.totalTokens),
+  };
+  return Object.values(usage).some((value) => value !== undefined) ? usage : undefined;
+}`;
+const SMITHERS_AGENTS_COMPLETED_USAGE_PATCH = `function usageFromCompletedEvent(completedEvent) {
+  const u = completedEvent?.usage;
+  if (!u || typeof u !== "object" || Array.isArray(u)) return undefined;
+  const num = (value) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const usd = (value) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const engine = typeof completedEvent?.engine === "string" ? completedEvent.engine.toLowerCase() : "";
+  const inputTokenDetails =
+    u.inputTokenDetails && typeof u.inputTokenDetails === "object" && !Array.isArray(u.inputTokenDetails)
+      ? u.inputTokenDetails
+      : undefined;
+  const outputTokenDetails =
+    u.outputTokenDetails && typeof u.outputTokenDetails === "object" && !Array.isArray(u.outputTokenDetails)
+      ? u.outputTokenDetails
+      : undefined;
+  if (
+    (u.inputTokenDetails !== undefined && inputTokenDetails === undefined) ||
+    (u.outputTokenDetails !== undefined && outputTokenDetails === undefined)
+  )
+    return undefined;
+  const tokenValues = [
+    u.input_tokens,
+    u.inputTokens,
+    u.output_tokens,
+    u.outputTokens,
+    u.cache_read_input_tokens,
+    u.cached_input_tokens,
+    u.cacheReadTokens,
+    inputTokenDetails?.cacheReadTokens,
+    u.cache_write_input_tokens,
+    u.cache_creation_input_tokens,
+    u.cacheWriteTokens,
+    inputTokenDetails?.cacheWriteTokens,
+    u.fresh_input_tokens,
+    u.freshInputTokens,
+    inputTokenDetails?.noCacheTokens,
+    u.reasoning_tokens,
+    u.reasoningTokens,
+    outputTokenDetails?.reasoningTokens,
+    u.total_tokens,
+    u.totalTokens,
+  ];
+  if (tokenValues.some((value) => value !== undefined && num(value) === undefined)) return undefined;
+  const rawReportedCostUsd = u.reported_cost_usd ?? u.reportedCostUsd;
+  if (rawReportedCostUsd !== undefined && usd(rawReportedCostUsd) === undefined) return undefined;
+  const rawInputTokens = num(u.input_tokens) ?? num(u.inputTokens);
+  const outputTokens = num(u.output_tokens) ?? num(u.outputTokens);
+  const cacheReadTokens =
+    num(u.cache_read_input_tokens) ??
+    num(u.cached_input_tokens) ??
+    num(u.cacheReadTokens) ??
+    num(inputTokenDetails?.cacheReadTokens);
+  const cacheWriteTokens =
+    num(u.cache_write_input_tokens) ??
+    num(u.cache_creation_input_tokens) ??
+    num(u.cacheWriteTokens) ??
+    num(inputTokenDetails?.cacheWriteTokens);
+  let inputTokens = rawInputTokens;
+  let freshInputTokens =
+    num(u.fresh_input_tokens) ?? num(u.freshInputTokens) ?? num(inputTokenDetails?.noCacheTokens);
+  if (
+    rawInputTokens !== undefined &&
+    freshInputTokens === undefined &&
+    (engine.includes("claude") || engine.includes("kimi"))
+  ) {
+    freshInputTokens = rawInputTokens;
+    inputTokens = rawInputTokens + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+  } else if (rawInputTokens !== undefined && freshInputTokens === undefined && engine.includes("codex")) {
+    const cachedInputTokens = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+    if (cachedInputTokens <= rawInputTokens) freshInputTokens = rawInputTokens - cachedInputTokens;
+  }
+  const inferredTotalTokens =
+    inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined;
+  const usage = {
+    inputTokens,
+    freshInputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens: num(u.reasoning_tokens) ?? num(u.reasoningTokens) ?? num(outputTokenDetails?.reasoningTokens),
+    totalTokens: inferredTotalTokens ?? num(u.total_tokens) ?? num(u.totalTokens),
+    reportedCostUsd: usd(rawReportedCostUsd),
+  };
+  return Object.values(usage).some((value) => value !== undefined) ? usage : undefined;
+}`;
+
+const SMITHERS_AGENTS_USAGE_ACCUMULATOR_SOURCE = `  const usage = {};
+  let found = false;
+  let countedIncremental = false;`;
+const SMITHERS_AGENTS_USAGE_ACCUMULATOR_PATCH = `  const usage = {};
+  let observationsComplete = true;
+  const count = (value) => {
+    if (value === undefined) return 0;
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+    observationsComplete = false;
+    return 0;
+  };
+  let found = false;
+  let countedIncremental = false;
+  let inputBreakdownComplete = true;
+  let reportedCostComplete = true;`;
+
+const SMITHERS_AGENTS_CLAUDE_USAGE_SOURCE = `    if (parsed.type === "message_start" && parsed.message?.usage) {
+      const u = parsed.message.usage;
+      usage.inputTokens = (usage.inputTokens ?? 0) + (u.input_tokens ?? 0);
+      if (u.cache_read_input_tokens) {
+        usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + u.cache_read_input_tokens;
+      }
+      if (u.cache_creation_input_tokens) {
+        usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + u.cache_creation_input_tokens;
+      }
+      found = true;
+      countedIncremental = true;
+      continue;
+    }
+    if (parsed.type === "message_delta" && parsed.usage) {
+      if (parsed.usage.output_tokens) {
+        usage.outputTokens = (usage.outputTokens ?? 0) + parsed.usage.output_tokens;
+      }
+      found = true;
+      countedIncremental = true;
+      continue;
+    }`;
+const SMITHERS_AGENTS_CLAUDE_USAGE_PATCH = `    if (parsed.type === "message_start" && parsed.message?.usage) {
+      const u = parsed.message.usage;
+      const freshInput = count(u.input_tokens);
+      const cacheRead = count(u.cache_read_input_tokens);
+      const cacheWrite = count(u.cache_write_input_tokens ?? u.cache_creation_input_tokens);
+      usage.inputTokens = (usage.inputTokens ?? 0) + freshInput + cacheRead + cacheWrite;
+      usage.freshInputTokens = (usage.freshInputTokens ?? 0) + freshInput;
+      usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + cacheRead;
+      usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + cacheWrite;
+      usage.totalTokens = (usage.totalTokens ?? 0) + freshInput + cacheRead + cacheWrite;
+      found = true;
+      countedIncremental = true;
+      continue;
+    }
+    if (parsed.type === "message_delta" && parsed.usage) {
+      const output = count(parsed.usage.output_tokens);
+      usage.outputTokens = (usage.outputTokens ?? 0) + output;
+      usage.totalTokens = (usage.totalTokens ?? 0) + output;
+      found = true;
+      countedIncremental = true;
+      continue;
+    }`;
+
+const SMITHERS_AGENTS_CLAUDE_RESULT_USAGE_SOURCE = `    if (parsed.type === "result") {
+      // Claude Code stream-json emits a terminal "result" event whose
+      // top-level usage summarizes tokens already accumulated from the
+      // per-message message_start/message_delta events. If we counted
+      // those incrementally, skip this event to avoid double-counting.
+      // Otherwise fall through so the usage is still captured.
+      if (countedIncremental) {
+        continue;
+      }
+    }`;
+const SMITHERS_AGENTS_CLAUDE_RESULT_USAGE_PATCH = `    if (parsed.type === "result") {
+      // Claude Code's terminal result summarizes the same independent fresh,
+      // cache-read and cache-write components as message_start. Use it only
+      // when incremental events were unavailable, otherwise it is a duplicate.
+      if (countedIncremental) continue;
+      if (parsed.usage && typeof parsed.usage === "object") {
+        const u = parsed.usage;
+        const freshInput = count(u.input_tokens ?? u.inputTokens);
+        const cacheRead = count(u.cache_read_input_tokens ?? u.cacheReadTokens);
+        const cacheWrite = count(
+          u.cache_write_input_tokens ?? u.cache_creation_input_tokens ?? u.cacheWriteTokens,
+        );
+        const output = count(u.output_tokens ?? u.outputTokens);
+        usage.inputTokens = (usage.inputTokens ?? 0) + freshInput + cacheRead + cacheWrite;
+        usage.freshInputTokens = (usage.freshInputTokens ?? 0) + freshInput;
+        usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + cacheRead;
+        usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + cacheWrite;
+        usage.outputTokens = (usage.outputTokens ?? 0) + output;
+        usage.totalTokens =
+          (usage.totalTokens ?? 0) + freshInput + cacheRead + cacheWrite + output;
+        found = true;
+      }
+      continue;
+    }`;
+
+const SMITHERS_AGENTS_CODEX_USAGE_SOURCE = `    if (parsed.type === "turn.completed" && parsed.usage) {
+      const u = parsed.usage;
+      if (u.input_tokens) {
+        usage.inputTokens = (usage.inputTokens ?? 0) + u.input_tokens;
+      }
+      if (u.output_tokens) {
+        usage.outputTokens = (usage.outputTokens ?? 0) + u.output_tokens;
+      }
+      if (u.cached_input_tokens) {
+        usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + u.cached_input_tokens;
+      }
+      found = true;
+      continue;
+    }`;
+const SMITHERS_AGENTS_CODEX_USAGE_PATCH = `    if (parsed.type === "turn.completed" && parsed.usage) {
+      const u = parsed.usage;
+      const providerInput = count(u.input_tokens);
+      const output = count(u.output_tokens);
+      const cacheRead = count(u.cached_input_tokens ?? u.cache_read_input_tokens);
+      const cacheWrite = count(u.cache_write_input_tokens ?? u.cache_creation_input_tokens);
+      const cachedInput = cacheRead + cacheWrite;
+      usage.inputTokens = (usage.inputTokens ?? 0) + providerInput;
+      usage.outputTokens = (usage.outputTokens ?? 0) + output;
+      usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + cacheRead;
+      usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + cacheWrite;
+      usage.totalTokens = (usage.totalTokens ?? 0) + providerInput + output;
+      if (cachedInput <= providerInput && inputBreakdownComplete) {
+        usage.freshInputTokens = (usage.freshInputTokens ?? 0) + providerInput - cachedInput;
+      } else {
+        inputBreakdownComplete = false;
+        delete usage.freshInputTokens;
+      }
+      found = true;
+      continue;
+    }`;
+
+const SMITHERS_AGENTS_OPENCODE_USAGE_SOURCE = `    if (parsed.type === "step_finish" && parsed.part?.tokens && typeof parsed.part.tokens === "object") {
+      const tokens = parsed.part.tokens;
+      const input = tokens.input ?? 0;
+      const output = tokens.output ?? 0;
+      const total = tokens.total ?? 0;
+      const reasoning = tokens.reasoning ?? 0;
+      const cacheRead = tokens.cache?.read ?? 0;
+      const cacheWrite = tokens.cache?.write ?? 0;
+      if (input > 0 || output > 0 || total > 0 || reasoning > 0 || cacheRead > 0 || cacheWrite > 0) {
+        usage.inputTokens = (usage.inputTokens ?? 0) + input;
+        usage.outputTokens = (usage.outputTokens ?? 0) + output;
+        usage.totalTokens = (usage.totalTokens ?? 0) + total;
+        usage.reasoningTokens = (usage.reasoningTokens ?? 0) + reasoning;
+        usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + cacheRead;
+        usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + cacheWrite;
+        found = true;
+        continue;
+      }
+    }`;
+const SMITHERS_AGENTS_OPENCODE_USAGE_PATCH = `    if (
+      parsed.type === "step_finish" &&
+      parsed.part &&
+      typeof parsed.part === "object" &&
+      !Array.isArray(parsed.part)
+    ) {
+      const tokensPresent = parsed.part.tokens !== undefined;
+      const tokens =
+        tokensPresent && parsed.part.tokens && typeof parsed.part.tokens === "object" && !Array.isArray(parsed.part.tokens)
+          ? parsed.part.tokens
+          : undefined;
+      if (tokensPresent && !tokens) observationsComplete = false;
+        if (tokens) {
+        const cachePresent = tokens.cache !== undefined;
+        const cache =
+          cachePresent && tokens.cache && typeof tokens.cache === "object" && !Array.isArray(tokens.cache)
+            ? tokens.cache
+            : undefined;
+        if (cachePresent && !cache) observationsComplete = false;
+        const freshInput = count(tokens.input);
+        const output = count(tokens.output);
+        const reasoning = count(tokens.reasoning);
+        const cacheRead = count(cache?.read);
+        const cacheWrite = count(cache?.write);
+        const providerInput = freshInput + cacheRead + cacheWrite;
+        const providerOutput = output + reasoning;
+        const total = providerInput + providerOutput;
+        if (
+          Number.isSafeInteger(providerInput) &&
+          Number.isSafeInteger(providerOutput) &&
+          Number.isSafeInteger(total)
+        ) {
+          usage.inputTokens = (usage.inputTokens ?? 0) + providerInput;
+          usage.freshInputTokens = (usage.freshInputTokens ?? 0) + freshInput;
+          usage.outputTokens = (usage.outputTokens ?? 0) + providerOutput;
+          usage.totalTokens = (usage.totalTokens ?? 0) + total;
+          usage.reasoningTokens = (usage.reasoningTokens ?? 0) + reasoning;
+          usage.cacheReadTokens = (usage.cacheReadTokens ?? 0) + cacheRead;
+          usage.cacheWriteTokens = (usage.cacheWriteTokens ?? 0) + cacheWrite;
+          found = true;
+        } else {
+          observationsComplete = false;
+        }
+      }
+      const reportedCostUsd = parsed.part.cost;
+      if (reportedCostUsd === undefined) {
+        if (tokensPresent) reportedCostComplete = false;
+      } else if (typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0) {
+        usage.reportedCostUsd = (usage.reportedCostUsd ?? 0) + reportedCostUsd;
+        if (!Number.isFinite(usage.reportedCostUsd)) observationsComplete = false;
+        found = true;
+      } else {
+        observationsComplete = false;
+      }
+      if (tokensPresent || reportedCostUsd !== undefined) continue;
+    }`;
+
+const SMITHERS_AGENTS_USAGE_RETURN_SOURCE = `  return found ? usage : undefined;
+}`;
+const SMITHERS_AGENTS_USAGE_RETURN_PATCH = `  if (!inputBreakdownComplete) delete usage.freshInputTokens;
+  if (!reportedCostComplete) delete usage.reportedCostUsd;
+  return found && observationsComplete ? usage : undefined;
+}`;
+
+const SMITHERS_AGENTS_RETAIN_USAGE_SCOPE_SOURCE = `    let diagnosticsPromise;
+    let stdoutEmitter;
+    let cleanup;
+    let commandLogAnnotations = {};`;
+const SMITHERS_AGENTS_RETAIN_USAGE_SCOPE_PATCH = `    let diagnosticsPromise;
+    let stdoutEmitter;
+    let cleanup;
+    let commandLogAnnotations = {};
+    let retainedUsage;`;
+
+const SMITHERS_AGENTS_RETAIN_USAGE_EARLY_SOURCE = `            const stdout = typeof outputFileText === "string" ? outputFileText : result.stdout;
+            if (result.exitCode && result.exitCode !== 0) {`;
+const SMITHERS_AGENTS_RETAIN_USAGE_EARLY_PATCH = `            const stdout = typeof outputFileText === "string" ? outputFileText : result.stdout;
+            const completedUsage = usageFromCompletedEvent(completedEvent);
+            const cliUsage = result.stdoutTruncated
+              ? completedUsage ?? extractUsageFromOutput(result.stdout)
+              : extractUsageFromOutput(result.stdout) ?? completedUsage;
+            retainedUsage = cliUsage
+              ? {
+                  inputTokens: cliUsage.inputTokens,
+                  inputTokenDetails: {
+                    noCacheTokens: cliUsage.freshInputTokens,
+                    cacheReadTokens: cliUsage.cacheReadTokens,
+                    cacheWriteTokens: cliUsage.cacheWriteTokens,
+                  },
+                  outputTokens: cliUsage.outputTokens,
+                  outputTokenDetails: {
+                    textTokens: undefined,
+                    reasoningTokens: cliUsage.reasoningTokens,
+                  },
+                  totalTokens:
+                    cliUsage.totalTokens ?? ((cliUsage.inputTokens ?? 0) + (cliUsage.outputTokens ?? 0) || undefined),
+                  ...(cliUsage.reportedCostUsd === undefined
+                    ? {}
+                    : { reportedCostUsd: cliUsage.reportedCostUsd }),
+                }
+              : undefined;
+            if (result.exitCode && result.exitCode !== 0) {`;
+
+const SMITHERS_AGENTS_RETAIN_USAGE_LATE_SOURCE = `            // Extract token usage from raw stdout before text extraction strips it.
+            // Each CLI harness embeds usage differently (NDJSON events, JSON stats, etc.)
+            const cliUsage = extractUsageFromOutput(result.stdout) ?? usageFromCompletedEvent(completedEvent);
+            const usage = cliUsage
+              ? {
+                  inputTokens: cliUsage.inputTokens,
+                  inputTokenDetails: {
+                    noCacheTokens: undefined,
+                    cacheReadTokens: cliUsage.cacheReadTokens,
+                    cacheWriteTokens: cliUsage.cacheWriteTokens,
+                  },
+                  outputTokens: cliUsage.outputTokens,
+                  outputTokenDetails: {
+                    textTokens: undefined,
+                    reasoningTokens: cliUsage.reasoningTokens,
+                  },
+                  totalTokens:
+                    cliUsage.totalTokens ?? ((cliUsage.inputTokens ?? 0) + (cliUsage.outputTokens ?? 0) || undefined),
+                }
+              : undefined;`;
+const SMITHERS_AGENTS_RETAIN_USAGE_LATE_PATCH = `            // Usage was normalized before all failure checks so billed provider
+            // work remains available even when the CLI exits unsuccessfully.
+            const usage = retainedUsage;`;
+
+const SMITHERS_AGENTS_RETAIN_USAGE_ERROR_SOURCE = `        Effect.tapError((err) =>
+          Effect.all(`;
+const SMITHERS_AGENTS_RETAIN_USAGE_ERROR_PATCH = `        Effect.tapError((err) => {
+          if (retainedUsage && err && typeof err === "object") {
+            try {
+              if (err.usage === undefined) err.usage = retainedUsage;
+            } catch {
+              // Preserve the provider error if an exotic error is immutable.
+            }
+          }
+          return Effect.all(`;
+const SMITHERS_AGENTS_RETAIN_USAGE_ERROR_CLOSE_SOURCE = `            { discard: true },
+          ),
+        ),
+        Effect.ensuring(`;
+const SMITHERS_AGENTS_RETAIN_USAGE_ERROR_CLOSE_PATCH = `            { discard: true },
+          );
+        }),
+        Effect.ensuring(`;
+
+const SMITHERS_OPENCODE_USAGE_TOTALS_SOURCE = `    // Accumulate tokens across multiple step_finish events
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalTokens = 0;`;
+const SMITHERS_OPENCODE_USAGE_TOTALS_PATCH = `    // Accumulate canonical provider-inclusive tokens across every step.
+    let totalInputTokens = 0;
+    let totalFreshInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheWriteTokens = 0;
+    let totalReasoningTokens = 0;
+    let totalReportedCostUsd = 0;
+    let totalTokens = 0;
+    let observationsComplete = true;
+    let reportedCostComplete = true;
+    let sawReportedCost = false;
+    const count = (value) => {
+      if (value === undefined) return 0;
+      if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+      observationsComplete = false;
+      return 0;
+    };
+    const currentUsage = () =>
+      observationsComplete
+        ? {
+            inputTokens: totalInputTokens,
+            freshInputTokens: totalFreshInputTokens,
+            cacheReadTokens: totalCacheReadTokens,
+            cacheWriteTokens: totalCacheWriteTokens,
+            outputTokens: totalOutputTokens,
+            reasoningTokens: totalReasoningTokens,
+            totalTokens,
+            ...(reportedCostComplete && sawReportedCost ? { reportedCostUsd: totalReportedCostUsd } : {}),
+          }
+        : undefined;`;
+
+const SMITHERS_OPENCODE_USAGE_STEP_SOURCE = `        if (tokens) {
+          const input = typeof tokens.input === "number" ? tokens.input : 0;
+          const output = typeof tokens.output === "number" ? tokens.output : 0;
+          const total = typeof tokens.total === "number" ? tokens.total : 0;
+          totalInputTokens += input;
+          totalOutputTokens += output;
+          totalTokens += total;
+        }`;
+const SMITHERS_OPENCODE_USAGE_STEP_PATCH = `        if (tokens) {
+          const freshInput = count(tokens.input);
+          const output = count(tokens.output);
+          const reasoning = count(tokens.reasoning);
+          const cache = isRecord(tokens.cache) ? tokens.cache : null;
+          if (tokens.cache !== undefined && cache === null) observationsComplete = false;
+          const cacheRead = count(cache?.read);
+          const cacheWrite = count(cache?.write);
+          const providerInput = freshInput + cacheRead + cacheWrite;
+          const providerOutput = output + reasoning;
+          totalInputTokens += providerInput;
+          totalFreshInputTokens += freshInput;
+          totalOutputTokens += providerOutput;
+          totalCacheReadTokens += cacheRead;
+          totalCacheWriteTokens += cacheWrite;
+          totalReasoningTokens += reasoning;
+          totalTokens += providerInput + providerOutput;
+          if (
+            !Number.isSafeInteger(totalInputTokens) ||
+            !Number.isSafeInteger(totalOutputTokens) ||
+            !Number.isSafeInteger(totalTokens)
+          )
+            observationsComplete = false;
+        } else if (part.tokens !== undefined) {
+          observationsComplete = false;
+        }
+        const reportedCostUsd = part.cost;
+        if (reportedCostUsd === undefined) {
+          if (part.tokens !== undefined) reportedCostComplete = false;
+        } else if (typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0) {
+          totalReportedCostUsd += reportedCostUsd;
+          sawReportedCost = true;
+          if (!Number.isFinite(totalReportedCostUsd)) observationsComplete = false;
+        } else {
+          observationsComplete = false;
+        }`;
+
+const SMITHERS_OPENCODE_USAGE_COMPLETED_SOURCE = `              resume: sessionId || undefined,
+              usage: {
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+                totalTokens: totalTokens,
+              },`;
+const SMITHERS_OPENCODE_USAGE_COMPLETED_PATCH = `              resume: sessionId || undefined,
+              usage: currentUsage(),`;
+
+const SMITHERS_OPENCODE_USAGE_ERROR_SOURCE = `            answer: fullText || undefined,
+            error: errorMessage ?? "OpenCode reported an error",
+          },`;
+const SMITHERS_OPENCODE_USAGE_ERROR_PATCH = `            answer: fullText || undefined,
+            error: errorMessage ?? "OpenCode reported an error",
+            usage: currentUsage(),
+          },`;
+
+const SMITHERS_OPENCODE_USAGE_EXIT_SOURCE = `            answer: isSuccess ? fullText || undefined : undefined,
+            error: isSuccess ? undefined : (terminalError ?? \`OpenCode exited with code \${result.exitCode ?? -1}\`),
+          },`;
+const SMITHERS_OPENCODE_USAGE_EXIT_PATCH = `            answer: isSuccess ? fullText || undefined : undefined,
+            error: isSuccess ? undefined : (terminalError ?? \`OpenCode exited with code \${result.exitCode ?? -1}\`),
+            usage: currentUsage(),
+          },`;
+
 export type SmithersCompatibilityPatchId =
   | "local_delegation"
   | "detached_snapshot_transfer"
@@ -1733,6 +2305,23 @@ export type SmithersCompatibilityPatchId =
   | "engine_final_usage_ownership"
   | "engine_reported_cost_normalize"
   | "engine_reported_cost_price"
+  | "agents_completed_usage"
+  | "agents_usage_accumulator"
+  | "agents_claude_usage"
+  | "agents_claude_result_usage"
+  | "agents_codex_usage"
+  | "agents_opencode_usage"
+  | "agents_usage_return"
+  | "agents_retain_usage_scope"
+  | "agents_retain_usage_early"
+  | "agents_retain_usage_late"
+  | "agents_retain_usage_error"
+  | "agents_retain_usage_error_close"
+  | "opencode_usage_totals"
+  | "opencode_usage_step"
+  | "opencode_usage_completed"
+  | "opencode_usage_error"
+  | "opencode_usage_exit"
   | "workflow_path_import"
   | "workflow_path_persistence"
   | "process_snapshot_anchor"
@@ -1921,6 +2510,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_SOURCE,
     patched: SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PATCH,
+    predecessors: [SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PREDECESSOR_PATCH],
     upstreamAbsent: ["reportedCostUsd"]
   },
   {
@@ -1929,7 +2519,144 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_REPORTED_COST_PRICE_SOURCE,
     patched: SMITHERS_ENGINE_REPORTED_COST_PRICE_PATCH,
+    predecessors: [SMITHERS_ENGINE_REPORTED_COST_PRICE_PREDECESSOR_PATCH],
     upstreamAbsent: []
+  },
+  {
+    id: "agents_completed_usage",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_COMPLETED_USAGE_SOURCE,
+    patched: SMITHERS_AGENTS_COMPLETED_USAGE_PATCH,
+    upstreamAbsent: ["fresh_input_tokens) ?? num(u.freshInputTokens)"]
+  },
+  {
+    id: "agents_usage_accumulator",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_USAGE_ACCUMULATOR_SOURCE,
+    patched: SMITHERS_AGENTS_USAGE_ACCUMULATOR_PATCH,
+    upstreamAbsent: ["let inputBreakdownComplete = true"]
+  },
+  {
+    id: "agents_claude_usage",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_CLAUDE_USAGE_SOURCE,
+    patched: SMITHERS_AGENTS_CLAUDE_USAGE_PATCH,
+    upstreamAbsent: ["usage.freshInputTokens = (usage.freshInputTokens ?? 0) + freshInput"]
+  },
+  {
+    id: "agents_claude_result_usage",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_CLAUDE_RESULT_USAGE_SOURCE,
+    patched: SMITHERS_AGENTS_CLAUDE_RESULT_USAGE_PATCH,
+    upstreamAbsent: ["Claude Code's terminal result summarizes the same independent fresh"]
+  },
+  {
+    id: "agents_codex_usage",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_CODEX_USAGE_SOURCE,
+    patched: SMITHERS_AGENTS_CODEX_USAGE_PATCH,
+    upstreamAbsent: ["const cachedInput = cacheRead + cacheWrite"]
+  },
+  {
+    id: "agents_opencode_usage",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_OPENCODE_USAGE_SOURCE,
+    patched: SMITHERS_AGENTS_OPENCODE_USAGE_PATCH,
+    upstreamAbsent: ["const providerOutput = output + reasoning"]
+  },
+  {
+    id: "agents_usage_return",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_USAGE_RETURN_SOURCE,
+    patched: SMITHERS_AGENTS_USAGE_RETURN_PATCH,
+    upstreamAbsent: ["if (!inputBreakdownComplete) delete usage.freshInputTokens"]
+  },
+  {
+    id: "agents_retain_usage_scope",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_RETAIN_USAGE_SCOPE_SOURCE,
+    patched: SMITHERS_AGENTS_RETAIN_USAGE_SCOPE_PATCH,
+    upstreamAbsent: ["let retainedUsage;"]
+  },
+  {
+    id: "agents_retain_usage_early",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_RETAIN_USAGE_EARLY_SOURCE,
+    patched: SMITHERS_AGENTS_RETAIN_USAGE_EARLY_PATCH,
+    upstreamAbsent: ["const completedUsage = usageFromCompletedEvent(completedEvent)"]
+  },
+  {
+    id: "agents_retain_usage_late",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_RETAIN_USAGE_LATE_SOURCE,
+    patched: SMITHERS_AGENTS_RETAIN_USAGE_LATE_PATCH,
+    upstreamAbsent: ["const usage = retainedUsage;"]
+  },
+  {
+    id: "agents_retain_usage_error",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_RETAIN_USAGE_ERROR_SOURCE,
+    patched: SMITHERS_AGENTS_RETAIN_USAGE_ERROR_PATCH,
+    upstreamAbsent: ["err.usage = retainedUsage"]
+  },
+  {
+    id: "agents_retain_usage_error_close",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_RETAIN_USAGE_ERROR_CLOSE_SOURCE,
+    patched: SMITHERS_AGENTS_RETAIN_USAGE_ERROR_CLOSE_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "opencode_usage_totals",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/OpenCodeAgent.js",
+    patchable: SMITHERS_OPENCODE_USAGE_TOTALS_SOURCE,
+    patched: SMITHERS_OPENCODE_USAGE_TOTALS_PATCH,
+    upstreamAbsent: ["let totalFreshInputTokens = 0"]
+  },
+  {
+    id: "opencode_usage_step",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/OpenCodeAgent.js",
+    patchable: SMITHERS_OPENCODE_USAGE_STEP_SOURCE,
+    patched: SMITHERS_OPENCODE_USAGE_STEP_PATCH,
+    upstreamAbsent: ["totalCacheWriteTokens += cacheWrite"]
+  },
+  {
+    id: "opencode_usage_completed",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/OpenCodeAgent.js",
+    patchable: SMITHERS_OPENCODE_USAGE_COMPLETED_SOURCE,
+    patched: SMITHERS_OPENCODE_USAGE_COMPLETED_PATCH,
+    upstreamAbsent: ["usage: currentUsage()"]
+  },
+  {
+    id: "opencode_usage_error",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/OpenCodeAgent.js",
+    patchable: SMITHERS_OPENCODE_USAGE_ERROR_SOURCE,
+    patched: SMITHERS_OPENCODE_USAGE_ERROR_PATCH,
+    upstreamAbsent: ['error: errorMessage ?? "OpenCode reported an error",\n            usage: currentUsage()']
+  },
+  {
+    id: "opencode_usage_exit",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/OpenCodeAgent.js",
+    patchable: SMITHERS_OPENCODE_USAGE_EXIT_SOURCE,
+    patched: SMITHERS_OPENCODE_USAGE_EXIT_PATCH,
+    upstreamAbsent: ["usage: currentUsage(),"]
   },
   {
     id: "workflow_path_import",
@@ -5825,12 +6552,20 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const schedulerRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/scheduler");
   const engineRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/engine");
   const dbRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/db");
+  const agentsRoots = smithersDependencyRootCandidates(nodeModules, "@smthrs/agents");
   // Unit-test installers intentionally provide only the public runner shim, so a
   // tree with none of these packages is tolerated. A registry installation always
   // carries all of them, so a tree holding some but not all of them is a broken
   // install: fail instead of silently skipping the resume-durability patches and
   // letting the run proceed unpatched. The caller repairs this by reinstalling.
-  if (cliRoots.length === 0 && schedulerRoots.length === 0 && engineRoots.length === 0 && dbRoots.length === 0) return;
+  if (
+    cliRoots.length === 0 &&
+    schedulerRoots.length === 0 &&
+    engineRoots.length === 0 &&
+    dbRoots.length === 0 &&
+    agentsRoots.length === 0
+  )
+    return;
   if (runnerRoots.length !== 1) throw new Error("pinned workflow runner resolved an incomplete public entrypoint");
   if (cliRoots.length !== 1) {
     throw new Error("pinned workflow runner resolved an incomplete CLI implementation");
@@ -5840,6 +6575,9 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   }
   if (dbRoots.length !== 1) {
     throw new Error("pinned workflow runner resolved an incomplete event-store implementation");
+  }
+  if (agentsRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete agent implementation");
   }
   const packageRoot = cliRoots[0]!;
   const runnerSource = path.join(runnerRoots[0]!, ...SMITHERS_BIN_PATH.split("/"));
@@ -5922,6 +6660,38 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     )
   );
 
+  const agentsRoot = agentsRoots[0];
+  if (agentsRoot === undefined) throw new Error("pinned workflow runner resolved an incomplete agent implementation");
+  const agentsPackageJson = path.join(agentsRoot, "package.json");
+  assertRegularFileInside(nodeModules, agentsPackageJson, "installed Smithers agents package metadata");
+  const agentsMetadata = readPackageManagerOwnedManifestEnvelope(
+    agentsPackageJson,
+    "installed Smithers agents package manifest"
+  );
+  if (optionalPackageManifestString(agentsMetadata, "version", agentsPackageJson) !== SMITHERS_VERSION) {
+    throw new Error(`installed Smithers agents package version must be ${SMITHERS_VERSION}`);
+  }
+  const agentsSources = new Map<string, string>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (candidate) => candidate.packageName === "@smthrs/agents"
+  )) {
+    const sourcePath = path.join(agentsRoot, ...patch.sourceRelativePath.split("/"));
+    assertRegularFileInside(nodeModules, sourcePath, `installed Smithers agent implementation ${patch.id}`);
+    const current = agentsSources.get(sourcePath) ?? fs.readFileSync(sourcePath, "utf8");
+    agentsSources.set(
+      sourcePath,
+      applyRequiredSmithersPatch(
+        current,
+        patch.patchable,
+        patch.patched,
+        patch.id.replaceAll("_", " "),
+        patch.predecessors,
+        patch.patchedFamilyMarkers
+      )
+    );
+  }
+  for (const [sourcePath, contents] of agentsSources) writeFileDurable(sourcePath, contents);
+
   const schedulerRoot = schedulerRoots[0]!;
   const engineRoot = engineRoots[0]!;
   const schedulerPackageJson = path.join(schedulerRoot, "package.json");
@@ -5973,7 +6743,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   writeFileDurable(engineWorkflowHashSource, workflowHashContents);
 
   let engineContents = fs.readFileSync(engineSource, "utf8");
-  for (const [source, patched, label] of [
+  for (const entry of [
     [SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_WORKFLOW_PATH_PATCH, "anchored workflow paths"],
     [
       SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
@@ -6003,12 +6773,14 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [
       SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_SOURCE,
       SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PATCH,
-      "reported CLI cost normalization"
+      "reported CLI cost normalization",
+      [SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PREDECESSOR_PATCH]
     ],
     [
       SMITHERS_ENGINE_REPORTED_COST_PRICE_SOURCE,
       SMITHERS_ENGINE_REPORTED_COST_PRICE_PATCH,
-      "reported CLI cost precedence"
+      "reported CLI cost precedence",
+      [SMITHERS_ENGINE_REPORTED_COST_PRICE_PREDECESSOR_PATCH]
     ],
     [
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
@@ -6048,7 +6820,9 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [SMITHERS_ENGINE_FAILED_USAGE_SOURCE, SMITHERS_ENGINE_FAILED_USAGE_PATCH, "failed agent usage ownership"],
     [SMITHERS_ENGINE_FINAL_USAGE_SOURCE, SMITHERS_ENGINE_FINAL_USAGE_PATCH, "final agent usage ownership"]
   ] as const) {
-    engineContents = applyRequiredSmithersPatch(engineContents, source, patched, label);
+    const [source, patched, label] = entry;
+    const predecessors = entry.length === 4 ? entry[3] : undefined;
+    engineContents = applyRequiredSmithersPatch(engineContents, source, patched, label, predecessors);
   }
   for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
     if (!engineContents.includes(required.anchor)) {

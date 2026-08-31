@@ -356,6 +356,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   KimiCode029Agent: new (options: Record<string, unknown>) => {
     issuedSessionId?: string;
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+    stream(options: Record<string, unknown>): Promise<{ usage: Promise<Record<string, unknown>> }>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command?: string;
       args: string[];
@@ -419,6 +420,7 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
     KimiCode029Agent: new (options: Record<string, unknown>) => {
       issuedSessionId?: string;
       generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+      stream(options: Record<string, unknown>): Promise<{ usage: Promise<Record<string, unknown>> }>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command?: string;
         args: string[];
@@ -2406,6 +2408,12 @@ function workflowEvents(
       }
       if (event.extra !== undefined) {
         Object.assign(payload, event.extra);
+      }
+      if (
+        event.type === "TokenUsageReported" &&
+        !Object.prototype.hasOwnProperty.call(event.extra ?? {}, "freshInputTokens")
+      ) {
+        payload.freshInputTokens = payload.inputTokens;
       }
       return JSON.stringify({
         runId: workflowRunId,
@@ -4481,6 +4489,176 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated OpenRouter recovery normalizes provider-inclusive cache usage and preserves unknown components",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+      jitterFraction: 0
+    });
+    const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+
+    const normalized = await agent.withOpenRouterRecovery(undefined, async () => ({
+      text: "OK",
+      usage: {
+        input_tokens: 100,
+        cached_input_tokens: 60,
+        cache_write_input_tokens: 10,
+        output_tokens: 20,
+        reasoning_tokens: 5,
+        total_tokens: 120
+      }
+    }));
+    assert.deepEqual((normalized as { usage?: unknown }).usage, {
+      inputTokens: 100,
+      inputTokenDetails: {
+        noCacheTokens: 30,
+        cacheReadTokens: 60,
+        cacheWriteTokens: 10
+      },
+      outputTokens: 20,
+      outputTokenDetails: { reasoningTokens: 5 },
+      totalTokens: 120
+    });
+
+    const contradictory = await agent.withOpenRouterRecovery(undefined, async () => ({
+      text: "OK",
+      usage: {
+        input_tokens: 10,
+        cached_input_tokens: 8,
+        cache_write_input_tokens: 5,
+        output_tokens: 2,
+        total_tokens: 12
+      }
+    }));
+    assert.deepEqual((contradictory as { usage?: unknown }).usage, {
+      inputTokens: 10,
+      inputTokenDetails: { cacheReadTokens: 8, cacheWriteTokens: 5 },
+      outputTokens: 2,
+      outputTokenDetails: {},
+      totalTokens: 12
+    });
+
+    let partialInvocation = 0;
+    const partiallyKnown = await agent.withOpenRouterRecovery(undefined, async () => {
+      partialInvocation += 1;
+      if (partialInvocation === 1) {
+        throw Object.assign(new Error("HTTP 429 request id: partial-usage"), {
+          usage: {
+            input_tokens: 20,
+            cached_input_tokens: 7,
+            cache_write_input_tokens: 3,
+            output_tokens: 8,
+            reasoning_tokens: 2,
+            total_tokens: 28
+          }
+        });
+      }
+      return {
+        text: "OK",
+        usage: {
+          input_tokens: 15,
+          cache_write_input_tokens: 2,
+          output_tokens: 4,
+          total_tokens: 19
+        }
+      };
+    });
+    assert.equal(partialInvocation, 2);
+    assert.deepEqual((partiallyKnown as { usage?: unknown }).usage, {
+      inputTokens: 35,
+      inputTokenDetails: { noCacheTokens: 23, cacheWriteTokens: 5 },
+      outputTokens: 12,
+      outputTokenDetails: {},
+      totalTokens: 47
+    });
+
+    let missingPrimaryInvocation = 0;
+    const missingPrimary = await agent.withOpenRouterRecovery(undefined, async () => {
+      missingPrimaryInvocation += 1;
+      if (missingPrimaryInvocation === 1) {
+        throw Object.assign(new Error("HTTP 429 request id: missing-primary-usage"), {
+          usage: { output_tokens: 8 }
+        });
+      }
+      return {
+        text: "OK",
+        usage: {
+          input_tokens: 15,
+          cached_input_tokens: 7,
+          output_tokens: 4,
+          total_tokens: 19
+        }
+      };
+    });
+    assert.equal(missingPrimaryInvocation, 2);
+    assert.deepEqual((missingPrimary as { usage?: unknown }).usage, {
+      inputTokenDetails: {},
+      outputTokens: 12,
+      outputTokenDetails: {}
+    });
+
+    let contradictoryInvocation = 0;
+    const contradictionAcrossRetry = await agent.withOpenRouterRecovery(undefined, async () => {
+      contradictoryInvocation += 1;
+      if (contradictoryInvocation === 1) {
+        throw Object.assign(new Error("HTTP 429 request id: contradictory-usage"), {
+          usage: {
+            input_tokens: 10,
+            cached_input_tokens: 8,
+            cache_write_input_tokens: 5,
+            output_tokens: 2,
+            total_tokens: 12
+          }
+        });
+      }
+      return {
+        text: "OK",
+        usage: {
+          input_tokens: 4,
+          cached_input_tokens: 1,
+          cache_write_input_tokens: 1,
+          output_tokens: 1,
+          total_tokens: 5
+        }
+      };
+    });
+    assert.equal(contradictoryInvocation, 2);
+    assert.deepEqual((contradictionAcrossRetry as { usage?: unknown }).usage, {
+      inputTokens: 14,
+      inputTokenDetails: { cacheReadTokens: 9, cacheWriteTokens: 6 },
+      outputTokens: 3,
+      outputTokenDetails: {},
+      totalTokens: 17
+    });
+  }
+);
+
+bunAdapterTest("generated OpenRouter recovery preserves unknown cache composition", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project);
+  const agent = new OpenRouterCodexAgent({ model: "openai/gpt-5.6-luna" });
+  const result = await agent.withOpenRouterRecovery(undefined, async () => ({
+    text: "OK",
+    usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 }
+  }));
+  assert.deepEqual((result as { usage?: unknown }).usage, {
+    inputTokens: 10,
+    inputTokenDetails: {},
+    outputTokens: 2,
+    outputTokenDetails: {},
+    totalTokens: 12
+  });
+});
+
+bunAdapterTest(
   "generated OpenRouter adapter decreases one caller timeout across exact-session recovery",
   { timeout: 10_000 },
   async () => {
@@ -6475,7 +6653,8 @@ bunAdapterTest(
       }>;
       const completed = events.find((event) => event.type === "completed");
       assert.deepEqual(completed?.usage, {
-        input_tokens: 120,
+        input_tokens: 520,
+        fresh_input_tokens: 120,
         output_tokens: 30,
         cache_read_input_tokens: 400,
         cache_creation_input_tokens: 0,
@@ -6549,7 +6728,7 @@ bunAdapterTest(
       reasoning_tokens: 17
     };
     const normalizedUsage = {
-      inputTokens: 101,
+      inputTokens: 501,
       inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
       outputTokens: 23,
       outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
@@ -8325,9 +8504,11 @@ bunAdapterTest(
     ]);
 
     const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
-    // Independent components, summed across the main agent and its sub-agent.
+    // Provider-inclusive input with independent cache breakdowns, summed
+    // across the main agent and its sub-agent.
     assert.deepEqual(completed.usage, {
-      input_tokens: 1_990,
+      input_tokens: 11_490,
+      fresh_input_tokens: 1_990,
       output_tokens: 412,
       cache_read_input_tokens: 9_000,
       cache_creation_input_tokens: 500,
@@ -8410,7 +8591,8 @@ bunAdapterTest(
 
     const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
     assert.deepEqual(completed.usage, {
-      input_tokens: 1_510,
+      input_tokens: 8_280,
+      fresh_input_tokens: 1_510,
       output_tokens: 270,
       cache_read_input_tokens: 6_030,
       cache_creation_input_tokens: 740,
@@ -8499,9 +8681,9 @@ bunAdapterTest(
     }
     assert.ok(failure instanceof Error);
     assert.deepEqual((failure as Error & { usage?: unknown }).usage, {
-      inputTokens: 101,
+      inputTokens: 508,
       outputTokens: 23,
-      inputTokenDetails: { cacheReadTokens: 400, cacheWriteTokens: 7 },
+      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 7 },
       totalTokens: 531
     });
     assert.equal(agent.issuedSessionId, session);
@@ -8514,14 +8696,27 @@ bunAdapterTest(
     const retryUsage = retried.usage as {
       inputTokens?: number;
       outputTokens?: number;
-      inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+      inputTokenDetails?: { noCacheTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
       totalTokens?: number;
     };
-    assert.equal(retryUsage.inputTokens, 11);
+    assert.equal(retryUsage.inputTokens, 43);
+    assert.equal(retryUsage.inputTokenDetails?.noCacheTokens, 11);
     assert.equal(retryUsage.outputTokens, 5);
     assert.equal(retryUsage.inputTokenDetails?.cacheReadTokens, 30);
     assert.equal(retryUsage.inputTokenDetails?.cacheWriteTokens, 2);
     assert.equal(retryUsage.totalTokens, 48);
+
+    const streamed = await agent.stream({
+      prompt: "Resume with stream usage",
+      rootDir: project,
+      resumeSession: session
+    });
+    assert.deepEqual(await streamed.usage, {
+      inputTokens: 43,
+      outputTokens: 5,
+      inputTokenDetails: { noCacheTokens: 11, cacheReadTokens: 30, cacheWriteTokens: 2 },
+      totalTokens: 48
+    });
   }
 );
 
@@ -8668,7 +8863,8 @@ bunAdapterTest(
 
     const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
     assert.deepEqual(completed.usage, {
-      input_tokens: 11,
+      input_tokens: 88,
+      fresh_input_tokens: 11,
       output_tokens: 22,
       cache_read_input_tokens: 33,
       cache_creation_input_tokens: 44,
@@ -14618,7 +14814,12 @@ async function assertOwnedUsageMonotonicity(fixture: OwnedUsageFixture): Promise
   assert.equal(await persist({ ...initial, inputTokens: 9, updatedAtMs: 12 }), false);
   const upgraded = { ...initial, inputTokens: 11, freshInputTokens: 5, updatedAtMs: 13 };
   assert.equal(await persist(upgraded), true);
-  assert.equal(await persist({ ...upgraded, inputTokens: 12, freshInputTokens: null, updatedAtMs: 14 }), false);
+  assert.equal(await persist({ ...upgraded, inputTokens: 12, freshInputTokens: null, updatedAtMs: 14 }), true);
+  const unknownFreshEvent = tokenEvents().at(-1);
+  assert.ok(unknownFreshEvent);
+  const unknownFreshPayload = JSON.parse(unknownFreshEvent.payload_json) as Record<string, unknown>;
+  assert.equal(unknownFreshPayload.inputTokens, 12);
+  assert.equal("freshInputTokens" in unknownFreshPayload, false);
   assert.equal(
     await persist({
       ...upgraded,
@@ -14713,7 +14914,7 @@ async function assertOwnedUsageAtomicity(fixture: OwnedUsageFixture): Promise<vo
     }),
     true
   );
-  assert.equal(tokenEvents().length, 6);
+  assert.equal(tokenEvents().length, 7);
   assert.deepEqual(await adapter.getRunTokenUsage("run-owned-usage"), {
     runId: "run-owned-usage",
     inputTokens: 23,
@@ -14837,6 +15038,291 @@ test("reported CLI cost compatibility patches validate and prefer the adapter es
   assert.match(pricing.patched, /if \(usage\.reportedCostUsd !== undefined\) return usage\.reportedCostUsd/u);
 });
 
+async function patchedSmithersAgentUsageModules(): Promise<{
+  extractUsageFromOutput: (raw: string) => Record<string, unknown> | undefined;
+  usageFromCompletedEvent: (event: Record<string, unknown>) => Record<string, unknown> | undefined;
+  OpenCodeAgent: new (options?: Record<string, unknown>) => {
+    createOutputInterpreter: () => {
+      onStdoutLine?: (line: string) => unknown[];
+      onExit?: (result: Record<string, unknown>) => unknown[];
+    };
+  };
+  CodexAgent: new (options?: Record<string, unknown>) => {
+    buildCommand: (params: unknown) => Promise<Record<string, unknown>>;
+    generate: (options: Record<string, unknown>) => Promise<{ text: string; usage?: unknown }>;
+  };
+}> {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const pinnedAgentsSource = pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent");
+  const pinnedAgentsRoot = path.dirname(pinnedAgentsSource);
+  const isolatedAgentsRoot = path.join(tempProject(), "node_modules", "@smthrs", "agents");
+  fs.mkdirSync(path.dirname(isolatedAgentsRoot), { recursive: true });
+  fs.cpSync(pinnedAgentsRoot, isolatedAgentsRoot, { recursive: true });
+  fs.rmSync(path.join(isolatedAgentsRoot, "node_modules"), { recursive: true, force: true });
+  fs.symlinkSync(path.dirname(path.dirname(pinnedAgentsRoot)), path.join(isolatedAgentsRoot, "node_modules"), "dir");
+
+  const sourceContents = new Map<string, string>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (candidate) => candidate.packageName === "@smthrs/agents"
+  )) {
+    const sourcePath = path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/"));
+    const current = sourceContents.get(sourcePath) ?? fs.readFileSync(sourcePath, "utf8");
+    assert.equal(current.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in pinned agents`);
+    sourceContents.set(sourcePath, current.replace(patch.patchable, patch.patched));
+  }
+  const baseCliSourcePath = path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js");
+  const baseCliSource = sourceContents.get(baseCliSourcePath);
+  assert.ok(baseCliSource);
+  assert.equal(baseCliSource.split("function usageFromCompletedEvent(").length, 2);
+  sourceContents.set(
+    baseCliSourcePath,
+    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent(")
+  );
+  for (const [sourcePath, contents] of sourceContents) fs.writeFileSync(sourcePath, contents, "utf8");
+
+  const baseCli = (await import(
+    pathToFileURL(path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js")).href
+  )) as {
+    extractUsageFromOutput: (raw: string) => Record<string, unknown> | undefined;
+    usageFromCompletedEvent: (event: Record<string, unknown>) => Record<string, unknown> | undefined;
+  };
+  const openCode = (await import(pathToFileURL(path.join(isolatedAgentsRoot, "src", "OpenCodeAgent.js")).href)) as {
+    OpenCodeAgent: new (options?: Record<string, unknown>) => {
+      createOutputInterpreter: () => {
+        onStdoutLine?: (line: string) => unknown[];
+        onExit?: (result: Record<string, unknown>) => unknown[];
+      };
+    };
+  };
+  const codex = (await import(pathToFileURL(path.join(isolatedAgentsRoot, "src", "CodexAgent.js")).href)) as {
+    CodexAgent: new (options?: Record<string, unknown>) => {
+      buildCommand: (params: unknown) => Promise<Record<string, unknown>>;
+      generate: (options: Record<string, unknown>) => Promise<{ text: string; usage?: unknown }>;
+    };
+  };
+  return {
+    extractUsageFromOutput: baseCli.extractUsageFromOutput,
+    usageFromCompletedEvent: baseCli.usageFromCompletedEvent,
+    OpenCodeAgent: openCode.OpenCodeAgent,
+    CodexAgent: codex.CodexAgent
+  };
+}
+
+test("CLI usage compatibility canonicalizes provider-specific cache and reasoning semantics", async () => {
+  const { extractUsageFromOutput, usageFromCompletedEvent, OpenCodeAgent } = await patchedSmithersAgentUsageModules();
+  const canonical = {
+    inputTokens: 21,
+    outputTokens: 5,
+    cacheReadTokens: 11,
+    cacheWriteTokens: 3,
+    freshInputTokens: 7,
+    totalTokens: 26
+  };
+  const openCodeCanonical = { ...canonical, reasoningTokens: 2, reportedCostUsd: 0.125 };
+  assert.equal(usageFromCompletedEvent({ usage: { inputTokens: 100, totalTokens: 150 } })?.totalTokens, 150);
+  assert.equal(
+    usageFromCompletedEvent({
+      usage: {
+        inputTokens: 100,
+        inputTokenDetails: { noCacheTokens: 100, cacheReadTokens: "invalid" },
+        outputTokens: 50
+      }
+    }),
+    undefined
+  );
+  const claudeUsage = { input_tokens: 7, cache_read_input_tokens: 11, cache_creation_input_tokens: 3 };
+  const claude = [
+    JSON.stringify({ type: "message_start", message: { usage: claudeUsage } }),
+    JSON.stringify({ type: "message_delta", usage: { output_tokens: 5 } }),
+    JSON.stringify({ type: "result", usage: { ...claudeUsage, output_tokens: 5 } })
+  ].join("\n");
+  assert.deepEqual(extractUsageFromOutput(claude), canonical);
+  assert.deepEqual(
+    extractUsageFromOutput(JSON.stringify({ type: "result", usage: { ...claudeUsage, output_tokens: 5 } })),
+    canonical
+  );
+  assert.deepEqual(
+    extractUsageFromOutput(
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 21,
+          cached_input_tokens: 11,
+          cache_write_input_tokens: 3,
+          output_tokens: 5
+        }
+      })
+    ),
+    canonical
+  );
+  assert.deepEqual(
+    extractUsageFromOutput(
+      JSON.stringify({
+        type: "step_finish",
+        part: {
+          cost: 0.125,
+          tokens: { input: 7, output: 3, reasoning: 2, cache: { read: 11, write: 3 }, total: 999 }
+        }
+      })
+    ),
+    openCodeCanonical
+  );
+  assert.deepEqual(
+    extractUsageFromOutput(
+      JSON.stringify({
+        type: "step_finish",
+        part: { cost: 0.01, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } }
+      })
+    ),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      freshInputTokens: 0,
+      reportedCostUsd: 0.01
+    }
+  );
+  assert.deepEqual(
+    extractUsageFromOutput(
+      JSON.stringify({
+        type: "step_finish",
+        part: { tokens: { input: 7, output: 3, reasoning: 2, cache: { read: 11, write: 3 } } }
+      })
+    ),
+    { ...canonical, reasoningTokens: 2 }
+  );
+  assert.equal(
+    extractUsageFromOutput(
+      JSON.stringify({ type: "step_finish", part: { cost: 0.125, tokens: { input: "7", output: 5 } } })
+    ),
+    undefined
+  );
+  const openCode = new OpenCodeAgent();
+  const interpreter = openCode.createOutputInterpreter();
+  const completed = interpreter.onStdoutLine?.(
+    JSON.stringify({
+      type: "step_finish",
+      part: {
+        reason: "stop",
+        cost: 0.125,
+        tokens: { input: 7, output: 3, reasoning: 2, cache: { read: 11, write: 3 }, total: 999 }
+      }
+    })
+  );
+  assert.deepEqual(
+    completed?.find((event) => (event as { type?: unknown }).type === "completed"),
+    {
+      type: "completed",
+      engine: "opencode",
+      ok: true,
+      answer: undefined,
+      resume: undefined,
+      usage: openCodeCanonical
+    }
+  );
+
+  const failedInterpreter = openCode.createOutputInterpreter();
+  failedInterpreter.onStdoutLine?.(
+    JSON.stringify({
+      type: "step_finish",
+      part: {
+        reason: "tool-calls",
+        cost: 0.125,
+        tokens: { input: 7, output: 3, reasoning: 2, cache: { read: 11, write: 3 }, total: 999 }
+      }
+    })
+  );
+  const failed = failedInterpreter.onStdoutLine?.(
+    JSON.stringify({ type: "error", error: { name: "ProviderError", data: { message: "failed" } } })
+  );
+  assert.deepEqual(
+    (failed?.find((event) => (event as { type?: unknown }).type === "completed") as { usage?: unknown }).usage,
+    {
+      ...openCodeCanonical
+    }
+  );
+});
+
+test("OpenCode usage compatibility rejects malformed cache containers", async () => {
+  const { extractUsageFromOutput, OpenCodeAgent } = await patchedSmithersAgentUsageModules();
+  const line = JSON.stringify({
+    type: "step_finish",
+    part: { reason: "stop", cost: 0.125, tokens: { input: 7, output: 3, cache: "invalid" } }
+  });
+  assert.equal(extractUsageFromOutput(line), undefined);
+
+  const events = new OpenCodeAgent().createOutputInterpreter().onStdoutLine?.(line);
+  assert.equal(
+    (events?.find((event) => (event as { type?: unknown }).type === "completed") as { usage?: unknown }).usage,
+    undefined
+  );
+});
+
+test("CLI usage compatibility retains authoritative truncated and failed invocation usage", async () => {
+  const { CodexAgent } = await patchedSmithersAgentUsageModules();
+  const providerUsage = {
+    input_tokens: 21,
+    cached_input_tokens: 11,
+    cache_write_input_tokens: 3,
+    output_tokens: 5
+  };
+  const nestedProviderUsage = {
+    inputTokens: 21,
+    inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 11, cacheWriteTokens: 3 },
+    outputTokens: 5,
+    totalTokens: 26
+  };
+  const expectedUsage = {
+    inputTokens: 21,
+    inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 11, cacheWriteTokens: 3 },
+    outputTokens: 5,
+    outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+    totalTokens: 26
+  };
+
+  const truncatedAgent = new CodexAgent({ maxOutputBytes: 512 });
+  const completeLines = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-accounting" }),
+    JSON.stringify({ type: "item.completed", item: { id: "answer", type: "agent_message", text: "OK" } }),
+    JSON.stringify({ type: "turn.completed", usage: nestedProviderUsage }),
+    JSON.stringify({ type: "tail-padding", padding: "x".repeat(4096) }),
+    JSON.stringify({ type: "tail", usage: { input_tokens: 999, output_tokens: 1 } })
+  ];
+  truncatedAgent.buildCommand = async () => ({
+    command: process.execPath,
+    args: ["-e", `for (const line of ${JSON.stringify(completeLines)}) console.log(line)`],
+    outputFormat: "stream-json"
+  });
+  const completed = await truncatedAgent.generate({ prompt: "account", rootDir: tempProject() });
+  assert.equal(completed.text, "OK");
+  assert.deepEqual(completed.usage, expectedUsage);
+
+  const failedAgent = new CodexAgent({ maxOutputBytes: 4096 });
+  const failureLines = [
+    JSON.stringify({ type: "thread.started", thread_id: "thread-failed-accounting" }),
+    JSON.stringify({ type: "turn.completed", usage: providerUsage })
+  ];
+  failedAgent.buildCommand = async () => ({
+    command: process.execPath,
+    args: [
+      "-e",
+      `for (const line of ${JSON.stringify(failureLines)}) console.log(line); console.error("boom"); process.exitCode = 1`
+    ],
+    outputFormat: "stream-json"
+  });
+  await assert.rejects(
+    failedAgent.generate({ prompt: "account failure", rootDir: tempProject() }),
+    (error: unknown) => {
+      assert.deepEqual((error as { usage?: unknown }).usage, expectedUsage);
+      assert.match(error instanceof Error ? error.message : String(error), /boom/u);
+      return true;
+    }
+  );
+});
+
 test("reported CLI cost compatibility preserves zero-token adapter estimates", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const normalization = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_normalize");
@@ -14886,7 +15372,7 @@ test("reported CLI cost compatibility preserves zero-token adapter estimates", a
         snapshot: (
           usage: {
             inputTokens: number;
-            freshInputTokens: number;
+            freshInputTokens?: number;
             outputTokens: number;
             cacheReadTokens?: number;
             cacheWriteTokens?: number;
@@ -14933,6 +15419,36 @@ test("reported CLI cost compatibility preserves zero-token adapter estimates", a
   assert.equal(normalizeTokenUsage(zeroTokenUsage), null);
   assert.equal(normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: -1 }), null);
   assert.equal(normalizeTokenUsage({ ...zeroTokenUsage, reportedCostUsd: Number.NaN }), null);
+  assert.equal(normalizeTokenUsage({ inputTokens: 1, outputTokens: 1, cacheReadTokens: "invalid" }), null);
+  assert.equal(normalizeTokenUsage({ inputTokens: 1, outputTokens: 1, reportedCostUsd: "invalid" }), null);
+
+  const unknownBreakdown = normalizeTokenUsage({ inputTokens: 21, outputTokens: 5 });
+  assert.ok(unknownBreakdown);
+  assert.equal(unknownBreakdown.freshInputTokens, 21);
+  assert.equal(estimateReportedCostUsd("gpt-5.6-sol", unknownBreakdown), undefined);
+
+  const consistent = normalizeTokenUsage({
+    inputTokens: 21,
+    inputTokenDetails: { noCacheTokens: 7, cacheReadTokens: 11, cacheWriteTokens: 3 },
+    outputTokens: 5
+  });
+  assert.ok(consistent);
+  assert.equal(estimateReportedCostUsd("gpt-5.6-sol", consistent), 0.00020925);
+  const inconsistent = normalizeTokenUsage({
+    inputTokens: 21,
+    inputTokenDetails: { noCacheTokens: 21, cacheReadTokens: 11, cacheWriteTokens: 3 },
+    outputTokens: 5
+  });
+  assert.ok(inconsistent);
+  assert.equal(estimateReportedCostUsd("gpt-5.6-sol", inconsistent), undefined);
+  const providerPriced = normalizeTokenUsage({
+    inputTokens: 21,
+    inputTokenDetails: { noCacheTokens: 21, cacheReadTokens: 11, cacheWriteTokens: 3 },
+    outputTokens: 5,
+    reportedCostUsd: 0.25
+  });
+  assert.ok(providerPriced);
+  assert.equal(estimateReportedCostUsd("gpt-5.6-sol", providerPriced), 0.25);
 
   const accumulator = createCumulativeAgentUsageState();
   accumulator.begin();
@@ -14968,7 +15484,6 @@ test("reported CLI cost compatibility preserves zero-token adapter estimates", a
   const corrected = accumulator.snapshot(correction, "provider/model", "PiAgent", true);
   assert.deepEqual(corrected.usage, {
     inputTokens: 15,
-    freshInputTokens: 12,
     outputTokens: 8
   });
   assert.equal(corrected.costUsd, 0.15);
@@ -14982,7 +15497,6 @@ test("reported CLI cost compatibility preserves zero-token adapter estimates", a
   const incomplete = accumulator.snapshot(unpriced, "model-absent-from-smithers", "PiAgent", true);
   assert.deepEqual(incomplete.usage, {
     inputTokens: 16,
-    freshInputTokens: 13,
     outputTokens: 9
   });
   assert.equal(incomplete.costUsd, undefined);
@@ -18776,7 +19290,8 @@ test("syncRun records a typed incomplete-pricing reason for a missing component 
         attempt: 1,
         extra: {
           iteration: 0,
-          inputTokens: 10_000,
+          inputTokens: 30_000,
+          freshInputTokens: 10_000,
           outputTokens: 1_000,
           cacheReadTokens: 20_000,
           cacheWriteTokens: 0,
@@ -18925,7 +19440,8 @@ test("syncRun publishes complete DeepSeek V4 telemetry at first-party list rates
         attempt: 1,
         extra: {
           iteration: 0,
-          inputTokens: 120_000,
+          inputTokens: 520_000,
+          freshInputTokens: 120_000,
           outputTokens: 8_000,
           cacheReadTokens: 400_000,
           cacheWriteTokens: 0,

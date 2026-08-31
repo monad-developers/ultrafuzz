@@ -659,8 +659,8 @@ function normalizeOpenRouterRecoveryUsage(value: unknown): OpenRouterRecoveryUsa
   const outputDetails = openRouterRecord(record.outputTokenDetails);
   const inputTokens = openRouterUsageCount(firstOpenRouterValue(record.inputTokens, record.input_tokens));
   const outputTokens = openRouterUsageCount(firstOpenRouterValue(record.outputTokens, record.output_tokens));
-  const noCacheTokens = openRouterUsageCount(
-    firstOpenRouterValue(inputDetails?.noCacheTokens, record.freshInputTokens)
+  const reportedNoCacheTokens = openRouterUsageCount(
+    firstOpenRouterValue(inputDetails?.noCacheTokens, record.freshInputTokens, record.fresh_input_tokens)
   );
   const cacheReadTokens = openRouterUsageCount(
     firstOpenRouterValue(
@@ -671,8 +671,15 @@ function normalizeOpenRouterRecoveryUsage(value: unknown): OpenRouterRecoveryUsa
     )
   );
   const cacheWriteTokens = openRouterUsageCount(
-    firstOpenRouterValue(inputDetails?.cacheWriteTokens, record.cacheWriteTokens, record.cache_creation_input_tokens)
+    firstOpenRouterValue(
+      inputDetails?.cacheWriteTokens,
+      record.cacheWriteTokens,
+      record.cache_write_input_tokens,
+      record.cache_creation_input_tokens
+    )
   );
+  const noCacheTokens =
+    reportedNoCacheTokens ?? inferredOpenRouterFreshInputTokens(inputTokens, cacheReadTokens, cacheWriteTokens);
   const textTokens = openRouterUsageCount(outputDetails?.textTokens);
   const reasoningTokens = openRouterUsageCount(
     firstOpenRouterValue(outputDetails?.reasoningTokens, record.reasoningTokens, record.reasoning_tokens)
@@ -709,6 +716,17 @@ function normalizeOpenRouterRecoveryUsage(value: unknown): OpenRouterRecoveryUsa
   };
 }
 
+function inferredOpenRouterFreshInputTokens(
+  inputTokens: number | undefined,
+  cacheReadTokens: number | undefined,
+  cacheWriteTokens: number | undefined
+): number | undefined {
+  if (inputTokens === undefined || (cacheReadTokens === undefined && cacheWriteTokens === undefined)) return undefined;
+  const cachedTokens = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+  if (!Number.isSafeInteger(cachedTokens) || cachedTokens > inputTokens) return undefined;
+  return inputTokens - cachedTokens;
+}
+
 function firstOpenRouterValue(...values: unknown[]): unknown {
   return values.find((candidate) => candidate !== undefined && candidate !== null);
 }
@@ -717,7 +735,7 @@ function inferredOpenRouterUsageTotal(
   inputTokens: number | undefined,
   outputTokens: number | undefined
 ): number | undefined {
-  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  if (inputTokens === undefined || outputTokens === undefined) return undefined;
   return addOpenRouterUsageCounts(inputTokens, outputTokens);
 }
 
@@ -739,39 +757,48 @@ function mergeOpenRouterRecoveryUsage(
   if (left === undefined) return right;
   if (right === undefined) return left;
   return {
-    ...optionalOpenRouterUsageCount("inputTokens", left.inputTokens, right.inputTokens),
+    ...optionalKnownOpenRouterUsageCount("inputTokens", left.inputTokens, right.inputTokens),
     inputTokenDetails: {
-      ...optionalOpenRouterUsageCount(
+      ...optionalKnownOpenRouterUsageCount(
         "noCacheTokens",
         left.inputTokenDetails.noCacheTokens,
         right.inputTokenDetails.noCacheTokens
       ),
-      ...optionalOpenRouterUsageCount(
+      ...optionalKnownOpenRouterUsageCount(
         "cacheReadTokens",
         left.inputTokenDetails.cacheReadTokens,
         right.inputTokenDetails.cacheReadTokens
       ),
-      ...optionalOpenRouterUsageCount(
+      ...optionalKnownOpenRouterUsageCount(
         "cacheWriteTokens",
         left.inputTokenDetails.cacheWriteTokens,
         right.inputTokenDetails.cacheWriteTokens
       )
     },
-    ...optionalOpenRouterUsageCount("outputTokens", left.outputTokens, right.outputTokens),
+    ...optionalKnownOpenRouterUsageCount("outputTokens", left.outputTokens, right.outputTokens),
     outputTokenDetails: {
-      ...optionalOpenRouterUsageCount(
+      ...optionalKnownOpenRouterUsageCount(
         "textTokens",
         left.outputTokenDetails.textTokens,
         right.outputTokenDetails.textTokens
       ),
-      ...optionalOpenRouterUsageCount(
+      ...optionalKnownOpenRouterUsageCount(
         "reasoningTokens",
         left.outputTokenDetails.reasoningTokens,
         right.outputTokenDetails.reasoningTokens
       )
     },
-    ...optionalOpenRouterUsageCount("totalTokens", left.totalTokens, right.totalTokens)
+    ...optionalKnownOpenRouterUsageCount("totalTokens", left.totalTokens, right.totalTokens)
   };
+}
+
+function optionalKnownOpenRouterUsageCount<Key extends string>(
+  key: Key,
+  left: number | undefined,
+  right: number | undefined
+): { [Property in Key]?: number } {
+  if (left === undefined || right === undefined) return {};
+  return optionalOpenRouterUsageCount(key, left, right);
 }
 
 function optionalOpenRouterUsageCount<Key extends string>(

@@ -98,7 +98,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
   "deepseek.tsx": {
-    classifiedSourceSha256: "646275da83bf43d316a40390e67125241a488c2691ab130e2dfbd93fe7597ea6",
+    classifiedSourceSha256: "ea7c6eec70883126e3ee9588b6d3349169652688756b519f1d49c3b5b794e887",
     responsibilities: ["output-interpretation", "token-accounting"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
@@ -113,7 +113,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "kimi.tsx": {
-    classifiedSourceSha256: "5249edcf97196b2deb0ecfadefcadbb1765cadd6c8866739f60bf8c911df0580",
+    classifiedSourceSha256: "81e269cf085a7f6cba68beba2f9647031a39b0ab9e88d605c55997ae6a6a5469",
     responsibilities: [
       "argv-construction",
       "filesystem-walking",
@@ -132,7 +132,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "openrouter.tsx": {
-    classifiedSourceSha256: "2a33857f10cc683919925234009a09e91799c6f1441c2d2f96bfaabc218faf4a",
+    classifiedSourceSha256: "433001409ef01f6e51742669515dece37c15dd27a34817df35a2f086b0d7180e",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/1006",
@@ -189,9 +189,9 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     // unknown constructor options, so the adapter carries a thin constructor
     // that splits the Ultrafuzz-only credential off `this.opts`.
     maxLines: 360,
-    maxSyntaxNodes: 1_650,
+    maxSyntaxNodes: 1_675,
     purpose: "adapter",
-    sourceSha256: "646275da83bf43d316a40390e67125241a488c2691ab130e2dfbd93fe7597ea6"
+    sourceSha256: "ea7c6eec70883126e3ee9588b6d3349169652688756b519f1d49c3b5b794e887"
   },
   "environment.tsx": {
     maxLines: 425,
@@ -207,10 +207,10 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   },
   "kimi.tsx": {
     // Raised with the 0.35.0 pin bump, for the same reason as deepseek.tsx.
-    maxLines: 1_560,
-    maxSyntaxNodes: 9_010,
+    maxLines: 1_600,
+    maxSyntaxNodes: 9_250,
     purpose: "adapter",
-    sourceSha256: "5249edcf97196b2deb0ecfadefcadbb1765cadd6c8866739f60bf8c911df0580"
+    sourceSha256: "81e269cf085a7f6cba68beba2f9647031a39b0ab9e88d605c55997ae6a6a5469"
   },
   "opencode.tsx": {
     maxLines: 150,
@@ -221,10 +221,10 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   "openrouter.tsx": {
     // Raised after the accounting review for cumulative response aggregation,
     // retry/failure usage, and adapter-recorded cost preservation (#1006).
-    maxLines: 1_725,
-    maxSyntaxNodes: 8_925,
+    maxLines: 1_750,
+    maxSyntaxNodes: 9_075,
     purpose: "adapter",
-    sourceSha256: "2a33857f10cc683919925234009a09e91799c6f1441c2d2f96bfaabc218faf4a"
+    sourceSha256: "433001409ef01f6e51742669515dece37c15dd27a34817df35a2f086b0d7180e"
   },
   "pi.tsx": {
     // Raised for cumulative per-response usage, session-aware progress, and

@@ -61,7 +61,7 @@ function renderableReport(): Record<string, unknown> {
         lifecycle: {
           dedupe_key: "state-mismatch",
           source_artifacts: [],
-          strategy_hits: [],
+          strategy_hits: [{ strategy: "stateful-invariant" }],
           canonical_severity: "Low"
         }
       }
@@ -361,7 +361,7 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
   const report = renderableReport();
   const [issue] = report.issues as Array<Record<string, unknown>>;
   assert.ok(issue);
-  issue.strategy_provenance = {
+  const strategyProvenance = {
     detection_rates: [
       { strategy: "stateful-invariant", detections: 1, configured_loops: 3 },
       { strategy: "class-goals", detections: 1, configured_loops: 4 }
@@ -375,6 +375,8 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
       }
     ]
   };
+  issue.strategy_provenance = strategyProvenance;
+  (issue.lifecycle as Record<string, unknown>).strategy_hits = strategyProvenance.attempts;
 
   const projection = projectCanonicalFinalReport(report);
 
@@ -392,7 +394,7 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
   ).attempts = [{ strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 }];
   assert.throws(
     () => projectCanonicalFinalReport(missingObservation),
-    /1 distinct contributing executions, which does not match 2 detections/u
+    /strategy attempts do not exactly preserve authenticated lifecycle strategy hits/u
   );
 
   const duplicateObservation = structuredClone(report);
@@ -402,7 +404,22 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
     { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 },
     { strategy: "stateful-invariant", attempt_index: 0, loop_index: 0 }
   ];
+  (
+    (duplicateObservation.issues as Array<Record<string, unknown>>)[0]?.lifecycle as Record<string, unknown>
+  ).strategy_hits = duplicateProvenance.attempts;
   assert.throws(() => projectCanonicalFinalReport(duplicateObservation), /repeats contributing execution provenance/u);
+
+  const swappedObservation = structuredClone(report);
+  const swappedProvenance = (swappedObservation.issues as Array<Record<string, unknown>>)[0]
+    ?.strategy_provenance as Record<string, unknown>;
+  swappedProvenance.attempts = [
+    { strategy: "class-goals", attempt_index: 0, loop_index: 0 },
+    { strategy: "stateful-invariant", attempt_index: 2, loop_index: 2 }
+  ];
+  assert.throws(
+    () => projectCanonicalFinalReport(swappedObservation),
+    /strategy attempts do not exactly preserve authenticated lifecycle strategy hits/u
+  );
 
   const misattributedObservation = structuredClone(report);
   (
@@ -416,7 +433,20 @@ test("strategy-loop evidence remains structured but is omitted from developer-fa
   ];
   assert.throws(
     () => projectCanonicalFinalReport(misattributedObservation),
-    /strategy "stateful-invariant" has 2 distinct contributing executions, which does not match 1 detections/u
+    /strategy attempts do not exactly preserve authenticated lifecycle strategy hits/u
+  );
+
+  const misattributedRates = structuredClone(report);
+  const rateProvenance = (misattributedRates.issues as Array<Record<string, unknown>>)[0]
+    ?.strategy_provenance as Record<string, unknown>;
+  delete rateProvenance.attempts;
+  rateProvenance.detection_rates = [
+    { strategy: "stateful-invariant", detections: 2, configured_loops: 3 },
+    { strategy: "class-goals", detections: 0, configured_loops: 4 }
+  ];
+  assert.throws(
+    () => projectCanonicalFinalReport(misattributedRates),
+    /strategy "stateful-invariant" has 1 distinct contributing executions, which does not match 2 detections/u
   );
 
   const impossibleRate = structuredClone(report);

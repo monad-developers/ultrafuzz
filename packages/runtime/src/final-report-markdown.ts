@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   assertRegularFileInside,
@@ -360,8 +361,26 @@ function assertStructuredStrategyProvenance(report: JsonRecord): void {
   for (const [recordIndex, candidate] of finalReportFindingRecords(report).entries()) {
     const provenance = recordField(candidate, "strategy_provenance");
     if (provenance === undefined) continue;
+    const lifecycle = recordField(candidate, "lifecycle");
+    const authenticatedHits = Array.isArray(lifecycle?.strategy_hits)
+      ? (lifecycle.strategy_hits as unknown[]).filter(isRecord)
+      : [];
+    assertPreservedStrategyAttempts(provenance.attempts, authenticatedHits, recordIndex);
     const detectionsByStrategy = strategyDetectionCounts(provenance, recordIndex);
-    assertStrategyAttempts(provenance.attempts, detectionsByStrategy, recordIndex);
+    assertStrategyAttempts(authenticatedHits, detectionsByStrategy, recordIndex);
+  }
+}
+
+function assertPreservedStrategyAttempts(
+  value: unknown,
+  authenticatedHits: readonly JsonRecord[],
+  recordIndex: number
+): void {
+  if (value === undefined) return;
+  if (!isDeepStrictEqual(value, authenticatedHits)) {
+    throw new Error(
+      `final report record ${String(recordIndex)} strategy attempts do not exactly preserve authenticated lifecycle strategy hits`
+    );
   }
 }
 
