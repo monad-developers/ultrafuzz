@@ -408,6 +408,7 @@ function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
 function loadFinalReportAgentExecutionAuthority(
   options: {
     smithersDetail?: unknown;
+    smithersFailure?: unknown;
     chainIndex?: number;
     execution?: unknown;
   } = {}
@@ -415,6 +416,8 @@ function loadFinalReportAgentExecutionAuthority(
   remember(task: unknown, execution: unknown): void;
   read(task: unknown): unknown;
   smithersReads(): number;
+  smithersTimeoutMs(): number | undefined;
+  budgetMs: number;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
@@ -424,6 +427,7 @@ function loadFinalReportAgentExecutionAuthority(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   let reads = 0;
+  let observedTimeout: number | undefined;
   const loaded = new Function(
     "declaredFinalReportOutputPair",
     "execFileSync",
@@ -433,12 +437,15 @@ function loadFinalReportAgentExecutionAuthority(
     "finalReportAgentExecution",
     `${helper}; return {
       remember: rememberFinalReportAgentExecutionAuthority,
-      read: authoritativeFinalReportAgentExecution
+      read: authoritativeFinalReportAgentExecution,
+      budgetMs: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS
     };`
   )(
     () => ({}),
-    () => {
+    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
       reads += 1;
+      observedTimeout = spawnOptions.timeout;
+      if (options.smithersFailure !== undefined) throw options.smithersFailure;
       if (options.smithersDetail === undefined) {
         throw new Error("Smithers fallback should not be needed");
       }
@@ -448,8 +455,49 @@ function loadFinalReportAgentExecutionAuthority(
     (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
     () => ({ chainIndex: options.chainIndex ?? 0 }),
     () => options.execution ?? {}
-  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown };
-  return { ...loaded, smithersReads: () => reads };
+  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown; budgetMs: number };
+  return { ...loaded, smithersReads: () => reads, smithersTimeoutMs: () => observedTimeout };
+}
+
+function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
+  preflight(): void;
+  observedTimeoutMs(): number | undefined;
+  budgetMs: number;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS");
+  const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  let observedTimeout: number | undefined;
+  const loaded = new Function(
+    "artifactSchemaRegistry",
+    "artifactValidatorSmokeFixturePath",
+    "execFileSync",
+    "parseJsonValidatorPreflightSuccessEnvelope",
+    "path",
+    `${helper}; return {
+      preflight: preflightJsonValidator,
+      budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
+    };`
+  )(
+    () => [{ filename: "findings.schema.json" }],
+    () => path.join(path.sep, "fixture", "findings.json"),
+    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+      observedTimeout = spawnOptions.timeout;
+      if (options.failure !== undefined) throw options.failure;
+      return options.stdout ?? "{}";
+    },
+    () => undefined,
+    path
+  ) as { preflight(schemaDirectory: string): void; budgetMs: number };
+  return {
+    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas")),
+    observedTimeoutMs: () => observedTimeout,
+    budgetMs: loaded.budgetMs
+  };
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -6339,6 +6387,35 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   );
 });
 
+test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
+  const timedOut = Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" });
+  const harness = loadJsonValidatorPreflight({ failure: timedOut });
+
+  // #1026: `"ultrafuzz"` is the trusted launcher, whose own cold start measured 33.8-35.6 s at the
+  // CPU oversubscription a full public lane runs at, so any budget near the CLI's idle cost dies on
+  // contention alone. It must also stay a minority of that lane's 1800 s `node_timeout_seconds`,
+  // since a preflight that outlives the attempt cannot report anything.
+  assert.ok(harness.budgetMs >= 120_000, String(harness.budgetMs));
+  assert.ok(harness.budgetMs <= 600_000, String(harness.budgetMs));
+
+  assert.throws(
+    () => harness.preflight(),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(harness.observedTimeoutMs(), harness.budgetMs);
+      assert.equal(error.cause, timedOut);
+      // `ETIMEDOUT` alone proves only that the budget was passed, never by how much. The elapsed
+      // reading has to survive the ledger's 1000-byte cap to be readable in the published row.
+      assert.match(error.message, /^artifact-contract failure: JSON validator preflight failed after \d+ms /u);
+      assert.match(error.message, new RegExp(`against a ${harness.budgetMs}ms budget`, "u"));
+      assert.ok(error.message.endsWith(": spawnSync ultrafuzz ETIMEDOUT"), error.message);
+      const reported = `prepare:audit-final-report failed at step preflight-json-validator: ${error.message}`;
+      assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
+      return true;
+    }
+  );
+});
+
 test("generated Smithers workflow does not precreate runtime-owned workspace patch outputs", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function prepareArtifactMirror");
@@ -8354,6 +8431,43 @@ test("single-rung final-report authority survives a worker restart without a run
   const authority = loadFinalReportAgentExecutionAuthority({ execution });
   assert.deepEqual(authority.read({ attemptId: "final-report", agentChain: [{ profileId: "primary" }] }), execution);
   assert.equal(authority.smithersReads(), 0);
+});
+
+test("multi-rung report-producer authority budgets a contended Smithers read and reports its wall time", () => {
+  const timedOut = Object.assign(new Error("spawnSync smithers ETIMEDOUT"), { code: "ETIMEDOUT" });
+  const authority = loadFinalReportAgentExecutionAuthority({ smithersFailure: timedOut });
+  const task = {
+    attemptId: "final-report",
+    id: "final-report",
+    smithersRunId: "run-1",
+    agentChain: [{ profileId: "primary" }, { profileId: "fallback" }]
+  };
+
+  // #1026: this read shares the finalizer with every other agent's build work, and it serializes the
+  // node's whole attempt history on top of a CLI start, so it needs the same order of budget as the
+  // validator preflight while staying a minority of the lane's 1800 s `node_timeout_seconds`.
+  assert.ok(authority.budgetMs >= 120_000, String(authority.budgetMs));
+  assert.ok(authority.budgetMs <= 600_000, String(authority.budgetMs));
+
+  assert.throws(
+    () => authority.read(task),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(authority.smithersTimeoutMs(), authority.budgetMs);
+      assert.equal(error.cause, timedOut);
+      // `--full-output` can return up to 64 MiB, so the failing command's own text stays behind
+      // `cause` as the neighbouring authority failures keep it; only the timing is published.
+      assert.match(
+        error.message,
+        new RegExp(
+          `^artifact-contract failure: Smithers report-producer authority is unavailable after \\d+ms against a ${authority.budgetMs}ms budget$`,
+          "u"
+        )
+      );
+      return true;
+    }
+  );
+  assert.equal(authority.smithersReads(), 1);
 });
 
 test("generated retries do not inspect or inject previous failure text", () => {
