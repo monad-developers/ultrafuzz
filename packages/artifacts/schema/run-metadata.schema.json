@@ -776,7 +776,7 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "ultrafuzz.accounting.v3"
+          "const": "ultrafuzz.accounting.v4"
         },
         "source": {
           "const": "usage-ledger"

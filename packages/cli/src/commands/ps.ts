@@ -17,7 +17,7 @@ export default class Ps extends Command {
         "ps",
         result,
         (value) =>
-          `${value.runs.map((run) => `${run.ultrafuzz_run_id ?? "-"}\t${run.workflow_run_id}\t${run.ultrafuzz_status ?? run.workflow_status ?? "-"}\t${run.run_root ?? ""}`).join("\n")}\n`
+          `${value.runs.map((run) => `${run.ultrafuzz_run_id ?? "-"}\t${run.workflow_run_id}\t${run.workflow_status ?? run.ultrafuzz_status ?? "-"}\t${run.run_root ?? ""}`).join("\n")}\n`
       ),
       flags.json === true
     );

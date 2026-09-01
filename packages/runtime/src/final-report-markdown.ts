@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   assertRegularFileInside,
@@ -57,12 +58,7 @@ const reportSummaryFields = [
   ["Models used", "models_used"],
   ["Tokens used", "tokens_used"],
   ["Estimated spend", "estimated_spend"],
-  ["Strategy loops", "strategy_loops"],
-  ["Audit profile", "audit_profile"],
-  ["Audit profile catalog digest", "audit_profile_catalog_digest"],
-  ["Topology digest", "topology_digest"],
-  ["Prompt digest", "prompt_digest"],
-  ["Expanded graph fingerprint", "expanded_graph_fingerprint"]
+  ["Audit profile", "audit_profile"]
 ] as const;
 
 const severityOrder = ["High", "Medium", "Low"] as const;
@@ -96,21 +92,27 @@ export interface CanonicalFinalReportContext {
  *
  * Internal report.json remains the immutable agent/controller authority used by
  * scoring and lifecycle consumers. Public publication instead receives a deep
- * copy with private filesystem paths redacted, then re-validates and renders
- * that copy as an exact canonical JSON/Markdown pair.
+ * copy with secrets and private filesystem paths redacted, then re-validates
+ * and renders that copy as an exact canonical JSON/Markdown pair. The ordinary
+ * canonical projection remains the unredacted developer report.
  */
 export function projectPublicCanonicalFinalReport(
   report: unknown,
   context: CanonicalFinalReportContext = {}
 ): CanonicalFinalReportProjection {
   const internal = projectCanonicalFinalReport(report, context);
-  const publicReport = redactPrivatePathsInValue(internal.report);
+  const publicReport = redactSecretsInStringValues(redactPrivatePathsInValue(internal.report));
   if (!isRecord(publicReport)) {
     throw new Error("public final-report projection did not produce an object");
   }
   const projection = projectCanonicalFinalReport(publicReport, context);
-  if (containsPrivatePathInValue(projection.report)) {
-    throw new Error("public final-report projection contains a private filesystem path");
+  if (
+    containsPrivatePathInValue(projection.report) ||
+    containsPrivatePath(projection.markdown) ||
+    containsUnredactedSecretInValue(projection.report) ||
+    containsUnredactedSecret(projection.markdown)
+  ) {
+    throw new Error("public final-report projection contains private report content");
   }
   return projection;
 }
@@ -130,8 +132,7 @@ export function supportsCanonicalFinalReportProjection(report: unknown): report 
     return (
       requiredAssessmentIfPresent(issue, "impact") !== undefined &&
       requiredAssessmentIfPresent(issue, "likelihood") !== undefined &&
-      proofOfConcept(issue) !== undefined &&
-      (collectStrategyRows(issue)?.length ?? 0) > 0
+      proofOfConcept(issue) !== undefined
     );
   });
 }
@@ -156,13 +157,17 @@ export function projectCanonicalFinalReport(
   }
 
   assertCanonicalIssuePresentation(input);
+  assertStructuredStrategyProvenance(input);
 
   const markdown = renderCanonicalReport(input, context.goalSearchCoverage);
   if (Buffer.byteLength(markdown, "utf8") > MAX_FINAL_REPORT_MARKDOWN_BYTES) {
     throw new Error(`canonical final report Markdown exceeds ${MAX_FINAL_REPORT_MARKDOWN_BYTES} bytes`);
   }
-  if (!isDirectiveConformingFinalReportMarkdown(markdown, input)) {
-    throw new Error("canonical final report Markdown does not satisfy the final-review report shape");
+  const directiveViolation = finalReportMarkdownDirectiveViolation(markdown, input);
+  if (directiveViolation !== undefined) {
+    throw new Error(
+      `canonical final report Markdown does not satisfy the final-review report shape: ${directiveViolation}`
+    );
   }
   const markdownValidation = validateArtifactContract("ultrafuzz/nonempty-markdown@1", markdown, "report.md");
   if (!markdownValidation.ok) {
@@ -172,11 +177,15 @@ export function projectCanonicalFinalReport(
 }
 
 export function isDirectiveConformingFinalReportMarkdown(markdown: string, report: JsonRecord): boolean {
+  return finalReportMarkdownDirectiveViolation(markdown, report) === undefined;
+}
+
+function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRecord): string | undefined {
   if (!markdown.startsWith("# Ultrafuzz report\n") || !markdown.includes("\n## Run summary\n")) {
-    return false;
+    return "missing report title or run summary";
   }
   if (!markdown.includes("\n## Property implementation coverage\n")) {
-    return false;
+    return "missing property implementation coverage";
   }
   // A current-run projection always states its goal-search coverage, even when that statement is
   // "coverage is unknown". Requiring the heading keeps a future edit from turning a partial hunt back
@@ -185,31 +194,14 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
   // parameter had no remaining caller and coupled the goal-coverage requirement to the
   // property-implementation one, so a single flag could silently drop both (issue #702).
   if (!markdown.includes("\n## Goal search coverage\n")) {
-    return false;
+    return "missing goal search coverage";
   }
   if (!markdown.includes("\n## Property provenance\n")) {
-    return false;
+    return "missing property provenance";
   }
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
-  if (
-    /\bCritical\b/iu.test(prose) ||
-    /(?:^|\n)#### Sources\s*$/imu.test(prose) ||
-    /\*\*Source (?:Node|Property) Id\*\*/iu.test(prose) ||
-    /(?:^|\n)- \*\*Item \d+\*\*/imu.test(prose) ||
-    /(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu.test(prose) ||
-    /(?:^|\n)#{3,6} (?:Lifecycle|Strategy provenance)\s*$/imu.test(prose)
-  ) {
-    return false;
-  }
-  if (
-    containsUnredactedSecret(markdown) ||
-    containsPrivatePath(markdown) ||
-    /<[A-Za-z][^>]*>/u.test(prose) ||
-    /!\[[^\]]*\]\(/u.test(prose) ||
-    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu.test(prose)
-  ) {
-    return false;
-  }
+  const proseViolation = finalReportProseDirectiveViolation(prose);
+  if (proseViolation !== undefined) return proseViolation;
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
   const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
@@ -217,15 +209,15 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
     headings.length !== expectedHeadings.length ||
     headings.some((heading, index) => heading !== expectedHeadings[index])
   ) {
-    return false;
+    return "issue headings do not match the validated report order";
   }
   // Exact equality above proves the Markdown kept the validated JSON order,
   // IDs, and titles. Presentation never assigns severity-local identities.
   if (expectedHeadings.length === 0) {
-    return !markdown.includes("| Issue id | Title |");
+    return markdown.includes("| Issue id | Title |") ? "contains an issue index without rendered issues" : undefined;
   }
   if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
-    return false;
+    return "issue index is missing or malformed";
   }
   const issueBlocks = expectedHeadings.map((heading, index) => {
     const start = markdown.indexOf(`${heading}\n`);
@@ -237,14 +229,35 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
   return issueBlocks.every((block) => {
     const severityIndex = block.indexOf("\n### Severity\n");
     const proofIndex = block.indexOf("\n### Proof of Concept\n");
-    const strategyIndex = block.indexOf("\n### Strategy\n");
-    return (
-      severityIndex >= 0 &&
-      proofIndex > severityIndex &&
-      strategyIndex > proofIndex &&
-      /\| [^|\n]+ \| \d+\/\d+ \|/u.test(block.slice(strategyIndex))
-    );
-  });
+    return severityIndex >= 0 && proofIndex > severityIndex;
+  })
+    ? undefined
+    : "an issue is missing severity or proof-of-concept ordering";
+}
+
+function finalReportProseDirectiveViolation(prose: string): string | undefined {
+  // Critical is not a supported report severity, but the word remains valid in explanatory prose
+  // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
+  // rewriting or discarding the validated finding text.
+  const forbiddenPatterns: ReadonlyArray<readonly [RegExp, string]> = [
+    [/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu, "contains the unsupported Critical severity"],
+    [/(?:^|\n)#### Sources\s*$/imu, "contains a legacy Sources section"],
+    [/\*\*Source (?:Node|Property) Id\*\*/iu, "contains a legacy source identifier field"],
+    [/(?:^|\n)- \*\*Item \d+\*\*/imu, "contains a legacy numbered-item field"],
+    [/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu, "contains a legacy report section"],
+    [/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu, "contains a legacy issue subsection"],
+    [
+      /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu,
+      "contains legacy run metadata"
+    ],
+    [/<[A-Za-z][^>]*>/u, "contains raw HTML outside fenced code"],
+    [/!\[[^\]]*\]\(/u, "contains an embedded image outside fenced code"],
+    [
+      /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu,
+      "contains a disallowed Markdown link outside fenced code"
+    ]
+  ];
+  return forbiddenPatterns.find(([pattern]) => pattern.test(prose))?.[1];
 }
 
 function validateReport(report: unknown): JsonRecord {
@@ -338,6 +351,126 @@ function assertCanonicalIssuePresentation(report: JsonRecord): void {
       throw new Error(`final report property provenance ${index} title does not equal its referenced finding title`);
     }
   }
+}
+
+/**
+ * Keep machine-readable execution provenance honest even though it is no longer developer-facing.
+ * A detection is one distinct contributing execution, not one duplicate finding or family member.
+ */
+function assertStructuredStrategyProvenance(report: JsonRecord): void {
+  for (const [recordIndex, candidate] of finalReportFindingRecords(report).entries()) {
+    const provenance = recordField(candidate, "strategy_provenance");
+    if (provenance === undefined) continue;
+    const lifecycle = recordField(candidate, "lifecycle");
+    const authenticatedHits = Array.isArray(lifecycle?.strategy_hits)
+      ? (lifecycle.strategy_hits as unknown[]).filter(isRecord)
+      : [];
+    assertPreservedStrategyAttempts(provenance.attempts, authenticatedHits, recordIndex);
+    const detectionsByStrategy = strategyDetectionCounts(provenance, recordIndex);
+    assertStrategyAttempts(authenticatedHits, detectionsByStrategy, recordIndex);
+  }
+}
+
+function assertPreservedStrategyAttempts(
+  value: unknown,
+  authenticatedHits: readonly JsonRecord[],
+  recordIndex: number
+): void {
+  if (value === undefined) return;
+  if (!isDeepStrictEqual(value, authenticatedHits)) {
+    throw new Error(
+      `final report record ${String(recordIndex)} strategy attempts do not exactly preserve authenticated lifecycle strategy hits`
+    );
+  }
+}
+
+function finalReportFindingRecords(report: JsonRecord): unknown[] {
+  const issues = Array.isArray(report.issues) ? (report.issues as unknown[]) : [];
+  const outcomes = Array.isArray(report.non_production_outcomes) ? (report.non_production_outcomes as unknown[]) : [];
+  return issues.concat(outcomes);
+}
+
+function strategyDetectionCounts(provenance: JsonRecord, recordIndex: number): Map<string, number> {
+  const rates = Array.isArray(provenance.detection_rates)
+    ? (provenance.detection_rates as unknown[]).filter(isRecord)
+    : [];
+  const detectionsByStrategy = new Map<string, number>();
+  for (const rate of rates) {
+    const strategy = typeof rate.strategy === "string" ? rate.strategy : "";
+    const detections = typeof rate.detections === "number" ? rate.detections : -1;
+    const configuredLoops = typeof rate.configured_loops === "number" ? rate.configured_loops : -1;
+    assertPossibleDetectionCount(strategy, detections, configuredLoops, recordIndex);
+    if (detectionsByStrategy.has(strategy)) {
+      throw new Error(
+        `final report record ${String(recordIndex)} repeats strategy detection provenance for ${JSON.stringify(strategy)}`
+      );
+    }
+    detectionsByStrategy.set(strategy, detections);
+  }
+  return detectionsByStrategy;
+}
+
+function assertPossibleDetectionCount(
+  strategy: string,
+  detections: number,
+  configuredLoops: number,
+  recordIndex: number
+): void {
+  if (detections <= configuredLoops) return;
+  throw new Error(
+    `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} reports ${String(detections)} detections from only ${String(configuredLoops)} configured executions`
+  );
+}
+
+function assertStrategyAttempts(
+  value: unknown,
+  detectionsByStrategy: ReadonlyMap<string, number>,
+  recordIndex: number
+): void {
+  if (!Array.isArray(value)) return;
+  const identities = new Set<string>();
+  const attemptsByStrategy = new Map<string, number>();
+  for (const attempt of (value as unknown[]).filter(isRecord)) {
+    const strategy = addStrategyAttempt(attempt, identities, recordIndex);
+    attemptsByStrategy.set(strategy, (attemptsByStrategy.get(strategy) ?? 0) + 1);
+  }
+  const detections = [...detectionsByStrategy.values()].reduce((total, count) => total + count, 0);
+  if (identities.size !== detections) {
+    throw new Error(
+      `final report record ${String(recordIndex)} has ${String(identities.size)} distinct contributing executions, which does not match ${String(detections)} detections`
+    );
+  }
+  for (const [strategy, strategyDetections] of detectionsByStrategy) {
+    const strategyAttempts = attemptsByStrategy.get(strategy) ?? 0;
+    if (strategyAttempts !== strategyDetections) {
+      throw new Error(
+        `final report record ${String(recordIndex)} strategy ${JSON.stringify(strategy)} has ${String(strategyAttempts)} distinct contributing executions, which does not match ${String(strategyDetections)} detections`
+      );
+    }
+  }
+}
+
+function addStrategyAttempt(attempt: JsonRecord, identities: Set<string>, recordIndex: number): string {
+  const strategy = typeof attempt.strategy === "string" ? attempt.strategy : "";
+  const identity = strategyAttemptIdentity(attempt, strategy);
+  if (identities.has(identity)) {
+    throw new Error(
+      `final report record ${String(recordIndex)} repeats contributing execution provenance for strategy ${JSON.stringify(strategy)}`
+    );
+  }
+  identities.add(identity);
+  return strategy;
+}
+
+function strategyAttemptIdentity(attempt: JsonRecord, strategy: string): string {
+  return JSON.stringify([
+    strategy,
+    attempt.attempt_index ?? null,
+    attempt.model_id ?? null,
+    attempt.model ?? null,
+    attempt.model_index ?? null,
+    attempt.loop_index ?? null
+  ]);
 }
 
 function requiredAssessment(
@@ -617,10 +750,6 @@ function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   lines.push("", "### Proof of Concept", "");
   appendProofOfConcept(lines, issue);
   appendFamilyVariants(lines, issue.family_variants);
-  lines.push("", "### Strategy", "", "| Strategy | Detection rate |", "| --- | --- |");
-  for (const row of strategyRows(issue)) {
-    lines.push(`| ${tableCell(row.strategy)} | ${tableCell(row.rate)} |`);
-  }
 }
 
 function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
@@ -651,41 +780,6 @@ function appendFamilyVariants(lines: string[], value: unknown): void {
     const summary = firstAvailableString(variant.summary, variant.description);
     lines.push(`- **${publicProse(title)}**${summary === undefined ? "" : `: ${publicProse(summary)}`}`);
   }
-}
-
-function strategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> {
-  const rows = collectStrategyRows(issue);
-  if (rows === undefined || rows.length === 0) {
-    throw new Error("production issue is missing exact strategy detection rates");
-  }
-  return rows;
-}
-
-function collectStrategyRows(issue: JsonRecord): Array<{ strategy: string; rate: string }> | undefined {
-  const provenance = isRecord(issue.strategy_provenance) ? issue.strategy_provenance : {};
-  const rates = Array.isArray(provenance.detection_rates) ? provenance.detection_rates.filter(isRecord) : [];
-  const rows: Array<{ strategy: string; rate: string }> = [];
-  for (const rate of rates) {
-    const strategy = rate.strategy;
-    if (typeof strategy !== "string" || strategy.length === 0) {
-      return undefined;
-    }
-    const detected = rate.detections;
-    const configured = rate.configured_loops;
-    if (
-      typeof detected !== "number" ||
-      !Number.isInteger(detected) ||
-      detected < 0 ||
-      typeof configured !== "number" ||
-      !Number.isInteger(configured) ||
-      configured <= 0 ||
-      detected > configured
-    ) {
-      return undefined;
-    }
-    rows.push({ strategy, rate: `${detected}/${configured}` });
-  }
-  return rows;
 }
 
 function appendPropertyProvenance(
@@ -1013,12 +1107,12 @@ function appendNonProductionOutcomes(lines: string[], outcomes: JsonRecord[]): v
     "",
     "## Non-production actionable outcomes",
     "",
-    "| Classification | Title | Status | Evidence | Strategy provenance | Recommended next action |",
-    "| --- | --- | --- | --- | --- | --- |"
+    "| Classification | Title | Status | Evidence | Recommended next action |",
+    "| --- | --- | --- | --- | --- |"
   );
   for (const outcome of outcomes) {
     lines.push(
-      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(strategySummary(outcome))} | ${tableCell(outcome.recommended_next_action)} |`
+      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
     );
   }
 }
@@ -1115,15 +1209,7 @@ function evidenceSummary(value: unknown, fallback: unknown): string {
 
 function publicEvidenceText(value: string): string {
   const text = value.trim();
-  return containsPrivatePath(text) ? "Evidence retained in structured report." : text;
-}
-
-function strategySummary(record: JsonRecord): string {
-  const rows = collectStrategyRows(record);
-  if (rows === undefined || rows.length === 0) {
-    return firstAvailableString(record.strategy) ?? "unavailable";
-  }
-  return rows.map((row) => `${row.strategy} (${row.rate})`).join(", ");
+  return text;
 }
 
 function inlineValue(value: unknown): string {
@@ -1173,15 +1259,13 @@ function recordTitle(record: JsonRecord, fallback: string): string {
 }
 
 function publicProse(value: string): string {
-  return redactPrivatePaths(redactSecrets(value))
+  return value
     .replace(/\s+/gu, " ")
     .trim()
     .replaceAll("\\", "\\\\")
     .replaceAll("`", "\\`")
     .replaceAll("*", "\\*")
     .replaceAll("_", "\\_")
-    .replaceAll("[", "\\[")
-    .replaceAll("]", "\\]")
     .replaceAll("!", "\\!")
     .replaceAll("#", "\\#")
     .replaceAll("~", "\\~")
@@ -1190,11 +1274,11 @@ function publicProse(value: string): string {
 }
 
 function publicCode(value: string): string {
-  return redactPrivatePaths(redactSecrets(value));
+  return value;
 }
 
 function publicInlineCode(value: string): string {
-  return redactPrivatePaths(redactSecrets(value)).replace(/\s+/gu, " ").trim().replaceAll("`", "'");
+  return value.replace(/\s+/gu, " ").trim().replaceAll("`", "'");
 }
 
 function redactSecrets(value: string): string {
@@ -1205,6 +1289,19 @@ function redactSecrets(value: string): string {
 function containsUnredactedSecret(value: string): boolean {
   const normalizedPlaceholders = value.replaceAll("&lt;redacted&gt;", "<redacted>");
   return redactValue(normalizedPlaceholders) !== normalizedPlaceholders;
+}
+
+function containsUnredactedSecretInValue(value: unknown): boolean {
+  if (typeof value === "string") return containsUnredactedSecret(value);
+  if (Array.isArray(value)) return value.some(containsUnredactedSecretInValue);
+  return isRecord(value) && Object.values(value).some(containsUnredactedSecretInValue);
+}
+
+function redactSecretsInStringValues(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (Array.isArray(value)) return value.map(redactSecretsInStringValues);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry)]));
 }
 
 function containsPrivatePath(value: string): boolean {

@@ -69,11 +69,13 @@ function usage(
   nodeId: string,
   tokens: {
     input_tokens: number;
+    fresh_input_tokens?: number;
     output_tokens: number;
     cache_read_tokens?: number;
     cache_write_tokens?: number;
     reasoning_tokens?: number;
     model?: string;
+    attempt?: number;
   },
   runId = RUN_ID
 ): UsageLedgerEntry {
@@ -86,11 +88,12 @@ function usage(
       observedTimestampMs: Date.parse(FINISHED_AT),
       nodeId,
       iteration: 0,
-      attempt: 1,
+      attempt: tokens.attempt ?? 1,
       usage: {
         model: tokens.model ?? "gpt-test",
         agent: "agent-test",
         input_tokens: tokens.input_tokens,
+        ...(tokens.fresh_input_tokens === undefined ? {} : { fresh_input_tokens: tokens.fresh_input_tokens }),
         output_tokens: tokens.output_tokens,
         ...(tokens.cache_read_tokens === undefined ? {} : { cache_read_tokens: tokens.cache_read_tokens }),
         ...(tokens.cache_write_tokens === undefined ? {} : { cache_write_tokens: tokens.cache_write_tokens }),
@@ -110,7 +113,7 @@ function evidence(overrides: Partial<StatisticsEvidence> = {}): StatisticsEviden
       cache_read_tokens: 5,
       cache_write_tokens: 0,
       output_tokens: 2,
-      reasoning_tokens: 0
+      reasoning_tokens: 1
     })
   ];
   const usageEntries = Object.prototype.hasOwnProperty.call(overrides, "usage") ? overrides.usage : defaultUsage;
@@ -146,13 +149,13 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
   assert.equal(node?.attempt_count, 1);
   assert.equal(node?.outcome, "succeeded");
   assert.deepEqual(node?.usage, {
-    input_tokens: 10,
+    input_tokens: 5,
     cache_read_tokens: 5,
     cache_write_tokens: 0,
-    output_tokens: 2,
-    reasoning_tokens: 0,
-    total_tokens: 17,
-    estimated_spend_usd: 0.0000165,
+    output_tokens: 1,
+    reasoning_tokens: 1,
+    total_tokens: 12,
+    estimated_spend_usd: 0.0000115,
     usage_complete: true,
     pricing_complete: true,
     event_count: 1,
@@ -171,8 +174,93 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
     invalidated: 0,
     unknown: 0
   });
-  assert.equal(derived.value.totals.accounting_cumulative?.total_tokens, 17);
+  assert.deepEqual(derived.value.totals.accounting_cumulative, {
+    input_tokens: 5,
+    cache_read_tokens: 5,
+    cache_write_tokens: 0,
+    output_tokens: 1,
+    reasoning_tokens: 1,
+    total_tokens: 12,
+    estimated_spend_usd: 0.0000115,
+    usage_complete: true,
+    pricing_complete: true,
+    event_count: 1,
+    models: ["gpt-test"],
+    agents: ["agent-test"],
+    source_run_ids: []
+  });
   assert.deepEqual(derived.diagnostics, []);
+});
+
+test("stats counts only the latest cumulative usage snapshot for each attempt", () => {
+  const snapshots = [
+    usage(1, "node:node", {
+      input_tokens: 4,
+      cache_read_tokens: 1,
+      output_tokens: 1
+    }),
+    usage(2, "node:node", {
+      input_tokens: 10,
+      cache_read_tokens: 5,
+      output_tokens: 2
+    })
+  ];
+  const derived = deriveRunStatistics(evidence({ usage: snapshots }), Date.parse(FINISHED_AT));
+
+  assert.deepEqual(derived.value.nodes[0]?.usage, {
+    input_tokens: 5,
+    cache_read_tokens: 5,
+    cache_write_tokens: 0,
+    output_tokens: 2,
+    reasoning_tokens: 0,
+    total_tokens: 12,
+    estimated_spend_usd: 0.0000115,
+    usage_complete: true,
+    pricing_complete: true,
+    event_count: 1,
+    models: ["gpt-test"]
+  });
+  assert.equal(derived.value.totals.accounting_cumulative?.event_count, 1);
+});
+
+test("stats bounds contradictory provider breakdowns to the inclusive token total", () => {
+  const contradictory = usage(1, "node:node", {
+    input_tokens: 5,
+    fresh_input_tokens: 6,
+    cache_read_tokens: 0,
+    output_tokens: 1,
+    reasoning_tokens: 2
+  });
+  const derived = deriveRunStatistics(evidence({ usage: [contradictory] }), Date.parse(FINISHED_AT));
+
+  assert.deepEqual(derived.value.nodes[0]?.usage, {
+    input_tokens: 5,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 1,
+    total_tokens: 6,
+    estimated_spend_usd: null,
+    usage_complete: false,
+    pricing_complete: false,
+    event_count: 1,
+    models: ["gpt-test"]
+  });
+  assert.deepEqual(derived.value.totals.accounting_cumulative, {
+    input_tokens: 5,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 1,
+    total_tokens: 6,
+    estimated_spend_usd: null,
+    usage_complete: false,
+    pricing_complete: false,
+    event_count: 1,
+    models: ["gpt-test"],
+    agents: ["agent-test"],
+    source_run_ids: []
+  });
 });
 
 test("stats keeps a fan-out graph node canonical and counts retries within each strategy", () => {
@@ -222,7 +310,7 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
   assert.deepEqual(derived.value.nodes[0]?.usage?.models, ["gpt-other", "gpt-test"]);
 });
 
-test("stats keeps pricing completeness independent from unavailable cache-read usage", () => {
+test("stats v1 projects unavailable cost coverage through pricing_complete", () => {
   const value = deriveRunStatistics(
     evidence({ usage: [usage(1, "node:node", { input_tokens: 10, output_tokens: 2 })] }),
     Date.parse(FINISHED_AT)
@@ -232,10 +320,10 @@ test("stats keeps pricing completeness independent from unavailable cache-read u
   assert.equal(value?.cache_read_tokens, null);
   assert.equal(value?.cache_write_tokens, 0);
   assert.equal(value?.reasoning_tokens, 0);
-  assert.equal(value?.total_tokens, null);
+  assert.equal(value?.total_tokens, 12);
   assert.equal(value?.estimated_spend_usd, null);
   assert.equal(value?.usage_complete, false);
-  assert.equal(value?.pricing_complete, true);
+  assert.equal(value?.pricing_complete, false);
 });
 
 test("stats makes genuinely missing attempt evidence nullable and excludes backoff from current elapsed", () => {
@@ -491,10 +579,10 @@ test("stats never applies an inherited cumulative cache-read ratio to current-ru
   sourceEvidence.state.source_run_id = metadata.source_run_id;
   const value = deriveRunStatistics(sourceEvidence).value;
   assert.equal(value.nodes[0]?.usage?.cache_read_tokens, null);
-  assert.equal(value.nodes[0]?.usage?.total_tokens, null);
+  assert.equal(value.nodes[0]?.usage?.total_tokens, 12);
   assert.equal(value.nodes[0]?.usage?.estimated_spend_usd, null);
   assert.equal(value.nodes[0]?.usage?.usage_complete, false);
-  assert.equal(value.nodes[0]?.usage?.pricing_complete, true);
+  assert.equal(value.nodes[0]?.usage?.pricing_complete, false);
 });
 
 test("stats preserves sub-microdollar usage while aggregating many events", () => {
@@ -503,7 +591,8 @@ test("stats preserves sub-microdollar usage while aggregating many events", () =
       input_tokens: 1,
       cache_read_tokens: 0,
       output_tokens: 0,
-      model: "gpt-tiny"
+      model: "gpt-tiny",
+      attempt: index + 1
     })
   );
   const value = deriveRunStatistics(evidence({ usage: tinyUsage }), Date.parse(FINISHED_AT)).value;
@@ -765,7 +854,8 @@ const TEST_MODEL_PRICES = {
 } as const;
 
 function accountingForUsage(entries: readonly UsageLedgerEntry[]): NonNullable<RunMetadataDocument["accounting"]> {
-  const summary = accountingSummaryForUsage(entries);
+  const accountedEntries = latestUsageEntriesByAttempt(entries);
+  const summary = accountingSummaryForUsage(accountedEntries);
   const resolvedModels = [...new Set(entries.map((entry) => entry.usage.model))].sort();
   const attempts: Array<{ node_id: string; iteration: number; attempt: number }> = [];
   const attemptIdentities = new Set<string>();
@@ -785,7 +875,7 @@ function accountingForUsage(entries: readonly UsageLedgerEntry[]): NonNullable<R
   };
   const finalEntry = entries.at(-1)!;
   return {
-    schema_version: "ultrafuzz.accounting.v3",
+    schema_version: "ultrafuzz.accounting.v4",
     source: "usage-ledger",
     workflow_run_id: WORKFLOW_RUN_ID,
     current,
@@ -817,6 +907,18 @@ function accountingForUsage(entries: readonly UsageLedgerEntry[]): NonNullable<R
   };
 }
 
+function latestUsageEntriesByAttempt(entries: readonly UsageLedgerEntry[]): UsageLedgerEntry[] {
+  const latest = new Map<string, UsageLedgerEntry>();
+  for (const entry of entries) {
+    const identity = JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]);
+    const previous = latest.get(identity);
+    if (previous === undefined || entry.source_event_sequence >= previous.source_event_sequence) {
+      latest.set(identity, entry);
+    }
+  }
+  return [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence);
+}
+
 function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAccountingSummary {
   const componentCosts: RunAccountingSummary["component_costs_usd"] = {
     uncached_input: 0,
@@ -825,6 +927,7 @@ function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAcc
     output: 0,
     reasoning: 0
   };
+  let uncachedInputTokens = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheReadTokens = 0;
@@ -847,31 +950,58 @@ function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAcc
         }
       | undefined;
     const components = {
-      uncached_input: entry.usage.input_tokens,
+      uncached_input:
+        entry.usage.fresh_input_tokens ??
+        Math.max(
+          entry.usage.input_tokens - (entry.usage.cache_read_tokens ?? 0) - (entry.usage.cache_write_tokens ?? 0),
+          0
+        ),
       cache_read: entry.usage.cache_read_tokens ?? 0,
       cache_write: entry.usage.cache_write_tokens ?? 0,
       output: entry.usage.output_tokens,
       reasoning: entry.usage.reasoning_tokens ?? 0
     };
-    inputTokens += components.uncached_input;
+    uncachedInputTokens += components.uncached_input;
+    inputTokens += entry.usage.input_tokens;
     cacheReadTokens += components.cache_read;
     cacheWriteTokens += components.cache_write;
     outputTokens += components.output;
     reasoningTokens += components.reasoning;
-    const usageUnavailable = entry.usage.cache_read_tokens === undefined;
-    if (usageUnavailable) {
+    const cacheReadUnavailable =
+      entry.usage.cache_read_tokens === undefined &&
+      entry.usage.fresh_input_tokens === undefined &&
+      entry.usage.input_tokens + entry.usage.output_tokens > 0;
+    if (cacheReadUnavailable) {
       usageIncompleteReasons.push({
         code: "component-usage-unavailable",
         component: "cache_read",
         model: entry.usage.model
       });
     }
+    const inputBreakdownIncomplete =
+      components.uncached_input + components.cache_read + components.cache_write !== entry.usage.input_tokens;
+    if (inputBreakdownIncomplete) {
+      usageIncompleteReasons.push({
+        code: "component-breakdown-incomplete",
+        component: "uncached_input",
+        model: entry.usage.model
+      });
+    }
+    const reasoningBreakdownIncomplete = components.reasoning > components.output;
+    if (reasoningBreakdownIncomplete) {
+      usageIncompleteReasons.push({
+        code: "component-breakdown-incomplete",
+        component: "reasoning",
+        model: entry.usage.model
+      });
+    }
+    const usageUnavailable = cacheReadUnavailable || inputBreakdownIncomplete || reasoningBreakdownIncomplete;
     const rates = {
       uncached_input: pricing?.inputUsdPerMillion,
       cache_read: pricing?.cachedInputUsdPerMillion,
       cache_write: pricing?.cacheWriteUsdPerMillion,
       output: pricing?.outputUsdPerMillion,
-      reasoning: pricing?.outputUsdPerMillion
+      reasoning: 0
     };
     const eventCosts = { ...componentCosts };
     const pricingReasonsBefore = pricingIncompleteReasons.length;
@@ -892,7 +1022,7 @@ function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAcc
       eventCosts[component] = roundTestUsd((tokens * rate) / 1_000_000);
     }
     const eventPricingIncomplete = pricingIncompleteReasons.length > pricingReasonsBefore;
-    if (eventPricingIncomplete) unpricedEventCount += 1;
+    if (eventPricingIncomplete || usageUnavailable) unpricedEventCount += 1;
     else pricedEventCount += 1;
     if (!usageUnavailable) {
       for (const component of Object.keys(componentCosts) as Array<keyof typeof componentCosts>) {
@@ -904,10 +1034,15 @@ function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAcc
     }
   }
 
-  const totalTokens = inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens + reasoningTokens;
-  const partialPricing = pricingIncompleteReasons.length > 0;
+  const totalTokens = inputTokens + outputTokens;
+  usageIncompleteReasons.sort((left, right) =>
+    `${left.code}:${left.component ?? ""}:${left.model ?? ""}`.localeCompare(
+      `${right.code}:${right.component ?? ""}:${right.model ?? ""}`
+    )
+  );
+  const partialPricing = pricingIncompleteReasons.length > 0 || unpricedEventCount > 0;
   return {
-    uncached_input_tokens: inputTokens,
+    uncached_input_tokens: uncachedInputTokens,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     cache_read_tokens: cacheReadTokens,
@@ -922,7 +1057,7 @@ function accountingSummaryForUsage(entries: readonly UsageLedgerEntry[]): RunAcc
     component_costs_usd: componentCosts,
     usage_complete: usageIncompleteReasons.length === 0,
     usage_incomplete_reasons: usageIncompleteReasons,
-    pricing_complete: !partialPricing,
+    pricing_complete: pricingIncompleteReasons.length === 0,
     pricing_incomplete_reasons: pricingIncompleteReasons,
     partial_pricing: partialPricing,
     cache_read_pricing_estimated: false,

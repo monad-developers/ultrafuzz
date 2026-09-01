@@ -20,6 +20,8 @@ const OUTCOME_KEYS = new Set([
   "collection_status",
   "diagnostic_collection_status"
 ]);
+const STALLED_HISTORY_NOTICE =
+  "Published eval history does not advance until one complete Modal benchmark generation exists.";
 
 export function classifyModalBenchmarkPublication(controlRoot, resultsRoot, mode, eventName) {
   const control = existingDirectory(controlRoot, "benchmark control root");
@@ -73,15 +75,24 @@ export function classifyModalBenchmarkPublication(controlRoot, resultsRoot, mode
     if (bundlePresent) {
       throw new Error(`incomplete Modal benchmark outcome ${pair.pair} unexpectedly has a public result bundle`);
     }
-    incompletePairs.push(pair.pair);
+    incompletePairs.push({
+      pair: pair.pair,
+      terminal_status: outcome.terminal_status,
+      category: outcome.category,
+      diagnostic_collection_status: outcome.diagnostic_collection_status
+    });
   }
 
-  return incompletePairs.length === 0
-    ? { ready: true, reason: "every Modal benchmark pair has a collected public result bundle" }
-    : {
-        ready: false,
-        reason: `automatic smoke publication skipped after operational soft-fail: ${incompletePairs.join(", ")}`
-      };
+  if (incompletePairs.length === 0) {
+    return { ready: true, reason: "every Modal benchmark pair has a collected public result bundle" };
+  }
+  return {
+    ready: false,
+    reason: `automatic smoke publication skipped after operational soft-fail: ${incompletePairs
+      .map((entry) => entry.pair)
+      .join(", ")}`,
+    incompletePairs
+  };
 }
 
 function readOutcome(controlRoot, pairId) {
@@ -134,6 +145,34 @@ function regularFilePresent(root, filePath, label) {
   return true;
 }
 
+// A refused publication is a green no-op by design, so the refusal is only ever
+// visible through the annotation and job summary written here. Every value
+// reported is a closed enum or the schema-constrained pair identifier, so no
+// free-form text can forge a workflow command or leak into a public log.
+function announceSkippedPublication(result) {
+  const details = result.incompletePairs.map(
+    (entry) =>
+      `${entry.pair} (terminal_status=${entry.terminal_status}, category=${entry.category}, diagnostic_collection_status=${entry.diagnostic_collection_status})`
+  );
+  process.stdout.write(
+    `::warning::${result.reason}; incomplete pairs: ${details.join("; ")}; ${STALLED_HISTORY_NOTICE}\n`
+  );
+  appendStepSummary([
+    "## Eval history publication skipped (incomplete benchmark generation)",
+    "",
+    `- Refusal: ${result.reason}`,
+    ...details.map((detail) => `- Incomplete pair: ${detail}`),
+    "",
+    STALLED_HISTORY_NOTICE
+  ]);
+}
+
+function appendStepSummary(lines) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath === undefined || summaryPath === "") return;
+  fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`);
+}
+
 function main(args) {
   if (args.length !== 5) {
     throw new Error(
@@ -142,8 +181,11 @@ function main(args) {
   }
   const [controlRoot, resultsRoot, mode, eventName, outputPath] = args;
   const result = classifyModalBenchmarkPublication(controlRoot, resultsRoot, mode, eventName);
-  fs.appendFileSync(outputPath, `ready=${String(result.ready)}\n`);
+  const outputs = [`ready=${String(result.ready)}`];
+  if (!result.ready) outputs.push(`skip_reason=${result.reason}`);
+  fs.appendFileSync(outputPath, `${outputs.join("\n")}\n`);
   console.log(result.reason);
+  if (!result.ready) announceSkippedPublication(result);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

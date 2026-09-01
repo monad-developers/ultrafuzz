@@ -14,6 +14,8 @@ const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
 const KNOWN_BENCHMARK_MODES = ["smoke", "full", "threat-model"];
 const PUBLISHABLE_BENCHMARK_MODES = new Set(["smoke", "full"]);
 const REQUIRED_ARTIFACT_PREFIXES = ["modal-benchmark-launch", "modal-benchmark-control", "public-benchmark-results"];
+const STALLED_HISTORY_NOTICE =
+  "Published eval history does not advance until one complete Modal benchmark generation exists.";
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifactsValue, repository) {
   const event = record(eventValue);
@@ -31,10 +33,12 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifact
   ) {
     return ineligible("the completed run is not an eligible default-branch benchmark producer");
   }
-  const benchmarkMode = benchmarkModeFromArtifacts(artifactsValue, workflowRun);
-  if (!benchmarkMode) {
+  const lane = benchmarkLaneFromArtifacts(artifactsValue, workflowRun);
+  if (lane.mode === undefined) {
     return ineligible("the completed producer attempt does not have one unambiguous benchmark artifact lane");
   }
+  if (!lane.publishable) return nonLongitudinalLane(lane.mode);
+  const benchmarkMode = lane.mode;
   const jobs = jobRecords(jobsValue);
   const requiredJobs = {};
   for (const requiredJob of ["launch", "collect"]) {
@@ -62,10 +66,14 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, artifact
   };
 }
 
-function benchmarkModeFromArtifacts(value, workflowRun) {
+// An absent mode means the observed artifacts never named exactly one lane. A
+// present mode with `publishable: false` is a lane this workflow recognises and
+// deliberately excludes, which is not the same refusal and must not be reported
+// as one.
+function benchmarkLaneFromArtifacts(value, workflowRun) {
   const runId = positiveInteger(workflowRun.id);
   const runAttempt = positiveInteger(workflowRun.run_attempt);
-  if (!runId || !runAttempt) return undefined;
+  if (!runId || !runAttempt) return {};
 
   const artifacts = artifactRecords(value);
   const observedNames = new Set(artifacts.map((artifact) => string(artifact.name)));
@@ -75,12 +83,12 @@ function benchmarkModeFromArtifacts(value, workflowRun) {
   const observedModes = KNOWN_BENCHMARK_MODES.filter((mode) =>
     REQUIRED_ARTIFACT_PREFIXES.some((prefix) => observedNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
   );
-  if (observedModes.length !== 1) return undefined;
+  if (observedModes.length !== 1) return {};
   const mode = observedModes[0];
-  if (!PUBLISHABLE_BENCHMARK_MODES.has(mode)) return undefined;
+  if (!PUBLISHABLE_BENCHMARK_MODES.has(mode)) return { mode, publishable: false };
   return REQUIRED_ARTIFACT_PREFIXES.every((prefix) => availableNames.has(`${prefix}-${mode}-${runId}-${runAttempt}`))
-    ? mode
-    : undefined;
+    ? { mode, publishable: true }
+    : {};
 }
 
 function jobRecords(value) {
@@ -101,6 +109,14 @@ function artifactRecords(value) {
 
 function ineligible(reason) {
   return { eligible: false, reason };
+}
+
+function nonLongitudinalLane(mode) {
+  return {
+    eligible: false,
+    nonLongitudinalLane: mode,
+    reason: `the completed producer attempt ran the ${mode} lane, which by design never publishes a longitudinal eval history row`
+  };
 }
 
 function record(value) {
@@ -144,9 +160,45 @@ async function main(args) {
   const outputs = [`eligible=${String(result.eligible)}`];
   if (result.eligible) {
     outputs.push(`candidate_commit=${result.candidateCommit}`, `benchmark_mode=${result.benchmarkMode}`);
+  } else {
+    outputs.push(`skip_reason=${result.reason}`);
   }
   fs.appendFileSync(outputPath, `${outputs.join("\n")}\n`);
   console.log(result.reason);
+  if (!result.eligible) announceSkippedPublication(result);
+}
+
+// An unqualified producer skips the whole publication job, so the refusal is
+// only ever visible through the annotation and job summary written here. Every
+// reason is composed from literals in this module, never GitHub-owned text, so
+// no free-form value can forge a workflow command. A lane this workflow
+// deliberately excludes was never a history candidate, so it is not a refusal
+// and gets no annotation.
+function announceSkippedPublication(result) {
+  if (result.nonLongitudinalLane !== undefined) {
+    appendStepSummary([
+      `## Eval history publication not applicable (${result.nonLongitudinalLane} lane)`,
+      "",
+      `- Skipped: ${result.reason}`,
+      "",
+      "This producer attempt was never a longitudinal history candidate, so published history is unchanged."
+    ]);
+    return;
+  }
+  process.stdout.write(`::warning::eval history publication skipped: ${result.reason}; ${STALLED_HISTORY_NOTICE}\n`);
+  appendStepSummary([
+    "## Eval history publication skipped (unqualified producer attempt)",
+    "",
+    `- Refusal: ${result.reason}`,
+    "",
+    STALLED_HISTORY_NOTICE
+  ]);
+}
+
+function appendStepSummary(lines) {
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath === undefined || summaryPath === "") return;
+  fs.appendFileSync(summaryPath, `${lines.join("\n")}\n`);
 }
 
 async function fetchProducerArtifacts(eventValue, repository) {
