@@ -254,7 +254,9 @@ describe("public post-eval diagnostics", () => {
 
   it("reads a production-length workflow ID from the durable run summary", () => {
     const fixture = evalFixture();
-    const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-long-workflow-"));
+    const controlRoot = mkdtempSync(
+      path.join(fs.realpathSync(tmpdir()), "ultrafuzz-public-diagnostics-long-workflow-")
+    );
     const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
     const workflowId = `ultrafuzz-${"r".repeat(128)}`;
     fixture.runSummary.records[0]!.workflow_ids = [workflowId];
@@ -838,7 +840,7 @@ describe("public post-eval diagnostics", () => {
       matrix: fixture.matrix,
       runSummary: fixture.runSummary
     });
-    const outputRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-write-"));
+    const outputRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-public-diagnostics-write-"));
     const output = path.join(outputRoot, "public-eval-diagnostics.json");
 
     await writePublicEvalDiagnosticsAtomic(output, diagnostics);
@@ -850,7 +852,7 @@ describe("public post-eval diagnostics", () => {
 });
 
 function evalFixture() {
-  const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-public-diagnostics-"));
   const runRoot = path.join(root, "run");
   const reportPath = writeCurrentTerminalReport(runRoot);
   fs.writeFileSync(
@@ -942,7 +944,7 @@ function evalRunSummary(evalRunId: string, records: EvalRunRecord[]): EvalRunSum
 }
 
 function writeEvalRoot(fixture: ReturnType<typeof evalFixture>): { controlRoot: string; evalRoot: string } {
-  const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-durable-"));
+  const controlRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-public-diagnostics-durable-"));
   const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
   fs.mkdirSync(evalRoot, { recursive: true });
   fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);

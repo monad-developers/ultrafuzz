@@ -1,4 +1,4 @@
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -589,7 +589,7 @@ describe("Modal benchmark config", () => {
   });
 
   it("fingerprints exact configuration bytes and every model field", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-config-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-config-"));
     const file = path.join(root, "config.json");
     fs.writeFileSync(file, `${JSON.stringify(minimalConfig())}\n`);
     const first = fingerprintModalConfigFile(file);
@@ -601,7 +601,7 @@ describe("Modal benchmark config", () => {
   });
 
   it("strictly loads one registered v2 document without repair or conversion", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-config-strict-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-config-strict-"));
     const file = path.join(root, "config.json");
     const config = minimalConfig();
     fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);

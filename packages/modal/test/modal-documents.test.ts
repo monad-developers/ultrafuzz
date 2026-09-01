@@ -510,7 +510,7 @@ describe("Modal strict JSON contract foundation", () => {
   });
 
   it("parses and reads an over-64 MiB public bundle through the schema-specific boundary", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-public-bundle-boundary-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-public-bundle-boundary-"));
     try {
       const filePath = path.join(root, "public-results.json");
       const oversizedPath = path.join(root, "oversized-public-results.json");
@@ -663,7 +663,7 @@ describe("Modal strict JSON contract foundation", () => {
   });
 
   it("reads one immutable byte snapshot and atomically writes only validated documents", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-documents-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-documents-"));
     const filePath = path.join(root, "state", "lineage.json");
     const fixture = contractFixtures()[MODAL_WORKER_LINEAGE_SCHEMA_ID];
     const written = await writeModalDocumentAtomic(filePath, MODAL_WORKER_LINEAGE_SCHEMA_ID, fixture, {
@@ -686,7 +686,7 @@ describe("Modal strict JSON contract foundation", () => {
   });
 
   it("requires containment in a canonical trusted root and rejects symlinked parents and targets", async () => {
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), "modal-document-paths-"));
+    const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-document-paths-"));
     const root = path.join(base, "trusted");
     const outside = path.join(base, "outside");
     fs.mkdirSync(root, { mode: 0o700 });
@@ -742,7 +742,7 @@ describe("Modal strict JSON contract foundation", () => {
   });
 
   it("fails closed when the parent is swapped after the temp write and before descriptor-anchored rename", async () => {
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), "modal-document-race-"));
+    const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-document-race-"));
     const root = path.join(base, "trusted");
     const parent = path.join(root, "state");
     const displaced = path.join(base, "displaced-state");
@@ -777,7 +777,7 @@ describe("Modal strict JSON contract foundation", () => {
   });
 
   it("detects same-inode byte tampering in the rename window", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-document-byte-race-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-document-byte-race-"));
     const target = path.join(root, "lineage.json");
     const fixture = contractFixtures()[MODAL_WORKER_LINEAGE_SCHEMA_ID];
     const rename = fs.promises.rename.bind(fs.promises);

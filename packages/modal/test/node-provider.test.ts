@@ -102,7 +102,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     const client = fakeClient({ created: sandbox });
     await probeModalCommands(providerOptions(client), ["recon"]);
 
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-probe-path-"));
+    const cwd = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-probe-path-"));
     try {
       const relativeBin = path.join(cwd, "bin");
       fs.mkdirSync(relativeBin);
@@ -241,7 +241,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       vulnerabilityDatabaseReferenceAttemptId: "dependency-one"
     });
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-overlap-test-"));
+    const extracted = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-overlap-test-"));
     try {
       execFileSync("tar", ["-xzf", archive.path, "-C", extracted]);
       const catalogPath = fixture.input.vulnerability_database!.catalogPath;
@@ -304,7 +304,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     refreshDependencyVerificationAuthority(fixture, path.basename(dependency));
 
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-publications-test-"));
+    const extracted = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-publications-test-"));
     try {
       execFileSync("tar", ["-xzf", archive.path, "-C", extracted]);
       expect(fs.readFileSync(path.join(extracted, dependency, "declared.txt"), "utf8")).toContain(dependency);
@@ -715,7 +715,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     // is materialized. The run-owned ref remains the archive authority.
     execFileSync("git", ["reset", "--quiet", "--hard", fixture.parentCommit], { cwd: fixture.root });
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-recorded-source-"));
+    const extracted = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-recorded-source-"));
     try {
       await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "recorded source handoff test" });
       expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
@@ -752,7 +752,9 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
         ...(baseline === "recorded" ? { recordedSource: true } : {})
       });
       let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
-      const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-tracked-ignored-handoff-"));
+      const extracted = fs.mkdtempSync(
+        path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-tracked-ignored-handoff-")
+      );
       try {
         if (baseline === "recorded") {
           execFileSync("git", ["update-ref", fixture.input.source_ref!, fixture.governedCommit], {
@@ -793,7 +795,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
     fixture.input.source_revision = pinnedCommit;
     fixture.input.source_ref = "refs/heads/ultrafuzz-pinned";
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-pinned-handoff-"));
+    const extracted = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-pinned-handoff-"));
     try {
       await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "pinned handoff test" });
       expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(
@@ -861,7 +863,9 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       expect([...gzipHeader.subarray(4, 8)]).toEqual([0, 0, 0, 0]);
       expect(gzipHeader[9]).toBe(0xff);
 
-      const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-deterministic-handoff-"));
+      const extracted = fs.mkdtempSync(
+        path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-deterministic-handoff-")
+      );
       try {
         await extractSafeTarArchive(first.path, extracted, { gzip: true, label: "deterministic handoff test" });
         expect(execFileSync("git", ["status", "--porcelain=v1"], { cwd: extracted, encoding: "utf8" })).not.toContain(
@@ -890,7 +894,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
       fs.writeFileSync(path.join(fixture.root, ".smithers", "agents", `${helper}.ts`), `hostile ${helper}\n`);
     }
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-sealed-handoff-"));
+    const extracted = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-sealed-handoff-"));
     try {
       await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "sealed handoff test" });
       expect(fs.readFileSync(path.join(extracted, fixture.input.workflow_path), "utf8")).toBe(
@@ -982,7 +986,9 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   it("retains committed controller-generation authority in refreshed cloud handoffs", async () => {
     const fixture = createProjectFixture();
     const authority = installControllerGenerationFixture(fixture, 2);
-    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-refreshed-controller-handoff-"));
+    const extracted = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-refreshed-controller-handoff-")
+    );
     let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
     try {
       archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -1288,7 +1294,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("rejects link entries before extracting a cloud result archive", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-archive-link-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-archive-link-"));
     const source = path.join(root, "source");
     const destination = path.join(root, "destination");
     const outside = path.join(root, "outside");
@@ -1310,7 +1316,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("refuses to publish a symlinked artifact root from a worker", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-symlink-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-worker-symlink-"));
     try {
       const outside = path.join(root, "outside");
       const source = path.join(root, "artifact-root");
@@ -1327,7 +1333,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("refuses to publish through a symlinked worker destination", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-destination-symlink-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-worker-destination-symlink-"));
     try {
       const source = path.join(root, "source");
       const outside = path.join(root, "outside");
@@ -1345,7 +1351,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("stages only marker-verified cloud artifact publications", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-verified-publication-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-worker-verified-publication-"));
     try {
       const source = path.join(root, "artifacts");
       const destination = path.join(root, "published");
@@ -1396,7 +1402,7 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("does not promote workspace-mirrored output into the canonical cloud artifact root", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-no-mirror-promotion-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-worker-no-mirror-promotion-"));
     try {
       const canonical = path.join(root, "artifacts", "attempt-one");
       const mirror = path.join(root, "workspace", "artifacts", "attempt-one");
@@ -1524,7 +1530,9 @@ describe("Modal node sandbox provider", { timeout: 30_000 }, () => {
   });
 
   it("retries only the exhausted generated preparation task selected by the dispatch", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-preparation-retry-test-"));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-inner-workflow-preparation-retry-test-")
+    );
     const logPath = path.join(root, "commands.jsonl");
     const retryEnvironmentPath = path.join(root, "retry-environment.json");
     const fixture = createProjectFixture({
@@ -1571,7 +1579,9 @@ if (args[0] === "retry-task") {
   });
 
   it("keeps an exhausted task outside the selected task family terminal", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-unrelated-retry-test-"));
+    const root = fs.mkdtempSync(
+      path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-inner-workflow-unrelated-retry-test-")
+    );
     const logPath = path.join(root, "commands.jsonl");
     const fixture = createProjectFixture({
       smithersCli: `#!/usr/bin/env node
@@ -1601,7 +1611,7 @@ if (args[0] === "why") {
   });
 
   it("falls back to a fresh inner workflow only when no persisted run exists", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-test-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-inner-workflow-test-"));
     const logPath = path.join(root, "commands.jsonl");
     const environmentPath = path.join(root, "environment.json");
     const ambientMarker = path.join(root, "ambient-package-ran");
@@ -1708,7 +1718,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
   });
 
   it("keeps Smithers on descriptor-anchored controls and rejects a canonical generation swap", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-swap-test-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-inner-workflow-swap-test-"));
     const observationPath = path.join(root, "observation.json");
     const fixture = createProjectFixture({
       smithersCli: `#!/usr/bin/env node
@@ -3759,7 +3769,7 @@ function createProjectFixture(
     recordedSource?: boolean;
   } = {}
 ) {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-provider-test-"));
+  const temporaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-provider-test-"));
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
@@ -4898,7 +4908,7 @@ function createResultArchive(
     });
   const logicalDispatchFingerprint = fingerprintForProjectArchive(projectArchiveSha256);
   let currentLogicalDispatchFingerprint = logicalDispatchFingerprint;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
   if (options.includeArtifactsDirectory !== false) {

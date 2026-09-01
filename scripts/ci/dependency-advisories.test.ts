@@ -215,7 +215,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("builds an exact approved-registry request from installed production dependencies", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-inventory-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-inventory-"));
     try {
       const zodPath = writeInstalledPackage(inventoryRoot, "zod", { name: "zod", version: "4.4.3" });
       const nestedPath = writeInstalledPackage(inventoryRoot, "nested", { name: "nested", version: "1.2.3" });
@@ -303,7 +303,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("includes exact manifests from the pinned npm bundle", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-bundle-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-bundle-"));
     try {
       const npmPath = writeInstalledPackage(inventoryRoot, "npm", {
         name: "npm",
@@ -347,7 +347,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("fails closed when bundle metadata or manifests are incomplete", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-bundle-invalid-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-bundle-invalid-"));
     try {
       const npmPath = writeInstalledPackage(inventoryRoot, "npm", {
         name: "npm",
@@ -389,7 +389,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("rejects scoped bundle aliases that do not match manifest names", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-bundle-alias-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-bundle-alias-"));
     try {
       const npmPath = writeInstalledPackage(inventoryRoot, "npm", {
         name: "npm",
@@ -408,7 +408,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("rejects required transitive dependencies that exist only outside the bundle", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-bundle-closure-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-bundle-closure-"));
     try {
       const npmPath = writeInstalledPackage(inventoryRoot, "npm", {
         name: "npm",
@@ -432,7 +432,7 @@ describe("production dependency advisory policy", () => {
   });
 
   it("keeps absent platform packages in the request without inventing bundled files", () => {
-    const inventoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-advisory-optional-"));
+    const inventoryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-advisory-optional-"));
     try {
       const missingPath = path.join(inventoryRoot, "node_modules", "platform-package");
       const descriptor = {

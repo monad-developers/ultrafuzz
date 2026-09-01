@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -764,7 +764,7 @@ config_dir = "kimi-code"
   });
 
   it("loads ultrafuzz.toml from disk", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ultrafuzz-config-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "ultrafuzz-config-"));
     await mkdir(root, { recursive: true });
     await writeFile(
       join(root, "ultrafuzz.toml"),

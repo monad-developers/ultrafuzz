@@ -185,7 +185,7 @@ describe("persistent Modal worker lineage", () => {
   });
 
   it("keeps the lineage lock inside a writable data root behind a canonicalized mount", async () => {
-    const mount = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-mount-"));
+    const mount = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-worker-mount-"));
     roots.push(mount);
     const resolvedMount = path.join(mount, "resolved-volume");
     const lexicalMount = path.join(mount, "data");
@@ -374,7 +374,7 @@ function lineageFixture(): {
   lineagePath: string;
   generationFloorPath: string;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-worker-lineage-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-worker-lineage-"));
   roots.push(root);
   return lineageFixtureAt(root);
 }

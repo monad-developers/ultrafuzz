@@ -26,7 +26,7 @@ interface TestRecord {
 }
 
 function tempJournal(): { root: string; journal: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-strict-jsonl-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-strict-jsonl-"));
   return { root, journal: path.join(root, "ledger.jsonl") };
 }
 

@@ -113,7 +113,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "kimi.tsx": {
-    classifiedSourceSha256: "81e269cf085a7f6cba68beba2f9647031a39b0ab9e88d605c55997ae6a6a5469",
+    classifiedSourceSha256: "1551f53080570f026aa8f6f60d533ef51abe8bac453eb0610e0ef11a9f974530",
     responsibilities: [
       "argv-construction",
       "filesystem-walking",
@@ -210,7 +210,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 1_600,
     maxSyntaxNodes: 9_250,
     purpose: "adapter",
-    sourceSha256: "81e269cf085a7f6cba68beba2f9647031a39b0ab9e88d605c55997ae6a6a5469"
+    sourceSha256: "1551f53080570f026aa8f6f60d533ef51abe8bac453eb0610e0ef11a9f974530"
   },
   "opencode.tsx": {
     maxLines: 150,

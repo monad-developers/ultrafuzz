@@ -29,7 +29,7 @@ import { currentArtifactBinding, currentRunState } from "./current-artifact-fixt
 describe("terminal artifact-gate recovery", () => {
   for (const artifactState of ["schema-invalid", "missing"] as const) {
     it(`settles ${artifactState} output after one attempt without recovery or byte changes`, async () => {
-      const root = fs.mkdtempSync(path.join(tmpdir(), `ultrafuzz-terminal-${artifactState}-`));
+      const root = fs.mkdtempSync(path.join(fs.realpathSync(tmpdir()), `ultrafuzz-terminal-${artifactState}-`));
       const layout = createRunLayout({ projectRoot: root, runId: `run-${artifactState}` });
       const artifactDir = getNodeArtifactDir(layout, "task-one", { create: true });
       const notesPath = path.join(artifactDir, "notes.md");

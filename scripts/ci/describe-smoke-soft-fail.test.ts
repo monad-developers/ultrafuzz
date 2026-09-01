@@ -54,7 +54,7 @@ describe("smoke soft-fail description", () => {
   });
 
   it("reports only an absent diagnostics file as unknown", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "smoke-soft-fail-"));
     roots.push(root);
     expect(describeSmokeSoftFail(path.join(root, "absent.json"))).toEqual({
       validated: false,
@@ -82,7 +82,7 @@ describe("smoke soft-fail description", () => {
     const oversizedPath = writeBytes(Buffer.alloc(1024 * 1024 + 1, 0x20));
     expect(() => describeSmokeSoftFail(oversizedPath)).toThrow(/public eval diagnostics are present but invalid/u);
 
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "smoke-soft-fail-"));
     roots.push(root);
     expect(() => describeSmokeSoftFail(root)).toThrow(/public eval diagnostics are present but invalid/u);
 
@@ -298,7 +298,7 @@ function write(document: unknown): string {
 }
 
 function writeBytes(contents: string | Buffer): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "smoke-soft-fail-"));
   roots.push(root);
   const diagnosticsPath = path.join(root, "public-eval-diagnostics.json");
   fs.writeFileSync(diagnosticsPath, contents);
@@ -306,7 +306,7 @@ function writeBytes(contents: string | Buffer): string {
 }
 
 function writeOutcome(document: Record<string, unknown>): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-soft-fail-outcome-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "smoke-soft-fail-outcome-"));
   roots.push(root);
   const outcomePath = path.join(root, "outcome.json");
   fs.writeFileSync(outcomePath, `${JSON.stringify(document)}\n`);

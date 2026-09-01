@@ -237,7 +237,7 @@ describe("trusted Modal benchmark publication qualification", () => {
   });
 
   it("strictly parses GitHub-owned event and REST envelopes before projecting fields", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-github-envelope-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-github-envelope-"));
     try {
       const eventPath = path.join(root, "event.json");
       const jobsPath = path.join(root, "jobs.json");

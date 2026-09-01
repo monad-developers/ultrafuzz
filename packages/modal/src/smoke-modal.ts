@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { access, lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -238,7 +239,7 @@ async function stageAuth(sandbox: Sandbox, auth: SubscriptionAuthCopy, candidate
 }
 
 async function stageAuthDirectory(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry, pending: string): Promise<void> {
-  const temporary = await mkdtemp(path.join(tmpdir(), "ultrafuzz-modal-smoke-auth-"));
+  const temporary = await mkdtemp(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-smoke-auth-"));
   const archivePath = path.join(temporary, "auth-entry.tgz");
   const remoteArchive = `${entry.destination}.tgz-${randomUUID()}`;
   try {
@@ -294,7 +295,7 @@ async function prepareApiKeySmokeAuth(
   if (apiKey === undefined || apiKey.trim() === "") {
     throw new Error(`${provider === "deepseek" ? "DeepSeek" : "OpenRouter"} smoke requires ${environmentName}`);
   }
-  const temporary = await mkdtemp(path.join(tmpdir(), `ultrafuzz-modal-smoke-${provider}-auth-`));
+  const temporary = await mkdtemp(path.join(fs.realpathSync(tmpdir()), `ultrafuzz-modal-smoke-${provider}-auth-`));
   const source = path.join(temporary, "api-key");
   try {
     await writeFile(source, apiKey, { encoding: "utf8", mode: 0o600 });

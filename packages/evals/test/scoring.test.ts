@@ -1,4 +1,4 @@
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -192,7 +192,7 @@ async function scoreInMemory(
 ) {
   const { record, ...scoreInput } = input;
   if (record !== undefined) return scoreFindingsAgainstGroundTruth({ ...scoreInput, record });
-  const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-scoring-inline-run-"));
+  const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-scoring-inline-run-"));
   const runId = path.basename(runRoot).slice(0, 100);
   writeCurrentRunEvidence({
     runRoot,
@@ -214,7 +214,7 @@ function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
   groundTruthPath: string;
   outputContents: Map<string, string>;
 } {
-  const base = mkdtempSync(path.join(tmpdir(), "ufz-scoring-transaction-"));
+  const base = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-scoring-transaction-"));
   const projectRoot = path.join(base, "project");
   initializeTestGitRepository(projectRoot);
   const groundTruthRoot = path.join(base, "ground-truth");
@@ -1349,7 +1349,7 @@ describe("deterministic scorer math", () => {
   });
 
   it("bounds ground-truth files when loading them for scoring", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ufz-ground-truth-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-ground-truth-"));
     const groundTruthPath = path.join(root, "large.yml");
     fs.writeFileSync(groundTruthPath, Buffer.alloc(1024 * 1024 + 1, 0x20));
     expect(() => loadGroundTruth(groundTruthPath, root)).toThrowError(
@@ -1661,7 +1661,7 @@ describe("deterministic scorer math", () => {
   });
 
   it("scores empty reports as all-missed", async () => {
-    const suite = testSuite(mkdtempSync(path.join(tmpdir(), "ufz-gt-")));
+    const suite = testSuite(mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-gt-")));
     const row = testRow(suite);
     const scored = await scoreInMemory({ suite, row, findings: [], bugs: BUGS });
     expect(scored.rowScore).toMatchObject({ precision: 0, recall: 0, f1_score: 0, missed: 2 });

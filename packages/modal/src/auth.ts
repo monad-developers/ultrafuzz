@@ -1,7 +1,7 @@
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, cp, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import lockfile from "proper-lockfile";
@@ -64,7 +64,7 @@ export async function prepareSubscriptionAuthCopy(
 
   const source = direct.source;
   const credentialPath = await refreshKimiSubscriptionAuth(source, model.model, env, options);
-  const snapshot = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-kimi-auth-"));
+  const snapshot = await mkdtemp(path.join(await realpath(os.tmpdir()), "ultrafuzz-kimi-auth-"));
   try {
     const config = kimiConfig(await readFile(path.join(source, "config.toml"), "utf8"));
     const token = readKimiOAuthToken(credentialPath);

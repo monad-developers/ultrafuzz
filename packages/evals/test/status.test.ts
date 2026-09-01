@@ -1618,7 +1618,7 @@ function evalFixture(matrix: unknown[]): {
   matrixPath: string;
   evalRunId: string;
 } {
-  const base = mkdtempSync(path.join(tmpdir(), "ufz-eval-status-"));
+  const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-status-"));
   const project = path.join(base, "project");
   const evalRunId = EVAL_RUN_ID;
   const root = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);

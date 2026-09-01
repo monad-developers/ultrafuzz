@@ -120,7 +120,7 @@ function writeSingleEvalSources(
 
 describe("privacy-safe eval analysis bundles", () => {
   it("derives portable aggregates and remains valid after source evidence is removed", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-"));
     const evalRunId = "eval-synthetic-analysis";
     const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
     const firstRun = path.join(projectRoot, "synthetic-runs", "run-one");
@@ -296,7 +296,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects missing required current analysis sources", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-omissions-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-omissions-"));
     const evalRunId = "eval-synthetic-omissions";
     const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
     fs.mkdirSync(evalRoot, { recursive: true });
@@ -307,7 +307,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects score summaries that do not exactly join current run records", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-empty-score-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-empty-score-"));
     const evalRunId = "eval-synthetic-empty-score";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const summary = JSON.parse(fs.readFileSync(fixture.summaryPath, "utf8")) as Record<string, unknown> & {
@@ -336,7 +336,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects incomplete accounting instead of defaulting missing fields", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-score-accounting-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-score-accounting-"));
     const evalRunId = "eval-synthetic-score-accounting";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const runPath = path.join(fixture.runRoot, "run.json");
@@ -451,7 +451,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("preserves valid source timestamps and rejects reversed launcher evidence without repair", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-timestamps-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-timestamps-"));
     const evalRunId = "eval-synthetic-timestamps";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const statePath = path.join(fixture.runRoot, "state.json");

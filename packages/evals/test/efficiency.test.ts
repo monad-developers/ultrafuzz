@@ -1,4 +1,4 @@
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -94,7 +94,7 @@ function writeTerminalRun(runRoot: string, accountingOverrides: Record<string, u
 
 describe("terminal eval efficiency", () => {
   it("derives terminal timestamps, non-overlapping active time, usage, and cost from current durable evidence", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-"));
     writeTerminalRun(runRoot);
 
     const summary = summarizeEvalTerminal(terminalRecord(runRoot));
@@ -124,7 +124,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("ignores never-executed and aggregate nodes when calculating active time", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-nonexecuting-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-nonexecuting-"));
     const state = terminalState();
     state.nodes.waiting = {
       node_id: "waiting",
@@ -161,7 +161,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("marks final-attempt timing as partial when a node retried", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-retried-node-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-retried-node-"));
     const state = terminalState();
     state.nodes.first!.retry_count = 1;
     writeCurrentRunEvidence({
@@ -183,7 +183,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("rejects malformed current state instead of downgrading it to unavailable", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-invalid-state-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-invalid-state-"));
     writeTerminalRun(runRoot);
     const statePath = path.join(runRoot, "state.json");
     const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
@@ -203,7 +203,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("keeps explicit incomplete usage and pricing as partial current evidence", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-partial-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-partial-"));
     writeTerminalRun(runRoot, {
       total_tokens: 123,
       estimated_spend_usd: 0.4,
@@ -222,7 +222,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("keeps complete pricing independent from explicitly incomplete usage", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-priced-retry-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-priced-retry-"));
     writeTerminalRun(runRoot, {
       total_tokens: 123,
       estimated_spend_usd: 0.4,
@@ -256,7 +256,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("publishes independent cache-aware accounting components", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-components-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-components-"));
     writeTerminalRun(runRoot, {
       input_tokens: 120_000,
       output_tokens: 8_000,
@@ -279,7 +279,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("rejects missing or malformed structural accounting evidence", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-accounting-invalid-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-accounting-invalid-"));
     writeTerminalRun(runRoot);
     fs.rmSync(path.join(runRoot, "run.json"));
     expect(() => summarizeEvalTerminal(terminalRecord(runRoot))).toThrow(/failed to read durable JSON/u);
@@ -293,7 +293,7 @@ describe("terminal eval efficiency", () => {
   });
 
   it("rejects nonterminal workflow state instead of publishing terminal completeness", () => {
-    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-running-"));
+    const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-running-"));
     const state = currentRunState({ runId: "generated-run", status: "running", nodes: { first: {} } });
     writeCurrentRunEvidence({
       runRoot,

@@ -16,7 +16,7 @@ interface Capture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-lifecycle-cli-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-lifecycle-cli-"));
 }
 
 function shellQuote(value: string): string {

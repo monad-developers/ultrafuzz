@@ -665,7 +665,7 @@ function currentAccountingSummary(): RunAccountingSummary {
 }
 
 async function temporaryRoot(): Promise<string> {
-  return mkdtemp(path.join(tmpdir(), "ultrafuzz-worker-result-"));
+  return mkdtemp(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-worker-result-"));
 }
 
 function readContract(filePath: string): WorkerResultContract {

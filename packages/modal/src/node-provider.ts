@@ -873,7 +873,7 @@ export async function createModalNodeHandoffArchive(
       );
   assertChildPath(runRoot, artifactDir, "artifact directory");
   assertChildPath(runRoot, workspaceDir, "workspace directory");
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
+  const temporaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-handoff-"));
   fs.chmodSync(temporaryRoot, 0o700);
   const staging = path.join(temporaryRoot, "project");
   const archive = path.join(temporaryRoot, "project.tgz");
@@ -1585,7 +1585,7 @@ async function publishModalNodeResult(
   const root = fs.realpathSync(path.resolve(projectRoot));
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
   const workspaceDir = checkedPath(root, input.workspace_dir, "workspace directory", false);
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-"));
+  const temporaryRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-node-result-"));
   fs.chmodSync(temporaryRoot, 0o700);
   try {
     const archive = path.join(temporaryRoot, "result.tgz");

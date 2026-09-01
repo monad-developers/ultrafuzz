@@ -385,7 +385,7 @@ function createKimiApiKeyConfigDir(model: string | undefined, reasoningEffort: K
   }
   const k3 = alias === "kimi-k3";
   const upstreamModel = k3 ? "k3" : alias;
-  const isolated = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-"));
+  const isolated = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-kimi-"));
   const lines = [
     `default_model = ${tomlString(alias)}`,
     "",
@@ -487,7 +487,7 @@ function copyKimiSeedFile(source: string, target: string, name: (typeof KIMI_CON
 }
 
 function createKimiBuildOnlyConfigDir(source: string): string {
-  const buildOnly = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-build-"));
+  const buildOnly = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-kimi-build-"));
   try {
     for (const name of KIMI_CONFIG_SEED_FILES) copyKimiSeedFile(source, buildOnly, name);
     return buildOnly;
@@ -623,7 +623,7 @@ function ensureKimiOAuthLockTargets(source: string, target: string): void {
 }
 
 function isolateKimiConfigDir(source: string, authHome = source): string {
-  const isolated = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-"));
+  const isolated = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-kimi-"));
   try {
     for (const name of KIMI_CONFIG_SEED_FILES) {
       const entry = path.join(source, name);

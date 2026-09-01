@@ -488,7 +488,7 @@ function adapterFixture(): Omit<Parameters<typeof runEvmbenchAdapter>[0], "execu
 }
 
 function temporaryDirectory(): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-evmbench-adapter-"));
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-evmbench-adapter-"));
   temporaryDirectories.push(directory);
   return directory;
 }

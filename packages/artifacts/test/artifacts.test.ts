@@ -47,7 +47,7 @@ import {
 } from "../src/index.js";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-artifacts-"));
 }
 
 function writeGeneratedTestManifest(
@@ -906,7 +906,7 @@ test("event indexes encode long IDs in a collision-free hash namespace", () => {
 });
 
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-events-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-artifacts-events-"));
   const layout = createRunLayout({ outputRoot: path.join(root, "runs"), runId: "run-redaction" });
   appendEvent(layout, {
     eventType: "workflow-submit-failed",

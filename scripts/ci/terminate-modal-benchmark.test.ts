@@ -42,7 +42,7 @@ describe("exact Modal benchmark termination", () => {
 });
 
 function terminationFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-termination-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-termination-"));
   roots.push(root);
   const plan = path.join(root, "plan");
   const state = path.join(root, "state");

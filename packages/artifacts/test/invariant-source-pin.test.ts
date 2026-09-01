@@ -13,7 +13,7 @@ import {
 } from "../src/index.js";
 
 function pinnedWorkspace(): string {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-pin-")));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-source-pin-")));
   const git = (args: string[]): void => {
     execFileSync("git", args, { cwd: root, stdio: ["ignore", "ignore", "ignore"] });
   };
@@ -34,7 +34,7 @@ function read(root: string, relativePath: string): Buffer {
 test("the pinned source ref probe reports only a repository carrying the pinned branch", () => {
   assert.equal(INVARIANT_PINNED_SOURCE_REF, `refs/heads/${INVARIANT_PINNED_SOURCE_BRANCH}`);
   const pinned = pinnedWorkspace();
-  const plain = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-unpinned-")));
+  const plain = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-source-unpinned-")));
   try {
     assert.equal(invariantPinnedSourceRefExists(pinned), true);
     assert.equal(invariantPinnedSourceRefExists(plain), false);

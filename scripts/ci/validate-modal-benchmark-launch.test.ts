@@ -148,7 +148,7 @@ describe("Modal benchmark launch guardrails", () => {
   });
 
   it("rejects whitespace-padded Kimi reasoning during CI model matrix preparation", () => {
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-kimi-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-launch-kimi-"));
     roots.push(output);
 
     let failure: unknown;
@@ -212,7 +212,7 @@ interface LaunchConfig {
 
 function preparedSmokeFixture(env: Record<string, string> = {}) {
   const workspace = path.resolve(".");
-  const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-"));
+  const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-launch-"));
   roots.push(output);
   execFileSync(
     process.execPath,

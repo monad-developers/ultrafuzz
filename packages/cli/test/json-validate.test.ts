@@ -119,7 +119,7 @@ test("json validate emits the exact shared preflight success envelope", async ()
 });
 
 test("json validate shared success envelope admits an unregistered schema with a null ID", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-external-success-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-external-success-"));
   try {
     const schema = path.join(temporary, "external.schema.json");
     const artifact = path.join(temporary, "artifact.json");
@@ -154,7 +154,7 @@ test("json validate shared success envelope admits an unregistered schema with a
 });
 
 test("json validate rejects rounded numeric lexemes before schema validation", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-lossless-number-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-lossless-number-"));
   try {
     const schema = path.join(temporary, "integer.schema.json");
     const artifact = path.join(temporary, "artifact.json");
@@ -184,7 +184,7 @@ test("json validate rejects rounded numeric lexemes before schema validation", a
 });
 
 test("json validate exposes the strict validator through the primary CLI", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-cli-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-cli-"));
   try {
     const schema = path.join(artifactSchemaDirectory(), "properties.schema.json");
     const valid = path.join(temporary, "valid.json");
@@ -251,7 +251,7 @@ test("json validate exposes the strict validator through the primary CLI", async
 });
 
 test("json validate diagnostics project exactly through the production planned-output host gate", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-cli-host-parity-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-cli-host-parity-"));
   try {
     const output = boundHostOutput("results/malformed-findings.json", "ultrafuzz/findings@2", true);
     const node = hostFixtureNode("malformed-findings-producer", [output]);
@@ -344,7 +344,7 @@ test("json validate diagnostics project exactly through the production planned-o
 });
 
 test("json validate passes shape before the sealed host rejects a discovered cross-artifact mismatch", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-semantic-boundary-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-semantic-boundary-"));
   try {
     const catalogJsonOutput = boundHostOutput("handoff/canonical-properties.json", "ultrafuzz/properties@2", true);
     const catalogMarkdownOutput = boundHostOutput("handoff/canonical-properties.md", "ultrafuzz/nonempty-markdown@1");
@@ -468,7 +468,7 @@ test("json validate passes shape before the sealed host rejects a discovered cro
 });
 
 test("json validate enforces generated-test bundle array and support coupling without rewriting", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-generated-tests-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-generated-tests-"));
   try {
     const schema = path.join(artifactSchemaDirectory(), "generated-tests.schema.json");
     const generatedEntry = {
@@ -570,7 +570,7 @@ test("json validate enforces generated-test bundle array and support coupling wi
 });
 
 test("a producer can correct an invalid draft in-session and rerun to exit zero", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-correction-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-correction-"));
   try {
     const schema = path.join(artifactSchemaDirectory(), "properties.schema.json");
     const artifact = path.join(temporary, "producer-artifact.json");
@@ -592,7 +592,7 @@ test("a producer can correct an invalid draft in-session and rerun to exit zero"
 });
 
 test("json validate recognizes the pinned topology schema and rejects a same-name mutation", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-topology-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-topology-"));
   try {
     const schema = path.join(topologySchemaDirectory(), "expanded-graph.schema.json");
     const graph = path.join(temporary, "expanded-graph.json");
@@ -628,7 +628,7 @@ test("json validate recognizes the pinned topology schema and rejects a same-nam
 });
 
 test("json validate recognizes the pinned resolved-config schema and reports the config bundle", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-config-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-config-"));
   try {
     const schema = path.join(configSchemaDirectory(), "resolved-config.schema.json");
     const configPath = path.join(temporary, "resolved-config.json");
@@ -663,7 +663,7 @@ test("json validate recognizes the pinned resolved-config schema and reports the
 });
 
 test("json validate recognizes the pinned eval schema and reports the owning eval bundle", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-eval-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-eval-"));
   try {
     const schema = path.join(evalSchemaDirectory(), "eval-publication-state.schema.json");
     const publicationState = path.join(temporary, "publication-state.json");
@@ -722,7 +722,7 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
 });
 
 test("json validate recognizes the pinned EVMBench schema and reports the owning bundle", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-evmbench-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-evmbench-"));
   try {
     const schema = path.join(evmbenchSchemaDirectory(), "evmbench-profile.schema.json");
     const profile = path.join(temporary, "profile.json");
@@ -767,7 +767,7 @@ test("json validate recognizes the pinned EVMBench schema and reports the owning
 });
 
 test("json validate recognizes the pinned Modal schema and reports the owning Modal bundle", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-modal-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-modal-"));
   try {
     const schema = path.join(modalSchemaDirectory(), "modal-node-input.schema.json");
     const nodeInput = path.join(temporary, "node-input.json");
@@ -818,7 +818,7 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
 });
 
 test("json validate admits an over-64 MiB public bundle while ordinary and external schemas stay capped", async (t) => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-public-bundle-budget-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-public-bundle-budget-"));
   t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
   const publicSchema = path.join(modalSchemaDirectory(), "modal-public-benchmark-bundle.schema.json");
   const ordinarySchema = path.join(artifactSchemaDirectory(), "properties.schema.json");
@@ -859,7 +859,7 @@ test("json validate admits an over-64 MiB public bundle while ordinary and exter
 });
 
 test("json validate recognizes the pinned reference cache schema and its owning bundle", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-json-reference-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-reference-"));
   try {
     const schema = path.join(referenceSchemaDirectory(), "reference-cache-manifest.schema.json");
     const manifest = path.join(temporary, "reference-cache-manifest.json");

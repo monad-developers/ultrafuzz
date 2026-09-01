@@ -948,7 +948,7 @@ function addDuplicateBundleKey(
 }
 
 function temporaryRoot(prefix: string): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), prefix));
   roots.push(root);
   return root;
 }

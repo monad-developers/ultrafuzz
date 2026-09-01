@@ -65,7 +65,7 @@ describe("audit profile catalog", () => {
   });
 
   it("fails closed when the catalog omits the reserved default profile", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-audit-profiles-"));
     const catalogPath = path.join(directory, "audit-profiles.yml");
     try {
       fs.writeFileSync(
@@ -101,7 +101,7 @@ profiles:
       diagnostic: /profiles\.default\.topology_path: default audit profile must use the project topology/u
     }
   ])("fails closed when the reserved default profile declares $label", ({ profile, diagnostic }) => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-audit-profiles-"));
     const catalogPath = path.join(directory, "audit-profiles.yml");
     try {
       fs.writeFileSync(
@@ -122,7 +122,7 @@ ${profile}
   });
 
   it("rejects the legacy top-level default pointer", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-audit-profiles-"));
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-audit-profiles-"));
     const catalogPath = path.join(directory, "audit-profiles.yml");
     try {
       fs.writeFileSync(

@@ -330,7 +330,7 @@ test("event-record v2 types every array item and rejects old or generic envelope
 });
 
 test("event replay and append reject schema-invalid present records without changing their bytes", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-event-v2-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-event-v2-"));
   const layout = createRunLayout({ projectRoot: root, runId: "run-1" });
   const oldRecord = {
     ...validVariantFixtures["workflow-synced"],

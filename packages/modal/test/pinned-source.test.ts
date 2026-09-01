@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("pinned benchmark source", () => {
   it("rejects duplicate keys in a persisted pinned-source proof", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-proof-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-pinned-proof-"));
     roots.push(root);
     const proofPath = path.join(root, "proof.json");
     const commit = "a".repeat(40);
@@ -439,7 +439,7 @@ describe("pinned benchmark source", () => {
 });
 
 function sourceRepository(): { root: string; repository: string; pinned: string; later: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-source-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-pinned-source-"));
   roots.push(root);
   const repository = path.join(root, "source");
   fs.mkdirSync(repository);
@@ -459,7 +459,7 @@ function sourceRepository(): { root: string; repository: string; pinned: string;
 
 /** A benchmark that ships a reference solution beside the protocol under test. */
 function referenceSourceRepository(): { root: string; repository: string; pinned: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-holdout-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-pinned-holdout-"));
   roots.push(root);
   const repository = path.join(root, "source");
   fs.mkdirSync(path.join(repository, "src"), { recursive: true });
@@ -485,7 +485,7 @@ function submoduleSourceRepository(): {
   submodule: string;
   nestedCommit: string;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-submodule-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-pinned-submodule-"));
   roots.push(root);
   const nested = path.join(root, "nested");
   fs.mkdirSync(nested);

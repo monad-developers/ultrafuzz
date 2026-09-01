@@ -27,7 +27,7 @@ interface BenchmarkTarget {
 describe("public Modal benchmark configuration", () => {
   it("creates the exact three-target OpenAI smoke benchmark with bounded row and control budgets", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-ci-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-ci-"));
     execFileSync(
       process.execPath,
       [
@@ -132,7 +132,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates the complete four-provider EVMBench full mode from the checked-in cohort", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-full-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-full-"));
     execFileSync(
       process.execPath,
       [
@@ -331,7 +331,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("accepts safe per-provider full model overrides and derives deterministic unique slugs", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-overrides-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-overrides-"));
     execFileSync(
       process.execPath,
       [
@@ -379,7 +379,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("accepts a safe OpenAI smoke model override while keeping high strategy reasoning fixed", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-smoke-override-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-smoke-override-"));
     execFileSync(
       process.execPath,
       [
@@ -427,7 +427,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates an explicit DeepSeek V4 smoke benchmark with max reasoning", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-deepseek-smoke-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-deepseek-smoke-"));
     execFileSync(
       process.execPath,
       [
@@ -473,7 +473,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates an OpenRouter smoke benchmark and preserves a punctuation-rich catalogue ID", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-openrouter-smoke-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-openrouter-smoke-"));
     const model = "~anthropic/claude-sonnet-latest:free+preview@2026";
     execFileSync(
       process.execPath,
@@ -557,7 +557,7 @@ describe("public Modal benchmark configuration", () => {
       }
     ];
     for (const [index, testCase] of cases.entries()) {
-      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-"));
+      const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-"));
       const result = spawnSync(
         process.execPath,
         [
@@ -589,7 +589,7 @@ describe("public Modal benchmark configuration", () => {
         message: /duplicate/iu
       }
     ].entries()) {
-      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-json-"));
+      const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-json-"));
       const result = spawnSync(
         process.execPath,
         [

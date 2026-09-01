@@ -148,7 +148,7 @@ function syntheticPayloads(): {
 }
 
 test("analysis bundles are deterministic, self-contained, and checksum verified", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-bundle-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-bundle-"));
   const first = path.join(root, "first");
   const second = path.join(root, "second");
   const payloads = syntheticPayloads();
@@ -209,7 +209,7 @@ test("analysis bundles are deterministic, self-contained, and checksum verified"
 });
 
 test("analysis bundle policy rejects non-allowlisted payload fields before creating output", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-policy-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-policy-"));
   const output = path.join(root, "bundle");
   const { metrics } = syntheticPayloads();
 
@@ -255,7 +255,7 @@ test("analysis bundle policy rejects non-allowlisted payload fields before creat
 });
 
 test("analysis recovery summaries reconcile active and terminal classifications exactly", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-recovery-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-recovery-"));
   const { recovery } = syntheticPayloads();
 
   assert.throws(
@@ -292,7 +292,7 @@ test("analysis recovery summaries reconcile active and terminal classifications 
 });
 
 test("analysis bundle validation rejects modified payload bytes", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-integrity-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-integrity-"));
   const output = path.join(root, "bundle");
   const { terminal } = syntheticPayloads();
   writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
@@ -302,7 +302,7 @@ test("analysis bundle validation rejects modified payload bytes", () => {
 });
 
 test("analysis bundle validation rejects duplicate manifest keys without changing bytes", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-duplicate-key-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-duplicate-key-"));
   const output = path.join(root, "bundle");
   writeAnalysisBundle({ outputDir: output, payloads: {} });
   const manifestPath = path.join(output, ANALYSIS_BUNDLE_MANIFEST_FILE);
@@ -319,7 +319,7 @@ test("analysis bundle validation rejects duplicate manifest keys without changin
 });
 
 test("analysis bundle validation rejects duplicate payload keys without changing bytes", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-payload-duplicate-key-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-payload-duplicate-key-"));
   const output = path.join(root, "bundle");
   const { terminal } = syntheticPayloads();
   writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
@@ -338,7 +338,7 @@ test("analysis bundle validation rejects duplicate payload keys without changing
 });
 
 test("analysis bundle reads reject historical versions for every payload without conversion", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-payload-current-only-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-payload-current-only-"));
   const payloads = syntheticPayloads();
   const files = [
     "data/terminal-status.json",
@@ -373,7 +373,7 @@ test("analysis bundle reads reject historical versions for every payload without
 });
 
 test("analysis bundle validation rejects a data kind that is neither included nor explicitly omitted", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-current-only-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-current-only-"));
   const output = path.join(root, "bundle");
   writeAnalysisBundle({ outputDir: output, payloads: {} });
 
@@ -402,7 +402,7 @@ test("analysis bundle validation rejects a data kind that is neither included no
 });
 
 test("analysis bundle validation rejects a data kind that is both included and explicitly omitted", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-double-coverage-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-double-coverage-"));
   const output = path.join(root, "bundle");
   const payloads = syntheticPayloads();
   writeAnalysisBundle({
@@ -435,7 +435,7 @@ test("analysis bundle validation rejects a data kind that is both included and e
 });
 
 test("analysis bundle validation rejects directories outside the fixed layout", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-tree-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-tree-"));
   const output = path.join(root, "bundle");
   const { terminal } = syntheticPayloads();
   writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
@@ -445,7 +445,7 @@ test("analysis bundle validation rejects directories outside the fixed layout", 
 });
 
 test("analysis bundle replacement refuses unrelated output directories", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-replace-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-replace-"));
   const output = path.join(root, "existing");
   fs.mkdirSync(output);
   fs.writeFileSync(path.join(output, "owned.txt"), "keep\n", "utf8");
