@@ -8231,7 +8231,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 });
 
 test("final-report Run summary uses full, partial, and unavailable workflow metrics without undercounting lineage", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-workflow-metrics-"));
+  const root = temporaryRoot("ultrafuzz-final-report-workflow-metrics-");
   try {
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
     const workspacePath = path.join(runRoot, "workspaces", "final-report");

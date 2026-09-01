@@ -1700,7 +1700,6 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-commands.log");
   const statusOverride = path.join(project, "fake-smithers-status-override.json");
@@ -1973,7 +1972,6 @@ function fakeLifecycleSmithersEnv(
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
   registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const resumeInspectPath = path.join(project, "fake-smithers-resume-inspect.json");
   const inspectCountPath = path.join(project, "fake-smithers-inspect-count");
@@ -14502,6 +14500,27 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
     // The Linux spelling of that root is unchanged; only darwin resolves elsewhere.
     assert.match(startupAnchor.patched, /: "\/proc\/self\/fd\/3";/u);
+    assert.match(
+      startupAnchor.patched,
+      /process\.platform !== "darwin"\) return realpathSync\(left\) === realpathSync\(right\)/u
+    );
+    assert.match(startupAnchor.patched, /a\.isFile\(\) && b\.isFile\(\) && a\.dev === b\.dev && a\.ino === b\.ino/u);
+    for (const id of [
+      "workflow_path_persistence",
+      "process_snapshot_anchor",
+      "replay_workflow_path",
+      "fork_workflow_path",
+      "engine_workflow_path"
+    ] as const) {
+      const identity = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
+      assert.ok(identity);
+      assert.match(identity.patched, /ultrafuzzSameWorkflowFile/u, `${id} bypasses verified workflow identity`);
+    }
+    const engineIdentityImport = SMITHERS_COMPATIBILITY_PATCHES.find(
+      (patch) => patch.id === "engine_workflow_path_import"
+    );
+    assert.ok(engineIdentityImport);
+    assert.match(engineIdentityImport.patched, /rmSync, statSync, writeFileSync/u);
     const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
     assert.ok(relaunch);
     assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
@@ -14593,7 +14612,6 @@ test("compatibility patcher rewrites every described workaround", async () => {
 
     const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
     assert.notEqual(mutatedNested, nested);
-    assert.equal(mutatedNested.includes(processAnchor.patch.patched), true);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
@@ -23472,7 +23490,7 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(processAnchorPatch);
   const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
-  assert.equal(resumeTransferPatch.predecessors?.length, 1);
+  assert.equal(resumeTransferPatch.predecessors?.length, 2);
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
@@ -23643,7 +23661,6 @@ test("controller refresh authenticates newly required sealed runner patches and 
     '"--mutated-outer-startup-flag"'
   );
   assert.notEqual(mutatedNestedProcessAnchorPatch, nestedProcessAnchorPatch);
-  assert.equal(mutatedNestedProcessAnchorPatch.includes(processAnchorPatch.patched), true);
   const mutatedNestedCliSource = {
     ...syntheticPreFix,
     executionFiles: syntheticPreFix.executionFiles.map((file) => {

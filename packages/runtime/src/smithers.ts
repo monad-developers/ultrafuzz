@@ -390,12 +390,20 @@ const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH = `import {
 } from "node:fs";`;
 const SMITHERS_CLI_WORKFLOW_PATH_SOURCE = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
     const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_WORKFLOW_FILE_IDENTITY_HELPER = `// Keep Linux's canonical-path comparison unchanged. Darwin volfs paths cannot
+// be realpathed, so compare the verified file identities they name instead.
+const ultrafuzzSameWorkflowFile = (left, right) => {
+  if (process.platform !== "darwin") return realpathSync(left) === realpathSync(right);
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino;
+};`;
 const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
     const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
     const persistedWorkflowPath = persistedWorkflowPathValue
       ? resolve(process.cwd(), persistedWorkflowPathValue)
       : resolvedWorkflowPath;
-    if (realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)) {
+    if (!ultrafuzzSameWorkflowFile(resolvedWorkflowPath, persistedWorkflowPath)) {
       return fail({
         code: "INVALID_WORKFLOW_PATH",
         message: "Controller workflow path does not match its persisted workflow path",
@@ -612,15 +620,32 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
 }
 
 anchorUltrafuzzExecutionSnapshotForProcess();`;
-const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH.replace(
-  '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
-  '"--no-addons", "--preserve-symlinks-main"'
-);
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH =
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH.replace(
+    '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
+    '"--no-addons", "--preserve-symlinks-main"'
+  );
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH =
   SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH.replace(
     SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
-    SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH
+    SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH
   );
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH.replace(
+  `const ultrafuzzSameDirectory = (left, right) => {
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+};`,
+  `const ultrafuzzSameDirectory = (left, right) => {
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+};
+${SMITHERS_WORKFLOW_FILE_IDENTITY_HELPER}`
+).replace(
+  "if (loadedWorkflow && realpathSync(loadedWorkflow) !== realpathSync(persistedWorkflowPath)) {",
+  "if (loadedWorkflow && !ultrafuzzSameWorkflowFile(loadedWorkflow, persistedWorkflowPath)) {"
+);
 const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `            launchPostFailureAutopsy({
               failedRunId: result.runId,
               workflowPath: resolvedWorkflowPath,
@@ -639,7 +664,7 @@ const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH = `          const resolvedReplayW
           const persistedReplayWorkflowPath = persistedReplayWorkflowPathValue
             ? resolve(persistedReplayWorkflowPathValue)
             : resolvedReplayWorkflowPath;
-          if (realpathSync(resolvedReplayWorkflowPath) !== realpathSync(persistedReplayWorkflowPath)) {
+          if (!ultrafuzzSameWorkflowFile(resolvedReplayWorkflowPath, persistedReplayWorkflowPath)) {
             return fail({
               code: "INVALID_WORKFLOW_PATH",
               message: "Controller replay workflow path does not match its persisted workflow path",
@@ -662,7 +687,7 @@ const SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH = `          const resolvedForkWorkf
           const persistedForkWorkflowPath = persistedForkWorkflowPathValue
             ? resolve(persistedForkWorkflowPathValue)
             : resolvedForkWorkflowPath;
-          if (realpathSync(resolvedForkWorkflowPath) !== realpathSync(persistedForkWorkflowPath)) {
+          if (!ultrafuzzSameWorkflowFile(resolvedForkWorkflowPath, persistedForkWorkflowPath)) {
             return fail({
               code: "INVALID_WORKFLOW_PATH",
               message: "Controller fork workflow path does not match its persisted workflow path",
@@ -698,9 +723,14 @@ const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH = `          runConfigJson,
         );`;
 const SMITHERS_ENGINE_DESCRIPTOR_EXECUTION_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath ?? opts.workflowPath,";
 const SMITHERS_ENGINE_DESCRIPTOR_DRIVER_PATH_ANCHOR = "workflowPath: resolvedWorkflowPath,";
+const SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_SOURCE =
+  'import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";';
+const SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_PATCH =
+  'import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";';
 const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
   "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
-const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;
+const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  ${SMITHERS_WORKFLOW_FILE_IDENTITY_HELPER.replaceAll("\n", "\n  ")}
+  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;
   const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
   const persistedWorkflowPath = opts.workflowPath
     ? resolve(persistedWorkflowPathValue || opts.workflowPath)
@@ -708,7 +738,7 @@ const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const resolvedWorkflowPath = opts
   if (
     resolvedWorkflowPath &&
     persistedWorkflowPath &&
-    realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)
+    !ultrafuzzSameWorkflowFile(resolvedWorkflowPath, persistedWorkflowPath)
   ) {
     throw new SmithersError(
       "INVALID_WORKFLOW_PATH",
@@ -2374,6 +2404,7 @@ export type SmithersCompatibilityPatchId =
   | "fork_workflow_path"
   | "fork_workflow_metadata"
   | "lifecycle_trace_summary"
+  | "engine_workflow_path_import"
   | "engine_workflow_path"
   | "engine_durability_metadata"
   | "engine_run_metadata"
@@ -2787,6 +2818,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_SOURCE,
     patched: SMITHERS_CLI_LIFECYCLE_TRACE_SUMMARY_PATCH,
     upstreamAbsent: ['"AgentTraceSummary"']
+  },
+  {
+    id: "engine_workflow_path_import",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_SOURCE,
+    patched: SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_PATCH,
+    upstreamAbsent: []
   },
   {
     id: "engine_workflow_path",
@@ -6789,6 +6828,11 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
 
   let engineContents = fs.readFileSync(engineSource, "utf8");
   for (const entry of [
+    [
+      SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_SOURCE,
+      SMITHERS_ENGINE_WORKFLOW_PATH_IMPORT_PATCH,
+      "workflow path file identity import"
+    ],
     [SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_WORKFLOW_PATH_PATCH, "anchored workflow paths"],
     [
       SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
