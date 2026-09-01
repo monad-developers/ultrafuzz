@@ -1333,16 +1333,25 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(psData.runs[0]?.ultrafuzz_run_id, "cli-run");
   assert.equal("smithers" in (psBody.data as Record<string, unknown>), false);
 
+  const runMetadataPath = path.join(runData.run_root, "run.json");
+  const runMetadata = readRunMetadataDocument(runMetadataPath, runData.run_id);
+  writeRunMetadataDocument(runMetadataPath, {
+    ...runMetadata,
+    source_revision: "a".repeat(40),
+    source_ref: `refs/ultrafuzz/runs/${runData.run_id}/source`
+  });
   const inspect = await cli(project, ["inspect", runData.run_id, "--json"], env);
   assert.equal(inspect.code, 0, `${inspect.stderr}\n${inspect.stdout}`);
   const inspectBody = parseJson(inspect);
   assertNoSmithersSurface(inspectBody);
   const inspectData = inspectBody.data as {
-    metadata: { workflow: { run_id: string } };
+    metadata: { workflow: { run_id: string }; source_ref?: string; source_revision?: string };
     state: { provenance?: { workflow?: Record<string, unknown> } };
     workflow: { run_id: string; inspect: { ok: boolean }; events: { ok: boolean } };
   };
   assert.equal(inspectData.metadata.workflow.run_id, "ultrafuzz-cli-run");
+  assert.equal(inspectData.metadata.source_ref, undefined);
+  assert.equal(inspectData.metadata.source_revision, undefined);
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
