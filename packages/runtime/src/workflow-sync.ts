@@ -70,6 +70,7 @@ import {
   type RunLayout,
   type RunMetadataAccounting,
   type RunMetadataDocument,
+  type RunState,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -101,7 +102,7 @@ import {
   type SyncRunInput,
   type SyncRunValue
 } from "./types.js";
-import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, runtimeFailure, runtimeResult, stableJson } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
 import {
   parseCurrentSmithersInspect,
@@ -1035,6 +1036,10 @@ export async function synchronizeLinkedWorkflowRun(
   if (!loaded.ok) {
     return { ok: false, diagnostics: loaded.diagnostics };
   }
+  const authenticatedTaskVariants = authenticatedTaskManifestVariants({
+    executionFiles: evidence.verifiedControl.executionFiles,
+    controllerTasks: evidence.controllerSnapshot.contents.tasks
+  });
   const previousControlState = structuredClone(readRunState(layout));
   const forbiddenSecretValues = sensitiveEnvironmentValues(
     input.env ?? process.env,
@@ -1166,6 +1171,7 @@ export async function synchronizeLinkedWorkflowRun(
       inspect,
       events,
       attemptAuthorities,
+      authenticatedTaskVariants,
       forbiddenSecretValues,
       control
     });
@@ -3621,6 +3627,7 @@ async function synchronizeTasks(input: {
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
   attemptAuthorities: SmithersNodeAttemptAuthorities;
+  authenticatedTaskVariants: ReadonlyMap<string, readonly StoredWorkflowTask[]>;
   forbiddenSecretValues: readonly string[];
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -3746,6 +3753,7 @@ async function synchronizeTasks(input: {
         currentStatus: patchStatus,
         finalization,
         attemptAuthorities: input.attemptAuthorities,
+        authenticatedTaskVariants: input.authenticatedTaskVariants.get(task.attemptId) ?? [],
         forbiddenSecretValues: input.forbiddenSecretValues
       });
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
@@ -4744,6 +4752,7 @@ function appendTerminalTaskAttempts(input: {
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
   attemptAuthorities: SmithersNodeAttemptAuthorities;
+  authenticatedTaskVariants: readonly StoredWorkflowTask[];
   forbiddenSecretValues: readonly string[];
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const allExisting = replayNodeAttempts(input.layout).entries;
@@ -4761,14 +4770,12 @@ function appendTerminalTaskAttempts(input: {
       )
   });
   const state = readRunState(input.layout);
-  const inputManifestDigest = manifestDigest(
-    JSON.stringify({
-      graph_fingerprint: state.graph_fingerprint,
-      config_fingerprint: state.config_fingerprint,
-      strategy_attempt_id: input.task.attemptId,
-      workflow_task_id: input.task.smithersNodeId,
-      metadata: input.task.metadata
-    })
+  const inputManifestDocument = attemptInputManifestDocument(state, input.task);
+  const inputManifestDigest = manifestDigest(stableJson(inputManifestDocument));
+  const authenticatedLegacyInputManifestDigests = new Set(
+    input.authenticatedTaskVariants
+      .filter((task) => isDeepStrictEqual(task, input.task))
+      .map((task) => manifestDigest(JSON.stringify(attemptInputManifestDocument(state, task))))
   );
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
@@ -4862,9 +4869,24 @@ function appendTerminalTaskAttempts(input: {
     }
     const recordedEntry = existingByIdentity.get(identity);
     if (recordedEntry !== undefined) {
-      const reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, candidate, {
+      let reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, candidate, {
         failureMessage
       });
+      // Older ledgers hashed JSON.stringify output, so semantically identical task manifests could
+      // produce a different digest after a controller refresh reordered object keys. Preserve such
+      // rows only when their exact legacy digest re-derives from an authenticated task snapshot and
+      // the complete task remains semantically identical. The normal immutable-entry reconciler
+      // still has to approve every other field.
+      if (
+        reconciled === undefined &&
+        authenticatedLegacyInputManifestDigests.has(recordedEntry.manifests.input_sha256)
+      ) {
+        const legacyCandidate = structuredClone(candidate);
+        legacyCandidate.manifests.input_sha256 = recordedEntry.manifests.input_sha256;
+        reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, legacyCandidate, {
+          failureMessage
+        });
+      }
       if (reconciled === undefined) {
         throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
       }
@@ -4911,6 +4933,16 @@ function appendTerminalTaskAttempts(input: {
     appended: results.some((result) => result.appended),
     executedAttempts: allEntries.filter((entry) => entry.reuse.status === "executed").length,
     currentAttemptExecuted
+  };
+}
+
+function attemptInputManifestDocument(state: RunState, task: StoredWorkflowTask): Record<string, unknown> {
+  return {
+    graph_fingerprint: state.graph_fingerprint,
+    config_fingerprint: state.config_fingerprint,
+    strategy_attempt_id: task.attemptId,
+    workflow_task_id: task.smithersNodeId,
+    metadata: task.metadata
   };
 }
 
@@ -6194,6 +6226,23 @@ function loadSynchronizationInputs(
     return { ok: false, diagnostics };
   }
   return { ok: true, graph, tasks };
+}
+
+function authenticatedTaskManifestVariants(input: {
+  executionFiles: readonly { snapshotPath: string; contents: Buffer }[];
+  controllerTasks: Buffer;
+}): ReadonlyMap<string, readonly StoredWorkflowTask[]> {
+  const sealedTasks = input.executionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
+  if (sealedTasks === undefined) throw new Error("sealed workflow is missing its task manifest");
+  const variants = new Map<string, StoredWorkflowTask[]>();
+  for (const contents of [sealedTasks.contents, input.controllerTasks]) {
+    for (const task of parseSmithersTaskManifestBytes(contents).tasks) {
+      const tasks = variants.get(task.attemptId) ?? [];
+      tasks.push(task);
+      variants.set(task.attemptId, tasks);
+    }
+  }
+  return variants;
 }
 
 async function checkedRunLayout(

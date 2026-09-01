@@ -35,6 +35,7 @@ import {
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -21297,6 +21298,35 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   const firstSync = await syncRun({ projectRoot: project, runId, env: failedEnv });
   assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
 
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, JSON.stringify(evidence.ok ? [] : evidence.diagnostics));
+  if (!evidence.ok) return;
+  const sealedTasks = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/tasks.json"
+  );
+  assert.ok(sealedTasks);
+  const sealedTask = parseSmithersTaskManifestBytes(sealedTasks.contents).tasks.find(
+    (task) => task.attemptId === "project-discovery"
+  );
+  assert.ok(sealedTask);
+  const state = readRunState(layoutForRunRoot(run.value!.run_root, runId));
+  const legacyInputDigest = manifestDigest(
+    JSON.stringify({
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      strategy_attempt_id: sealedTask.attemptId,
+      workflow_task_id: sealedTask.smithersNodeId,
+      metadata: sealedTask.metadata
+    })
+  );
+  const legacyEntry = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as {
+    manifests: { input_sha256: string };
+  };
+  assert.notEqual(legacyEntry.manifests.input_sha256, legacyInputDigest);
+  legacyEntry.manifests.input_sha256 = legacyInputDigest;
+  fs.writeFileSync(ledgerPath, `${JSON.stringify(legacyEntry)}\n`, "utf8");
+
   const attemptDetail = (state: "in-progress" | "failed") => ({
     node: { nodeId, lastAttempt: 1 },
     attempts: [
@@ -21326,8 +21356,8 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   const interruptedSync = await syncRun({ projectRoot: project, runId, env: activeEnv });
   assert.equal(interruptedSync.ok, true, JSON.stringify(interruptedSync.diagnostics));
   assert.equal(interruptedSync.value?.status, "running");
-  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
   const recordedBeforeCurrentTerminal = fs.readFileSync(ledgerPath, "utf8");
+  assert.equal(JSON.parse(recordedBeforeCurrentTerminal).manifests.input_sha256, legacyInputDigest);
 
   const currentEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
