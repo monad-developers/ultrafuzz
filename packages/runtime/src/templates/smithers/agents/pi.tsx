@@ -77,6 +77,7 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       args = args.slice(0, -1);
       stdin = params.prompt;
     }
+    const childPath = command.env?.PATH ?? process.env.PATH;
     return {
       ...command,
       args,
@@ -86,7 +87,14 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       // select an earlier tool payload instead of the terminal interpreter
       // answer. Its `stream-json` format gives the interpreter precedence.
       outputFormat: command.outputFormat === "json" ? "stream-json" : command.outputFormat,
-      env: workflowControlChildEnvironment({ ...this.opts.env, ...command.env })
+      // Native continuations receive a target-filtered command PATH from the
+      // Ultrafuzz controller. Preserve it across the generated child boundary
+      // so Smithers can preflight an external Pi CLI after detaching.
+      env: workflowControlChildEnvironment({
+        ...this.opts.env,
+        ...command.env,
+        ...(childPath === undefined ? {} : { PATH: childPath })
+      })
     };
   }
 

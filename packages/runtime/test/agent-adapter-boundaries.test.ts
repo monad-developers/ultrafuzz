@@ -142,10 +142,11 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "da8b929f54f4db4af3c973b73699ab69d189556726b9aeb34e8b31aaaf6211c4",
+    classifiedSourceSha256: "0b940b0427ef4fa7977d6eb4370b553b99d980f4a362a711eec8b0660464e769",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/1006",
+      "https://github.com/monad-developers/ultrafuzz/issues/1035",
       "https://github.com/monad-developers/ultrafuzz/issues/895",
       "https://github.com/smithersai/smithers/issues/1629"
     ]
@@ -228,11 +229,12 @@ const sourcePolicies: Record<string, SourcePolicy> = {
   },
   "pi.tsx": {
     // Raised for cumulative per-response usage, session-aware progress, and
-    // adapter-recorded cost preservation in addition to terminal mapping.
+    // adapter-recorded cost preservation in addition to terminal mapping. The
+    // detached child boundary also retains the controller-filtered Pi PATH.
     maxLines: 475,
-    maxSyntaxNodes: 2_625,
+    maxSyntaxNodes: 2_640,
     purpose: "adapter",
-    sourceSha256: "da8b929f54f4db4af3c973b73699ab69d189556726b9aeb34e8b31aaaf6211c4"
+    sourceSha256: "0b940b0427ef4fa7977d6eb4370b553b99d980f4a362a711eec8b0660464e769"
   },
   "provider-home.tsx": {
     maxLines: 75,

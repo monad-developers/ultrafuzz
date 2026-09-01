@@ -6902,10 +6902,13 @@ bunAdapterTest(
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       openRouter: process.env.OPENROUTER_API_KEY,
-      named: process.env.PI_OPENROUTER_KEY
+      named: process.env.PI_OPENROUTER_KEY,
+      path: process.env.PATH
     };
+    const externalPiBin = temporaryRoot("ultrafuzz-external-pi-bin-");
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.OPENROUTER_API_KEY = credential;
+    process.env.PATH = [externalPiBin, previous.path].filter(Boolean).join(path.delimiter);
     delete process.env.PI_OPENROUTER_KEY;
     try {
       const configDir = path.resolve(process.cwd(), ".ultrafuzz/pi-coding-agent");
@@ -6974,6 +6977,8 @@ bunAdapterTest(
       assert.equal(agent.opts.env.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
+      assert.equal(command.env?.PATH, process.env.PATH);
+      assert.equal(command.env?.PATH?.split(path.delimiter)[0], externalPiBin);
 
       // Pi names its NDJSON CLI mode `json`, but Smithers must treat that
       // transcript as `stream-json` so the interpreter's terminal answer wins
@@ -7349,6 +7354,8 @@ bunAdapterTest(
       else process.env.OPENROUTER_API_KEY = previous.openRouter;
       if (previous.named === undefined) delete process.env.PI_OPENROUTER_KEY;
       else process.env.PI_OPENROUTER_KEY = previous.named;
+      if (previous.path === undefined) delete process.env.PATH;
+      else process.env.PATH = previous.path;
     }
   }
 );
