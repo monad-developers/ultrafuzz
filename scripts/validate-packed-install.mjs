@@ -87,6 +87,7 @@ try {
       ...[...tarballs].map(([name, tarballPath]) => `  "${name}": "file:${tarballPath.split(path.sep).join("/")}"`),
       "allowBuilds:",
       "  cbor-extract: true",
+      "  msgpackr-extract: false",
       "  protobufjs: true",
       ""
     ].join("\n"),
