@@ -2073,7 +2073,7 @@ function currentIssue(): Record<string, unknown> {
     lifecycle: {
       dedupe_key: "current-finding",
       source_artifacts: [],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       canonical_severity: "Medium"
     }
   };
