@@ -13,11 +13,12 @@ import {
   type StrictJsonlCodec
 } from "./strict-jsonl.js";
 
-export const USAGE_LEDGER_SCHEMA_VERSION = "ultrafuzz.usage-ledger.v1" as const;
-export const USAGE_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:usage-ledger:1" as const;
+export const USAGE_LEDGER_SCHEMA_VERSION = "ultrafuzz.usage-ledger.v2" as const;
+export const USAGE_LEDGER_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:usage-ledger:2" as const;
 
 export const USAGE_FIELDS = [
   "input_tokens",
+  "fresh_input_tokens",
   "output_tokens",
   "cache_read_tokens",
   "cache_write_tokens",
@@ -29,10 +30,12 @@ export interface NormalizedUsage {
   model: string;
   agent: string;
   input_tokens: number;
+  fresh_input_tokens?: number;
   output_tokens: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
   reasoning_tokens?: number;
+  recorded_cost_usd?: number;
 }
 
 /**
@@ -85,6 +88,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const dimensionId = z.string().min(1).max(DIMENSION_ID_MAX_LENGTH).regex(DIMENSION_ID_PATTERN);
 const count = z.number().int().nonnegative().safe();
 const usageCounter = z.number().int().nonnegative().safe();
+const usageCost = z.number().nonnegative();
 
 export const normalizedUsageSchema = z.strictObject({
   model: z
@@ -100,14 +104,15 @@ export const normalizedUsageSchema = z.strictObject({
       message: "Agent must not exceed 1024 Unicode code points"
     }),
   input_tokens: usageCounter,
+  fresh_input_tokens: usageCounter.optional(),
   output_tokens: usageCounter,
   cache_read_tokens: usageCounter.optional(),
   cache_write_tokens: usageCounter.optional(),
-  reasoning_tokens: usageCounter.optional()
+  reasoning_tokens: usageCounter.optional(),
+  recorded_cost_usd: usageCost.optional()
 });
 
-export const usageLedgerEntrySchema = z.strictObject({
-  schema_version: z.literal(USAGE_LEDGER_SCHEMA_VERSION),
+const usageLedgerEntryFields = {
   run_id: z.string().regex(SAFE_ID_PATTERN),
   workflow_run_id: dimensionId,
   control_generation: z.string().regex(SHA256_PATTERN),
@@ -115,7 +120,12 @@ export const usageLedgerEntrySchema = z.strictObject({
   observed_timestamp_ms: count,
   node_id: dimensionId,
   iteration: count,
-  attempt: count,
+  attempt: count
+};
+
+export const usageLedgerEntrySchema = z.strictObject({
+  schema_version: z.literal(USAGE_LEDGER_SCHEMA_VERSION),
+  ...usageLedgerEntryFields,
   usage: normalizedUsageSchema
 });
 
@@ -163,10 +173,12 @@ export const usageLedgerJsonSchema = {
         model: { type: "string", minLength: 1, maxLength: 1_024 },
         agent: { type: "string", minLength: 1, maxLength: 1_024 },
         input_tokens: countJsonSchema,
+        fresh_input_tokens: countJsonSchema,
         output_tokens: countJsonSchema,
         cache_read_tokens: countJsonSchema,
         cache_write_tokens: countJsonSchema,
-        reasoning_tokens: countJsonSchema
+        reasoning_tokens: countJsonSchema,
+        recorded_cost_usd: { type: "number", minimum: 0 }
       }
     }
   }

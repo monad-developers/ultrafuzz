@@ -589,11 +589,19 @@ function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 
 }
 
 function loadFinalReportRunMetadataAuthorityHarness(
-  remote = "https://github.com/example/project.git?session=private-id\n"
+  remote = "https://github.com/example/project.git?session=private-id\n",
+  workflowMetrics?: {
+    elapsed_through?: string;
+    models_used: string[];
+    tokens_used?: string;
+    estimated_spend?: string;
+    partial_pricing: boolean;
+  }
 ): {
   normalize(remoteValue: string): string;
+  latestElapsedThrough(...values: unknown[]): string | undefined;
   derive(task: unknown): unknown;
-  materialize(task: unknown): void;
+  materialize(task: unknown): Promise<void>;
   assertUnchanged(task: unknown): void;
   authoritative(task: unknown): unknown;
   relativePath(task: unknown): string;
@@ -640,6 +648,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "execFileSync",
     "readBoundedRegularArtifactSnapshot",
     "parseStrictJsonSnapshot",
+    "parseStrictJsonBytes",
     "isPlainJsonRecord",
     "assertRunMetadataDocument",
     "RUN_METADATA_SCHEMA_VERSION",
@@ -653,8 +662,10 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "Buffer",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     "untrustedContentBoundary",
+    "deriveCurrentTaskWorkflowMetrics",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
+      latestElapsedThrough: finalReportLatestElapsedThrough,
       derive: deriveAuthoritativeFinalReportRunMetadata,
       materialize: materializeFinalReportRunMetadataAuthority,
       assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
@@ -668,6 +679,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     () => remote,
     readSnapshot,
     (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    parseStrictJsonBytes,
     (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value),
     assertRunMetadataDocument,
     RUN_METADATA_SCHEMA_VERSION,
@@ -690,7 +702,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     sameIdentity,
     Buffer,
     ".ultrafuzz/authorities",
-    "UNTRUSTED CONTENT BOUNDARY"
+    "UNTRUSTED CONTENT BOUNDARY",
+    async () => workflowMetrics
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -2508,7 +2521,8 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     // A positively identified vendor-format credential: the publication gate
     // scans positive-only (#819), so a bare `token=` keyword assignment is a
     // display-redaction heuristic and no longer fails publication.
-    const contaminated = Buffer.from("analysis ghp_AbCdEf1234567890AbCdEf1234567890AbCd\n", "utf8");
+    const syntheticGithubToken = ["gh", "p_AbCdEf1234567890AbCdEf1234567890AbCd"].join("");
+    const contaminated = Buffer.from(`analysis ${syntheticGithubToken}\n`, "utf8");
     fs.writeFileSync(outputPath, contaminated);
     const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
     const harness = loadVerifyArtifactsHarness();
@@ -6678,7 +6692,7 @@ test("generated prompt authority is derived from sealed controls immediately bef
 
   assert.match(
     reset,
-    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*return materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
   );
   assert.ok(
     agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
@@ -8080,7 +8094,7 @@ test("final-report repository normalization strips private URL suffixes and reje
   }
 });
 
-test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", () => {
+test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-run-summary-"));
   try {
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
@@ -8130,7 +8144,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       ]
     };
     const authority = loadFinalReportRunMetadataAuthorityHarness();
-    authority.materialize(task);
+    await authority.materialize(task);
 
     const relativePath = ".ultrafuzz/authorities/final-report.final-report-run-metadata.json";
     const authorityPath = path.join(workspacePath, ...relativePath.split("/"));
@@ -8170,7 +8184,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 
     fs.writeFileSync(authorityPath, `${JSON.stringify({ ...projection, repository: "tampered" })}\n`, "utf8");
     assert.throws(() => authority.assertUnchanged(task), /run metadata authority was modified/u);
-    authority.materialize(task);
+    await authority.materialize(task);
     assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
     assert.doesNotThrow(() => authority.assertUnchanged(task));
 
@@ -8182,7 +8196,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
         fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
         fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
       }
-      authority.materialize(task);
+      await authority.materialize(task);
       assert.equal(fs.lstatSync(authorityPath).isFile(), true);
       assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
       assert.doesNotThrow(() => authority.assertUnchanged(task));
@@ -8215,6 +8229,108 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 
     const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
     assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata has the wrong run ID/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("final-report Run summary uses full, partial, and unavailable workflow metrics without undercounting lineage", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-workflow-metrics-"));
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(runRoot, "workspaces", "final-report");
+    fs.mkdirSync(workspacePath, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z" })}\n`,
+      "utf8"
+    );
+    const task = {
+      attemptId: "final-report",
+      runRoot,
+      workspacePath,
+      metadata: { run: { ultrafuzzRunId: "run-1" } },
+      outputs: [
+        { path: "report.json", contract: "ultrafuzz/report@3" },
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+      ]
+    };
+    const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["model-a", "model-b"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
+    });
+    assert.equal(
+      full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
+      "2026-08-20T01:00:00.000Z",
+      "the final-report start must supersede a stale accounting checkpoint"
+    );
+    assert.throws(
+      () => full.latestElapsedThrough("2026-08-20T01:00:00.000Z", "not-a-timestamp"),
+      /elapsed-time metadata is malformed/u
+    );
+    await full.materialize(task);
+    const authorityPath = path.join(
+      workspacePath,
+      ".ultrafuzz",
+      "authorities",
+      "final-report.final-report-run-metadata.json"
+    );
+    const fullProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(fullProjection.elapsed_time, "1h 00m");
+    assert.deepEqual(fullProjection.models_used, ["model-a", "model-b"]);
+    assert.equal(fullProjection.tokens_used, "1,234");
+    assert.equal(fullProjection.estimated_spend, "$0.46");
+    assert.equal(fullProjection.partial_pricing, false);
+
+    const partial = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T00:01:30.000Z",
+      models_used: ["model-priced", "model-unpriced"],
+      tokens_used: "300",
+      estimated_spend: "$0.05+",
+      partial_pricing: true
+    });
+    await partial.materialize(task);
+    const partialProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(partialProjection.elapsed_time, "1m 30s");
+    assert.deepEqual(partialProjection.models_used, ["model-priced", "model-unpriced"]);
+    assert.equal(partialProjection.tokens_used, "300");
+    assert.equal(partialProjection.estimated_spend, "$0.05+");
+    assert.equal(partialProjection.partial_pricing, true);
+
+    const unavailable = loadFinalReportRunMetadataAuthorityHarness();
+    await unavailable.materialize(task);
+    const unavailableProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(unavailableProjection.elapsed_time, "unavailable");
+    assert.deepEqual(unavailableProjection.models_used, []);
+    assert.equal(unavailableProjection.tokens_used, "unavailable");
+    assert.equal(unavailableProjection.estimated_spend, "unavailable");
+    assert.equal(unavailableProjection.partial_pricing, false);
+
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({
+        run_id: "run-1",
+        source_run_id: "source-run",
+        created_at: "2026-08-20T00:00:00.000Z"
+      })}\n`,
+      "utf8"
+    );
+    const lineage = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["current-run-model"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
+    });
+    await lineage.materialize(task);
+    const lineageProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(lineageProjection.elapsed_time, "1h 00m");
+    assert.deepEqual(lineageProjection.models_used, []);
+    assert.equal(lineageProjection.tokens_used, "unavailable");
+    assert.equal(lineageProjection.estimated_spend, "unavailable");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -95,6 +95,7 @@ const {
   derivePromptArtifactAuthority,
   deriveWorkspacePatchGitFacts,
   dynamicStorageId,
+  deriveCurrentTaskWorkflowMetrics,
   GOAL_SEARCH_COVERAGE_FILE,
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
@@ -2227,6 +2228,14 @@ type FinalReportRunMetadataProjection = {
   source_run_ids?: string[];
 };
 
+type FinalReportWorkflowMetricsProjection = {
+  elapsed_through?: string;
+  models_used: string[];
+  tokens_used?: string;
+  estimated_spend?: string;
+  partial_pricing: boolean;
+};
+
 type FinalReportRunMetadataAuthority = {
   projection: FinalReportRunMetadataProjection;
   snapshot: ImmutableFileSnapshot;
@@ -2385,7 +2394,49 @@ function finalReportElapsedTime(createdAt: unknown, updatedAt: unknown): string 
   return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
 }
 
-function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[number]): FinalReportRunMetadataProjection {
+function finalReportLatestElapsedThrough(...values: unknown[]): string | undefined {
+  let latest: { value: string; timestamp: number } | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    if (typeof value !== "string") {
+      throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+    }
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
+      throw new Error("artifact-contract failure: final-report elapsed-time metadata is malformed");
+    }
+    if (latest === undefined || timestamp > latest.timestamp) latest = { value, timestamp };
+  }
+  return latest?.value;
+}
+
+function finalReportAvailableLabel(value: string): string | undefined {
+  return value === "unavailable" ? undefined : value;
+}
+
+function finalReportStrategyLoops(
+  effectiveSettings: Record<string, unknown>,
+  attemptId: string
+): number | "unavailable" {
+  const configured = effectiveSettings.strategy_loops;
+  if (configured === undefined) return "unavailable";
+  if (typeof configured !== "number" || !Number.isSafeInteger(configured) || configured < 0) {
+    throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${attemptId}`);
+  }
+  return configured;
+}
+
+async function deriveAuthoritativeFinalReportWorkflowMetrics(
+  task: (typeof taskSpecs)[number]
+): Promise<FinalReportWorkflowMetricsProjection | undefined> {
+  if (declaredFinalReportOutputPair(task) === undefined) return undefined;
+  return (await deriveCurrentTaskWorkflowMetrics()) as FinalReportWorkflowMetricsProjection | undefined;
+}
+
+function deriveAuthoritativeFinalReportRunMetadata(
+  task: (typeof taskSpecs)[number],
+  workflowMetrics?: FinalReportWorkflowMetricsProjection
+): FinalReportRunMetadataProjection {
   const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
   const metadataPath = path.resolve(runRoot, "run.json");
   const snapshot = readBoundedRegularArtifactSnapshot(
@@ -2413,18 +2464,7 @@ function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[numb
   }
   const auditProfile = finalReportOptionalRecord(metadata.audit_profile, "audit profile");
   const effectiveSettings = finalReportOptionalRecord(auditProfile.effective_settings, "audit-profile settings");
-  const configuredStrategyLoops = effectiveSettings.strategy_loops;
-  let strategyLoops: number | "unavailable" = "unavailable";
-  if (configuredStrategyLoops !== undefined) {
-    if (
-      typeof configuredStrategyLoops !== "number" ||
-      !Number.isSafeInteger(configuredStrategyLoops) ||
-      configuredStrategyLoops < 0
-    ) {
-      throw new Error(`artifact-contract failure: final-report strategy loops are malformed ${task.attemptId}`);
-    }
-    strategyLoops = configuredStrategyLoops;
-  }
+  const strategyLoops = finalReportStrategyLoops(effectiveSettings, task.attemptId);
   const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
   const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
   const models = finalReportOptionalStringArray(accounting.models, "accounting models");
@@ -2432,15 +2472,30 @@ function deriveAuthoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[numb
   if (accounting.partial_pricing !== undefined && typeof accounting.partial_pricing !== "boolean") {
     throw new Error(`artifact-contract failure: final-report partial pricing is malformed ${task.attemptId}`);
   }
+  const tokensUsed = finalReportOptionalString(accounting.tokens_used, "tokens used");
+  const estimatedSpend = finalReportOptionalString(accounting.estimated_spend, "estimated spend");
+  // The Smithers fallback is scoped to this workflow run. A continuation's
+  // run.json cumulative block is the only authority that includes source-run
+  // usage, so never replace missing lineage accounting with a current-run
+  // subtotal that would look complete.
+  const directWorkflowMetrics = metadata.source_run_id === undefined ? workflowMetrics : undefined;
+  const elapsedTime = finalReportElapsedTime(
+    metadata.created_at,
+    finalReportLatestElapsedThrough(accountingRoot.updated_at, workflowMetrics?.elapsed_through)
+  );
   return {
     run_id: task.metadata.run.ultrafuzzRunId,
     source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
-    elapsed_time: finalReportElapsedTime(metadata.created_at, accountingRoot.updated_at),
-    models_used: models,
-    tokens_used: finalReportOptionalString(accounting.tokens_used, "tokens used"),
-    estimated_spend: finalReportOptionalString(accounting.estimated_spend, "estimated spend"),
-    partial_pricing: accounting.partial_pricing ?? false,
+    elapsed_time: elapsedTime,
+    models_used: models.length === 0 ? (directWorkflowMetrics?.models_used ?? []) : models,
+    tokens_used: finalReportAvailableLabel(tokensUsed) ?? directWorkflowMetrics?.tokens_used ?? "unavailable",
+    estimated_spend:
+      finalReportAvailableLabel(estimatedSpend) ?? directWorkflowMetrics?.estimated_spend ?? "unavailable",
+    partial_pricing:
+      finalReportAvailableLabel(estimatedSpend) === undefined
+        ? (directWorkflowMetrics?.partial_pricing ?? false)
+        : (accounting.partial_pricing ?? false),
     strategy_loops: strategyLoops,
     audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
     audit_profile_catalog_digest: finalReportOptionalSha256(
@@ -2465,12 +2520,13 @@ function serializeFinalReportRunMetadataProjection(projection: FinalReportRunMet
   return bytes;
 }
 
-function materializeFinalReportRunMetadataAuthority(task: (typeof taskSpecs)[number]): void {
+async function materializeFinalReportRunMetadataAuthority(task: (typeof taskSpecs)[number]): Promise<void> {
   if (declaredFinalReportOutputPair(task) === undefined) {
     finalReportRunMetadataAuthoritiesByTask.delete(task.attemptId);
     return;
   }
-  const projection = deriveAuthoritativeFinalReportRunMetadata(task);
+  const workflowMetrics = await deriveAuthoritativeFinalReportWorkflowMetrics(task);
+  const projection = deriveAuthoritativeFinalReportRunMetadata(task, workflowMetrics);
   const expected = serializeFinalReportRunMetadataProjection(projection);
   const workspaceRoot = realpathSync(task.workspacePath);
   const authorityPath = prepareTaskLocalAuthorityPath(workspaceRoot, finalReportRunMetadataAuthorityRelativePath(task));
@@ -3179,7 +3235,7 @@ function artifactAwareAgent(
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
         assertWorkspaceSourceRevision(task);
-        resetTaskArtifactsForRetry(task);
+        await resetTaskArtifactsForRetry(task);
       } else {
         assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
@@ -3304,7 +3360,7 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
   return path.dirname(candidate) === path.resolve(artifactDir) ? candidate : undefined;
 }
 
-function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
+function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): Promise<void> {
   // A task-owned prompt may live directly in the task artifact root, so retry
   // cleanup must preserve it. A sealed prompt instead lives in the immutable
   // execution snapshot. That file is outside this cleanup root and is validated
@@ -3360,7 +3416,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   restoreWorkspacePatchPreparation(task, workspaceRoot);
   prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
   materializePromptArtifactAuthority(task);
-  materializeFinalReportRunMetadataAuthority(task);
+  return materializeFinalReportRunMetadataAuthority(task);
 }
 
 function resetTaskArtifactContents(

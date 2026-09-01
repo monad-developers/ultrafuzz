@@ -178,11 +178,14 @@ Accounting contract:
 
 Use the injected sanitized projection's `source_run_id` for `Source run ID`.
 
-The Run summary contains exactly these public fields when available: `Run ID`,
+The developer-facing Run summary contains exactly these public fields: `Run ID`,
 `Source run ID`, `Repository`, `Elapsed time`, `Models used`, `Tokens used`,
-`Estimated spend`, `Strategy loops`, `Audit profile`, `Audit profile catalog
-digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
-Render each concrete value as Markdown inline code.
+`Estimated spend`, and `Audit profile`. Render each concrete value as Markdown
+inline code. Do not render strategy-loop counts, audit-profile catalog digests,
+topology digests, prompt digests, or expanded graph fingerprints in
+`report.md`; those are machine-readable orchestration provenance, not report
+content. Continue to copy the complete injected projection into
+`report.json.run_metadata` exactly as required above.
 
 Goal search coverage census: `{{goal_search_coverage_path}}`
 
@@ -357,7 +360,7 @@ Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues belo
 - Models used: `<models_used from the injected sanitized projection, or unavailable>`
 - Tokens used: `<token usage, or unavailable>`
 - Estimated spend: `<cost estimate such as $123 or $123+ when pricing is partial, or unavailable>`
-- Strategy loops: `<configured loop summary, or unavailable>`
+- Audit profile: `<effective audit profile, or unavailable>`
 
 ## Audit context
 
@@ -407,12 +410,6 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 #### Family variants
 
 - Alternate withdrawal route: The same accounting mismatch appears through a second redeem helper.
-
-### Strategy
-
-| Strategy | Detection rate |
-| --- | --- |
-| stateful-invariant | 2/8 |
 ````
 
 The first issue paragraph and every Proof of Concept step must use concrete
@@ -487,21 +484,22 @@ the Proof of Concept section after the primary native reproducer or execution
 trace. List variants as concise bullets with each variant title and summary
 only. Omit the subheading when there are no family variants.
 
-## Strategy Section
+## Structured Strategy Provenance
 
-Compute the Strategy section from `strategy-detections.json`, the lifecycle
-ledger, and configured strategy loop counts. For each strategy that found the
-same deduped bug instance or same-root family variant, count matching loop
-attempts for that strategy and divide by the total configured loops for that
-strategy. Every selected source finding carries `dedupe_key`, identical to its
-lifecycle record and its strategy-detections row, so match strategy detections
-by that key. Stop and report an invalid upstream artifact when a finding has no
-`dedupe_key`; never fall back to `finding_id` and never invent a key.
+Do not render a Strategy section, loop count, detection rate, or strategy
+provenance column anywhere in `report.md`. The audit profile is the canonical
+developer-facing description of orchestration.
 
-Render the human-readable Strategy section as a Markdown table with columns
-`Strategy` and `Detection rate`. Detection rates must be exact `M/N` counts
-without percentages. Keep loop-attempt provenance in `report.json`, not in the
-human-readable Strategy section. Do not call this metric Temperature.
+Preserve authenticated strategy provenance in `report.json` when the pinned
+schema admits it. Derive each structured detection count from distinct actual
+contributing executions matched by `dedupe_key`; never use deduplicated finding
+counts, family-member counts, or planned-but-unexecuted loops as observations.
+The denominator must be the actual configured execution count for that exact
+strategy. When `attempts` is present, it must enumerate the distinct
+contributing execution identities and agree with the corresponding structured
+detection count. Stop with validation failure when the evidence cannot support
+that exact representation; never fall back to `finding_id` and never invent a
+key, attempt, or count.
 
 Render the `- **Source nodes**:` bullet exactly as shown in the issue template,
 as the last Severity bullet, listing the stable `source_nodes` union from the
@@ -628,17 +626,17 @@ not by titles.
 For non-production actionable outcomes, append a single
 `## Non-production actionable outcomes` table after the production issue
 entries. The table should include classification, title, status, concise
-evidence reference, strategy provenance, and recommended next action. Keep this
-appendix short and do not include exploit-style PoC sections for these outcomes.
+evidence reference, and recommended next action. Keep this appendix short and
+do not include exploit-style PoC sections or strategy-loop provenance for these
+outcomes.
 
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
-production issue entries with their Strategy sections, Property implementation
-coverage, Goal search coverage, Property provenance, optional prior finding
-disposition section, and non-production actionable outcomes appendix. If there
-are no production issues and no appendix outcomes, skip the issue index table
-and write `No issues reported.` before the Property implementation coverage
-section.
+production issue entries, Property implementation coverage, Goal search
+coverage, Property provenance, optional prior finding disposition section, and
+non-production actionable outcomes appendix. If there are no production issues
+and no appendix outcomes, skip the issue index table and write `No issues
+reported.` before the Property implementation coverage section.
 
 Never write that bare `No issues reported.` when the goal search coverage census
 records a targeted goal search that did not complete, or records no targeted
@@ -669,10 +667,10 @@ exit 1 as a report JSON authoring failure: correct `report.json`, rerun its exac
 validation command, and rerun this renderer. Do not hand-edit `report.md` after
 the renderer succeeds.
 
-Render run identity, repository, elapsed time, model, token, pricing, loop, and
-audit-policy metadata only from the injected sanitized projection described
-above. Preserve each exact value used in the Markdown Run summary and never
-synthesize a missing value.
+Render run identity, repository, elapsed time, model, token, pricing, and audit
+profile metadata only from the injected sanitized projection described above.
+Preserve each exact value used in the Markdown Run summary and never synthesize
+a missing value. Keep loop and digest provenance only in the structured report.
 
 Emit one property-provenance record per property-derived finding, joined to its
 canonical property sources and implementation/test paths. Preserve the complete
@@ -695,9 +693,12 @@ Apart from authoring canonical report `id` and `title`, only add fields admitted
 by the pinned report schema. Rewriting, tightening, or re-voicing any other
 copied field fails the report. Keep the canonical originating strategy name
 when one is available.
-Derive structured detection rates from the exact strategy hits and configured
-loop counts, and preserve optional attempt provenance from the canonical hit
-records. Do not emit removed or compatibility aliases.
+Derive structured detection rates from the distinct authenticated strategy hits
+and actual configured execution counts. Preserve optional attempt provenance
+from the canonical hit records; when present, its distinct execution identities
+must agree with the detection count for each strategy. Do not confuse duplicate
+or family finding records with distinct executions, and do not emit removed or
+compatibility aliases.
 
 Keep any additional loop-attempt provenance only in the fields admitted by the
 schema. `severity_guess` remains the upstream preliminary estimate and need not
@@ -745,7 +746,7 @@ Before finishing, verify that:
 - Production issues include `### Proof of Concept`.
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
-- Production issues include a `### Strategy` detection-rate table.
+- Production issues do not include a Strategy section or detection-rate table.
 - Production issues render the `- **Source nodes**:` Severity bullet with their
   complete discovery union.
 - Production issues do not include a standalone reachability section.

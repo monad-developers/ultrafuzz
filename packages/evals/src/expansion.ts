@@ -10,7 +10,8 @@ import {
   type GoalPlan,
   type NodeState,
   type NodeStatus,
-  type RunState
+  type RunState,
+  type UsageLedgerEntry
 } from "@ultrafuzz/artifacts";
 import { modelPricingFromSnapshot, projectNormalizedUsageAccounting } from "@ultrafuzz/runtime";
 
@@ -237,7 +238,7 @@ interface LaneUsageTotals {
   total_tokens: number | null;
   cost_usd: number | null;
   usage_complete: boolean;
-  pricing_complete: boolean;
+  partial_pricing: boolean;
 }
 
 interface UsageLedgerTotals {
@@ -252,8 +253,8 @@ interface UsageLedgerTotals {
  * Per-node token and cost totals replayed from the run's usage ledger.
  *
  * The join key is the ledger's required `node_id`, and only that. Cost is projected from the exact
- * normalized usage the ledger stores and the pricing snapshot retained in current run metadata; the
- * eval reader never accepts an invented ledger-side cost field.
+ * normalized usage the ledger stores: adapter-recorded cost takes precedence for the local projection
+ * when present, with the pricing snapshot retained in current run metadata used only as its fallback.
  */
 function readUsageTotalsByNode(runRoot: string | undefined, runId: string): UsageLedgerTotals {
   if (runRoot === undefined) return { totals: new Map(), joinable: false, reason: "usage-ledger-unavailable" };
@@ -272,30 +273,49 @@ function readUsageTotalsByNode(runRoot: string | undefined, runId: string): Usag
   }
   const metadata = readRunMetadataDocument(path.join(path.resolve(runRoot), "run.json"), runId);
   const modelPricing = modelPricingFromSnapshot(metadata.accounting?.pricing_catalog.model_prices);
-  const cacheReadRatio = metadata.accounting?.cumulative.cache_read_ratio_used;
+  const cacheReadRatio = currentRunCacheReadRatio(metadata);
   const totals = new Map<string, LaneUsageTotals>();
-  for (const entry of replay.entries) {
+  for (const entry of latestUsageLedgerEntriesByAttempt(replay.entries)) {
     const projected = projectNormalizedUsageAccounting({
       usage: entry.usage,
       modelPricing,
       ...(cacheReadRatio === undefined ? {} : { cacheReadRatio })
     });
-    const projectedCost =
-      projected.estimated_spend_usd ?? (projected.pricing_complete && projected.total_tokens === 0 ? 0 : null);
     const previous = totals.get(entry.node_id) ?? {
       total_tokens: null,
       cost_usd: null,
       usage_complete: true,
-      pricing_complete: true
+      partial_pricing: false
     };
     totals.set(entry.node_id, {
       total_tokens: addOptional(previous.total_tokens, projected.total_tokens),
-      cost_usd: addOptional(previous.cost_usd, projectedCost),
+      cost_usd: addOptional(previous.cost_usd, projected.estimated_spend_usd),
       usage_complete: previous.usage_complete && projected.usage_complete,
-      pricing_complete: previous.pricing_complete && projected.pricing_complete
+      partial_pricing: previous.partial_pricing || projected.partial_pricing
     });
   }
   return { totals, joinable: true };
+}
+
+function currentRunCacheReadRatio(metadata: ReturnType<typeof readRunMetadataDocument>): number | undefined {
+  const accounting = metadata.accounting;
+  if (accounting === undefined) return undefined;
+  return (
+    accounting.current.cache_read_ratio_used ??
+    accounting.segments.find((segment) => segment.cache_read_ratio_used !== undefined)?.cache_read_ratio_used
+  );
+}
+
+function latestUsageLedgerEntriesByAttempt(entries: readonly UsageLedgerEntry[]): UsageLedgerEntry[] {
+  const latest = new Map<string, UsageLedgerEntry>();
+  for (const entry of entries) {
+    const key = JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]);
+    const previous = latest.get(key);
+    if (previous === undefined || entry.source_event_sequence >= previous.source_event_sequence) {
+      latest.set(key, entry);
+    }
+  }
+  return [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence);
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -381,7 +401,7 @@ function laneUsageTotals(
     total_tokens: null,
     cost_usd: null,
     usage_complete: true,
-    pricing_complete: true
+    partial_pricing: false
   };
   const joinedKeys = new Set<string>();
   for (const node of matched) {
@@ -392,7 +412,7 @@ function laneUsageTotals(
       totals.total_tokens = addOptional(totals.total_tokens, entry.total_tokens);
       totals.cost_usd = addOptional(totals.cost_usd, entry.cost_usd);
       totals.usage_complete &&= entry.usage_complete;
-      totals.pricing_complete &&= entry.pricing_complete;
+      totals.partial_pricing ||= entry.partial_pricing;
     }
   }
   const matchedNodes = matched.filter((node) => nodeIdentities(node).some((identity) => joinedKeys.has(identity)));
@@ -410,7 +430,7 @@ function laneUsageTotals(
               ? { status: "partial", reason: "usage-ledger-node-unmatched" }
               : !totals.usage_complete
                 ? { status: "partial", reason: "usage-incomplete" }
-                : !totals.pricing_complete
+                : totals.partial_pricing
                   ? { status: "partial", reason: "pricing-incomplete" }
                   : completeness(undefined)
   };

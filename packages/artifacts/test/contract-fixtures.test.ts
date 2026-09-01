@@ -2514,7 +2514,7 @@ function zodPositiveFixture(filename: string, contractIds: readonly string[]): u
       };
     case "usage-ledger.schema.json":
       return {
-        schema_version: "ultrafuzz.usage-ledger.v1",
+        schema_version: "ultrafuzz.usage-ledger.v2",
         run_id: "run-1",
         workflow_run_id: "workflow-1",
         control_generation: "c".repeat(64),

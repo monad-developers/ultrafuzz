@@ -287,7 +287,8 @@ function requiredDeepSeekTokenCount(value: Record<string, unknown>, field: strin
 
 function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
   return {
-    input_tokens: usage.inputTokens,
+    input_tokens: deepSeekProviderInputTokens(usage),
+    fresh_input_tokens: usage.inputTokens,
     output_tokens: usage.outputTokens,
     cache_read_input_tokens: usage.cacheReadTokens,
     cache_creation_input_tokens: usage.cacheWriteTokens,
@@ -297,7 +298,7 @@ function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
 
 function deepSeekSmithersUsage(usage: DeepSeekUsage): DeepSeekSmithersUsage {
   return {
-    inputTokens: usage.inputTokens,
+    inputTokens: deepSeekProviderInputTokens(usage),
     inputTokenDetails: {
       noCacheTokens: usage.inputTokens,
       cacheReadTokens: usage.cacheReadTokens,
@@ -310,6 +311,10 @@ function deepSeekSmithersUsage(usage: DeepSeekUsage): DeepSeekSmithersUsage {
     },
     totalTokens: usage.totalTokens
   };
+}
+
+function deepSeekProviderInputTokens(usage: DeepSeekUsage): number {
+  return usage.totalTokens - usage.outputTokens;
 }
 
 function attachDeepSeekResultUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {

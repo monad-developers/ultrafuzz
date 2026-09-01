@@ -1365,9 +1365,16 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/canonical originating strategy name\s+when one is available/u);
     expect(markdown).toContain("`strategy_provenance` when\nthe upstream finding has it");
     expect(flatMarkdown).toContain(
-      "Derive structured detection rates from the exact strategy hits and configured loop counts"
+      "Derive structured detection rates from the distinct authenticated strategy hits and actual configured execution counts"
     );
-    expect(flatMarkdown).toContain("Do not emit removed or compatibility aliases");
+    expect(flatMarkdown).toContain(
+      "Do not render a Strategy section, loop count, detection rate, or strategy provenance column anywhere in `report.md`"
+    );
+    expect(flatMarkdown).toContain(
+      "Do not render strategy-loop counts, audit-profile catalog digests, topology digests, prompt digests, or expanded graph fingerprints in `report.md`"
+    );
+    expect(flatMarkdown).toContain("do not include a Strategy section or detection-rate table");
+    expect(flatMarkdown).toContain("do not emit removed or compatibility aliases");
     expect(flatMarkdown).toContain(
       "pinned report schema alone defines how zero, one, or several producing backends are represented"
     );
