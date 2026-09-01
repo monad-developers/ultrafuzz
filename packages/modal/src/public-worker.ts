@@ -54,9 +54,14 @@ import {
 } from "./public-eval-diagnostics.js";
 import { modalTargetToml } from "./workspace-config.js";
 import {
+  childExitFailureCause,
+  createBoundedStderrTail,
   describeWorkerTermination,
-  sanitizeWorkerDiagnosticMessage,
-  WORKER_STDERR_TAIL_BYTES
+  workerDiagnosticLogPayload,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE,
+  type WorkerDiagnostic
 } from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { guardCurrentPersistentWorkerLineage } from "./worker-lineage.js";
@@ -120,6 +125,10 @@ export class PublicWorkerCommandInterruptedError extends OperationalDispositionE
   }
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
+const MODEL_WORK_CORROBORATION_FAILED_DIAGNOSTIC_CODE = "MODEL_WORK_CORROBORATION_FAILED";
+
+/** Secret values every diagnostic a command emits is redacted against, resolved when the command runs. */
+type PublicDiagnosticSecretValues = readonly string[] | (() => Promise<readonly string[]>);
 
 /**
  * Run artifacts retained per row when the topology produced them.
@@ -243,11 +252,11 @@ export async function runPublicBenchmarkWorker(input: {
           throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
         }
       }
-      await resolveForbiddenSecretValues();
+      const preparationSecretValues = await resolveForbiddenSecretValues();
       await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
       const prepared = await runWithPublicPreparationTimeout((signal) =>
-        preparePublicBenchmark(input.config, input.model, workRoot, logPath, signal)
+        preparePublicBenchmark(input.config, input.model, workRoot, logPath, signal, preparationSecretValues)
       );
       await checkpointPublicModelWorkStart(
         writer,
@@ -281,6 +290,7 @@ export async function runPublicBenchmarkWorker(input: {
               "--json"
             ],
             {
+              label: "eval run",
               cwd: prepared.controlRoot,
               logPath,
               timeoutMs:
@@ -290,7 +300,8 @@ export async function runPublicBenchmarkWorker(input: {
                   rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds
                 }) * 1000,
               timeoutCategory: "model-work-timeout",
-              publicDiagnosticSecretValues: resolveForbiddenSecretValues
+              publicDiagnosticSecretValues: resolveForbiddenSecretValues,
+              evalFailureDiagnosticsFromStdout: true
             }
           ).then(() => undefined),
         corroborateModelWork: () => {
@@ -308,9 +319,14 @@ export async function runPublicBenchmarkWorker(input: {
           }
         },
         reportCorroborationFailure: (error) => {
-          appendPublicWorkerLogLine(
+          appendPublicWorkerDiagnosticLogLine(
             logPath,
-            `model-work-corroboration-failed ${describeWorkerTermination(error)}`,
+            [
+              {
+                code: MODEL_WORK_CORROBORATION_FAILED_DIAGNOSTIC_CODE,
+                message: describeWorkerTermination(error, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)
+              }
+            ],
             retainedForbiddenSecretValues
           );
         },
@@ -338,6 +354,7 @@ export async function runPublicBenchmarkWorker(input: {
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
         {
+          label: "eval score",
           cwd: prepared.controlRoot,
           logPath,
           timeoutMs:
@@ -345,6 +362,7 @@ export async function runPublicBenchmarkWorker(input: {
               matrixRows: prepared.matrixRows,
               maxParallelRuns: prepared.maxParallelRuns
             }) * 1000,
+          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues],
           env: {
             ULTRAFUZZ_EVAL_JUDGE_API_KEY: requiredEnv(judgeKeyEnv),
             ...(input.config.braintrust.judge_url === undefined
@@ -355,7 +373,13 @@ export async function runPublicBenchmarkWorker(input: {
       );
       await runCommand(
         ["node", CLI, "eval", "report", prepared.evalRunId, "--project", prepared.controlRoot, "--json"],
-        { cwd: prepared.controlRoot, logPath, timeoutMs: PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS * 1000 }
+        {
+          label: "eval report",
+          cwd: prepared.controlRoot,
+          logPath,
+          timeoutMs: PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS * 1000,
+          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues]
+        }
       );
       const bundle = createPublicBenchmarkBundle({
         benchmark: input.config.public_benchmark.benchmark,
@@ -499,7 +523,6 @@ export type PublicEvalModelWorkEvidence = "launched" | "none" | "unknown";
  * the pre-model retry that `none` buys it.
  */
 const PUBLIC_EVAL_POST_SUBMISSION_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set(["WORKFLOW_SUBMISSION_FAILED"]);
-const PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 /**
  * What the eval run's own journal records about model work having begun.
@@ -726,7 +749,8 @@ async function preparePublicBenchmark(
   model: ModalModelSpec,
   workRoot: string,
   logPath: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  diagnosticSecretValues: readonly string[]
 ): Promise<{
   controlRoot: string;
   targetsRoot: string;
@@ -742,7 +766,14 @@ async function preparePublicBenchmark(
   const groundTruthRoot = path.join(workRoot, "ground-truth");
   const suitePath = path.join(workRoot, "suite.yml");
   throwIfAborted(signal);
-  await materializeBakedCandidate(scope.candidate_commit, controlRoot, logPath, BAKED_CANDIDATE_ARCHIVE, signal);
+  await materializeBakedCandidate(
+    scope.candidate_commit,
+    controlRoot,
+    logPath,
+    BAKED_CANDIDATE_ARCHIVE,
+    signal,
+    diagnosticSecretValues
+  );
   const cohort = loadBenchmarkCohortManifest(
     path.join(controlRoot, "benchmarks", scope.benchmark === "evmbench" ? "evmbench" : "ultrafuzzbench", "cohort.json")
   );
@@ -772,12 +803,19 @@ async function preparePublicBenchmark(
   await mapLimitStable(suite.targets, PUBLIC_BENCHMARK_PREPARATION_PARALLELISM, async (target) => {
     throwIfAborted(signal);
     const destination = path.join(targetsRoot, target.id);
-    await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true, signal });
+    await cloneAtCommit(target.repo, target.ref, destination, logPath, {
+      initializeSubmodules: true,
+      label: `target ${target.id}`,
+      signal,
+      diagnosticSecretValues
+    });
     await runCommand(["node", CLI, "init", "--project", destination, "--force", "--json"], {
+      label: `target ${target.id} init`,
       cwd: controlRoot,
       logPath,
       timeoutMs: 5 * 60 * 1000,
-      signal
+      signal,
+      publicDiagnosticSecretValues: diagnosticSecretValues
     });
     await seedPublicBenchmarkSmithersDependencies(destination);
     await writeFile(
@@ -786,16 +824,20 @@ async function preparePublicBenchmark(
       { mode: 0o600 }
     );
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
+      label: `target ${target.id} references sync`,
       cwd: controlRoot,
       logPath,
       timeoutMs: 5 * 60 * 1000,
-      signal
+      signal,
+      publicDiagnosticSecretValues: diagnosticSecretValues
     });
     await runCommand(["node", CLI, "validate", "--project", destination, "--json"], {
+      label: `target ${target.id} validate`,
       cwd: controlRoot,
       logPath,
       timeoutMs: 5 * 60 * 1000,
-      signal
+      signal,
+      publicDiagnosticSecretValues: diagnosticSecretValues
     });
   });
   if (scope.benchmark === "evmbench") {
@@ -804,7 +846,8 @@ async function preparePublicBenchmark(
       suite.targets.map((target) => target.id),
       groundTruthRoot,
       logPath,
-      signal
+      signal,
+      diagnosticSecretValues
     );
   } else {
     for (const target of suite.targets) {
@@ -831,7 +874,14 @@ async function preparePublicBenchmark(
       groundTruthRoot,
       "--json"
     ],
-    { cwd: controlRoot, logPath, timeoutMs: 5 * 60 * 1000, signal }
+    {
+      label: "eval plan",
+      cwd: controlRoot,
+      logPath,
+      timeoutMs: 5 * 60 * 1000,
+      signal,
+      publicDiagnosticSecretValues: diagnosticSecretValues
+    }
   );
   return {
     controlRoot,
@@ -914,31 +964,38 @@ export async function materializeBakedCandidate(
   destination: string,
   logPath: string,
   archivePath = BAKED_CANDIDATE_ARCHIVE,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  diagnosticSecretValues: readonly string[] = []
 ): Promise<void> {
   throwIfAborted(signal);
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true, mode: 0o700 });
   await runCommand(["tar", "--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", destination], {
+    label: "candidate archive extract",
     cwd: path.dirname(destination),
     logPath,
     timeoutMs: 5 * 60 * 1000,
+    publicDiagnosticSecretValues: diagnosticSecretValues,
     ...(signal === undefined ? {} : { signal })
   });
   const head = (
     await runCommand(["git", "rev-parse", "HEAD"], {
+      label: "candidate rev-parse",
       cwd: destination,
       logPath,
       timeoutMs: 30_000,
+      publicDiagnosticSecretValues: diagnosticSecretValues,
       ...(signal === undefined ? {} : { signal })
     })
   )
     .trim()
     .toLowerCase();
   const dirty = await runCommand(["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"], {
+    label: "candidate status",
     cwd: destination,
     logPath,
     timeoutMs: 30_000,
+    publicDiagnosticSecretValues: diagnosticSecretValues,
     ...(signal === undefined ? {} : { signal })
   });
   if (head !== expectedCommit.toLowerCase() || dirty.trim() !== "") {
@@ -973,7 +1030,8 @@ async function materializeEvmbenchGroundTruth(
   targetIds: string[],
   destination: string,
   logPath: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  diagnosticSecretValues: readonly string[]
 ): Promise<void> {
   throwIfAborted(signal);
   if (cohort.schema_version !== "ultrafuzz.evmbench.cohort.v1") {
@@ -981,7 +1039,9 @@ async function materializeEvmbenchGroundTruth(
   }
   const dataset = path.join(path.dirname(destination), "frontier-evals");
   await cloneAtCommit(cohort.upstream.dataset_repository, cohort.upstream.dataset_revision, dataset, logPath, {
-    signal
+    label: "evmbench dataset",
+    signal,
+    diagnosticSecretValues
   });
   for (const targetId of targetIds) {
     throwIfAborted(signal);
@@ -1001,48 +1061,58 @@ async function cloneAtCommit(
   commit: string,
   destination: string,
   logPath: string,
-  options: { initializeSubmodules?: boolean; signal?: AbortSignal } = {}
+  options: {
+    initializeSubmodules?: boolean;
+    label: string;
+    signal?: AbortSignal;
+    diagnosticSecretValues?: readonly string[];
+  }
 ): Promise<void> {
   throwIfAborted(options.signal);
+  const shared = {
+    logPath,
+    publicDiagnosticSecretValues: options.diagnosticSecretValues ?? [],
+    ...(options.signal === undefined ? {} : { signal: options.signal })
+  };
   await rm(destination, { recursive: true, force: true });
   await runCommand(["git", "clone", "--filter=blob:none", "--no-checkout", repository, destination], {
+    label: `${options.label} clone`,
     cwd: path.dirname(destination),
-    logPath,
     timeoutMs: 5 * 60 * 1000,
-    ...(options.signal === undefined ? {} : { signal: options.signal })
+    ...shared
   });
   await runCommand(["git", "fetch", "--depth", "1", "origin", commit], {
+    label: `${options.label} fetch`,
     cwd: destination,
-    logPath,
     timeoutMs: 5 * 60 * 1000,
-    ...(options.signal === undefined ? {} : { signal: options.signal })
+    ...shared
   });
   await runCommand(["git", "checkout", "--detach", commit], {
+    label: `${options.label} checkout`,
     cwd: destination,
-    logPath,
     timeoutMs: 2 * 60 * 1000,
-    ...(options.signal === undefined ? {} : { signal: options.signal })
+    ...shared
   });
   if (options.initializeSubmodules === true) {
     await runCommand(["git", "submodule", "sync", "--recursive"], {
+      label: `${options.label} submodule sync`,
       cwd: destination,
-      logPath,
       timeoutMs: 2 * 60 * 1000,
-      ...(options.signal === undefined ? {} : { signal: options.signal })
+      ...shared
     });
     await runCommand(["git", "submodule", "update", "--init", "--recursive", "--depth", "1"], {
+      label: `${options.label} submodule update`,
       cwd: destination,
-      logPath,
       timeoutMs: 10 * 60 * 1000,
-      ...(options.signal === undefined ? {} : { signal: options.signal })
+      ...shared
     });
   }
   const head = (
     await runCommand(["git", "rev-parse", "HEAD"], {
+      label: `${options.label} rev-parse`,
       cwd: destination,
-      logPath,
       timeoutMs: 30_000,
-      ...(options.signal === undefined ? {} : { signal: options.signal })
+      ...shared
     })
   ).trim();
   if (head !== commit.toLowerCase()) throw new Error(`checkout revision mismatch for ${repository}`);
@@ -1258,13 +1328,15 @@ async function mapLimitStable<T>(
 async function runCommand(
   argv: string[],
   options: {
+    label: string;
     cwd: string;
     logPath: string;
     timeoutMs: number;
     env?: Record<string, string>;
     timeoutCategory?: string;
     signal?: AbortSignal;
-    publicDiagnosticSecretValues?: readonly string[] | (() => Promise<readonly string[]>);
+    publicDiagnosticSecretValues?: PublicDiagnosticSecretValues;
+    evalFailureDiagnosticsFromStdout?: boolean;
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
@@ -1316,7 +1388,7 @@ async function runCommand(
       : typeof options.publicDiagnosticSecretValues === "function"
         ? await options.publicDiagnosticSecretValues()
         : options.publicDiagnosticSecretValues;
-  if (options.publicDiagnosticSecretValues !== undefined) {
+  if (options.evalFailureDiagnosticsFromStdout === true) {
     const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
@@ -1330,31 +1402,42 @@ async function runCommand(
   // exactly like a timed-out one, and its half-written journal must not be read
   // as a final account of what launched.
   if (timedOut || aborted || termination.signal !== null) {
-    await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
-    throw new PublicWorkerCommandInterruptedError({
-      cause: interruptedCommandCause({
-        label: argv[0]!,
-        timedOut,
-        aborted,
-        terminationSignal: termination.signal,
-        abortReason: options.signal?.reason,
-        ...(options.timeoutCategory === undefined ? {} : { timeoutCategory: options.timeoutCategory })
-      })
+    const cause = interruptedCommandCause({
+      label: options.label,
+      timedOut,
+      aborted,
+      terminationSignal: termination.signal,
+      abortReason: options.signal?.reason,
+      ...(options.timeoutCategory === undefined ? {} : { timeoutCategory: options.timeoutCategory })
     });
+    appendPublicWorkerDiagnosticLogLine(
+      options.logPath,
+      [
+        {
+          code: WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE,
+          message: `${options.label} interrupted: ${cause.message}`
+        }
+      ],
+      forbiddenSecretValues
+    );
+    await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
+    throw new PublicWorkerCommandInterruptedError({ cause });
   }
   if (exitCode !== 0) {
-    await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
     // The stderr tail can quote configuration, so it goes through the same sanitizer as every other
     // diagnostic string this worker emits rather than being embedded raw.
-    const detail = sanitizeWorkerDiagnosticMessage(
-      Buffer.concat(stderr).subarray(-WORKER_STDERR_TAIL_BYTES).toString("utf8"),
-      {
-        forbiddenSecretValues
-      }
+    const stderrTail = createBoundedStderrTail();
+    stderrTail.append(Buffer.concat(stderr));
+    const cause = childExitFailureCause(options.label, exitCode, stderrTail, forbiddenSecretValues);
+    // Nothing else collected carries the reason: `diagnostic_code` names a category and `operation-failed`
+    // names nothing, so a reason that is not logged here is a reason no reader ever sees.
+    appendPublicWorkerDiagnosticLogLine(
+      options.logPath,
+      [{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message: cause.message }],
+      forbiddenSecretValues
     );
-    throw new OperationalDispositionError("unreachable", {
-      cause: new Error(`${argv[0]} exited ${exitCode}${detail === "" ? "" : `: ${detail}`}`)
-    });
+    await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
+    throw new OperationalDispositionError("unreachable", { cause });
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
@@ -1425,26 +1508,30 @@ export function publicEvalFailureDiagnosticLogPayloadFromRecords(
   );
 }
 
+/**
+ * The eval's own failed diagnostics as one collectable payload.
+ *
+ * Only severity and shape are decided here. Which codes are expressible, how many entries a line carries and
+ * how long a message may be belong to the collector's grammar, which `workerDiagnosticLogPayload` re-derives;
+ * bounding the count before it filters would let one inexpressible entry consume a slot a reportable one
+ * needs.
+ */
 function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
   entries: readonly unknown[],
   forbiddenSecretValues: readonly string[]
 ): string | undefined {
-  const diagnostics = entries
-    .filter(
-      (entry): entry is Record<string, unknown> =>
-        isPlainRecord(entry) &&
-        typeof entry.code === "string" &&
-        PUBLIC_EVAL_LOGGABLE_FAILURE_DIAGNOSTIC_CODE.test(entry.code) &&
-        typeof entry.message === "string" &&
-        entry.severity === "error"
-    )
-    .slice(0, 3)
-    .map((entry) => ({
-      code: entry.code as string,
-      message: sanitizeWorkerDiagnosticMessage(entry.message as string, { forbiddenSecretValues })
-    }));
-  if (diagnostics.length === 0) return undefined;
-  return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
+  return workerDiagnosticLogPayload(
+    entries
+      .filter(
+        (entry): entry is Record<string, unknown> =>
+          isPlainRecord(entry) &&
+          typeof entry.code === "string" &&
+          typeof entry.message === "string" &&
+          entry.severity === "error"
+      )
+      .map((entry) => ({ code: entry.code as string, message: entry.message as string })),
+    forbiddenSecretValues
+  );
 }
 
 function appendPublicEvalFailureDiagnosticLogPayload(logPath: string, payload: string): void {
@@ -1473,25 +1560,26 @@ async function runBare(argv: string[]): Promise<void> {
 }
 
 /**
- * Append one redacted line to the worker log without ever becoming a failure.
+ * Append one `eval-failure-diagnostics` line to the worker log without ever becoming a failure.
  *
  * Callers use this from paths whose whole point is that they cannot fail the
- * run -- a best-effort read that threw, say -- so a log that cannot be written
- * must not turn into the outcome the caller was avoiding.
+ * run -- a best-effort read that threw, say -- so a diagnostic that cannot be
+ * composed or written must not turn into the outcome the caller was avoiding.
+ *
+ * The payload channel is the only one available: the collector's line grammar
+ * admits a bare lifecycle token or this, and free text -- however sanitized --
+ * costs the pair its status.json, result.json and recovery lifecycle wholesale.
  */
-export function appendPublicWorkerLogLine(
+export function appendPublicWorkerDiagnosticLogLine(
   logPath: string,
-  message: string,
+  diagnostics: readonly WorkerDiagnostic[],
   forbiddenSecretValues: Iterable<string> = []
 ): void {
   try {
-    const sanitized = sanitizeWorkerDiagnosticMessage(message, {
-      forbiddenSecretValues: [...forbiddenSecretValues],
-      keep: "head"
-    });
-    fs.appendFileSync(logPath, `${new Date().toISOString()} ${sanitized}\n`);
+    const payload = workerDiagnosticLogPayload(diagnostics, [...forbiddenSecretValues]);
+    if (payload !== undefined) appendPublicEvalFailureDiagnosticLogPayload(logPath, payload);
   } catch {
-    // The log is evidence, not an outcome.
+    // A diagnostic that cannot be composed is evidence that is missing, not an outcome.
   }
 }
 

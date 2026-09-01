@@ -306,6 +306,14 @@ ultrafuzz fork <run-id> \
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
 and maps workflow details into the stable Ultrafuzz JSON envelope.
 
+Detached `run` and `resume` record local `running` state when Smithers admits
+the workflow. If that workflow later terminates without another successful
+Ultrafuzz synchronization, raw `state.json` can retain that admission-time
+state: there is not yet a detached completion reconciler. `ps` therefore shows
+the linked workflow status when it is available; its JSON output retains both
+`workflow_status` and `ultrafuzz_status` so lifecycle divergence remains
+explicit.
+
 `resume` delegates continuation to Smithers with the same Ultrafuzz and
 Smithers run IDs and automatically accepts changed workflow source. Control
 seals, link journals, controller generations, graph fingerprints, current
@@ -354,6 +362,11 @@ spend, model, and attempt count. JSON output uses `ultrafuzz.stats.v1` inside
 the normal CLI envelope and additionally exposes retries, executed/reused
 counts, outcomes, failure categories, completeness, unattributed usage, and
 cumulative run accounting.
+The closed stats v1 field `pricing_complete` continues to mean complete cost
+coverage: it is the inverse of run accounting `partial_pricing`. Accounting v4's
+own `pricing_complete` field independently reports whether each event had
+sufficient pricing evidence; an adapter-recorded cost satisfies that evidence
+without requiring catalog component rates.
 
 `stats --bundle` reads an `ultrafuzz report bundle` ZIP directly without
 extracting it and without the original checkout, workflow backend, provider,

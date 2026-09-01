@@ -49,8 +49,14 @@ const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "waiting-quota"
 ]);
 
+const TERMINAL_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set(["finished", "continued", "failed", "cancelled"]);
+
 export function isLiveWorkflowRunStatus(status: string): boolean {
   return LIVE_WORKFLOW_RUN_STATUSES.has(status);
+}
+
+export function isTerminalWorkflowRunStatus(status: string): boolean {
+  return TERMINAL_WORKFLOW_RUN_STATUSES.has(status);
 }
 
 export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
@@ -292,12 +298,27 @@ function workflowLifecycleDivergenceDiagnostic(
   workflowStatus: string,
   statePath: string
 ): RuntimeDiagnostic | undefined {
-  if (!isTerminalRunStatus(runStatus) || !isLiveWorkflowRunStatus(workflowStatus)) return undefined;
+  if (isTerminalRunStatus(runStatus) && isLiveWorkflowRunStatus(workflowStatus)) {
+    return {
+      code: "RUN_WORKFLOW_STATUS_DIVERGED",
+      message:
+        `Ultrafuzz run is terminal ${runStatus} while the workflow runner reports ${workflowStatus}; ` +
+        "workflow work may still be active and cannot finalize coherently until the lifecycle state is reconciled",
+      severity: "warning",
+      source: "runtime",
+      path: statePath,
+      details: {
+        run_status: runStatus,
+        workflow_status: workflowStatus
+      }
+    };
+  }
+  if (runStatus !== "running" || !isTerminalWorkflowRunStatus(workflowStatus)) return undefined;
   return {
     code: "RUN_WORKFLOW_STATUS_DIVERGED",
     message:
-      `Ultrafuzz run is terminal ${runStatus} while the workflow runner reports ${workflowStatus}; ` +
-      "workflow work may still be active and cannot finalize coherently until the lifecycle state is reconciled",
+      `Ultrafuzz run is running while the workflow runner reports terminal ${workflowStatus}; ` +
+      "local run state has not reconciled the workflow's terminal result and must not be treated as current",
     severity: "warning",
     source: "runtime",
     path: statePath,

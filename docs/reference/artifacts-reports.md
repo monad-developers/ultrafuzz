@@ -44,7 +44,24 @@ Each entry's immutable identity is the exact Smithers pair
 `(workflow_run_id, source_event_sequence)`; `control_generation`, node,
 iteration, and attempt remain validated evidence dimensions rather than
 surrogate identities. Replaying the same continuation is idempotent. The
-ledger stores closed normalized counters, not raw execution records.
+ledger stores closed normalized counters, not raw execution records. Usage
+events are cumulative snapshots within a workflow attempt: accounting and
+`stats` select the highest source-event sequence for each
+`(workflow_run_id, node_id, iteration, attempt)` coordinate while retaining
+every sequence as immutable audit evidence. When one attempt makes additional
+model calls for output correction, their counters and fully known per-call
+costs are added to that cumulative snapshot; a terminal result replaces the
+same call's progress snapshot instead of being counted twice. Optional cache
+and reasoning breakdowns are omitted when any included call lacks that detail.
+The Smithers compatibility layer commits each accepted snapshot and its exact
+`TokenUsageReported` event in one database transaction before publishing the
+event to live listeners and the stream log, so a controller crash cannot leave
+the usage row ahead of its recoverable ledger event. Smithers 0.35.0's
+`_smithers_run_usage` table cannot encode unknown optional-component
+completeness: when a cumulative event omits cache or reasoning detail, that
+query-optimized row retains the prior known subtotal as a monotonic lower
+bound. The event and `usage.jsonl` ledger, not that subtotal, are authoritative
+for optional-component completeness.
 
 `ultrafuzz stats <run-id>` joins this ledger with `attempts.jsonl`, `state.json`,
 `graph.json`, and `run.json` to derive per-node timing and usage on demand. The
@@ -598,30 +615,49 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
+If cumulative metadata has not synchronized when the final-report producer
+starts, its live Smithers fallback is a snapshot through that producer's start.
+It includes earlier attempts but cannot include the producer's own eventual
+duration, model fallback, tokens, or cost. Report v3 has no metric-scope field,
+so closed-run accounting should be read from `ultrafuzz stats` after terminal
+synchronization. A future report-contract version should carry an explicit
+scope/completeness marker before controller-owned post-production metrics are
+published into the canonical report pair.
+
 `accounting.segments` publishes one rollup per checkpoint generation, and
-`accounting.current` identifies the latest segment. `accounting.cumulative`
-is derived from every unique ledger entry, including prior generations and any
-source-run lineage. `accounting.checkpoint` records the ledger position used by
-the durable metadata snapshot. Usage and pricing completeness are reported
-independently through `usage_complete`/`usage_incomplete_reasons` and
+`accounting.current` identifies the latest segment. Each segment retains every
+source event sequence as audit evidence, but accounting uses only the latest
+cumulative usage snapshot for each workflow attempt. `accounting.cumulative`
+combines those canonical attempt snapshots with any source-run lineage.
+`accounting.checkpoint` records the raw ledger position used by the durable
+metadata snapshot. Usage and pricing completeness are reported independently
+through `usage_complete`/`usage_incomplete_reasons` and
 `pricing_complete`/`pricing_incomplete_reasons`.
 
-Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
-output, and reasoning as independent components. `inclusive_token_total`
-counts every reported component, while `billable_token_total` counts the
-components with a positive known rate. Per-component amounts are recorded in
-`component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
-events. `usage_complete` and `pricing_complete` are independent: their typed
-`*_incomplete_reasons` arrays distinguish missing or estimated usage from a
-missing component rate. Usage completeness is derived from reported component
-evidence regardless of whether catalog pricing is available. `partial_pricing`
-is the inverse of pricing completeness. An event's
-reported total is tracked separately in `provided_cost_usd`; it does not fill
-missing component rates or make component pricing complete. Kimi-family models
-are priced from the pinned Moonshot provider entry, while DeepSeek-family
-models are priced from the pinned first-party DeepSeek entry. Either family
-stays listed in `pricing_catalog.unresolved_models` when its first-party entry
-is absent rather than borrowing a same-named rate from another provider.
+Accounting schema `ultrafuzz.accounting.v4` treats provider `input_tokens` as
+inclusive of fresh input, cache reads, and cache writes, and treats provider
+`output_tokens` as inclusive of reasoning tokens. Consequently,
+`inclusive_token_total` and `total_tokens` are exactly input plus output;
+cache and reasoning counters are diagnostic and pricing breakdowns, not
+additional tokens. Contradictory breakdowns are retained but marked incomplete
+and are not locally repriced. `billable_token_total` counts components with a
+known positive local rate without counting reasoning twice.
+
+For catalog-priced events, `component_costs_usd` sums to the local portion of
+`estimated_spend_usd`. When an adapter records an event cost, that value takes
+precedence over host-side repricing, is retained in `provided_cost_usd`, and
+makes pricing complete for that event even if component rates are unavailable.
+The recorded value remains an estimate unless its adapter documents
+authoritative billing provenance. Across mixed events, local component costs
+plus provided costs sum to `estimated_spend_usd`. `usage_complete` and `pricing_complete`
+remain independent: their typed `*_incomplete_reasons` arrays distinguish
+missing, estimated, or contradictory usage from missing pricing. A trailing
+`+` and `partial_pricing` indicate that at least one accounted event still lacks
+a usable cost. Kimi-family models are priced from the pinned Moonshot provider
+entry, while DeepSeek-family models are priced from the pinned first-party
+DeepSeek entry. Either family stays listed in
+`pricing_catalog.unresolved_models` when its first-party entry is absent rather
+than borrowing a same-named rate from another provider.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

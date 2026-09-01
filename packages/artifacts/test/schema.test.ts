@@ -3038,12 +3038,22 @@ test("usage ledger schema accepts only exact projected Smithers usage", () => {
     node_id: "node:1",
     iteration: 0,
     attempt: 1,
-    usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
+    usage: {
+      model: "model",
+      agent: "agent",
+      input_tokens: 3,
+      fresh_input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 2,
+      recorded_cost_usd: 0.000_123
+    }
   };
 
   assert.equal(validateUsageLedgerEntry(entry).ok, true);
   assert.equal(validateUsageLedgerEntry({ ...entry, source_event_id: "legacy" }).ok, false);
+  assert.equal(validateUsageLedgerEntry({ ...entry, schema_version: "ultrafuzz.usage-ledger.v1" }).ok, false);
   assert.equal(validateUsageLedgerEntry({ ...entry, usage: { ...entry.usage, total_tokens: 3 } }).ok, false);
+  assert.equal(validateUsageLedgerEntry({ ...entry, usage: { ...entry.usage, recorded_cost_usd: -1 } }).ok, false);
 });
 
 test("node attempt ledger shape stays structural while byte and ordering rules remain semantic gates", () => {

@@ -126,14 +126,8 @@ function runtimeEfficiency(
 function accountingEfficiency(runRoot: string): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
   const cumulative = readCumulativeAccounting(runRoot);
   const usageComplete = requiredBoolean(cumulative.usage_complete, "accounting.cumulative.usage_complete");
-  const pricingComplete = requiredBoolean(cumulative.pricing_complete, "accounting.cumulative.pricing_complete");
+  requiredBoolean(cumulative.pricing_complete, "accounting.cumulative.pricing_complete");
   const partialPricing = requiredBoolean(cumulative.partial_pricing, "accounting.cumulative.partial_pricing");
-  if (partialPricing === pricingComplete) {
-    throw new EvalError(
-      "EVAL_ACCOUNTING_EVIDENCE_INVALID",
-      "accounting partial_pricing must be the inverse of pricing_complete"
-    );
-  }
   const observedTokens = optionalNonNegativeNumber(cumulative.total_tokens, "accounting.cumulative.total_tokens");
   if (usageComplete && observedTokens === undefined) {
     throw new EvalError(
@@ -145,15 +139,18 @@ function accountingEfficiency(runRoot: string): Pick<EvalEfficiency, "total_toke
     cumulative.estimated_spend_usd,
     "accounting.cumulative.estimated_spend_usd"
   );
-  if (pricingComplete && storedCost === undefined) {
-    throw new EvalError("EVAL_ACCOUNTING_EVIDENCE_INVALID", "complete pricing requires cumulative.estimated_spend_usd");
+  if (!partialPricing && storedCost === undefined) {
+    throw new EvalError(
+      "EVAL_ACCOUNTING_EVIDENCE_INVALID",
+      "complete cost evidence requires cumulative.estimated_spend_usd"
+    );
   }
 
   return {
     total_tokens: usageComplete ? (observedTokens ?? null) : null,
     cost_usd: storedCost ?? null,
     usage: usageComplete ? complete() : partial("usage-incomplete"),
-    cost: pricingComplete ? complete() : partial("pricing-incomplete")
+    cost: partialPricing ? partial("pricing-incomplete") : complete()
   };
 }
 

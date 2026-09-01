@@ -26,7 +26,17 @@ This inventory records the compatibility decision for every artifact contract th
 | `ultrafuzz/text@1`                    | Remains `@1`                                     | Its canonical contract is still arbitrary UTF-8 text, including empty text.                                                                                                                                                                                                               |
 | `ultrafuzz/workspace-patch@1`         | Remains `@1`                                     | The manifest fields and v1 literal did not change; the checked-in schema now matches path and uniqueness rules the v1 runtime validator already enforced.                                                                                                                                 |
 
-The migration also introduces named v1 contracts for previously generic workflow artifacts: admin/config boundary matrices, aggregation manifests, audited differential lanes, boundary recipes, coverage evidence, dependency scope matrices, differential plans/results/triage/repair/gap/report review, dynamic enumerator outputs/plans/provenance, externalized-state accounting, finding lifecycle ledgers, harness repairs, reference harnesses/manifests, selected strategies, semantic-red registries, strategy detections, triaged findings, and severity-classified findings. These are new identities rather than version bumps because no earlier canonical contract described their fields. Invariant campaign plans are the exception documented above: only their v2 contract and document identity remain supported.
+The migration also introduces named v1 contracts for previously generic
+workflow artifacts: admin/config boundary matrices, aggregation manifests,
+audited differential lanes, boundary recipes, coverage evidence, dependency
+scope matrices, differential plans/results/triage/repair/gap/report review,
+dynamic enumerator outputs/plans/provenance, externalized-state accounting,
+finding lifecycle ledgers, harness repairs, reference harnesses/manifests,
+selected strategies, semantic-red registries, strategy detections, triaged
+findings, and severity-classified findings. These are new identities rather than
+version bumps because no earlier canonical contract described their fields.
+Invariant campaign plans are the exception documented above: only their v2
+contract and document identity remain supported.
 
 Bare arrays are versioned by their contract and whole-document schema identity. Their items do not gain a synthetic `schema_version`; for example, each harness repair remains an ordinary record inside the versioned `ultrafuzz/harness-repairs@1` array.
 
@@ -62,10 +72,10 @@ fields.
 | Run plan                              | `ultrafuzz.run-plan.v2`                                             | `ultrafuzz.run-plan.v3`; a digest-bound campaign data-governance reference is required.                                             |
 | Run metadata                          | `1.0`                                                               | `ultrafuzz.run-metadata.v2`; accounting and graph authority are typed.                                                              |
 | Config redactions                     | `1.0`                                                               | `ultrafuzz.config-redactions.v2`.                                                                                                   |
-| Accounting                            | `2.0`                                                               | `ultrafuzz.accounting.v3`; incomplete pricing and current control-segment evidence are explicit.                                    |
+| Accounting                            | `ultrafuzz.accounting.v3`                                           | `ultrafuzz.accounting.v4`; input and output totals use provider-inclusive counters, while cache and reasoning remain breakdowns.    |
 | Accounting checkpoint                 | `1.0`                                                               | `ultrafuzz.accounting-checkpoint.v1`.                                                                                               |
 | Run state                             | `1.1` / `ultrafuzz.state.v1`                                        | `ultrafuzz.run-state.v5`; old runs fail with an unsupported-version diagnostic.                                                     |
-| Usage ledger                          | `1.0`                                                               | `ultrafuzz.usage-ledger.v1`.                                                                                                        |
+| Usage ledger                          | `ultrafuzz.usage-ledger.v1`                                         | `ultrafuzz.usage-ledger.v2`; fresh-input tokens and adapter-recorded cost are retained losslessly.                                  |
 | Release-validation report             | `ultrafuzz.release-validation.report.v1`                            | `ultrafuzz.release-validation.report.v2`.                                                                                           |
 | Smithers workflow manifest            | `ultrafuzz.smithers.workflow.v3`                                    | `ultrafuzz.smithers.workflow.v4`; retry-chain and producer authority are required.                                                  |
 | Smithers task metadata                | `ultrafuzz.smithers.task.v2`                                        | `ultrafuzz.smithers.task.v3`; retry-chain metadata is required.                                                                     |

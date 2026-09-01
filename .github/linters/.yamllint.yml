@@ -1,0 +1,30 @@
+# Super-Linter lints only changed files but lints each changed file in full, so
+# every rule here is applied to lines nobody touched. A rule that no existing
+# file can satisfy therefore blocks all future edits to that file.
+extends: default
+
+rules:
+  # Prettier writes flow mappings as `{ a: b }` and `format:check` gates it, so
+  # zero spaces inside braces is unreachable. Flow sequences stay `[a, b]`, so
+  # `brackets` keeps its default.
+  braces:
+    max-spaces-inside: 1
+
+  # Dependabot pins actions as `uses: owner/action@<sha> # v1.2.3` with a single
+  # space before the comment and rewrites that line on every bump.
+  comments:
+    min-spaces-from-content: 1
+
+  # GitHub Actions mandates the top-level `on:` key, which YAML 1.1 resolves to
+  # a boolean. Values are still checked.
+  truthy:
+    check-keys: false
+
+  # Prettier already owns YAML width repo-wide and cannot break a single-line
+  # scalar: `${{ }}` expressions, inline jq filters, and shell that emits one
+  # markdown line per `echo`. A second, stricter width has no satisfying edit.
+  line-length: disable
+
+  # Every workflow and config in the repo is a single document with no `---`.
+  document-start:
+    present: false

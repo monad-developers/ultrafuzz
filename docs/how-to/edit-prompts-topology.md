@@ -11,6 +11,9 @@ After `ultrafuzz init`, editable prompts live under:
 .ultrafuzz/prompts/
 ```
 
+Use the [prompt catalog](../reference/prompt-catalog.md) to find every shipped
+workflow prompt and its role before choosing what to customize.
+
 Prompt frontmatter may include only identity and display metadata:
 
 ```md
