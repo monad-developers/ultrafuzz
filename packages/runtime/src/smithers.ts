@@ -254,8 +254,9 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
 // The replacement still overrides all three, and still supplies the fd-3
 // execution-snapshot descriptor upstream has no equivalent of.
 // The bun startup arguments 0.35.0 leaves inline in the resume patch. The
-// darwin-capable patch swaps the whole expression for a descriptor-rooted
-// helper call, so it is named here to keep that substitution checkable.
+// darwin-capable patch swaps the /proc literal for the descriptor-rooted child
+// path, so the whole expression is named here to keep that substitution
+// checkable.
 const RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS =
   '[...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]';
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const runtime = options.executable ? { command: options.executable, args } : smithersRuntimeSpawn(args);
@@ -353,14 +354,26 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH 
     '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
     '"--no-addons", "--preserve-symlinks-main"'
   );
-// The form Ultrafuzz wrote while the child root was the /proc literal. An
-// installation patched by that release is still recognized through the
-// predecessor list below rather than being rewritten in place.
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH =
+// The first descriptor-rooted form accidentally called a helper declared in
+// src/index.js from the separate resume-detached.js module. Keep it as a
+// predecessor so controller refresh repairs already-patched installations.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH =
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
     RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
     "[...ultrafuzzBunStartupArgsFor(snapshotChildRoot), ...args.map(rewriteSnapshotArgument)]"
   );
+// resume-detached.js is a separate module, so its Bun startup arguments must be
+// self-contained rather than depending on helpers patched into src/index.js.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH =
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
+    RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
+    '[...(process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]'
+  );
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS = [
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH,
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH
+] as const;
 // 0.35.0 reflowed this import across multiple lines and added `watch`;
 // `realpathSync` is still absent, so the CLI still cannot compare a workflow
 // path against its persisted generation without this patch.
@@ -2488,10 +2501,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/resume-detached.js",
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
-    predecessors: [
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH
-    ],
+    predecessors: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
     patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
@@ -6746,7 +6756,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
       "detached resume execution snapshot transfer",
-      [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
       ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
     )
   );

@@ -14485,15 +14485,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     // Bun's startup controls are addressed relative to the inherited descriptor
     // root instead of a /proc literal, so the same patch works where /proc is
-    // absent. Both patches must route through that helper rather than spell the
-    // arguments themselves.
-    for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
-      const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
-      assert.ok(startup);
-      assert.match(startup.patched, /ultrafuzzBunStartupArgsFor/u);
-    }
+    // absent. The resume patch is a separate module and must not depend on the
+    // helper declared in the CLI entry module.
+    const resumeStartup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "resume_snapshot_transfer");
+    assert.ok(resumeStartup);
+    assert.doesNotMatch(resumeStartup.patched, /ultrafuzzBunStartupArgsFor/u);
+    assert.match(
+      resumeStartup.patched,
+      /"--config=" \+ snapshotChildRoot.*"--env-file=" \+ snapshotChildRoot.*"--preload=" \+ snapshotChildRoot/su
+    );
     const startupAnchor = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
     assert.ok(startupAnchor);
+    assert.match(startupAnchor.patched, /ultrafuzzBunStartupArgsFor/u);
     assert.match(
       startupAnchor.patched,
       /"--env-file=" \+ root \+ "\/controls\/bun-empty\.env".*"--no-addons".*"--preload=" \+ root \+ "\/controls\/bun-module-confinement\.js"/u
@@ -14563,6 +14566,22 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+
+    const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
+      candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
+    );
+    assert.ok(unscopedHelperPredecessor);
+    fs.writeFileSync(
+      resumeTransfer.source,
+      current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
+    assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
+    assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
