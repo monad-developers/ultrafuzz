@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { initProject, materializeDynamicRuntime, planRun } from "../src/index.js
 import { compileSmithersWorkflow } from "../src/smithers.js";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-dynamic-workflow-"));
+  return temporaryRoot("ufz-dynamic-workflow-");
 }
 
 function writePrompt(project: string, relativePath: string, id: string, body: string): void {

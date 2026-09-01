@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const fixtureContents = "verified synthetic artifact\n";
 
 test("verified ignored artifacts survive a real successful Smithers worktree reap", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-publication-"));
+  const root = temporaryRoot("ultrafuzz-smithers-publication-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "artifact-publication.tsx");
   const worktreePath = path.join(root, ".smithers", "worktrees", "artifact-publication");
@@ -65,7 +65,7 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
 });
 
 test("a real Smithers worktree uses the recorded launch commit after its branch moves", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-source-revision-"));
+  const root = temporaryRoot("ultrafuzz-smithers-source-revision-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "source-revision.tsx");
   const worktreePath = path.join(root, ".smithers", "worktrees", "source-revision");

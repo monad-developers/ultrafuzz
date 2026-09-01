@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -49,7 +49,7 @@ const CAMPAIGN_EVIDENCE_BYTES = Buffer.from("x", "utf8");
 const CAMPAIGN_EVIDENCE_SHA256 = createHash("sha256").update(CAMPAIGN_EVIDENCE_BYTES).digest("hex");
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
+  return temporaryRoot("ufz-runtime-gates-");
 }
 
 function writeCoverageLcov(

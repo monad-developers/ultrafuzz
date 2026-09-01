@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -866,7 +866,7 @@ test("registry discovery follows factory imports, aliases, and registered-only a
 });
 
 test("source inventory recurses through both TypeScript source extensions", () => {
-  const fixture = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-adapter-boundaries-"));
+  const fixture = temporaryRoot("ultrafuzz-adapter-boundaries-");
   try {
     mkdirSync(path.join(fixture, "nested", "deeper"), { recursive: true });
     writeFileSync(path.join(fixture, "index.tsx"), "export const index = true;\n");

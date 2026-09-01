@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -24,7 +24,7 @@ function fixture(runId: string): {
   pathValue: string;
   layout: ReturnType<typeof createRunLayout>;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-forge-guard-"));
+  const root = temporaryRoot("ultrafuzz-forge-guard-");
   const bin = path.join(root, "bin");
   const forge = path.join(bin, "forge");
   fs.mkdirSync(bin);

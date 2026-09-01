@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -42,7 +42,7 @@ nodes:
 }
 
 test("run planning binds local task worktrees to the launch checkout commit", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-revision-"));
+  const project = temporaryRoot("ultrafuzz-source-revision-");
   const git = (args: string[]): string =>
     execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   try {
@@ -133,7 +133,7 @@ function gitAt(cwd: string, args: string[]): string {
 }
 
 test("detached HEAD receives the same immutable run source binding", () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-detached-source-"));
+  const project = temporaryRoot("ultrafuzz-detached-source-");
   try {
     gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
     gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
@@ -157,7 +157,7 @@ test("detached HEAD receives the same immutable run source binding", () => {
 });
 
 test("planning captures source before repository reads and publishes no ref when the checkout changes", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-race-"));
+  const project = temporaryRoot("ultrafuzz-source-race-");
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
     writeSourceRevisionTopology(project);
@@ -195,7 +195,7 @@ test("planning captures source before repository reads and publishes no ref when
 });
 
 test("multi-run cleanup deletes source refs atomically", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-clean-atomic-"));
+  const project = temporaryRoot("ultrafuzz-source-clean-atomic-");
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
     writeSourceRevisionTopology(project);
@@ -234,7 +234,7 @@ test("multi-run cleanup deletes source refs atomically", async () => {
 });
 
 test("failed directory cleanup preserves the run source ref", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-clean-remove-failure-"));
+  const project = temporaryRoot("ultrafuzz-source-clean-remove-failure-");
   const originalRmSync = fs.rmSync;
   try {
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);

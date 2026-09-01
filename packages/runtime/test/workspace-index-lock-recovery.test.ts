@@ -1,17 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync
-} from "node:fs";
-import os from "node:os";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -30,7 +21,7 @@ function git(cwd: string, args: string[]): string {
 }
 
 function fixture(): { root: string; worktree: string; tree: string; lockPath: string } {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-index-lock-"));
+  const root = temporaryRoot("ultrafuzz-index-lock-");
   const repo = path.join(root, "repo");
   mkdirSync(repo);
   git(repo, ["init", "--quiet", "--initial-branch=main"]);

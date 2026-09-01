@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -1414,7 +1414,7 @@ function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]):
     { artifactRoot: string; file: { path: string; bytes: Buffer }; contents: string; value: unknown }
   >;
 } {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-ledger-probe-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-ledger-probe-"));
   const workspacePath = path.join(root, "workspace");
   const artifactDir = path.join(root, "run", "artifacts", "project-discovery");
   fs.mkdirSync(workspacePath, { recursive: true });
@@ -1581,7 +1581,7 @@ test("generated Smithers invariant ledger still snapshots a symlinked-directory 
 });
 
 test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
+  const root = temporaryRoot("ultrafuzz-invariant-directory-");
   const realRoot = path.join(root, "files");
   const rootAlias = path.join(root, "files-alias");
   fs.mkdirSync(realRoot);
@@ -1684,7 +1684,7 @@ test("generated Smithers authenticates the final generated-test publication snap
     createHash
   ) as (artifactDir: string, value: unknown) => Array<{ path: string; contents: Buffer }>;
 
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-final-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-final-snapshot-"));
   try {
     const relativePath = "generated-tests/Replay.t.sol";
     const contents = "contract Replay {}\n";
@@ -2493,7 +2493,7 @@ function generatedCampaignVerificationFixture(
 }
 
 test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys from captured bytes", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-output-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-output-snapshot-"));
   try {
     const outputPath = path.join(root, "result.json");
     const invalidUtf8Harness = loadVerifyArtifactsHarness();
@@ -2515,7 +2515,7 @@ test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys 
 });
 
 test("generated Smithers verifier rejects secret-bearing captured bytes before publication", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-secret-output-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-secret-output-"));
   try {
     const outputPath = path.join(root, "result.json");
     // A positively identified vendor-format credential: the publication gate
@@ -2538,7 +2538,7 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
 });
 
 test("generated Smithers hashes and publishes the captured output after its path changes", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-output-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-output-snapshot-"));
   try {
     const outputPath = path.join(root, "result.json");
     const original = Buffer.from("captured bytes\n", "utf8");
@@ -2560,7 +2560,7 @@ test("generated Smithers hashes and publishes the captured output after its path
 });
 
 test("generated verifier returns the exact durable verification-marker byte authority", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-marker-authority-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-marker-authority-"));
   try {
     const writeMarker = loadArtifactVerificationMarkerWriter(root);
     const alpha = Buffer.from("alpha publication\n", "utf8");
@@ -2611,7 +2611,7 @@ test("generated verifier returns the exact durable verification-marker byte auth
 });
 
 test("generated Smithers fails closed on schema-valid document semantic violations", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-output-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-output-"));
   try {
     const document = {
       schema_version: "ultrafuzz.generated-tests.v3",
@@ -2641,7 +2641,7 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
 });
 
 test("generated Smithers rejects non-UTF-8 generated-test support companions", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-support-utf8-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-support-utf8-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     const replayContents = "contract Replay {}\n";
@@ -2690,7 +2690,7 @@ test("generated Smithers rejects hard-linked generated-test manifests and compan
   assert.match(generatedVerifier, /readBoundedRegularArtifactSnapshot\([\s\S]*true\s*\)/u);
 
   await t.test("manifest", () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-manifest-link-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-manifest-link-"));
     try {
       const manifestPath = path.join(root, "result.json");
       fs.writeFileSync(
@@ -2720,7 +2720,7 @@ test("generated Smithers rejects hard-linked generated-test manifests and compan
   });
 
   await t.test("companion", () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-companion-link-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-companion-link-"));
     try {
       const generatedTestsDirectory = path.join(root, "generated-tests");
       fs.mkdirSync(generatedTestsDirectory);
@@ -2763,7 +2763,7 @@ test("generated Smithers binds generated-test manifests to the current run and l
     ["node_id", "node-foreign"],
     ["provenance", { producer_node_id: "node-one-attempt-1" }]
   ] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-identity-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-identity-"));
     try {
       const document = {
         schema_version: "ultrafuzz.generated-tests.v3",
@@ -2796,7 +2796,7 @@ test("generated Smithers binds generated-test manifests to the current run and l
 });
 
 test("generated Smithers verifies a v3 property campaign against authenticated semantic context", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-siblings-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const harness = loadVerifyArtifactsHarness({
@@ -2831,9 +2831,7 @@ test("generated Smithers requires exactly one declaration for every current camp
   ] as const;
   for (const [label, contract] of tupleMembers) {
     for (const count of [0, 2] as const) {
-      const root = fs.realpathSync(
-        fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-tuple-${label}-${count}-`))
-      );
+      const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-tuple-${label}-${count}-`));
       try {
         const fixture = generatedCampaignVerificationFixture(root);
         const output = fixture.task.outputs.find((candidate) => candidate.contract === contract);
@@ -2878,7 +2876,7 @@ test("generated Smithers fails closed on missing or duplicate selected-strategie
     "ultrafuzz/dynamic-strategy-provenance@1"
   ] as const;
   for (const count of [0, 2] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-dynamic-selected-tuple-${count}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-dynamic-selected-tuple-${count}-`));
     try {
       const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
       task.outputs = tupleContracts
@@ -2968,9 +2966,7 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
   ];
 
   for (const { label, mutate, alsoMatches } of cases) {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`))
-    );
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const plan = generatedCampaignPlanFixture();
@@ -3010,7 +3006,7 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
 });
 
 test("generated Smithers fails closed without sealed campaign timeout expectations", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-missing-timeout-authority-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-missing-timeout-authority-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     fixture.task.campaignTimeoutExpectations = null;
@@ -3031,7 +3027,7 @@ test("generated Smithers fails closed without sealed campaign timeout expectatio
 });
 
 test("generated Smithers rejects mixed implementation and campaign producers", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-mixed-property-role-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-mixed-property-role-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const implementationOutput = fixture.implementationProducer.outputs[0]!;
@@ -3054,7 +3050,7 @@ test("generated Smithers rejects mixed implementation and campaign producers", (
 
 test("generated Smithers fails closed when declared campaign evidence is missing or digest-mismatched", () => {
   for (const mode of ["missing", "mismatched"] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-evidence-${mode}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const harness = loadVerifyArtifactsHarness({
@@ -3100,7 +3096,7 @@ test("generated Smithers fails closed when declared campaign evidence is missing
 
 test("generated Smithers rejects symlinked and hard-linked campaign evidence", () => {
   for (const mode of ["symlink", "hardlink"] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-evidence-${mode}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const harness = loadVerifyArtifactsHarness({
@@ -3300,7 +3296,7 @@ test("generated Smithers diagnoses the node-dir campaign path base across all fi
   ];
 
   for (const { label, options, verify } of phases) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-path-base-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-path-base-"));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const documents = incidentDocuments(options);
@@ -3336,7 +3332,7 @@ test("generated Smithers diagnoses the node-dir campaign path base across all fi
 });
 
 test("generated Smithers publishes the one immutable campaign evidence snapshot used for verification", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-evidence-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-evidence-snapshot-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
@@ -3365,7 +3361,7 @@ test("generated Smithers publishes the one immutable campaign evidence snapshot 
 });
 
 test("generated Smithers rejects a dependency epoch swap after publication construction and before success", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dependency-final-recheck-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-dependency-final-recheck-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const dependencyPath = path.join(fixture.implementationArtifactDir, "implemented-properties.json");
@@ -3400,7 +3396,7 @@ test("generated Smithers rejects a dependency epoch swap after publication const
 });
 
 test("generated Smithers fails closed when v3 campaign sibling semantic counts disagree", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-siblings-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root, {
       includeNonPropertyFinding: true,
@@ -3426,7 +3422,7 @@ test("generated Smithers fails closed when v3 campaign sibling semantic counts d
 });
 
 test("generated Smithers rejects property-campaign v2 bytes without converting them", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-v2-rejection-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-v2-rejection-"));
   try {
     const artifactPath = path.join(root, "result.json");
     const legacyBytes = Buffer.from(
@@ -3453,7 +3449,7 @@ test("generated Smithers rejects property-campaign v2 bytes without converting t
 });
 
 test("generated Smithers fails closed when a contextual gate lacks verified ancestors", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-context-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-context-"));
   try {
     const contents = `${JSON.stringify({ schema_version: "ultrafuzz.properties.v2", properties: [] })}\n`;
     assert.equal(validateArtifactContract("ultrafuzz/properties@2", contents).ok, true);
@@ -5786,7 +5782,7 @@ test("generated optional admission rejects a present malformed marker before pub
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
 
-  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-optional-admission-")));
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-optional-admission-"));
   try {
     const producerAttemptId = "optional-producer";
     const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
@@ -5914,7 +5910,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
 
-  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-rerender-admission-")));
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-rerender-admission-"));
   try {
     const producerAttemptId = "dependency-producer";
     const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
@@ -6531,7 +6527,7 @@ test("runtime workspace patch publication replaces empty placeholders but reject
     writeFileDurable
   ) as (root: string, relativePath: string, contents: string, replaceSuperseded?: boolean) => void;
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-patch-publication-"));
+  const root = temporaryRoot("ultrafuzz-workspace-patch-publication-");
   try {
     const patchPath = path.join(root, "workspace.patch");
     fs.writeFileSync(patchPath, "\n");
@@ -6748,7 +6744,7 @@ test("generated immutable file identities preserve bigint device, inode, size, a
 });
 
 test("generated task-local prompt authority is minimized, tamper-evident, and restored for retries", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-prompt-authority-"));
+  const root = temporaryRoot("ultrafuzz-generated-prompt-authority-");
   try {
     const controllerRunRoot = path.join(root, "controller-host-private", ".ultrafuzz", "runs", "run-1");
     const relocatedRunRoot = path.join(root, "execution-b", ".ultrafuzz", "runs", "run-1");
@@ -6981,7 +6977,7 @@ test(
 
     const { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath } =
       loadWorkflowControlPathResolvers();
-    const snapshotsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-detached-task-paths-"));
+    const snapshotsRoot = temporaryRoot("ultrafuzz-detached-task-paths-");
     const generationRoot = path.join(snapshotsRoot, "a".repeat(64));
     const workflowRelativePath = path.join(".smithers", "workflows", "detached-paths.tsx");
     const persistedWorkflowPath = path.join(generationRoot, workflowRelativePath);
@@ -7055,7 +7051,7 @@ test(
 
 test("generated workflow controls admit the same persisted native workflow outside a snapshot", () => {
   const { admitWorkflowControls, taskWorkflowControlPaths } = loadWorkflowControlPathResolvers();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-native-workflow-controls-"));
+  const root = temporaryRoot("ultrafuzz-native-workflow-controls-");
   const workflowPath = path.join(root, ".smithers", "continuations", "current", "workflows", "workflow.tsx");
   const differentWorkflowPath = path.join(root, ".smithers", "workflows", "different.tsx");
   const snapshotRoot = path.join(root, "snapshots", "a".repeat(64));
@@ -7126,7 +7122,7 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
 // gate, so `ultrafuzz validate` and the run enforced different things. The template must now delegate
 // to the shared validator in @ultrafuzz/artifacts, which is the only place the rule lives.
 test("generated Smithers invariant snapshot delegates the pin check to the shared validator", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-template-pin-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-template-pin-"));
   fs.writeFileSync(path.join(root, "Counter.sol"), "contract Counter {}\n");
   const calls: InvariantSourcePinCall[] = [];
   try {
@@ -7312,7 +7308,7 @@ test("recorded source identity, not later ref creation, selects pinned worktree 
 
 test("generated Smithers cloud source proof records the sealed submodule expectation", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-cloud-source-proof-"));
+  const root = temporaryRoot("ultrafuzz-cloud-source-proof-");
   const workspace = path.join(root, "workspace");
   const artifactDir = path.join(root, "artifacts", "cloud-attempt");
   const proofPath = path.join(root, "source-proofs", "cloud-attempt.json");
@@ -7366,7 +7362,7 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
   assert.equal(typeof command, "string");
   assert.doesNotMatch(command, /--batch-all-objects/u);
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-hidden-commit-"));
+  const root = temporaryRoot("ultrafuzz-hidden-commit-");
   const git = (args: string[]): string =>
     execFileSync("git", args, {
       cwd: root,
@@ -7403,7 +7399,7 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
 
 test("generated Smithers pinned source proof rejects any previously published byte drift", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-proof-"));
+  const root = temporaryRoot("ultrafuzz-source-proof-");
   const workspace = path.join(root, "workspace");
   const artifactDir = path.join(root, "artifacts", "property-specification-certora");
   const proofPath = path.join(root, "source-proofs", "property-specification-certora.json");
@@ -7996,7 +7992,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(coverageSource, /verifiedSingletonAncestorJsonArtifact/u);
   assert.match(coverageSource, /verifiedCanonicalPropertyCatalog/u);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-prompt-authority-"));
+  const root = temporaryRoot("ultrafuzz-final-report-prompt-authority-");
   try {
     const workspacePath = path.join(root, "workspaces", "final-report");
     fs.mkdirSync(workspacePath, { recursive: true });
@@ -8095,7 +8091,7 @@ test("final-report repository normalization strips private URL suffixes and reje
 });
 
 test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-run-summary-"));
+  const root = temporaryRoot("ultrafuzz-final-report-run-summary-");
   try {
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
     const workspacePath = path.join(runRoot, "workspaces", "final-report");
@@ -8479,7 +8475,7 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
 });
 
 test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-forged-producer-"));
+  const root = temporaryRoot("ultrafuzz-forged-producer-");
   try {
     const task = {
       id: "node:final-report",
@@ -8613,7 +8609,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
 });
 
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-retry-prompt-"));
+  const root = temporaryRoot("ultrafuzz-retry-prompt-");
   try {
     const artifactDir = path.join(root, "run", "artifacts", "final-report");
     const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
@@ -8798,7 +8794,7 @@ test("generated Smithers workflow contains no output repair or legacy normalizat
 });
 
 test("durable writer replaces a destination symlink without overwriting its target", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-durable-writer-"));
+  const root = temporaryRoot("ultrafuzz-durable-writer-");
   try {
     const symlinkTarget = path.join(root, "target.txt");
     const output = path.join(root, "output.txt");
@@ -9267,7 +9263,7 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
 });
 
 test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-discovery-"));
+  const workspace = temporaryRoot("ultrafuzz-git-discovery-");
   try {
     execFileSync("git", ["init", "--quiet", workspace]);
     for (const relativePath of [
@@ -9315,7 +9311,7 @@ test("generated Smithers invariant provenance accepts only supported source root
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-verifier-"));
+  const root = temporaryRoot("ultrafuzz-generated-verifier-");
   const realDirectory = path.join(root, "real");
   fs.mkdirSync(realDirectory);
   const realFile = path.join(realDirectory, "Test.t.sol");
@@ -9504,7 +9500,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
+  const runRoot = temporaryRoot("ultrafuzz-verification-gate-");
   const dependency = path.join(runRoot, "property-specification-fanin");
   const generatedDependency = path.join(runRoot, "generated-tests-fanin");
   const invariantDependency = path.join(runRoot, "stateful-invariant-setup");
@@ -9921,7 +9917,7 @@ test("generated Smithers verification marker root must be a canonical directory"
     createRoot: boolean
   ) => { root: string; path: string; relativePath: string };
 
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-root-"));
+  const runRoot = temporaryRoot("ultrafuzz-verification-root-");
   try {
     const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
     const realMarkerRoot = path.join(runRoot, "real-markers");

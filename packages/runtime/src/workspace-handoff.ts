@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { lstatSync, mkdtempSync, realpathSync, rmSync, unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -1127,7 +1127,7 @@ function sha256(value: string): string {
 }
 
 function withTemporaryIndex<T>(workspaceRoot: string, callback: (index: string) => T): T {
-  const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-index-"));
+  const temporaryRoot = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ultrafuzz-workspace-index-"));
   const index = path.join(temporaryRoot, "index");
   try {
     return callback(index);

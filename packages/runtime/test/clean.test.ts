@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { cleanRun, initProject, planRun } from "../src/index.js";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-clean-"));
+  return temporaryRoot("ufz-runtime-clean-");
 }
 
 function writeSmallTopology(project: string): void {
@@ -117,7 +117,7 @@ test("cleanRun rejects missing confirmation, non-generated paths, state files, m
   assert.equal(missing.ok, false);
   assert.ok(missing.diagnostics.some((diagnostic) => diagnostic.code === "CLEAN_SELECTION_MISSING"));
 
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-clean-outside-"));
+  const outside = temporaryRoot("ufz-clean-outside-");
   const workspaceRoot = path.join(runRoot, "workspaces");
   fs.mkdirSync(workspaceRoot, { recursive: true });
   fs.symlinkSync(outside, path.join(workspaceRoot, "link"));

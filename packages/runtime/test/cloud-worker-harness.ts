@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
+import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as ts from "typescript";
@@ -236,7 +236,7 @@ function writeHarnessStubs(runtimeModuleUrl: string): {
   agents: string;
   runtimeGuard: string;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workflow-harness-"));
+  const root = temporaryRoot("ufz-workflow-harness-");
   const write = (name: string, contents: string): string => {
     const filePath = path.join(root, name);
     fs.writeFileSync(filePath, contents, "utf8");
