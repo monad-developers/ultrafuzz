@@ -108,7 +108,7 @@ function runMetadata(runId: string, totalTokens: number): Record<string, unknown
       task_node_ids: ["synthetic-strategy"]
     },
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: workflowRunId,
       current: structuredClone(segment),

@@ -9,7 +9,10 @@ import {
   readGroundTruthDocument,
   type GroundTruthSubject
 } from "@ultrafuzz/evals";
+import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import { MODAL_PUBLIC_BENCHMARK_ENV } from "@ultrafuzz/runtime";
+
+import { runnerApiKeySourceEnv } from "./auth.js";
 
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
@@ -74,7 +77,11 @@ import {
   childExitFailureCause,
   describeWorkerTermination,
   drainChildOutput,
-  workerTerminationStack
+  workerDiagnosticLogPayload,
+  workerTerminationStack,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  type WorkerDiagnostic
 } from "./worker-diagnostics.js";
 import {
   assertWorkerInputLineage,
@@ -105,6 +112,23 @@ const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
 const RESULT_GENERATION_FLOOR_PATH = path.join(DATA_ROOT, "result-generation-floor.json");
 const SOURCE_PROOF_PATH = path.join(DATA_ROOT, "source-proof.json");
+/**
+ * Credential values every diagnostic this worker appends to its log is redacted against.
+ *
+ * The collected copy of that log is checked against the redaction patterns only, and an opaque token matches
+ * none of them: a `references sync` stderr quoting a token-bearing URL would otherwise reach a public
+ * artifact, and once the collector holds the same value the whole collected file set is refused instead.
+ */
+const DIAGNOSTIC_SECRET_VALUES = new Set(
+  [
+    CONFIG.braintrust.api_key_env,
+    CONFIG.braintrust.judge_api_key_env,
+    REFERENCE_GITHUB_TOKEN_ENV,
+    ...runnerApiKeySourceEnv(MODEL.provider)
+  ]
+    .map((name) => process.env[name]?.trim())
+    .filter((value): value is string => value !== undefined && value !== "")
+);
 let modelWorkStarted = false;
 
 function privateConfig(): PrivateModalBenchmarkConfig {
@@ -247,6 +271,7 @@ async function main(): Promise<void> {
       await writer.writePartial(await readWorkerCheckpoint(target));
       const judgeKeyEnv = privateJudgeApiKeyEnv(privateConfig());
       const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv, "authentication-failure"));
+      DIAGNOSTIC_SECRET_VALUES.add(judgeCredential);
       await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
         label: "eval score",
         failureCategory: "unreachable",
@@ -589,6 +614,12 @@ async function runChecked(
     });
   } catch (error) {
     await drained.catch(() => undefined);
+    await appendDiagnosticLog([
+      {
+        code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+        message: `${options.label} did not start: ${describeWorkerTermination(error, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)}`
+      }
+    ]);
     await appendGenericLog("operation-failed");
     throw new OperationalDispositionError(capacityFailure(error) ? "capacity-unavailable" : failureCategory(options), {
       cause: error
@@ -596,10 +627,12 @@ async function runChecked(
   }
   await drained;
   if (exitCode !== 0) {
+    const cause = childExitFailureCause(options.label, exitCode, stderrTail, [...DIAGNOSTIC_SECRET_VALUES]);
+    // `appendGenericLog` carries a lifecycle token and nothing else, so a reason that is not logged here
+    // reaches the sandbox console and no collected file.
+    await appendDiagnosticLog([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message: cause.message }]);
     await appendGenericLog("operation-failed");
-    throw new OperationalDispositionError(failureCategory(options), {
-      cause: childExitFailureCause(options.label, exitCode, stderrTail)
-    });
+    throw new OperationalDispositionError(failureCategory(options), { cause });
   }
   await appendGenericLog("operation-finished");
 }
@@ -617,6 +650,21 @@ async function appendGenericLog(
   event: "worker-started" | "operation-started" | "operation-finished" | "operation-failed"
 ): Promise<void> {
   await appendFile(LOG_PATH, `${new Date().toISOString()} ${event}\n`);
+}
+
+/**
+ * Append one `eval-failure-diagnostics` line, which is the only production besides a bare lifecycle token
+ * that `assertSanitizedModalCollectedFiles` will collect. A diagnostic that cannot be composed or written is
+ * not an outcome: the caller is already failing the run for its own reason and must keep that reason.
+ */
+async function appendDiagnosticLog(diagnostics: readonly WorkerDiagnostic[]): Promise<void> {
+  try {
+    const payload = workerDiagnosticLogPayload(diagnostics, [...DIAGNOSTIC_SECRET_VALUES]);
+    if (payload === undefined) return;
+    await appendFile(LOG_PATH, `${new Date().toISOString()} eval-failure-diagnostics ${payload}\n`);
+  } catch {
+    // The diagnostic is evidence, not an outcome.
+  }
 }
 
 async function flushVolume(): Promise<void> {

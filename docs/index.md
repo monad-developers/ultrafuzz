@@ -11,6 +11,11 @@ inspectable prompts, pinned references, artifacts, findings, and reports. It is
 built for security researchers auditing a protocol and for protocol developers
 hardening their code before or during review.
 
+> **Security note:** run Ultrafuzz only on an ephemeral, isolated virtual machine
+> you can discard afterwards, never on a developer workstation or any host holding
+> valuable data or credentials. Agents run in an unrestricted, skip-permissions
+> workflow. See [Security](security.md).
+
 ## The Short Path
 
 From a Solidity repository:

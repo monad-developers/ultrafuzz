@@ -297,12 +297,12 @@ describe("strict worker result contracts", () => {
         digest: `sha256:${crypto.createHash("sha256").update(stateContents).digest("hex")}`
       },
       usage: {
-        input_tokens: 11,
+        input_tokens: 8,
         output_tokens: 7,
         cache_read_tokens: 3,
         cache_write_tokens: 2,
         reasoning_tokens: 5,
-        total_tokens: 28,
+        total_tokens: 25,
         estimated_cost_usd: 0.125,
         partial_pricing: true,
         event_count: 4,
@@ -318,6 +318,47 @@ describe("strict worker result contracts", () => {
       }
     });
     expect(JSON.stringify(snapshot)).not.toContain("placeholder-one");
+  });
+
+  it("bounds contradictory accounting breakdowns while preserving the provider total", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ current: taskNode("succeeded") }))}\n`
+    );
+    writeRunMetadataDocument(
+      path.join(runRoot, "run.json"),
+      currentRunMetadata({
+        ...currentAccountingSummary(),
+        uncached_input_tokens: 6,
+        input_tokens: 5,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 2,
+        inclusive_token_total: 6,
+        billable_token_total: 6,
+        total_tokens: 6,
+        tokens_used: "6",
+        usage_complete: false,
+        usage_incomplete_reasons: [
+          { code: "component-breakdown-incomplete", component: "reasoning", model: "placeholder-one" },
+          { code: "component-breakdown-incomplete", component: "uncached_input", model: "placeholder-one" }
+        ]
+      })
+    );
+
+    const snapshot = await readWorkerCheckpoint(root);
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 5,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 1,
+      total_tokens: 6
+    });
   });
 
   it("counts durable state logical_node_id rows once across loop attempts", async () => {
@@ -522,8 +563,7 @@ function taskNode(status: string): Record<string, unknown> {
   return { status };
 }
 
-function currentRunMetadata(): RunMetadataDocument {
-  const summary = currentAccountingSummary();
+function currentRunMetadata(summary: RunAccountingSummary = currentAccountingSummary()): RunMetadataDocument {
   const segment = {
     ...summary,
     control_generation: "b".repeat(64),
@@ -561,7 +601,7 @@ function currentRunMetadata(): RunMetadataDocument {
       task_node_ids: ["first"]
     },
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: "workflow-current",
       current: structuredClone(segment),
@@ -592,15 +632,15 @@ function currentRunMetadata(): RunMetadataDocument {
 function currentAccountingSummary(): RunAccountingSummary {
   return {
     uncached_input_tokens: 8,
-    input_tokens: 11,
-    output_tokens: 7,
+    input_tokens: 13,
+    output_tokens: 12,
     cache_read_tokens: 3,
     cache_write_tokens: 2,
     reasoning_tokens: 5,
-    inclusive_token_total: 28,
+    inclusive_token_total: 25,
     billable_token_total: 22,
-    total_tokens: 28,
-    tokens_used: "28",
+    total_tokens: 25,
+    tokens_used: "25",
     estimated_spend: "$0.125",
     estimated_spend_usd: 0.125,
     component_costs_usd: {

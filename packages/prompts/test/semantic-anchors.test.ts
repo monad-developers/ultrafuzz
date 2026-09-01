@@ -630,21 +630,15 @@ describe("prompt semantic anchors", () => {
     expect(discovery).toMatch(/JSON escaping is serialization only/iu);
   });
 
-  it("requires final reports to preserve benchmark expectation coverage", () => {
+  it("requires final reports to preserve runtime-authoritative property coverage", () => {
     const finalReport = prompt("review/final-report.md");
     const flatFinalReport = finalReport.replace(/\s+/gu, " ");
     expect(finalReport).toContain("reference_expected_property_ids");
     expect(finalReport).toContain("reference_expectation_ids");
-    expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
-    // The runtime derives blocker summaries from the selected implementation
-    // records. Preserve that semantic projection without redefining the JSON
-    // member type owned by the pinned report schema.
-    expect(finalReport).toContain("<property-id>: <the record's blocker summary text>");
-    expect(flatFinalReport).toContain("in canonical catalog order");
-    // The gate compares blocker_summaries byte-for-byte with
-    // `${propertyId}: ${record.blocker.summary}`, so a paraphrase fails it just
-    // as surely as an object does.
-    expect(finalReport).toContain("Copy that summary text verbatim");
+    expect(finalReport).toMatch(/Copy that JSON value exactly; do not derive/u);
+    expect(finalReport).toMatch(/preserve every ID array and blocker summary in the\s+runtime-supplied order/u);
+    expect(finalReport).toContain("tracked and not-planned");
+    expect(finalReport).not.toMatch(/implementation handoff's\s+`selection` object/u);
     // The Markdown half of the same coverage block is compared line by line and
     // was documented nowhere. Pin every label the gate matches on, not a sample.
     for (const label of [
@@ -669,6 +663,7 @@ describe("prompt semantic anchors", () => {
     // reportPublicProse in prose was tried and was wrong in three ways, so the
     // prompt must keep promising the laxer contract the gate actually applies.
     expect(finalReport).toMatch(/Markdown-escaping the special characters is\s+accepted but not\s+required/u);
+    expect(flatFinalReport).toContain("the values below are only a format example");
   });
 
   it("requires renumbered property findings to retain authenticated campaign identity", () => {
@@ -1012,6 +1007,12 @@ describe("prompt semantic anchors", () => {
       expect(markdown.split(placeholder), relativePath).toHaveLength(2);
       expect(markdown, relativePath).not.toContain("docs/reference/artifacts-reports.md");
     }
+
+    const report = prompt("review/final-report.md");
+    expect(report).toContain("campaign-summary.json,coverage-evidence.json}}");
+    expect(report).toContain("copy its complete parsed value exactly to `report.json.coverage_evidence`");
+    expect(report).toMatch(/When no coverage-evidence producer is selected,\s+omit both the optional JSON member/u);
+    expect(report.indexOf(placeholder)).toBeLessThan(report.indexOf("## Additional Sections"));
 
     const partialPath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/coverage-evidence-markdown.mdx", import.meta.url)
@@ -1364,9 +1365,16 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/canonical originating strategy name\s+when one is available/u);
     expect(markdown).toContain("`strategy_provenance` when\nthe upstream finding has it");
     expect(flatMarkdown).toContain(
-      "Derive structured detection rates from the exact strategy hits and configured loop counts"
+      "Derive structured detection rates from the distinct authenticated strategy hits and actual configured execution counts"
     );
-    expect(flatMarkdown).toContain("Do not emit removed or compatibility aliases");
+    expect(flatMarkdown).toContain(
+      "Do not render a Strategy section, loop count, detection rate, or strategy provenance column anywhere in `report.md`"
+    );
+    expect(flatMarkdown).toContain(
+      "Do not render strategy-loop counts, audit-profile catalog digests, topology digests, prompt digests, or expanded graph fingerprints in `report.md`"
+    );
+    expect(flatMarkdown).toContain("do not include a Strategy section or detection-rate table");
+    expect(flatMarkdown).toContain("do not emit removed or compatibility aliases");
     expect(flatMarkdown).toContain(
       "pinned report schema alone defines how zero, one, or several producing backends are represented"
     );
@@ -1406,6 +1414,44 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toMatch(/source finding you render has a `dedupe_key` exactly equal to its\s+lifecycle record/iu);
     expect(markdown).toContain("never fall back to `finding_id`");
     expect(markdown).not.toContain("when the finding has no dedupe key");
+  });
+
+  it("binds every bounded disposition to its classification in the report prompt", () => {
+    const markdown = prompt("review/final-report.md");
+    const flatMarkdown = normalized(markdown);
+
+    // The bounded gate derives the disposition from the row's own enriched
+    // classification, so a `true-positive` sitting in `non_production_outcomes`
+    // fails the report. Only `issues` is scored, so licensing that pairing
+    // would let a report assert a credible production bug from an unscored
+    // array (#1026). A finding that must not be promoted is reclassified.
+    expect(flatMarkdown).toContain("derive `final_disposition` from the chosen `triage_classification` alone");
+    expect(flatMarkdown).toContain(
+      "`true-positive` is `promoted`, `false-positive` is `dropped`, and every other classification is `non-production`"
+    );
+    expect(flatMarkdown).toContain("Never pair a `true-positive` with a non-promoted disposition");
+    expect(flatMarkdown).toContain(
+      "When a finding must not be promoted, choose any other classification from the list above"
+    );
+    expect(flatMarkdown).toContain("Omit `canonical_severity` from every non-promoted record");
+    expect(flatMarkdown).toContain(
+      "copy the enriched `triage_classification` onto the report row itself as well as into that row's `lifecycle` object"
+    );
+    expect(flatMarkdown).toContain("in every `issues` row and every `non_production_outcomes` row");
+    expect(flatMarkdown).toContain(
+      "emit `non_production_outcomes` in the exact relative order of the authenticated deduped findings"
+    );
+    expect(flatMarkdown).toContain("Only `issues` are re-sorted High, Medium, then Low");
+    // The trusted-role boundary reaches the same failing state on its own when
+    // it names a report array instead of a classification.
+    expect(flatMarkdown).toContain(
+      "Classify them `defensive-hardening`, or `spec-gated` when an explicit product decision governs the behavior"
+    );
+    expect(flatMarkdown).toContain("Direct misuse of a trusted role is a `true-positive` at Low severity");
+    expect(flatMarkdown).toContain("This boundary never selects a report array directly; it selects a classification");
+    expect(flatMarkdown).not.toContain("every reportability and evidence gate in this prompt");
+    expect(flatMarkdown).not.toContain("Reckless mistakes by a trusted administrator are non-production outcomes");
+    expect(flatMarkdown).not.toContain("`non-production` for every other actionable class");
   });
 
   it("keeps findings semantics beside the schema-owned JSON shape", () => {
@@ -1631,6 +1677,11 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("Add `## Goal search coverage` after `## Property implementation coverage` and");
     expect(report).toContain("and before `## Goal search coverage`");
     expect(report).toContain("Add `## Property provenance` after the goal search coverage section.");
+    expect(report.match(/Add `## Property implementation coverage`/gu)).toHaveLength(1);
+    expect(report).toContain("runtime-authoritative tracked or not-planned object");
+    expect(report).toContain("the values below are only a format example");
+    expect(report).not.toContain("or the string `unavailable`");
+    expect(report).not.toMatch(/implementation handoff's\s+`selection` object/u);
     expect(report).toMatch(/in every report, including a report with no\s+issues/u);
     expect(report).toMatch(/Never state or imply that no vulnerabilities were found without stating goal/u);
     expect(report).toMatch(/write that goal search coverage is unknown/u);

@@ -6,6 +6,7 @@ import {
   type NodeStatus,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
+  type RunAccountingSummary,
   type RunMetadataDocument,
   type RunState,
   type RunStatus,
@@ -174,7 +175,7 @@ export function deriveRunStatistics(
   }
 
   const attempts = evidence.attempts ?? [];
-  const usageEvents = evidence.usage ?? [];
+  const usageEvents = latestUsageEntriesByAttempt(evidence.usage ?? []);
   const descriptors = nodeDescriptors(evidence.graph, evidence.state, attempts);
   const aliases = usageNodeAliases(descriptors, diagnostics);
   const pricing = modelPricing(evidence.runMetadata);
@@ -243,6 +244,18 @@ export function deriveRunStatistics(
     unattributed_usage: usageStatistics(unattributed)
   };
   return { value, diagnostics };
+}
+
+function latestUsageEntriesByAttempt(entries: readonly UsageLedgerEntry[]): UsageLedgerEntry[] {
+  const latest = new Map<string, UsageLedgerEntry>();
+  for (const entry of entries) {
+    const identity = JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]);
+    const previous = latest.get(identity);
+    if (previous === undefined || entry.source_event_sequence >= previous.source_event_sequence) {
+      latest.set(identity, entry);
+    }
+  }
+  return [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence);
 }
 
 function assertEvidenceBindings(evidence: StatisticsEvidence): void {
@@ -604,7 +617,7 @@ function accumulateUsage(
     accumulator.hasEstimatedSpend = true;
   }
   accumulator.usageComplete &&= projected.usage_complete;
-  accumulator.pricingComplete &&= projected.pricing_complete;
+  accumulator.pricingComplete &&= !projected.partial_pricing;
   accumulator.eventCount += 1;
   accumulator.models.add(event.usage.model);
 }
@@ -697,20 +710,42 @@ function modelPricing(metadata: RunMetadataDocument): Map<string, ModelPricing> 
 function accountingCumulative(metadata: RunMetadataDocument): AccountingCumulativeStatistics | null {
   const cumulative = metadata.accounting?.cumulative;
   if (cumulative === undefined) return null;
+  const components = boundedIndependentAccountingComponents(cumulative);
   return {
-    input_tokens: cumulative.input_tokens,
-    cache_read_tokens: cumulative.cache_read_tokens,
-    cache_write_tokens: cumulative.cache_write_tokens,
-    output_tokens: cumulative.output_tokens,
-    reasoning_tokens: cumulative.reasoning_tokens,
+    // stats.v1 exposes independent token components even though accounting.v4
+    // stores the provider-inclusive input and output counters.
+    ...components,
     total_tokens: cumulative.total_tokens,
     estimated_spend_usd: cumulative.estimated_spend_usd ?? null,
     usage_complete: cumulative.usage_complete,
-    pricing_complete: cumulative.pricing_complete,
+    pricing_complete: !cumulative.partial_pricing,
     event_count: cumulative.event_count,
     models: [...cumulative.models],
     agents: [...cumulative.agents],
     source_run_ids: [...cumulative.source_run_ids]
+  };
+}
+
+function boundedIndependentAccountingComponents(
+  summary: RunAccountingSummary
+): Pick<
+  AccountingCumulativeStatistics,
+  "input_tokens" | "cache_read_tokens" | "cache_write_tokens" | "output_tokens" | "reasoning_tokens"
+> {
+  let inputTokens = Math.min(summary.uncached_input_tokens, summary.input_tokens);
+  let remainingInputTokens = summary.input_tokens - inputTokens;
+  const cacheReadTokens = Math.min(summary.cache_read_tokens, remainingInputTokens);
+  remainingInputTokens -= cacheReadTokens;
+  const cacheWriteTokens = Math.min(summary.cache_write_tokens, remainingInputTokens);
+  remainingInputTokens -= cacheWriteTokens;
+  inputTokens += remainingInputTokens;
+  const reasoningTokens = Math.min(summary.reasoning_tokens, summary.output_tokens);
+  return {
+    input_tokens: inputTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+    output_tokens: summary.output_tokens - reasoningTokens,
+    reasoning_tokens: reasoningTokens
   };
 }
 

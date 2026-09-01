@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { sha256Bytes, type RunDataGovernanceReference } from "@ultrafuzz/artifacts";
@@ -34,7 +34,7 @@ import {
 import { assertSealedDataGovernance } from "../src/smithers.js";
 import type { PlannedGraph } from "../src/types.js";
 function repository(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-governance-"));
+  const root = temporaryRoot("ufz-governance-");
   execFileSync("git", ["init", "-q"], { cwd: root });
   execFileSync("git", ["config", "user.email", "tester@example.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
@@ -290,7 +290,7 @@ test("governance semantic gates reject projected duplicates, incomplete coverage
 });
 test("policy pins explicit and home routes, Modal, and OpenRouter models", () => {
   const root = repository(),
-    homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provider-routes-"));
+    homes = temporaryRoot("ufz-provider-routes-");
   const routed = {
     ...config,
     agents: { KimiAgent: { auth: "subscription" }, ClaudeAgent: { auth: "subscription" } }
@@ -438,7 +438,7 @@ test("target identity excludes only exact controller-owned untracked outputs", (
   assert.equal(targetIdentity(root, owned).dirty, true);
 });
 test("governance precedes preflight and rejects a policy mutated during it", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-governance-plan-"));
+  const project = temporaryRoot("ufz-governance-plan-");
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   useSmallTopology(project);
   let calls = 0;
@@ -475,7 +475,7 @@ test("governance precedes preflight and rejects a policy mutated during it", asy
   assert.equal(changed.diagnostics[0]?.code, "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT");
 });
 test("planning persists digest-bound governance and sealing detects tamper", async () => {
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-governance-persist-"));
+  const projectRoot = temporaryRoot("ufz-governance-persist-");
   assert.equal(initProject({ projectRoot, force: true }).ok, true);
   useSmallTopology(projectRoot);
   const planned = await planRun(
@@ -524,7 +524,7 @@ test("target identity rejects Git content filters before execution", () => {
 });
 
 test("Codex CLI bookkeeping in config.toml does not change the acknowledged route", () => {
-  const homes = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-codex-route-"));
+  const homes = temporaryRoot("ufz-codex-route-");
   fs.mkdirSync(path.join(homes, ".codex"));
   const configPath = path.join(homes, ".codex", "config.toml");
   // What the Codex CLI writes on its own: model selection, marketplace

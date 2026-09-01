@@ -102,7 +102,7 @@ type KimiWireReadBudget = { bytes: number };
 type KimiSmithersUsage = {
   inputTokens: number;
   outputTokens: number;
-  inputTokenDetails: { cacheReadTokens: number; cacheWriteTokens: number };
+  inputTokenDetails: { noCacheTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   totalTokens: number;
 };
 
@@ -141,11 +141,11 @@ export class KimiCode029Agent extends SmithersKimiAgent {
   }
 
   override generate(...args: Parameters<SmithersKimiAgent["generate"]>): ReturnType<SmithersKimiAgent["generate"]> {
-    return this.withFailureUsage(super.generate(...args)) as ReturnType<SmithersKimiAgent["generate"]>;
+    return this.withResultUsage(super.generate(...args)) as ReturnType<SmithersKimiAgent["generate"]>;
   }
 
   override stream(...args: Parameters<SmithersKimiAgent["stream"]>): ReturnType<SmithersKimiAgent["stream"]> {
-    return this.withFailureUsage(super.stream(...args)) as ReturnType<SmithersKimiAgent["stream"]>;
+    return this.withStreamUsage(super.stream(...args)) as ReturnType<SmithersKimiAgent["stream"]>;
   }
 
   override createOutputInterpreter(): KimiOutputInterpreter {
@@ -287,8 +287,20 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     return kimiUsageDelta(runtimeHome, baseline);
   }
 
-  private withFailureUsage<T>(promise: Promise<T>): Promise<T> {
+  private withResultUsage<T>(promise: Promise<T>): Promise<T> {
     return promise
+      .then((result) => attachKimiResultUsage(result, this.pendingFailureUsage))
+      .catch((error: unknown) => {
+        throw attachKimiFailureUsage(error, this.pendingFailureUsage);
+      })
+      .finally(() => {
+        this.pendingFailureUsage = undefined;
+      });
+  }
+
+  private withStreamUsage<T>(promise: Promise<T>): Promise<T> {
+    return promise
+      .then((result) => attachKimiStreamUsage(result, this.pendingFailureUsage))
       .catch((error: unknown) => {
         throw attachKimiFailureUsage(error, this.pendingFailureUsage);
       })
@@ -934,7 +946,8 @@ function remapKimiSessionPath(value: string, sourceSessionDir: string, targetSes
 
 function kimiCompletedUsage(delta: KimiWireUsage): Record<string, number> {
   return {
-    input_tokens: delta.inputOther,
+    input_tokens: kimiProviderInputTokens(delta),
+    fresh_input_tokens: delta.inputOther,
     output_tokens: delta.output,
     cache_read_input_tokens: delta.inputCacheRead,
     cache_creation_input_tokens: delta.inputCacheCreation,
@@ -944,14 +957,39 @@ function kimiCompletedUsage(delta: KimiWireUsage): Record<string, number> {
 
 function kimiSmithersUsage(delta: KimiWireUsage): KimiSmithersUsage {
   return {
-    inputTokens: delta.inputOther,
+    inputTokens: kimiProviderInputTokens(delta),
     outputTokens: delta.output,
     inputTokenDetails: {
+      noCacheTokens: delta.inputOther,
       cacheReadTokens: delta.inputCacheRead,
       cacheWriteTokens: delta.inputCacheCreation
     },
     totalTokens: kimiUsageTotal(delta)
   };
+}
+
+function attachKimiResultUsage<T>(result: T, usage: KimiSmithersUsage | undefined): T {
+  if (usage === undefined || !isRecord(result)) return result;
+  try {
+    result.usage = usage;
+    result.totalUsage = usage;
+  } catch {
+    // Telemetry must never turn a successful provider invocation into a model
+    // failure if an exotic Smithers result becomes immutable.
+  }
+  return result;
+}
+
+function attachKimiStreamUsage<T>(result: T, usage: KimiSmithersUsage | undefined): T {
+  if (usage === undefined || !isRecord(result)) return result;
+  try {
+    result.usage = Promise.resolve(usage);
+    result.totalUsage = Promise.resolve(usage);
+  } catch {
+    // Telemetry must never turn a successful provider invocation into a model
+    // failure if an exotic Smithers stream result becomes immutable.
+  }
+  return result;
 }
 
 function attachKimiFailureUsage(error: unknown, usage: KimiSmithersUsage | undefined): unknown {
@@ -1210,11 +1248,12 @@ function safeKimiUsageSum(left: number, right: number): number {
   return sum;
 }
 
+function kimiProviderInputTokens(usage: KimiWireUsage): number {
+  return safeKimiUsageSum(usage.inputOther, safeKimiUsageSum(usage.inputCacheRead, usage.inputCacheCreation));
+}
+
 function kimiUsageTotal(usage: KimiWireUsage): number {
-  return safeKimiUsageSum(
-    safeKimiUsageSum(usage.inputOther, usage.output),
-    safeKimiUsageSum(usage.inputCacheRead, usage.inputCacheCreation)
-  );
+  return safeKimiUsageSum(kimiProviderInputTokens(usage), usage.output);
 }
 
 function kimiUsageBaseline(runtimeHome: string): KimiUsageBaseline {

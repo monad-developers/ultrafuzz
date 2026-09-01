@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import fs, { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,7 +21,7 @@ function git(cwd: string, args: string[], input?: string): string {
 }
 
 function fixture(): string {
-  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-"));
+  const root = temporaryRoot("ultrafuzz-workspace-handoff-");
   git(root, ["init", "--quiet", "--initial-branch=main"]);
   git(root, ["config", "user.name", "Ultrafuzz test"]);
   git(root, ["config", "user.email", "ultrafuzz@example.invalid"]);
@@ -96,7 +96,7 @@ test("still captures an edit to a tracked file under lib", () => {
  * one run and, through a lane that was not `continueOnFail`, ended a 13-hour run at 93%.
  */
 function submoduleWorkspaceFixture(): { project: string; workspace: string; scratch: string } {
-  const scratch = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-submodule-"));
+  const scratch = temporaryRoot("ultrafuzz-workspace-submodule-");
   const dependency = path.join(scratch, "forge-std");
   mkdirSync(dependency);
   git(dependency, ["init", "--quiet", "--initial-branch=main"]);
@@ -248,7 +248,7 @@ test("records source preservation while allowing harness and runtime artifact wr
 
 test("rejects replay when a manifest narrows the configured protected roots", () => {
   const source = fixture();
-  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-policy-replay-"));
+  const downstreamParent = temporaryRoot("ultrafuzz-workspace-policy-replay-");
   const downstream = path.join(downstreamParent, "checkout");
   try {
     mkdirSync(path.join(source, "src"), { recursive: true });
@@ -361,7 +361,7 @@ test("captures an edit to tracked content living under a generated corpus root",
 // come from the stager, by name, exactly like the corpus roots above.
 test("captures a Foundry workspace without staging out/ when the target does not gitignore it", () => {
   const root = fixture();
-  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-foundry-out-"));
+  const downstreamParent = temporaryRoot("ultrafuzz-workspace-foundry-out-");
   const downstream = path.join(downstreamParent, "checkout");
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\n/artifacts\n/cache\n");
@@ -651,7 +651,7 @@ test("captures a tracked file inside an ignored directory", () => {
 // run. Simulated with a git wrapper that deletes a listed file on the first `add` only.
 test("recovers when a listed path vanishes before it is staged", () => {
   const root = fixture();
-  const binDir = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-shim-"));
+  const binDir = temporaryRoot("ultrafuzz-git-shim-");
   const previousPath = process.env.PATH;
   try {
     writeFileSync(path.join(root, "transient.tmp"), "written by a still-running subprocess\n");
@@ -780,7 +780,7 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   // repository: independently-created commits can have different hashes even
   // when their files are byte-for-byte identical (for example, due to commit
   // timestamps), making this test accidentally depend on wall-clock timing.
-  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-downstream-"));
+  const downstreamParent = temporaryRoot("ultrafuzz-workspace-handoff-downstream-");
   const downstream = path.join(downstreamParent, "checkout");
   git(downstreamParent, ["clone", "--quiet", source, downstream]);
   try {
@@ -1375,7 +1375,7 @@ test("pins the diff format against inherited git config", () => {
     // makes a second fixture pass or fail on wall-clock luck -- measured at one failure in six runs
     // before this was changed. The existing round-trip test carries the same warning; I reintroduced the
     // bug it documents.
-    const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-prefix-"));
+    const downstreamParent = temporaryRoot("ultrafuzz-workspace-handoff-prefix-");
     const downstream = path.join(downstreamParent, "checkout");
     git(downstreamParent, ["clone", "--quiet", root, downstream]);
     try {
@@ -1644,7 +1644,7 @@ test("does not use invalid-UTF-8 decode expansion to authorize an exclusion", ()
 //   recon-corpus-deep (>=33865139 diff bytes in 1 file), echidna-deep (>=37453 diff bytes in 15 files)
 test("excludes agent-chosen variants of the generated corpus roots", () => {
   const root = fixture();
-  const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-overflow-downstream-"));
+  const downstreamParent = temporaryRoot("ultrafuzz-workspace-overflow-downstream-");
   const downstream = path.join(downstreamParent, "checkout");
   try {
     writeFileSync(path.join(root, ".gitignore"), "node_modules\ncache/\nout/\n");

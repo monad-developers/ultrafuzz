@@ -33,12 +33,21 @@ In bounded classification mode:
   `false-positive`, `undetermined`, `incomplete-spec`, `harness-defect`,
   `repair-candidate`, `spec-gated`, or `defensive-hardening`;
 - set a concise source-backed `triage_reason` on every record;
-- set `final_disposition` to `promoted` only for a `true-positive` that passes
-  every reportability and evidence gate in this prompt, to `dropped` for a
-  `false-positive`, and to `non-production` for every other actionable class;
+- derive `final_disposition` from the chosen `triage_classification` alone:
+  `true-positive` is `promoted`, `false-positive` is `dropped`, and every other
+  classification is `non-production`. Never pair a `true-positive` with a
+  non-promoted disposition. When a finding must not be promoted, choose any
+  other classification from the list above, such as `undetermined`,
+  `spec-gated`, or `defensive-hardening`, and let this mapping demote it;
 - set a concise `demotion_reason` for every `non-production` or `dropped`
   record, and set `canonical_severity` after applying the matrix to every
-  promoted record;
+  promoted record. Omit `canonical_severity` from every non-promoted record;
+- copy the enriched `triage_classification` onto the report row itself as well
+  as into that row's `lifecycle` object, in every `issues` row and every
+  `non_production_outcomes` row, and keep the two values identical;
+- emit `non_production_outcomes` in the exact relative order of the
+  authenticated deduped findings. Only `issues` are re-sorted High, Medium,
+  then Low;
 - for every promoted finding, author source-backed `impact`, `likelihood`, and
   their rationales, compute `severity` from the matrix, and set a concise
   `severity_rationale`; and
@@ -66,7 +75,7 @@ ancestors, so a topology can omit stages without leaving stale paths or
 exposing unrelated patches, raw campaign plans, or generated-test bundles. It
 does not expand a path or source array into this prompt:
 
-{{ancestor_artifact_path_authority:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json}}
+{{ancestor_artifact_path_authority:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json,coverage-evidence.json}}
 
 Read these fixed setup or smoke context handoffs when the topology declares
 them:
@@ -94,6 +103,16 @@ manifest identity, preserve its byte size, digest, language, and provenance,
 and never infer a framework from an extension or mix different bundles. These
 joins and byte-preservation rules are contextual requirements beyond JSON
 Schema.
+
+When `coverage-evidence.json` is present in the selected set, validate it
+against the exact pinned `{{schema_path}}/coverage-evidence.schema.json` and
+copy its complete parsed value exactly to `report.json.coverage_evidence`.
+Render the corresponding `## Scoped coverage evidence` section using the
+canonical projection below. When no coverage-evidence producer is selected,
+omit both the optional JSON member and the Markdown section; do not invent an
+unavailable result.
+
+{{coverage_evidence_markdown_projection}}
 
 Use `properties.json`, `implemented-properties.json`,
 `recon-fuzzer-results.json`, and `campaign-summary.json` as property provenance
@@ -159,11 +178,14 @@ Accounting contract:
 
 Use the injected sanitized projection's `source_run_id` for `Source run ID`.
 
-The Run summary contains exactly these public fields when available: `Run ID`,
+The developer-facing Run summary contains exactly these public fields: `Run ID`,
 `Source run ID`, `Repository`, `Elapsed time`, `Models used`, `Tokens used`,
-`Estimated spend`, `Strategy loops`, `Audit profile`, `Audit profile catalog
-digest`, `Topology digest`, `Prompt digest`, and `Expanded graph fingerprint`.
-Render each concrete value as Markdown inline code.
+`Estimated spend`, and `Audit profile`. Render each concrete value as Markdown
+inline code. Do not render strategy-loop counts, audit-profile catalog digests,
+topology digests, prompt digests, or expanded graph fingerprints in
+`report.md`; those are machine-readable orchestration provenance, not report
+content. Continue to copy the complete injected projection into
+`report.json.run_metadata` exactly as required above.
 
 Goal search coverage census: `{{goal_search_coverage_path}}`
 
@@ -235,15 +257,27 @@ Use these risk boundaries before applying the matrix:
 
 Apply this trusted-role boundary explicitly:
 
-- Reckless mistakes by a trusted administrator are non-production outcomes.
-- Direct misuse of a trusted role, and code defects reachable only after an
-  administrator makes a mistake, are Low.
+- Reckless mistakes by a trusted administrator, and code defects reachable only
+  after an administrator makes such a mistake, are not production bugs.
+  Classify them `defensive-hardening`, or `spec-gated` when an explicit product
+  decision governs the behavior, and let the classification mapping set their
+  disposition. Do not author a severity for them.
+- Direct misuse of a trusted role is a `true-positive` at Low severity, and a
+  `true-positive` is promoted.
 - A privileged function used under reasonable, intended assumptions can be
   Medium only when it exposes a genuine protocol bug. Because a trusted role is
   required, assign Low likelihood, so even High impact maps to Medium.
 - Privilege escalation is assessed normally from its impact and likelihood.
 - High severity requires a path that does not depend solely on an already
   trusted role choosing, supplying, or executing the harmful action.
+
+The first bullet decides first. When an administrator mistake is anywhere in
+the required path, that bullet governs even if a severity bullet below it would
+otherwise apply, and the finding carries no severity. A severity bullet applies
+only to a finding the first bullet leaves as a `true-positive`, and such a
+finding is promoted into `issues`. This boundary never selects a report array
+directly; it selects a classification, and the classification mapping decides
+the disposition and the array.
 
 Apply this Impact x Likelihood matrix before publishing any production issue:
 
@@ -326,7 +360,7 @@ Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues belo
 - Models used: `<models_used from the injected sanitized projection, or unavailable>`
 - Tokens used: `<token usage, or unavailable>`
 - Estimated spend: `<cost estimate such as $123 or $123+ when pricing is partial, or unavailable>`
-- Strategy loops: `<configured loop summary, or unavailable>`
+- Audit profile: `<effective audit profile, or unavailable>`
 
 ## Audit context
 
@@ -376,12 +410,6 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 #### Family variants
 
 - Alternate withdrawal route: The same accounting mismatch appears through a second redeem helper.
-
-### Strategy
-
-| Strategy | Detection rate |
-| --- | --- |
-| stateful-invariant | 2/8 |
 ````
 
 The first issue paragraph and every Proof of Concept step must use concrete
@@ -456,21 +484,22 @@ the Proof of Concept section after the primary native reproducer or execution
 trace. List variants as concise bullets with each variant title and summary
 only. Omit the subheading when there are no family variants.
 
-## Strategy Section
+## Structured Strategy Provenance
 
-Compute the Strategy section from `strategy-detections.json`, the lifecycle
-ledger, and configured strategy loop counts. For each strategy that found the
-same deduped bug instance or same-root family variant, count matching loop
-attempts for that strategy and divide by the total configured loops for that
-strategy. Every selected source finding carries `dedupe_key`, identical to its
-lifecycle record and its strategy-detections row, so match strategy detections
-by that key. Stop and report an invalid upstream artifact when a finding has no
-`dedupe_key`; never fall back to `finding_id` and never invent a key.
+Do not render a Strategy section, loop count, detection rate, or strategy
+provenance column anywhere in `report.md`. The audit profile is the canonical
+developer-facing description of orchestration.
 
-Render the human-readable Strategy section as a Markdown table with columns
-`Strategy` and `Detection rate`. Detection rates must be exact `M/N` counts
-without percentages. Keep loop-attempt provenance in `report.json`, not in the
-human-readable Strategy section. Do not call this metric Temperature.
+Preserve authenticated strategy provenance in `report.json` when the pinned
+schema admits it. Derive each structured detection count from distinct actual
+contributing executions matched by `dedupe_key`; never use deduplicated finding
+counts, family-member counts, or planned-but-unexecuted loops as observations.
+The denominator must be the actual configured execution count for that exact
+strategy. When `attempts` is present, it must enumerate the distinct
+contributing execution identities and agree with the corresponding structured
+detection count. Stop with validation failure when the evidence cannot support
+that exact representation; never fall back to `finding_id` and never invent a
+key, attempt, or count.
 
 Render the `- **Source nodes**:` bullet exactly as shown in the issue template,
 as the last Severity bullet, listing the stable `source_nodes` union from the
@@ -482,36 +511,17 @@ Preserve that same array in the `report.json` issue and keep compatibility
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
-and before `## Goal search coverage`. Read the implementation handoff's
-`selection` object and property records. When
-the handoff is historical or lacks `selection`, render `unavailable` instead
-of guessing. In `report.json`, emit `property_implementation_coverage` with
-this exact shape:
-
-{{coverage_evidence_markdown_projection}}
-
-Add `## Property implementation coverage` after the production issue entries
-and before `## Property provenance`. The runtime supplies the authoritative
+and before `## Goal search coverage`. The runtime supplies the authoritative
 current-run value in this prompt. Copy that JSON value exactly; do not derive,
 repair, normalize, omit, or convert it. The exact pinned
 `{{schema_path}}/report.schema.json` alone defines the tracked and not-planned
 JSON variants. When the topology declares the property-implementation track,
 preserve the runtime-supplied tracked value.
 
-Use the canonical catalog order for every ID array. Keep the arrays as the
-machine-readable source of truth; counts in Markdown must match them exactly.
-When the canonical catalog contains `reference_expectations`, include every
-corresponding canonical property ID in `reference_expected_property_ids` and
-every distinct expectation identifier in `reference_expectation_ids`, in
-catalog order. Preserve these arrays even when the property priority is below
-the configured threshold.
-For every selected record whose status is `blocked`, `pending`, or `deferred`,
-preserve its blocker summary in `blocker_summaries` as
-`<property-id>: <the record's blocker summary text>`, in canonical catalog
-order. Copy that summary text verbatim from the handoff record's
-`blocker.summary` — do not shorten, rephrase, re-punctuate, or re-case it. The
-typed blocker's other fields stay in the handoff record; do not copy the blocker
-object into the report.
+In the tracked object, preserve every ID array and blocker summary in the
+runtime-supplied order, including `reference_expected_property_ids`,
+`reference_expectation_ids`, and `blocker_summaries`.
+
 When the current topology does not declare a property-implementation track,
 preserve the runtime-supplied schema-defined not-planned value exactly.
 
@@ -522,15 +532,11 @@ Render that runtime value in Markdown as exactly:
 - Reason: `property-implementation-track-not-declared`
 ```
 
-Missing or invalid current selection metadata is a contract failure. It is not
-an absence case and must never be converted to the `not-planned` variant.
-
-The Markdown body of `## Property implementation coverage` is compared line by
-line against the JSON above, so write exactly these bullets, in this order, with
-these labels and backticks, and nothing else before the blocker list:
-
-These bullets are the Markdown rendering of exactly the JSON above, so read the
-two together:
+For a tracked value, the Markdown body of
+`## Property implementation coverage` is compared line by line against that
+authoritative JSON. These bullets are the Markdown rendering format: use these
+labels, order, and backticks while substituting the runtime-supplied values;
+the values below are only a format example:
 
 ```markdown
 - Priority threshold: `medium`
@@ -546,15 +552,15 @@ Blocker summaries:
 - property-2: The handler cannot observe the premium delta returned by the Hub.
 ```
 
-Join `Included priorities` with `<br>`, and write `unavailable` in the backticks
-when the threshold or priorities are unavailable. Derive each count from the
-corresponding schema-defined collection in the authoritative coverage value;
+Join `Included priorities` with `<br>`. Derive each count from the corresponding
+schema-defined collection in the authoritative coverage value;
 `Reference expectation properties` counts the properties carrying a reference
 expectation. Introduce the blocker list with a line reading exactly `Blocker summaries:`.
-Then write one `- ` bullet per authoritative blocker summary, in the same order
-as the coverage value, with no blank line between the heading and the first
-bullet: the list ends at the first line that is not a `- ` bullet. Omit the
-Markdown heading and list when the authoritative value has no blockers.
+Then write one bullet, beginning with a hyphen and one space, per authoritative
+blocker summary, in the same order as the coverage value, with no blank line
+between the heading and the first bullet. The list ends at the first line that
+does not begin with that prefix. Omit the Markdown heading and list when the
+authoritative value has no blockers.
 
 Write each blocker bullet from the exact corresponding blocker-summary value.
 Collapsing runs of whitespace to single spaces is fine; rewording, truncating,
@@ -620,17 +626,17 @@ not by titles.
 For non-production actionable outcomes, append a single
 `## Non-production actionable outcomes` table after the production issue
 entries. The table should include classification, title, status, concise
-evidence reference, strategy provenance, and recommended next action. Keep this
-appendix short and do not include exploit-style PoC sections for these outcomes.
+evidence reference, and recommended next action. Keep this appendix short and
+do not include exploit-style PoC sections or strategy-loop provenance for these
+outcomes.
 
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
-production issue entries with their Strategy sections, Property implementation
-coverage, Goal search coverage, Property provenance, optional prior finding
-disposition section, and non-production actionable outcomes appendix. If there
-are no production issues and no appendix outcomes, skip the issue index table
-and write `No issues reported.` before the Property implementation coverage
-section.
+production issue entries, Property implementation coverage, Goal search
+coverage, Property provenance, optional prior finding disposition section, and
+non-production actionable outcomes appendix. If there are no production issues
+and no appendix outcomes, skip the issue index table and write `No issues
+reported.` before the Property implementation coverage section.
 
 Never write that bare `No issues reported.` when the goal search coverage census
 records a targeted goal search that did not complete, or records no targeted
@@ -661,10 +667,10 @@ exit 1 as a report JSON authoring failure: correct `report.json`, rerun its exac
 validation command, and rerun this renderer. Do not hand-edit `report.md` after
 the renderer succeeds.
 
-Render run identity, repository, elapsed time, model, token, pricing, loop, and
-audit-policy metadata only from the injected sanitized projection described
-above. Preserve each exact value used in the Markdown Run summary and never
-synthesize a missing value.
+Render run identity, repository, elapsed time, model, token, pricing, and audit
+profile metadata only from the injected sanitized projection described above.
+Preserve each exact value used in the Markdown Run summary and never synthesize
+a missing value. Keep loop and digest provenance only in the structured report.
 
 Emit one property-provenance record per property-derived finding, joined to its
 canonical property sources and implementation/test paths. Preserve the complete
@@ -687,9 +693,12 @@ Apart from authoring canonical report `id` and `title`, only add fields admitted
 by the pinned report schema. Rewriting, tightening, or re-voicing any other
 copied field fails the report. Keep the canonical originating strategy name
 when one is available.
-Derive structured detection rates from the exact strategy hits and configured
-loop counts, and preserve optional attempt provenance from the canonical hit
-records. Do not emit removed or compatibility aliases.
+Derive structured detection rates from the distinct authenticated strategy hits
+and actual configured execution counts. Preserve optional attempt provenance
+from the canonical hit records; when present, its distinct execution identities
+must agree with the detection count for each strategy. Do not confuse duplicate
+or family finding records with distinct executions, and do not emit removed or
+compatibility aliases.
 
 Keep any additional loop-attempt provenance only in the fields admitted by the
 schema. `severity_guess` remains the upstream preliminary estimate and need not
@@ -737,7 +746,7 @@ Before finishing, verify that:
 - Production issues include `### Proof of Concept`.
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
-- Production issues include a `### Strategy` detection-rate table.
+- Production issues do not include a Strategy section or detection-rate table.
 - Production issues render the `- **Source nodes**:` Severity bullet with their
   complete discovery union.
 - Production issues do not include a standalone reachability section.
@@ -767,15 +776,14 @@ Before finishing, verify that:
   findings.
 - `report.md` renders the fixed `## Audit context` section for every artifact
   the run produced, without copying their detailed analysis.
-- `report.md` contains `## Property implementation coverage` with counts that
-  match the implementation handoff, or the literal `unavailable` for
-  historical artifacts.
+- `report.md` contains `## Property implementation coverage` rendered from the
+  exact runtime-authoritative coverage object.
 - `report.md` contains `## Goal search coverage` with counts recomputed from the
   census, or unknown coverage when none is readable, and states no absence of
   findings without them.
 - `report.json` contains no agent-authored `goal_search_coverage` value.
-- `report.json.property_implementation_coverage` is either the exact
-  machine-readable coverage object or the string `unavailable`.
+- `report.json.property_implementation_coverage` is the exact
+  runtime-authoritative tracked or not-planned object.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact values from the injected sanitized

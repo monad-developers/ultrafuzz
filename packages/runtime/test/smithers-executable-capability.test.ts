@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -16,7 +16,7 @@ import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smit
 import { BUN_MODULE_CONFINEMENT_SOURCE } from "../src/workflow-integrity.js";
 
 function temporaryDirectory(prefix: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return temporaryRoot(prefix);
 }
 
 function writeExecutable(filePath: string, contents: string): void {

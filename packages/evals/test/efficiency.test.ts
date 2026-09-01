@@ -238,6 +238,23 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.cost).toEqual({ status: "complete", reason: null });
   });
 
+  it("marks cost partial when rates are complete but usage prevents complete costing", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-complete-rates-partial-cost-"));
+    writeTerminalRun(runRoot, {
+      total_tokens: 123,
+      estimated_spend_usd: 0.4,
+      usage_complete: false,
+      pricing_complete: true,
+      partial_pricing: true,
+      priced_event_count: 0,
+      unpriced_event_count: 1
+    });
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.cost_usd).toBe(0.4);
+    expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
+  });
+
   it("publishes independent cache-aware accounting components", () => {
     const runRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-eval-efficiency-components-"));
     writeTerminalRun(runRoot, {
@@ -272,7 +289,7 @@ describe("terminal eval efficiency", () => {
     expect(() => summarizeEvalTerminal(terminalRecord(runRoot))).toThrow(/durable JSON is invalid/u);
 
     writeTerminalRun(runRoot, { estimated_spend_usd: undefined });
-    expect(() => summarizeEvalTerminal(terminalRecord(runRoot))).toThrow(/complete pricing requires/u);
+    expect(() => summarizeEvalTerminal(terminalRecord(runRoot))).toThrow(/complete cost evidence requires/u);
   });
 
   it("rejects nonterminal workflow state instead of publishing terminal completeness", () => {

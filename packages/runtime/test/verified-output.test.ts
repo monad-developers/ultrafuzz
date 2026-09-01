@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -288,7 +288,7 @@ test("run-wide authority rejects a graph fingerprint outside the sealed state/co
 });
 
 test("post-finalization property fan-in remains readable through sealed fanout ancestor authority", () => {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-fanout-fanin-"));
+  const outputRoot = temporaryRoot("ultrafuzz-verified-fanout-fanin-");
   const discoveryOutput = boundOutput("setup/invariant-evidence-ledger.json", "ultrafuzz/invariant-ledger@1", true);
   const discoveryMarkdownOutput = boundOutput("handoffs/discovery-evidence.md", "ultrafuzz/nonempty-markdown@1", false);
   const lensOutput = boundOutput("custom/recon-lens.json", "ultrafuzz/property-lens@2", true);
@@ -1049,7 +1049,7 @@ function reportGraphNode(id: string, outputs: ArtifactManifestOutputContract[]):
 }
 
 function createSelectionLayout(runId: string, nodes: PlannedGraphDocument["nodes"]): RunLayout {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-selection-"));
+  const outputRoot = temporaryRoot("ultrafuzz-verified-output-selection-");
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "4",
@@ -1137,7 +1137,7 @@ function createVerifiedReportFixture(
     indirectOptionalPrerequisite?: boolean;
   } = {}
 ): ReportFixture {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-output-"));
+  const outputRoot = temporaryRoot("ultrafuzz-verified-output-");
   const outputs = override.outputs ?? finalReportOutputs();
   const prerequisiteOutputs = producerOutputs();
   const attemptId = override.attemptId ?? REPORT_ATTEMPT_ID;
@@ -1778,7 +1778,7 @@ function createVerifiedCampaignFixture(
   runId: string,
   options: { omitEvidencePublication?: boolean } = {}
 ): CampaignAuthorityFixture {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verified-campaign-"));
+  const outputRoot = temporaryRoot("ultrafuzz-verified-campaign-");
   const catalogId = "property-specification-fanin";
   const implementationId = "stateful-invariant-implement-properties";
   const campaignId = "stateful-invariant-campaign";
@@ -2073,7 +2073,7 @@ function currentIssue(): Record<string, unknown> {
     lifecycle: {
       dedupe_key: "current-finding",
       source_artifacts: [],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       canonical_severity: "Medium"
     }
   };

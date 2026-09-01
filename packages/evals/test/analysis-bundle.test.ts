@@ -44,11 +44,13 @@ function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", toke
   writeJson(path.join(root, "run.json"), {
     accounting: {
       cumulative: {
-        input_tokens: tokens,
-        output_tokens: 2,
+        uncached_input_tokens: tokens,
+        input_tokens: tokens + 1,
+        output_tokens: 5,
         cache_read_tokens: 1,
         cache_write_tokens: 0,
         reasoning_tokens: 3,
+        inclusive_token_total: tokens + 6,
         total_tokens: tokens + 6,
         estimated_spend_usd: cost,
         usage_complete: true,
@@ -260,6 +262,11 @@ describe("privacy-safe eval analysis bundles", () => {
       accounted_run_count: 2,
       runtime_observed_run_count: 2,
       runtime_seconds: 150,
+      input_tokens: 300,
+      output_tokens: 4,
+      cache_read_tokens: 2,
+      cache_write_tokens: 0,
+      reasoning_tokens: 6,
       total_tokens: 312,
       estimated_spend_usd: 0.03,
       partial_pricing: false
@@ -336,13 +343,111 @@ describe("privacy-safe eval analysis bundles", () => {
     const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
       accounting: { cumulative: Record<string, unknown> };
     };
-    delete metadata.accounting.cumulative.input_tokens;
+    delete metadata.accounting.cumulative.uncached_input_tokens;
     writeJson(runPath, metadata);
 
     const output = path.join(projectRoot, "bundle");
     expect(() => collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output })).toThrowError(
       expect.objectContaining({ code: "EVAL_ANALYSIS_ACCOUNTING_INVALID" })
     );
+  });
+
+  it("accepts complete rates with partial cost evidence", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-partial-cost-"));
+    const evalRunId = "eval-synthetic-partial-cost";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const runPath = path.join(fixture.runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+      accounting: { cumulative: Record<string, unknown> };
+    };
+    delete metadata.accounting.cumulative.estimated_spend_usd;
+    metadata.accounting.cumulative.usage_complete = false;
+    metadata.accounting.cumulative.pricing_complete = true;
+    metadata.accounting.cumulative.partial_pricing = true;
+    metadata.accounting.cumulative.priced_event_count = 0;
+    metadata.accounting.cumulative.unpriced_event_count = 1;
+    writeJson(runPath, metadata);
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8")) as {
+      estimated_spend_usd: number | null;
+      partial_pricing: boolean;
+    };
+    expect(accounting.estimated_spend_usd).toBeNull();
+    expect(accounting.partial_pricing).toBe(true);
+  });
+
+  it("bounds contradictory provider breakdowns while preserving the source total", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-contradictory-breakdown-"));
+    const evalRunId = "eval-synthetic-contradictory-breakdown";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const runPath = path.join(fixture.runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+      accounting: { cumulative: Record<string, unknown> };
+    };
+    Object.assign(metadata.accounting.cumulative, {
+      uncached_input_tokens: 6,
+      input_tokens: 5,
+      output_tokens: 1,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 2,
+      inclusive_token_total: 6,
+      total_tokens: 6,
+      usage_complete: false
+    });
+    writeJson(runPath, metadata);
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8"));
+    expect(accounting).toMatchObject({
+      input_tokens: 5,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 1,
+      total_tokens: 6
+    });
+  });
+
+  it("rejects provider-inclusive accounting whose source total does not reconcile", () => {
+    const mutations: Array<{
+      name: string;
+      mutate: (summary: Record<string, unknown>) => void;
+      reason: string;
+    }> = [
+      {
+        name: "source-total",
+        mutate: (summary) => {
+          summary.total_tokens = 105;
+        },
+        reason: "source token totals must equal"
+      }
+    ];
+
+    for (const mutation of mutations) {
+      const projectRoot = mkdtempSync(path.join(tmpdir(), `ufz-eval-analysis-${mutation.name}-`));
+      const evalRunId = `eval-synthetic-${mutation.name}`;
+      const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+      const runPath = path.join(fixture.runRoot, "run.json");
+      const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+        accounting: { cumulative: Record<string, unknown> };
+      };
+      mutation.mutate(metadata.accounting.cumulative);
+      writeJson(runPath, metadata);
+
+      try {
+        collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: path.join(projectRoot, "bundle") });
+        expect.fail("expected inconsistent accounting to be rejected");
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "EVAL_ANALYSIS_ACCOUNTING_INVALID",
+          details: { reason: expect.stringContaining(mutation.reason) }
+        });
+      }
+    }
   });
 
   it("preserves valid source timestamps and rejects reversed launcher evidence without repair", () => {

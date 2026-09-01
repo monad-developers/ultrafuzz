@@ -87,7 +87,7 @@ function canonicalFinding(overrides: Record<string, unknown> = {}): Record<strin
           relationship: "primary"
         }
       ],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       triage_classification: "true-positive",
       triage_reason: "The authenticated test finding is production-relevant.",
       canonical_severity: "High",
@@ -138,7 +138,7 @@ function matchedFinding(overrides: Record<string, unknown> = {}): unknown {
           relationship: "primary"
         }
       ],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       triage_classification: "true-positive",
       triage_reason: "The authenticated test finding is production-relevant.",
       canonical_severity: "High",
@@ -278,7 +278,7 @@ function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
             relationship: "primary"
           }
         ],
-        strategy_hits: [],
+        strategy_hits: [{ strategy: "stateful-invariant" }],
         triage_classification: "true-positive",
         triage_reason: "The authenticated test finding is production-relevant.",
         canonical_severity: "Medium",

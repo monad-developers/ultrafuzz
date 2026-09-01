@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import os from "node:os";
+import { temporaryRoot } from "./temporary-root.js";
 import path from "node:path";
 
 import { KIMI_CODE_VERSION, SMITHERS_VERSION } from "../src/smithers-package.js";
@@ -24,7 +24,7 @@ export function writeFakeNpmInstaller(
   npmLogPath: string;
   smithersLogPath: string;
 } {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-fake-npm-"));
+  const binDir = temporaryRoot("ufz-fake-npm-");
   const npm = path.join(binDir, "npm");
   const npmLogPath = path.join(project, "npm-install.log");
   const smithersLogPath = path.join(project, "local-smithers.log");

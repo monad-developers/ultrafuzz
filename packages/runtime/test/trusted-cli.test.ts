@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -24,10 +24,6 @@ import {
   runTrustedJsonValidatorPreflight,
   ULTRAFUZZ_TRUSTED_BIN_ENV
 } from "../src/trusted-cli.js";
-
-function temporaryRoot(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-trusted-cli-"));
-}
 
 function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
   const packageRoot = path.join(root, "fake-validator-cli");
@@ -277,7 +273,7 @@ function canonicalDigest(value: Record<string, unknown>): string {
 }
 
 test("schema-backed producers require an explicit trusted CLI entrypoint", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "required-entrypoint" });
   assert.throws(
     () => prepareTrustedCliEnvironment({ layout, required: true }),
@@ -312,12 +308,12 @@ test("trusted CLI launchers quote POSIX spaces and keep Windows command lines bo
 });
 
 test("trusted CLI identity is schema-valid and target PATH entries cannot shadow it", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "trusted-path" });
   const entrypoint = fakeCliEntrypoint(root);
   const callerBin = path.join(root, "target-bin");
   const localBin = path.join(root, ".smithers", "node_modules", ".bin");
-  const externalBin = temporaryRoot();
+  const externalBin = temporaryRoot("ultrafuzz-trusted-cli-");
   const targetLink = path.join(externalBin, "target-link");
   fs.mkdirSync(callerBin, { recursive: true });
   fs.mkdirSync(localBin, { recursive: true });
@@ -364,7 +360,7 @@ test("trusted CLI identity is schema-valid and target PATH entries cannot shadow
 });
 
 test("an authenticated closure content address is preflighted once per process", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const counterPath = path.join(root, "validator-cli-invocations");
   const entrypoint = countingCliEntrypoint(root, counterPath);
 
@@ -402,7 +398,7 @@ test("an authenticated closure content address is preflighted once per process",
 });
 
 test("trusted CLI initialization resumes an authenticated launcher publication crash", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "initialization-crash" });
   const entrypoint = fakeCliEntrypoint(root);
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
@@ -433,7 +429,7 @@ test("trusted CLI initialization resumes an authenticated launcher publication c
 });
 
 test("trusted CLI preflight rejects duplicate-key validator output", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "duplicate-output" });
   const entrypoint = fakeCliEntrypoint(root, '{"ok":true,"ok":true}');
   assert.throws(() => prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint }), /duplicate property name/u);
@@ -448,7 +444,7 @@ test("trusted CLI preflight rejects incomplete and extensible success envelopes"
       (value: Record<string, unknown>) => Object.assign(value, { diagnostics: [{ severity: "info" }] })
     ]
   ] as const) {
-    const root = temporaryRoot();
+    const root = temporaryRoot("ultrafuzz-trusted-cli-");
     const layout = createRunLayout({ projectRoot: root, runId: `invalid-${label.replaceAll(" ", "-")}` });
     const value = preflightEnvelope();
     mutate(value);
@@ -462,7 +458,7 @@ test("trusted CLI preflight rejects incomplete and extensible success envelopes"
 });
 
 test("resume rejects missing, tampered, and stale trusted CLI identity", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const entrypoint = fakeCliEntrypoint(root);
 
   const tamperedLayout = createRunLayout({ projectRoot: root, runId: "tampered-launcher" });
@@ -495,7 +491,7 @@ test("resume rejects missing, tampered, and stale trusted CLI identity", () => {
 });
 
 test("ordinary resume retains a sealed CLI while controller refresh rotates its closure", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "rotated-identity" });
   const entrypoint = fakeCliEntrypoint(root);
   const original = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
@@ -533,7 +529,7 @@ test("ordinary resume retains a sealed CLI while controller refresh rotates its 
 });
 
 test("controller refresh rejects a tampered trusted CLI identity before rotation", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "tampered-rotation" });
   const entrypoint = fakeCliEntrypoint(root);
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
@@ -575,7 +571,7 @@ test("controller refresh rejects a tampered trusted CLI identity before rotation
 });
 
 test("controller refresh migrates a valid legacy launcher to an immutable closure", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "legacy-migration" });
   const entrypoint = fakeCliEntrypoint(root);
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
@@ -606,7 +602,7 @@ test("controller refresh migrates a valid legacy launcher to an immutable closur
 });
 
 test("legacy migration rejects stale evidence and recovers only the matching staged rotation", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "legacy-staged-rotation" });
   const entrypoint = fakeCliEntrypoint(root);
   prepareTrustedCliEnvironment({ layout, cliEntrypoint: entrypoint });
@@ -665,7 +661,7 @@ test("legacy migration rejects stale evidence and recovers only the matching sta
 });
 
 test("active trusted CLI stays on its sealed transitive build and rejects an incompatible refresh", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "sealed-transitive-build" });
   const originalEnvelope = preflightEnvelope();
   const source = fakeTransitiveCli(root, JSON.stringify(originalEnvelope));
@@ -703,7 +699,7 @@ test("active trusted CLI stays on its sealed transitive build and rejects an inc
 });
 
 test("trusted CLI closure prefers the authenticated execution generation for workspace dependencies", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const valid = JSON.stringify(preflightEnvelope());
   const invalid = structuredClone(preflightEnvelope()) as { data: { schema: { bundle_sha256: string } } };
   invalid.data.schema.bundle_sha256 = "9".repeat(64);
@@ -728,7 +724,7 @@ test("trusted CLI closure prefers the authenticated execution generation for wor
 });
 
 test("trusted CLI confines ESM, CommonJS, ancestor, and preload module resolution without blocking data reads", () => {
-  const root = temporaryRoot();
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "module-confinement" });
   const source = fakeResolutionEscapeCli(root);
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: source.entrypoint });
@@ -773,7 +769,7 @@ test("trusted CLI confines ESM, CommonJS, ancestor, and preload module resolutio
 
 test("trusted CLI rejects transitive closure, path-set, and manifest digest tampering", () => {
   for (const tamper of ["transitive-file", "unexpected-file", "manifest-digest"] as const) {
-    const root = temporaryRoot();
+    const root = temporaryRoot("ultrafuzz-trusted-cli-");
     const layout = createRunLayout({ projectRoot: root, runId: `tampered-${tamper}` });
     const source = fakeTransitiveCli(root, JSON.stringify(preflightEnvelope()));
     const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: source.entrypoint });

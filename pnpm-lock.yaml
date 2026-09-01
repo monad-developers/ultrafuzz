@@ -293,6 +293,9 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@smthrs/driver':
+        specifier: 0.35.0
+        version: 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
@@ -311,6 +314,9 @@ importers:
       '@ultrafuzz/topology':
         specifier: workspace:*
         version: link:../topology
+      effect:
+        specifier: 4.0.0-beta.105
+        version: 4.0.0-beta.105
       entities:
         specifier: 7.0.1
         version: 7.0.1

@@ -652,7 +652,8 @@ describe("prompt rendering", () => {
         "properties.json",
         "implemented-properties.json",
         "recon-fuzzer-results.json",
-        "campaign-summary.json"
+        "campaign-summary.json",
+        "coverage-evidence.json"
       ].sort()
     );
     const contextSelectorId = promptArtifactAuthorityPathSelectorId(
