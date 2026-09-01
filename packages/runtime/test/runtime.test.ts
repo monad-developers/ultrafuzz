@@ -14587,10 +14587,11 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     const processAnchor = sources.find(({ patch }) => patch.id === "process_snapshot_anchor");
     assert.ok(processAnchor);
-    const [predecessor, nested] = processAnchor.patch.predecessors ?? [];
+    const [predecessor, nested, reusedInheritedDescriptor] = processAnchor.patch.predecessors ?? [];
     assert.ok(predecessor);
     assert.ok(nested);
-    assert.equal(processAnchor.patch.predecessors?.length, 2);
+    assert.ok(reusedInheritedDescriptor);
+    assert.equal(processAnchor.patch.predecessors?.length, 3);
     const current = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
@@ -14600,6 +14601,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedPredecessor.includes(nested), false);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+
+    fs.writeFileSync(
+      processAnchor.source,
+      current.replace(processAnchor.patch.patched, reusedInheritedDescriptor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedReusedInheritedDescriptor = fs.readFileSync(processAnchor.source, "utf8");
+    assert.equal(migratedReusedInheritedDescriptor.split(processAnchor.patch.patched).length, 2);
+    assert.equal(migratedReusedInheritedDescriptor.includes(reusedInheritedDescriptor), false);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
@@ -16447,8 +16460,8 @@ function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
 
 function assertInheritedSnapshotEvidence(evidence: TransferEvidence): void {
   assertProcessOwnedSnapshotEvidence(evidence);
-  assert.equal(evidence.process_descriptor, 3);
-  assert.equal(evidence.source_root, "/proc/self/fd/3");
+  assert.notEqual(evidence.process_descriptor, 3);
+  assert.equal(evidence.source_root, evidence.process_root);
 }
 
 function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys: string[]): void {
