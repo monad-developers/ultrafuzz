@@ -21295,10 +21295,12 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   });
   const run = await startRun({ projectRoot: project, runId, env: failedEnv });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
   const firstSync = await syncRun({ projectRoot: project, runId, env: failedEnv });
   assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
 
-  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const ledgerPath = path.join(runRoot, "attempts.jsonl");
   const evidence = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(evidence.ok, true, JSON.stringify(evidence.ok ? [] : evidence.diagnostics));
   if (!evidence.ok) return;
@@ -21310,7 +21312,7 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
     (task) => task.attemptId === "project-discovery"
   );
   assert.ok(sealedTask);
-  const state = readRunState(layoutForRunRoot(run.value!.run_root, runId));
+  const state = readRunState(layoutForRunRoot(runRoot, runId));
   const legacyInputDigest = manifestDigest(
     JSON.stringify({
       graph_fingerprint: state.graph_fingerprint,
