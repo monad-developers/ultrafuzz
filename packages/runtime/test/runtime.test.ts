@@ -24852,6 +24852,17 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
+  const plan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
+  const snapshotPath = path.join(run.value!.run_root, plannedPrompt.rendered_prompt_snapshot_path);
+  const expectedPrompt = fs.readFileSync(snapshotPath);
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const detached = await resumeRun({
@@ -24865,8 +24876,31 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(detached.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
   assert.match(detached.diagnostics[0]?.message ?? "", /without repeating the reset/u);
   assert.equal(fs.existsSync(markerPath), true, "reset marker must persist after a failed continuation");
+  assert.deepEqual(
+    fs.readFileSync(plannedPrompt.rendered_prompt_path),
+    expectedPrompt,
+    "reset continuation must restore the authenticated presentation prompt"
+  );
   const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(snapshotPath, "mismatched retained prompt\n", "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const rejected = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match reset task/u);
+  const rejectedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(rejectedCommands, /^inspect /mu);
+  assert.doesNotMatch(rejectedCommands, /^(?:timetravel|up) /mu, "invalid snapshot must fail before mutation or launch");
+  assert.equal(fs.existsSync(markerPath), true, "rejected recovery must retain the reset marker");
+  fs.writeFileSync(snapshotPath, expectedPrompt);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const retried = await resumeRun({
@@ -24879,6 +24913,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
+  assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
   const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
