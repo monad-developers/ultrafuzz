@@ -1724,10 +1724,16 @@ const SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_PATCH = `        const agentUsageAccu
 const SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_SOURCE = `                      const doGenerate = () => {
                         cliTurnCompletion.begin();
                         return effectiveAgent.generate({`;
-const SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH = `                      const doGenerate = () => {
+const SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PREDECESSOR_PATCH = `                      const doGenerate = () => {
                         beginAgentUsageInvocation();
                         cliTurnCompletion.begin();
                         return effectiveAgent.generate({`;
+const SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH = `                      const doGenerate = () => {
+                        beginAgentUsageInvocation();
+                        cliTurnCompletion.begin();
+                        return effectiveAgent.generate(
+                          {
+                          ultrafuzzTaskRuntime: agentTaskRuntime,`;
 
 const SMITHERS_ENGINE_JSON_CORRECTION_USAGE_INVOCATION_SOURCE = `            const checkpointPublicationBeforeCorrection = checkpointPublicationCount;
             cliTurnCompletion.begin();
@@ -2530,6 +2536,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/engine.js",
     patchable: SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_SOURCE,
     patched: SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH,
+    predecessors: [SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PREDECESSOR_PATCH],
     upstreamAbsent: ["beginAgentUsageInvocation"]
   },
   {
@@ -6884,7 +6891,8 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     [
       SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_SOURCE,
       SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH,
-      "main agent usage invocation"
+      "main agent usage invocation",
+      [SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PREDECESSOR_PATCH]
     ],
     [
       SMITHERS_ENGINE_JSON_CORRECTION_USAGE_INVOCATION_SOURCE,

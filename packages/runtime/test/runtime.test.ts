@@ -22525,6 +22525,119 @@ test("a refresh resume reuses its own ownership inspection instead of inspecting
   );
 });
 
+testWhen(runningUnderBun)(
+  "engine-owned task runtime crosses sealed issuer aliases under production Bun symlink flags",
+  () => {
+    const root = tempProject();
+    const controls = path.join(root, "controls");
+    const driverRoot = path.join(root, "dependencies", "packages", "driver");
+    const engineRoot = path.join(root, "dependencies", "packages", "engine");
+    fs.mkdirSync(controls, { recursive: true });
+    fs.mkdirSync(driverRoot, { recursive: true });
+    fs.mkdirSync(engineRoot, { recursive: true });
+    fs.writeFileSync(path.join(controls, "bunfig.toml"), "\n", "utf8");
+    fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n", "utf8");
+    fs.writeFileSync(
+      path.join(driverRoot, "package.json"),
+      `${JSON.stringify({
+        name: "@smthrs/driver",
+        type: "module",
+        exports: { "./task-runtime": "./task-runtime.js" }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(driverRoot, "task-runtime.js"),
+      `import { AsyncLocalStorage } from "node:async_hooks";
+const storage = new AsyncLocalStorage();
+export const withTaskRuntime = (runtime, execute) => storage.run(runtime, execute);
+export const getTaskRuntime = () => storage.getStore();
+`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(engineRoot, "package.json"),
+      `${JSON.stringify({ name: "@smthrs/engine", type: "module", exports: { ".": "./engine.js" } })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(engineRoot, "engine.js"),
+      `import { withTaskRuntime } from "@smthrs/driver/task-runtime";
+export const execute = (agent) => {
+  const runtime = {
+    runId: "sealed-run",
+    stepId: "final-report",
+    attempt: 1,
+    iteration: 0,
+    signal: new AbortController().signal,
+    db: { marker: "engine-owned" }
+  };
+  return withTaskRuntime(runtime, () => agent.generate({
+    ultrafuzzTaskRuntime: runtime,
+    taskContext: { runId: runtime.runId, nodeId: runtime.stepId, attempt: 1, iteration: 0 }
+  }));
+};
+`,
+      "utf8"
+    );
+    const linkPackage = (issuerRoot: string, name: string, target: string) => {
+      const link = path.join(issuerRoot, "node_modules", ...name.split("/"));
+      fs.mkdirSync(path.dirname(link), { recursive: true });
+      fs.symlinkSync(path.relative(path.dirname(link), target), link);
+    };
+    linkPackage(root, "@smthrs/engine", engineRoot);
+    linkPackage(root, "@smthrs/driver", driverRoot);
+    linkPackage(engineRoot, "@smthrs/driver", driverRoot);
+
+    const workflowPath = path.join(root, "workflow.mjs");
+    fs.writeFileSync(
+      workflowPath,
+      `import { execute } from "@smthrs/engine";
+import { getTaskRuntime } from "@smthrs/driver/task-runtime";
+const observed = await execute({
+  generate(args) {
+    const explicitRuntime = args.ultrafuzzTaskRuntime;
+    const forwarded = { ...args };
+    Reflect.deleteProperty(forwarded, "ultrafuzzTaskRuntime");
+    return {
+      ambientVisible: getTaskRuntime() !== undefined,
+      explicitMarker: explicitRuntime?.db?.marker,
+      contextMatches:
+        explicitRuntime?.runId === args.taskContext?.runId &&
+        explicitRuntime?.stepId === args.taskContext?.nodeId,
+      forwardedRuntime: Object.hasOwn(forwarded, "ultrafuzzTaskRuntime")
+    };
+  }
+});
+process.stdout.write(JSON.stringify(observed));
+`,
+      "utf8"
+    );
+
+    const probe = spawnSync(
+      "bun",
+      [
+        `--config=${path.join(controls, "bunfig.toml")}`,
+        `--env-file=${path.join(controls, "bun-empty.env")}`,
+        "--no-env-file",
+        "--no-install",
+        "--no-addons",
+        "--preserve-symlinks",
+        "--preserve-symlinks-main",
+        workflowPath
+      ],
+      { cwd: root, encoding: "utf8" }
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.deepEqual(JSON.parse(probe.stdout), {
+      ambientVisible: false,
+      explicitMarker: "engine-owned",
+      contextMatches: true,
+      forwardedRuntime: false
+    });
+  }
+);
+
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -23474,6 +23587,21 @@ test("controller refresh authenticates newly required sealed runner patches and 
     dependencyMap.packages.some((entry) => entry.name === "@smthrs/engine"),
     false
   );
+  const sealedRuntimeManifest = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "modules/@ultrafuzz/runtime/package.json"
+  );
+  const sealedRuntimeIssuer = dependencyMap.issuers.find((entry) => entry.id === "module:@ultrafuzz/runtime");
+  const sealedDriverPackage = dependencyMap.packages.find((entry) => entry.name === "@smthrs/driver");
+  assert.ok(sealedRuntimeManifest);
+  assert.ok(sealedRuntimeIssuer);
+  assert.ok(sealedDriverPackage);
+  assert.equal(
+    (JSON.parse(sealedRuntimeManifest.contents.toString("utf8")) as { dependencies?: Record<string, string> })
+      .dependencies?.["@smthrs/driver"],
+    SMITHERS_VERSION
+  );
+  assert.equal(sealedRuntimeIssuer.dependencies["@smthrs/driver"], sealedDriverPackage.id);
+  assert.doesNotMatch(evidence.verifiedControl.contents.workflow.toString("utf8"), /@smthrs\/driver/u);
 
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const enginePatches = SMITHERS_COMPATIBILITY_PATCHES.filter(
@@ -23496,7 +23624,11 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(nestedProcessAnchorPatch);
   assert.equal(processAnchorPatch.predecessors?.length, 2);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
+  const mainInvocation = enginePatches.find((candidate) => candidate.id === "engine_main_usage_invocation");
   assert.ok(newlyRequired);
+  assert.ok(mainInvocation);
+  const [predecessorMainInvocation] = mainInvocation.predecessors ?? [];
+  assert.ok(predecessorMainInvocation);
   const engineSequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
   const enginePackageId = `package:${engineSequence}`;
   const enginePackageSnapshotPath = `dependencies/packages/${engineSequence}`;
@@ -23551,13 +23683,19 @@ test("controller refresh authenticates newly required sealed runner patches and 
       sourceRelativePath,
       enginePatches
         .filter((candidate) => candidate.sourceRelativePath === sourceRelativePath)
-        .map((candidate) => (candidate.id === newlyRequired.id ? candidate.patchable : candidate.patched))
+        .map((candidate) => {
+          if (candidate.id === newlyRequired.id) return candidate.patchable;
+          if (candidate.id === mainInvocation.id) return predecessorMainInvocation;
+          return candidate.patched;
+        })
         .join("\n")
     );
   }
   const preFixEngineSource = engineSources.get(newlyRequired.sourceRelativePath)!;
   assert.equal(preFixEngineSource.includes(newlyRequired.patchable), true);
   assert.equal(preFixEngineSource.includes(newlyRequired.patched), false);
+  assert.equal(preFixEngineSource.includes(predecessorMainInvocation), true);
+  assert.equal(preFixEngineSource.includes(mainInvocation.patched), false);
   const cliSources = new Map<string, string>();
   for (const sourceRelativePath of new Set(cliPatches.map((candidate) => candidate.sourceRelativePath))) {
     cliSources.set(
@@ -23617,6 +23755,8 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(refreshedEngine);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patched), true);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patchable), false);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(mainInvocation.patched), true);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(predecessorMainInvocation), false);
   const refreshedCliResume = rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === cliResumeSourcePath);
   assert.ok(refreshedCliResume);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(resumeTransferPatch.patched), true);
