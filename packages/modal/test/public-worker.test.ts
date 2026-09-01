@@ -1925,7 +1925,11 @@ it("rejects a schema-valid report whose current semantic gates fail", () => {
   const secondIssue = currentReportIssue({
     id: "L-02",
     title: "[L-02] - Second fixture finding",
-    lifecycle: { dedupe_key: "fixture-dedupe-key-2", source_artifacts: [], strategy_hits: [] }
+    lifecycle: {
+      dedupe_key: "fixture-dedupe-key-2",
+      source_artifacts: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }]
+    }
   });
   const canonicalReport = currentTerminalReport({
     run_metadata: reportMetadata,

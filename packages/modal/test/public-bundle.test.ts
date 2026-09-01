@@ -888,7 +888,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
       lifecycle: {
         dedupe_key: `${row.id}-dedupe-key`,
         source_artifacts: [],
-        strategy_hits: []
+        strategy_hits: [{ strategy: "stateful-invariant" }]
       },
       summary: "A fixture finding used to exercise public bundle validation."
     });

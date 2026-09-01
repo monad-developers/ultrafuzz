@@ -741,7 +741,7 @@ function currentReportIssue(id = "M-01"): Record<string, unknown> {
     lifecycle: {
       dedupe_key: `dedupe-${id}`,
       source_artifacts: [],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       canonical_severity: "Medium"
     }
   };
@@ -876,7 +876,7 @@ function canonicalLifecycleRecord(): Record<string, unknown> {
   return {
     dedupe_key: CANONICAL_DEDUPE_KEY,
     source_artifacts: [],
-    strategy_hits: [],
+    strategy_hits: [{ strategy: "stateful-invariant" }],
     stages: [{ stage: "deduped", artifact_path: "findings.json", finding_id: "M-01" }],
     triage_classification: "true-positive",
     triage_reason: "The source-backed transition reproduces on the current revision.",
