@@ -326,18 +326,21 @@ Use concrete actor or system-role language throughout the issue-related prose
 you author yourself: everything you write in `report.md`, including issue
 descriptions, Severity explanations, PoC steps, family variant bullets,
 non-production outcome text, and recommended next actions as rendered there,
-plus the `report.json` fields that exist only in the report, which are
-`description` and `proof_of_concept`. This rule never licenses rewriting a
-field you copy from the selected strict or bounded source finding. In `report.json`,
-`summary`, `family_variants`, and `recommended_next_action` stay byte-identical
-to the upstream finding even when their wording is weaker than the prose you
-write around them. Choose actor wording from the evidence and reuse it
+plus any `report.json` field that is absent from the selected source and is
+therefore genuinely report-authored, such as a new `proof_of_concept`. This rule
+never licenses rewriting a field you copy from the selected strict or bounded
+source finding. A bounded source's carried `description` remains dedupe-owned,
+not report-authored. In `report.json`, `summary`, `description`,
+`family_variants`, and `recommended_next_action` stay byte-identical when the
+upstream finding carries them, even when their wording is weaker than the prose
+you would otherwise write. Choose actor wording from the evidence and reuse it
 consistently. Use `Attacker` only when another party can gain an advantage,
 grief, steal, or otherwise harm someone else. Use `User` when the behavior is
 self-impacting or the protocol does not work as intended for the same user who
 triggers it. Prefer precise roles such as `Depositor`, `Borrower`,
-`Liquidator`, `Relayer`, or `Operator` when clearer. Do not combine multiple roles with slash notation. Do not leave
-placeholder tokens, anonymous variable labels, or copied generated-test
+`Liquidator`, `Relayer`, or `Operator` when clearer. Do not combine multiple
+roles with slash notation. Do not leave placeholder tokens, anonymous variable
+labels, or copied generated-test
 boilerplate in the final report.
 
 ## Required Markdown Shape
@@ -433,18 +436,24 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 - Alternate withdrawal route: The same accounting mismatch appears through a second redeem helper.
 ````
 
-The first issue paragraph and every Proof of Concept step must use concrete
-actor or role language, following the global actor-role rule.
+Every issue paragraph you author because its selected source has no
+`description`, and every Proof of Concept step you author, must use concrete
+actor or role language following the global actor-role rule. A carried
+`description` is exempt from this authoring rule and remains byte-identical.
 
-The first sentence under each issue heading must be a grammatical concrete
-sentence in this exact shape:
+When the selected source does not carry a `description`, the first sentence
+under each issue heading must be a grammatical concrete sentence in this exact
+shape:
 `Depositor can withdraw after accounting state diverges which leads to claimable
 funds remaining locked.`
 It must not duplicate prose awkwardly, for example avoid constructions like
 `Fallback caller can exercise selectorless fallback which leads to Registered
-fallback callers could...`. Tighten copied upstream text into a clean actor,
-action, and outcome. The title prefix is report-owned; all substantive copied
-fields keep the upstream wording byte-for-byte.
+fallback callers could...`. When the selected source already carries a
+`description`, use it exactly as the issue paragraph even if it does not match
+this authored-text shape. If carried text violates a hard downstream contract,
+reject the upstream artifact instead of tightening or rewriting it. The title
+prefix is report-owned; all substantive copied fields keep the upstream wording
+byte-for-byte.
 
 Use the final `severity` selected by the active strict or bounded mode
 consistently for issue IDs, ordering, counts, Markdown, and JSON after verifying

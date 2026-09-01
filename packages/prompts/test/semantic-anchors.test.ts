@@ -1367,6 +1367,9 @@ describe("prompt semantic anchors", () => {
     expect(flatMarkdown).toContain("not permission to rewrite a dedupe-owned `description`");
     expect(flatMarkdown).toContain("Before rendering bounded output, programmatically reload both JSON files");
     expect(flatMarkdown).toContain("This mechanical comparison must include `description`");
+    expect(flatMarkdown).toContain("A bounded source's carried `description` remains dedupe-owned");
+    expect(flatMarkdown).toContain("reject the upstream artifact instead of tightening or rewriting it");
+    expect(flatMarkdown).not.toContain("Tighten copied upstream text");
     expect(flatMarkdown).toContain(
       "assert exact equality between each production row's `lifecycle.canonical_severity` and top-level `severity`"
     );
@@ -1415,7 +1418,9 @@ describe("prompt semantic anchors", () => {
       "In strict severity-handoff mode, reject a mismatch instead of correcting the artifact"
     );
     expect(markdown).not.toContain("bounded-final-review");
-    expect(markdown).toMatch(/`summary`, `family_variants`, and `recommended_next_action` stay byte-identical/u);
+    expect(markdown).toMatch(
+      /`summary`, `description`,\s+`family_variants`, and `recommended_next_action` stay byte-identical/u
+    );
     // `ultrafuzz json validate` is schema-only, so ordering is undetectable
     // before the host gate rejects the artifact.
     expect(markdown).toContain("sort the\nspans by their starting line");
