@@ -1359,6 +1359,17 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("High impact + Low likelihood must render as Medium");
     expect(markdown).toContain("Medium impact + Low likelihood must render as Low");
     expect(markdown).toContain("Every production issue severity equals the Impact x Likelihood matrix result");
+    expect(flatMarkdown).toContain("`row.lifecycle.canonical_severity === row.severity` for every production issue");
+    expect(flatMarkdown).toContain(
+      "Never use `severity_guess`, a preliminary source value, or an independently recomputed value for `canonical_severity`"
+    );
+    expect(flatMarkdown).toContain("`description` is dedupe-owned source evidence: preserve it byte-for-byte");
+    expect(flatMarkdown).toContain("not permission to rewrite a dedupe-owned `description`");
+    expect(flatMarkdown).toContain("Before rendering bounded output, programmatically reload both JSON files");
+    expect(flatMarkdown).toContain("This mechanical comparison must include `description`");
+    expect(flatMarkdown).toContain(
+      "assert exact equality between each production row's `lifecycle.canonical_severity` and top-level `severity`"
+    );
     expect(markdown).toContain("{{schema_path}}/report.schema.json");
     expect(markdown).toContain("run the exact `ultrafuzz json validate` command");
     expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");

@@ -50,7 +50,12 @@ In bounded classification mode:
   then Low;
 - for every promoted finding, author source-backed `impact`, `likelihood`, and
   their rationales, compute `severity` from the matrix, and set a concise
-  `severity_rationale`; and
+  `severity_rationale`. After writing that top-level `severity`, copy its exact
+  JSON string into `lifecycle.canonical_severity` on the same row. Never use
+  `severity_guess`, a preliminary source value, or an independently recomputed
+  value for `canonical_severity`; mechanically confirm
+  `row.lifecycle.canonical_severity === row.severity` for every production
+  issue; and
 - preserve the dedupe lifecycle record's source artifacts, strategy hits, and
   `stages` array byte-for-byte. Do not append a report-only lifecycle stage;
   report schemas admit only stages backed by actual review artifacts.
@@ -58,14 +63,30 @@ In bounded classification mode:
 If evidence is insufficient for `true-positive`, use `undetermined`; never
 guess missing validation. Copy every normalized deduped-finding field
 byte-for-byte into the selected report row before adding only report-schema
-fields. Preserve `severity_guess` as preliminary provenance. Treat the enriched
-lifecycle records as the bounded lifecycle source of truth and copy them into
-the matching report objects. Every authenticated deduplicated finding must be
+fields. In particular, `description` is dedupe-owned source evidence: preserve
+it byte-for-byte even when you could make it more concise, concrete, or
+actor-specific. The report prose-quality checks below diagnose source quality;
+they never authorize re-voicing a carried `description`. Preserve
+`severity_guess` as preliminary provenance. Treat the enriched lifecycle
+records as the bounded lifecycle source of truth and copy them into the
+matching report objects. Every authenticated deduplicated finding must be
 represented exactly once in the report: a `promoted` record belongs in
 `issues`, and every other record belongs in `non_production_outcomes`, including
 a `dropped` false positive. Omission never means dropped. Render unavailable
 provenance fields as `unavailable`, and emit a schema-valid report even when
 the authenticated deduplicated population is empty.
+
+Before rendering bounded output, programmatically reload both JSON files and
+index all report rows by `lifecycle.dedupe_key`. For each normalized deduped
+finding, use deep structural equality to compare every carried field except the
+separately validated `lifecycle` and `triage_classification` enrichments. For a
+promoted row only, also exclude the report-authored `id`, `title`, `impact`,
+`likelihood`, `impact_rationale`, `likelihood_rationale`, `severity`, and
+`severity_rationale`; do not exclude those carried fields on a non-production
+row. This mechanical comparison must include `description`. Also assert exact
+equality between each production row's `lifecycle.canonical_severity` and
+top-level `severity`. Do not finish or run the canonical renderer until both
+checks pass for every row.
 
 ## Required Inputs
 
@@ -742,7 +763,9 @@ Before finishing, verify that:
   distribution.
 - Production issue descriptions and Proof of Concept steps use concrete
   actor-role language and do not contain placeholder tokens, anonymous variable
-  labels, or copied generated-test boilerplate.
+  labels, or copied generated-test boilerplate. This is a validation check, not
+  permission to rewrite a dedupe-owned `description`: preserve a carried
+  `description` byte-for-byte even when it fails this prose-quality check.
 - Production issues include `### Proof of Concept`.
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
@@ -761,6 +784,12 @@ Before finishing, verify that:
 - In bounded classification mode, every `report.json` production issue
   preserves every normalized deduped-finding field byte-for-byte and adds the
   source-backed classification and report-owned fields required by the schema.
+- In bounded classification mode, every carried `description` is deeply equal
+  to the matching deduped finding's `description`; no tightening, expansion, or
+  re-voicing is permitted.
+- In bounded classification mode, every production issue has
+  `lifecycle.canonical_severity` deeply equal to its final top-level `severity`,
+  never its preliminary `severity_guess`.
 - Every `report.json` production issue reproduces every non-presentation field
   already present on its selected source byte-for-byte, including `summary`,
   `recommended_next_action`, and `family_variants` when present, and adds only
