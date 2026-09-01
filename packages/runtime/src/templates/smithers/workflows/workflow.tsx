@@ -36,6 +36,19 @@ const artifactsModule =
 const runtimeModule =
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
   new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
+// Resolve task runtime through the workflow runner's dependency edge. The
+// sealed Ultrafuzz runtime module comes from a separate package installation in
+// cloud workers, so importing @smthrs/driver from there would create a second
+// AsyncLocalStorage singleton that cannot observe the engine's active step.
+const taskRuntimeModuleId: string = "@smthrs/driver/task-runtime";
+const taskRuntimeModule = (await import(taskRuntimeModuleId)) as {
+  requireTaskRuntime(): {
+    runId: string;
+    stepId: string;
+    signal: AbortSignal;
+    db: Record<string, unknown>;
+  };
+};
 const {
   artifactContractDefinition,
   artifactContractSchemaBinding,
@@ -2430,7 +2443,8 @@ async function deriveAuthoritativeFinalReportWorkflowMetrics(
   task: (typeof taskSpecs)[number]
 ): Promise<FinalReportWorkflowMetricsProjection | undefined> {
   if (declaredFinalReportOutputPair(task) === undefined) return undefined;
-  return (await deriveCurrentTaskWorkflowMetrics()) as FinalReportWorkflowMetricsProjection | undefined;
+  return (await deriveCurrentTaskWorkflowMetrics(taskRuntimeModule.requireTaskRuntime())) as
+    FinalReportWorkflowMetricsProjection | undefined;
 }
 
 function deriveAuthoritativeFinalReportRunMetadata(

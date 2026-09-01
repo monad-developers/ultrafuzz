@@ -1622,6 +1622,7 @@ function fakeInstalledSmithersPaths(project: string): {
 function writeFakeInstalledSmithersDependencies(project: string): void {
   const dependencies = [
     ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
+    ["@smthrs/driver", SMITHERS_VERSION],
     ["@smthrs/tool-context", SMITHERS_VERSION],
     ["react", "19.2.4"],
     ["zod", "4.4.3"]
@@ -1634,8 +1635,23 @@ function writeFakeInstalledSmithersDependencies(project: string): void {
 function writeFakeInstalledSmithersDependency(project: string, name: string, version: string): void {
   const packageRoot = path.join(project, ".smithers", "node_modules", ...name.split("/"));
   fs.mkdirSync(packageRoot, { recursive: true });
-  fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({ name, version })}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({
+      name,
+      version,
+      ...(name === "@smthrs/driver" ? { type: "module", exports: { "./task-runtime": "./task-runtime.js" } } : {})
+    })}\n`,
+    "utf8"
+  );
   fs.writeFileSync(path.join(packageRoot, "index.js"), "export {};\n", "utf8");
+  if (name === "@smthrs/driver") {
+    fs.writeFileSync(
+      path.join(packageRoot, "task-runtime.js"),
+      'export function requireTaskRuntime() { throw new Error("unused fake task runtime"); }\n',
+      "utf8"
+    );
+  }
 }
 
 function writeFakeInstalledSmithers(
@@ -22523,6 +22539,39 @@ test("a refresh resume reuses its own ownership inspection instead of inspecting
     issuedCommands().filter((command) => command.startsWith("inspect ")),
     [inspectCommand]
   );
+});
+
+test("workflow task runtime resolves through the sealed runner dependency edge", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "runner-owned-task-runtime";
+  const installer = writeFakeNpmInstaller(project);
+  const env = { SMITHERS_FAKE_LOG: installer.smithersLogPath };
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const dependencyManifest = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "dependencies/manifest.json"
+  );
+  assert.ok(dependencyManifest);
+  const dependencyMap = JSON.parse(dependencyManifest.contents.toString("utf8")) as {
+    packages: Array<{ id: string; name: string }>;
+    issuers: Array<{ id: string; dependencies: Record<string, string> }>;
+  };
+  const driverPackages = dependencyMap.packages.filter((entry) => entry.name === "@smthrs/driver");
+  assert.equal(driverPackages.length, 1);
+  const [driverPackage] = driverPackages;
+  assert.ok(driverPackage);
+  const rootIssuer = dependencyMap.issuers.find((entry) => entry.id === "root");
+  const runtimeIssuer = dependencyMap.issuers.find((entry) => entry.id === "module:@ultrafuzz/runtime");
+  assert.ok(rootIssuer);
+  assert.ok(runtimeIssuer);
+  assert.equal(rootIssuer.dependencies["@smthrs/driver"], driverPackage.id);
+  assert.equal(runtimeIssuer.dependencies["@smthrs/driver"], undefined);
 });
 
 test("controller refresh sources stock adapters from the packaged closure instead of the project scaffold", async () => {

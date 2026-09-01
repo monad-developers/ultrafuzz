@@ -662,6 +662,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "Buffer",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     "untrustedContentBoundary",
+    "taskRuntimeModule",
     "deriveCurrentTaskWorkflowMetrics",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
@@ -703,6 +704,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     Buffer,
     ".ultrafuzz/authorities",
     "UNTRUSTED CONTENT BOUNDARY",
+    { requireTaskRuntime: () => ({}) },
     async () => workflowMetrics
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
@@ -8228,6 +8230,19 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("final-report workflow metrics use the runner-owned Smithers task runtime", () => {
+  const workflowSource = fs.readFileSync(workflowTemplatePath, "utf8");
+  const metricsSource = fs.readFileSync(
+    path.join(path.dirname(workflowTemplatePath), "..", "..", "..", "workflow-task-metrics.ts"),
+    "utf8"
+  );
+
+  assert.match(workflowSource, /const taskRuntimeModuleId: string = "@smthrs\/driver\/task-runtime"/u);
+  assert.match(workflowSource, /deriveCurrentTaskWorkflowMetrics\(\s*taskRuntimeModule\.requireTaskRuntime\(\)\s*\)/u);
+  assert.doesNotMatch(metricsSource, /@smthrs\/driver/u);
+  assert.match(metricsSource, /runtime: CurrentTaskWorkflowRuntime/u);
 });
 
 test("final-report Run summary uses full, partial, and unavailable workflow metrics without undercounting lineage", async () => {

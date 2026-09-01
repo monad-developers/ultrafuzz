@@ -31,6 +31,13 @@ interface CurrentTaskWorkflowEvidence {
   signal: AbortSignal;
 }
 
+export interface CurrentTaskWorkflowRuntime {
+  runId: string;
+  stepId: string;
+  signal: AbortSignal;
+  db: Record<string, unknown>;
+}
+
 function nonNegativeFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`artifact-contract failure: final-report ${label} is malformed`);
@@ -175,20 +182,9 @@ function formatUsd(value: number, partial: boolean): string {
   return value > 0 && value < 0.01 ? `$${value.toFixed(4)}${suffix}` : `$${value.toFixed(2)}${suffix}`;
 }
 
-async function readCurrentTaskWorkflowEvidence(): Promise<CurrentTaskWorkflowEvidence | undefined> {
-  // Smithers 0.35 exposes this runtime subpath at execution time but points its
-  // `types` export at a bundled index that omits the symbol. Keep the runtime
-  // dependency explicit while avoiding a false static named-export contract.
-  const taskRuntimeModuleId: string = "@smthrs/driver/task-runtime";
-  const taskRuntimeModule = (await import(taskRuntimeModuleId)) as {
-    requireTaskRuntime(): {
-      runId: string;
-      stepId: string;
-      signal: AbortSignal;
-      db: Record<string, unknown>;
-    };
-  };
-  const runtime = taskRuntimeModule.requireTaskRuntime();
+async function readCurrentTaskWorkflowEvidence(
+  runtime: CurrentTaskWorkflowRuntime
+): Promise<CurrentTaskWorkflowEvidence | undefined> {
   const db = runtime.db as {
     getRunTokenUsage?: (runId: string) => Effect.Effect<unknown, unknown>;
     listEventsByType?: (runId: string, type: string) => Effect.Effect<unknown, unknown>;
@@ -257,15 +253,18 @@ async function deriveWorkflowSpend(input: {
 }
 
 /**
- * Read the current Smithers task's durable usage and timing evidence.
+ * Project durable usage and timing evidence from an explicitly admitted
+ * Smithers task runtime.
  *
- * This adapter deliberately lives in the runtime module instead of the generated
- * workflow. Relocated execution snapshots already seal the runtime module's full
- * dependency closure, while a workflow file may only import its admitted root
- * packages directly.
+ * The generated workflow must resolve that runtime from the runner's dependency
+ * edge and pass it here. Cloud snapshots source the runner and this Ultrafuzz
+ * module from separate installations, whose AsyncLocalStorage singletons cannot
+ * safely be interchanged.
  */
-export async function deriveCurrentTaskWorkflowMetrics(): Promise<CurrentTaskWorkflowMetrics | undefined> {
-  const evidence = await readCurrentTaskWorkflowEvidence();
+export async function deriveCurrentTaskWorkflowMetrics(
+  runtime: CurrentTaskWorkflowRuntime
+): Promise<CurrentTaskWorkflowMetrics | undefined> {
+  const evidence = await readCurrentTaskWorkflowEvidence(runtime);
   if (evidence === undefined) return undefined;
   const rawUsage = evidence.raw_usage;
   const attempts = nonNegativeSafeInteger(rawUsage.attempts, "workflow usage attempts");

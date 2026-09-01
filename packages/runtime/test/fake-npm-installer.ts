@@ -30,6 +30,7 @@ export function writeFakeNpmInstaller(
   const smithersLogPath = path.join(project, "local-smithers.log");
   const dependencies = [
     ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
+    ["@smthrs/driver", SMITHERS_VERSION],
     ["@smthrs/tool-context", SMITHERS_VERSION],
     ["react", "19.2.4"],
     ["smthrs", SMITHERS_VERSION],
@@ -45,12 +46,13 @@ export function writeFakeNpmInstaller(
       `if (fs.readFileSync(log, "utf8").trimEnd().split("\\n").length <= ${failures.count}) { ${failures.stderr.map((line) => `process.stderr.write(${JSON.stringify(`${line}\n`)});`).join(" ")} process.exit(1); }`,
       `const prefix = args[args.indexOf("--prefix") + 1], dependencies = ${JSON.stringify(dependencies)}, packages = { '': JSON.parse(fs.readFileSync(path.join(prefix, 'package.json'), 'utf8')) };`,
       `const integrity = ${JSON.stringify(failures.integrity ?? `sha512-${Buffer.alloc(64).toString("base64")}`)};`,
-      "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." +
+      "for (const [name, version] of dependencies) { const root = path.join(prefix, 'node_modules', ...name.split('/')); fs.mkdirSync(root, { recursive: true }); const manifest = { name, version, ...(name === '@smthrs/driver' ? { type: 'module', exports: { './task-runtime': './task-runtime.js' } } : {}), ...(name === 'smthrs' ? { bin: { smithers: 'src/bin/smithers.js' }, ..." +
         JSON.stringify({
           ...(failures.optional === undefined ? {} : { optionalDependencies: { [failures.optional]: "1.0.0" } }),
           ...(failures.required === undefined ? {} : { dependencies: { [failures.required]: "1.0.0" } })
         }) +
         " } : {}) }; fs.writeFileSync(path.join(root, 'package.json'), `${JSON.stringify(manifest)}\\n`); fs.writeFileSync(path.join(root, 'index.js'), 'export {};\\n'); packages[`node_modules/${name}`] = { version, resolved: `https://registry.npmjs.org/${name}/-/fixture.tgz`, integrity }; }",
+      "fs.writeFileSync(path.join(prefix, 'node_modules/@smthrs/driver/task-runtime.js'), 'export function requireTaskRuntime() { throw new Error(\"unused fake task runtime\"); }\\n');",
       "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
       `fs.writeFileSync(target, ${JSON.stringify(
         failures.runnerSource ??

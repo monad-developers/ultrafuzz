@@ -25,7 +25,6 @@
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
-    "@smthrs/driver": "0.35.0",
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/prompts": "workspace:*",

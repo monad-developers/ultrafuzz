@@ -151,7 +151,17 @@ const NATIVE_SMITHERS_CONTROLLER_RETAIN_MARKER = ".ultrafuzz-native-continuation
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
 const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
-const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = ["@smthrs/tool-context", "react", "smthrs", "zod"] as const;
+// These packages are imported by the generated workflow itself, so they must
+// resolve through its root runner closure. In particular, task-runtime owns an
+// AsyncLocalStorage singleton and cannot come from a separately snapshotted
+// @ultrafuzz/runtime installation.
+const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
+  "@smthrs/driver",
+  "@smthrs/tool-context",
+  "react",
+  "smthrs",
+  "zod"
+] as const;
 interface OperatorControllerProject {
   npm: OperatorNpmProvision;
   root: string;
