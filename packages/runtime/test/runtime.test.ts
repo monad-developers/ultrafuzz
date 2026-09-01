@@ -7180,6 +7180,41 @@ bunAdapterTest(
         reportedCostUsd: 0.032
       });
 
+      // Some providers report reasoning separately from visible output even
+      // though Smithers models it as a subset of inclusive output. Telemetry
+      // must not terminate the invocation; clamp only the optional breakdown.
+      const separateReasoningInterpreter = agent.createOutputInterpreter();
+      const separateReasoningEvents = separateReasoningInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: "separate-reasoning-response",
+            content: [{ type: "text", text: "reasoning complete" }],
+            usage: {
+              input: 1,
+              output: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 7,
+              totalTokens: 3,
+              cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 }
+            }
+          }
+        })
+      );
+      const separateReasoningUsage = (
+        Array.isArray(separateReasoningEvents) ? separateReasoningEvents : [separateReasoningEvents]
+      ).find((event) => event?.type === "usage") as { usage?: Record<string, unknown> } | undefined;
+      assert.deepEqual(separateReasoningUsage?.usage, {
+        inputTokens: 1,
+        inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokens: 2,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 2 },
+        totalTokens: 3,
+        reportedCostUsd: 0.003
+      });
+
       // A provider response becomes observable at message_end, before either
       // agent_end or process settlement. This is the ordering the engine uses
       // to durably checkpoint usage when a child then hangs or dies.
