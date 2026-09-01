@@ -36,19 +36,6 @@ const artifactsModule =
 const runtimeModule =
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
   new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
-// Resolve task runtime through the workflow runner's dependency edge. The
-// sealed Ultrafuzz runtime module comes from a separate package installation in
-// cloud workers, so importing @smthrs/driver from there would create a second
-// AsyncLocalStorage singleton that cannot observe the engine's active step.
-const taskRuntimeModuleId: string = "@smthrs/driver/task-runtime";
-const taskRuntimeModule = (await import(taskRuntimeModuleId)) as {
-  requireTaskRuntime(): {
-    runId: string;
-    stepId: string;
-    signal: AbortSignal;
-    db: Record<string, unknown>;
-  };
-};
 const {
   artifactContractDefinition,
   artifactContractSchemaBinding,
@@ -2249,6 +2236,15 @@ type FinalReportWorkflowMetricsProjection = {
   partial_pricing: boolean;
 };
 
+type FinalReportTaskRuntime = {
+  runId: string;
+  stepId: string;
+  attempt: number;
+  iteration: number;
+  signal: AbortSignal;
+  db: Record<string, unknown>;
+};
+
 type FinalReportRunMetadataAuthority = {
   projection: FinalReportRunMetadataProjection;
   snapshot: ImmutableFileSnapshot;
@@ -2439,12 +2435,51 @@ function finalReportStrategyLoops(
   return configured;
 }
 
+function finalReportTaskRuntimeFromAgentArgs(
+  task: (typeof taskSpecs)[number],
+  args: unknown
+): FinalReportTaskRuntime | undefined {
+  if (declaredFinalReportOutputPair(task) === undefined) return undefined;
+  if (args === null || typeof args !== "object") {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is unavailable");
+  }
+  const runtime = Reflect.get(args, "ultrafuzzTaskRuntime") as Partial<FinalReportTaskRuntime> | undefined;
+  const context = Reflect.get(args, "taskContext") as
+    { runId?: unknown; nodeId?: unknown; attempt?: unknown; iteration?: unknown } | undefined;
+  if (
+    runtime === null ||
+    typeof runtime !== "object" ||
+    typeof runtime.runId !== "string" ||
+    runtime.runId.length === 0 ||
+    runtime.stepId !== task.id ||
+    !Number.isSafeInteger(runtime.attempt) ||
+    Number(runtime.attempt) <= 0 ||
+    !Number.isSafeInteger(runtime.iteration) ||
+    Number(runtime.iteration) < 0 ||
+    runtime.signal === null ||
+    typeof runtime.signal !== "object" ||
+    typeof runtime.signal.aborted !== "boolean" ||
+    typeof runtime.signal.addEventListener !== "function" ||
+    runtime.db === null ||
+    typeof runtime.db !== "object" ||
+    context === null ||
+    typeof context !== "object" ||
+    context.runId !== runtime.runId ||
+    context.nodeId !== runtime.stepId ||
+    context.attempt !== runtime.attempt ||
+    context.iteration !== runtime.iteration
+  ) {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is invalid");
+  }
+  return runtime as FinalReportTaskRuntime;
+}
+
 async function deriveAuthoritativeFinalReportWorkflowMetrics(
-  task: (typeof taskSpecs)[number]
+  task: (typeof taskSpecs)[number],
+  runtime: FinalReportTaskRuntime
 ): Promise<FinalReportWorkflowMetricsProjection | undefined> {
   if (declaredFinalReportOutputPair(task) === undefined) return undefined;
-  return (await deriveCurrentTaskWorkflowMetrics(taskRuntimeModule.requireTaskRuntime())) as
-    FinalReportWorkflowMetricsProjection | undefined;
+  return (await deriveCurrentTaskWorkflowMetrics(runtime)) as FinalReportWorkflowMetricsProjection | undefined;
 }
 
 function deriveAuthoritativeFinalReportRunMetadata(
@@ -2534,12 +2569,18 @@ function serializeFinalReportRunMetadataProjection(projection: FinalReportRunMet
   return bytes;
 }
 
-async function materializeFinalReportRunMetadataAuthority(task: (typeof taskSpecs)[number]): Promise<void> {
+async function materializeFinalReportRunMetadataAuthority(
+  task: (typeof taskSpecs)[number],
+  runtime?: FinalReportTaskRuntime
+): Promise<void> {
   if (declaredFinalReportOutputPair(task) === undefined) {
     finalReportRunMetadataAuthoritiesByTask.delete(task.attemptId);
     return;
   }
-  const workflowMetrics = await deriveAuthoritativeFinalReportWorkflowMetrics(task);
+  if (runtime === undefined) {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is unavailable");
+  }
+  const workflowMetrics = await deriveAuthoritativeFinalReportWorkflowMetrics(task, runtime);
   const projection = deriveAuthoritativeFinalReportRunMetadata(task, workflowMetrics);
   const expected = serializeFinalReportRunMetadataProjection(projection);
   const workspaceRoot = realpathSync(task.workspacePath);
@@ -3249,7 +3290,7 @@ function artifactAwareAgent(
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
         assertWorkspaceSourceRevision(task);
-        await resetTaskArtifactsForRetry(task);
+        await resetTaskArtifactsForRetry(task, finalReportTaskRuntimeFromAgentArgs(task, args));
       } else {
         assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
@@ -3332,6 +3373,9 @@ function artifactAwareAgent(
         // arbitrary or absent terminal text cannot become a second contract.
         const unstructuredArgs = { ...attemptArgs };
         Reflect.deleteProperty(unstructuredArgs, "outputSchema");
+        // This is a privileged engine-to-wrapper capability. It must never
+        // cross into an adapter, model process, callback, or serialized event.
+        Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
         const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertPromptArtifactAuthorityUnchanged(task);
@@ -3374,7 +3418,7 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
   return path.dirname(candidate) === path.resolve(artifactDir) ? candidate : undefined;
 }
 
-function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): Promise<void> {
+function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number], runtime?: FinalReportTaskRuntime): Promise<void> {
   // A task-owned prompt may live directly in the task artifact root, so retry
   // cleanup must preserve it. A sealed prompt instead lives in the immutable
   // execution snapshot. That file is outside this cleanup root and is validated
@@ -3430,7 +3474,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): Promise<v
   restoreWorkspacePatchPreparation(task, workspaceRoot);
   prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
   materializePromptArtifactAuthority(task);
-  return materializeFinalReportRunMetadataAuthority(task);
+  return materializeFinalReportRunMetadataAuthority(task, runtime);
 }
 
 function resetTaskArtifactContents(

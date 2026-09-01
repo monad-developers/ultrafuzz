@@ -256,6 +256,7 @@ function loadArtifactAwareAgent(
     "assertPromptArtifactAuthorityUnchanged",
     "assertFinalReportRunMetadataAuthorityUnchanged",
     "assertFinalReportPromptAuthorityUnchanged",
+    "finalReportTaskRuntimeFromAgentArgs",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
@@ -272,6 +273,7 @@ function loadArtifactAwareAgent(
     sensitiveEnvironmentValues,
     () => undefined,
     () => options.onAuthorityCheck?.(),
+    () => undefined,
     () => undefined,
     () => undefined
   ) as ReturnType<typeof loadArtifactAwareAgent>;
@@ -662,13 +664,13 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "Buffer",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     "untrustedContentBoundary",
-    "taskRuntimeModule",
+    "workflowRuntime",
     "deriveCurrentTaskWorkflowMetrics",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
       latestElapsedThrough: finalReportLatestElapsedThrough,
       derive: deriveAuthoritativeFinalReportRunMetadata,
-      materialize: materializeFinalReportRunMetadataAuthority,
+      materialize: (task) => materializeFinalReportRunMetadataAuthority(task, workflowRuntime),
       assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
       authoritative: authoritativeFinalReportRunMetadata,
       relativePath: finalReportRunMetadataAuthorityRelativePath,
@@ -704,7 +706,14 @@ function loadFinalReportRunMetadataAuthorityHarness(
     Buffer,
     ".ultrafuzz/authorities",
     "UNTRUSTED CONTENT BOUNDARY",
-    { requireTaskRuntime: () => ({}) },
+    {
+      runId: "smithers-run-1",
+      stepId: "final-report",
+      attempt: 1,
+      iteration: 0,
+      signal: new AbortController().signal,
+      db: {}
+    },
     async () => workflowMetrics
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
@@ -6690,19 +6699,19 @@ test("generated prompt authority is derived from sealed controls immediately bef
 
   assert.match(
     reset,
-    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*return materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*return materializeFinalReportRunMetadataAuthority\(task, runtime\);\s*\}/u
   );
   assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
+    agent.indexOf("resetTaskArtifactsForRetry(task,") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
   );
-  assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)/u);
+  assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task,/u);
   assert.match(
     agent,
     /else \{\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*\}/u
   );
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.match(
     agent,
@@ -7986,7 +7995,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?const result = await executionAgent\.generate\(unstructuredArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\)\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),
@@ -8232,15 +8241,27 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
   }
 });
 
-test("final-report workflow metrics use the runner-owned Smithers task runtime", () => {
+test("final-report workflow metrics use the engine-owned Smithers task runtime handoff", async () => {
   const workflowSource = fs.readFileSync(workflowTemplatePath, "utf8");
   const metricsSource = fs.readFileSync(
     path.join(path.dirname(workflowTemplatePath), "..", "..", "..", "workflow-task-metrics.ts"),
     "utf8"
   );
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const handoffPatch = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (candidate) => candidate.id === "engine_main_usage_invocation"
+  );
 
-  assert.match(workflowSource, /const taskRuntimeModuleId: string = "@smthrs\/driver\/task-runtime"/u);
-  assert.match(workflowSource, /deriveCurrentTaskWorkflowMetrics\(\s*taskRuntimeModule\.requireTaskRuntime\(\)\s*\)/u);
+  assert.ok(handoffPatch);
+  assert.match(handoffPatch.patched, /ultrafuzzTaskRuntime: agentTaskRuntime/u);
+  assert.equal(
+    handoffPatch.predecessors?.some((source) => source.includes("ultrafuzzTaskRuntime")),
+    false
+  );
+  assert.doesNotMatch(workflowSource, /@smthrs\/driver/u);
+  assert.match(workflowSource, /finalReportTaskRuntimeFromAgentArgs\(task, args\)/u);
+  assert.match(workflowSource, /deriveCurrentTaskWorkflowMetrics\(runtime\)/u);
+  assert.match(workflowSource, /Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\)/u);
   assert.doesNotMatch(metricsSource, /@smthrs\/driver/u);
   assert.match(metricsSource, /runtime: CurrentTaskWorkflowRuntime/u);
 });
@@ -8619,7 +8640,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
   );
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
 });
 
@@ -8685,7 +8706,7 @@ test("generated Smithers resets exact task-owned artifact contents before every 
   const agent = source.slice(agentStart, rootsStart);
   assert.match(agent, /if \(firstGenerationForAttempt\)/u);
   assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)"),
+    agent.indexOf("resetTaskArtifactsForRetry(task,") < agent.indexOf("executionAgent.generate(unstructuredArgs)"),
     agent
   );
 
@@ -8790,7 +8811,7 @@ test("generated Smithers agent boundary performs only task-local authority check
   const agent = source.slice(agentStart, agentEnd);
   assert.match(
     agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
+    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.doesNotMatch(
     agent,
