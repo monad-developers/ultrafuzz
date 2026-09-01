@@ -1700,7 +1700,6 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
   const smithers = path.join(binDir, "smithers");
   const commandLog = path.join(project, "smithers-commands.log");
   const statusOverride = path.join(project, "fake-smithers-status-override.json");
@@ -1973,7 +1972,6 @@ function fakeLifecycleSmithersEnv(
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-lifecycle-bin`);
   registerTemporaryPath(binDir);
   fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const resumeInspectPath = path.join(project, "fake-smithers-resume-inspect.json");
   const inspectCountPath = path.join(project, "fake-smithers-inspect-count");
@@ -14502,6 +14500,28 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
     // The Linux spelling of that root is unchanged; only darwin resolves elsewhere.
     assert.match(startupAnchor.patched, /: "\/proc\/self\/fd\/3";/u);
+    assert.match(
+      startupAnchor.patched,
+      /process\.platform !== "darwin"\) return realpathSync\(left\) === realpathSync\(right\)/u
+    );
+    assert.match(startupAnchor.patched, /a\.isFile\(\) && b\.isFile\(\) && a\.dev === b\.dev && a\.ino === b\.ino/u);
+    for (const id of [
+      "workflow_path_persistence",
+      "process_snapshot_anchor",
+      "replay_workflow_path",
+      "fork_workflow_path",
+      "engine_workflow_path"
+    ] as const) {
+      const identity = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
+      assert.ok(identity);
+      assert.match(identity.patched, /ultrafuzzSameWorkflowFile/u, `${id} bypasses verified workflow identity`);
+      assert.ok(identity.predecessors?.length, `${id} cannot upgrade the just-merged realpath replacement`);
+    }
+    const engineIdentityImport = SMITHERS_COMPATIBILITY_PATCHES.find(
+      (patch) => patch.id === "engine_workflow_path_import"
+    );
+    assert.ok(engineIdentityImport);
+    assert.match(engineIdentityImport.patched, /rmSync, statSync, writeFileSync/u);
     const relaunch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "manifest_relaunch");
     assert.ok(relaunch);
     assert.match(relaunch.patched, /relaunchSnapshotTransfer.*ultrafuzzBunStartupArgs.*descriptor/su);
@@ -14568,10 +14588,11 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     const processAnchor = sources.find(({ patch }) => patch.id === "process_snapshot_anchor");
     assert.ok(processAnchor);
-    const [predecessor, nested] = processAnchor.patch.predecessors ?? [];
+    const [predecessor, nested, workflowRealpathPredecessor] = processAnchor.patch.predecessors ?? [];
     assert.ok(predecessor);
     assert.ok(nested);
-    assert.equal(processAnchor.patch.predecessors?.length, 2);
+    assert.ok(workflowRealpathPredecessor);
+    assert.equal(processAnchor.patch.predecessors?.length, 4);
     const current = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
@@ -14591,10 +14612,31 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(migratedNested.includes(nested), false);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
 
+    fs.writeFileSync(
+      processAnchor.source,
+      current.replace(processAnchor.patch.patched, workflowRealpathPredecessor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    applySmithersCompatibilityPatches(project);
+    assert.equal(fs.readFileSync(processAnchor.source, "utf8").includes(processAnchor.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+
     const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
     assert.notEqual(mutatedNested, nested);
-    assert.equal(mutatedNested.includes(processAnchor.patch.patched), true);
+    assert.equal(mutatedNested.includes(workflowRealpathPredecessor), true);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.throws(
+      () => applySmithersCompatibilityPatches(project),
+      /process-owned execution snapshot implementation is incompatible/u
+    );
+
+    fs.writeFileSync(
+      processAnchor.source,
+      current.replace(processAnchor.patch.patched, `${nested}\n${workflowRealpathPredecessor}`),
+      "utf8"
+    );
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
@@ -14610,6 +14652,23 @@ test("compatibility patcher rewrites every described workaround", async () => {
       /process-owned execution snapshot implementation is incompatible/u
     );
     fs.writeFileSync(processAnchor.source, current, "utf8");
+  }
+  for (const id of [
+    "workflow_path_persistence",
+    "replay_workflow_path",
+    "fork_workflow_path",
+    "engine_workflow_path"
+  ] as const) {
+    const described = sources.find(({ patch }) => patch.id === id);
+    assert.ok(described);
+    const [realpathPredecessor] = described.patch.predecessors ?? [];
+    assert.ok(realpathPredecessor);
+    const current = fs.readFileSync(described.source, "utf8");
+    fs.writeFileSync(described.source, current.replace(described.patch.patched, realpathPredecessor), "utf8");
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches[id], "missing");
+    applySmithersCompatibilityPatches(project);
+    assert.equal(fs.readFileSync(described.source, "utf8").includes(described.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches[id], "applied");
   }
   {
     const delegation = sources.find(({ patch }) => patch.id === "local_delegation");
@@ -14669,6 +14728,79 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
     assert.equal(fs.existsSync(trustedMarker), true);
     assert.equal(fs.existsSync(hostileMarker), false);
+  }
+});
+
+test("compatibility patcher upgrades every v0.0.23 CLI replacement", async () => {
+  const {
+    applySmithersCompatibilityPatches,
+    inspectSmithersInstallation,
+    SMITHERS_COMPATIBILITY_PATCHES,
+    SMITHERS_REQUIRED_ENGINE_ANCHORS
+  } = await import("../src/smithers.js");
+  const { SMITHERS_V0_0_23_CLI_PATCH_PREDECESSORS } = await import("../src/smithers-patch-predecessors.js");
+  const releasedById: Readonly<Record<string, string>> = SMITHERS_V0_0_23_CLI_PATCH_PREDECESSORS;
+  const releasedIds = [
+    "detached_snapshot_transfer",
+    "supervisor_descriptor",
+    "resume_snapshot_transfer",
+    "workflow_path_import",
+    "process_snapshot_anchor",
+    "manifest_relaunch"
+  ] as const;
+  assert.deepEqual(Object.keys(releasedById), releasedIds);
+
+  const project = tempProject();
+  writeFakeInstalledSmithers(project);
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  const stockRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
+  const sources = SMITHERS_COMPATIBILITY_PATCHES.map((patch) => ({
+    patch,
+    source: path.join(nodeModules, ...patch.packageName.split("/"), ...patch.sourceRelativePath.split("/"))
+  }));
+  const bySource = new Map<string, string[]>();
+  for (const { patch, source } of sources) {
+    bySource.set(source, [...(bySource.get(source) ?? []), releasedById[patch.id] ?? patch.patchable]);
+    const packageRoot = path.join(nodeModules, ...patch.packageName.split("/"));
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(
+      path.join(packageRoot, "package.json"),
+      `${JSON.stringify({ name: patch.packageName, version: SMITHERS_VERSION })}\n`,
+      "utf8"
+    );
+  }
+  for (const required of SMITHERS_REQUIRED_ENGINE_ANCHORS) {
+    const source = path.join(
+      nodeModules,
+      ...required.packageName.split("/"),
+      ...required.sourceRelativePath.split("/")
+    );
+    bySource.set(source, [...(bySource.get(source) ?? []), required.anchor]);
+  }
+  for (const [source, anchors] of bySource) {
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    if (source.endsWith(SMITHERS_BIN_PATH)) {
+      fs.cpSync(path.dirname(stockRunner), path.dirname(source), { recursive: true });
+    } else {
+      fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
+    }
+  }
+
+  const before = inspectSmithersInstallation(project).compatibility_patches;
+  for (const id of releasedIds) assert.equal(before[id], "missing", `${id} was not recognized as upgradeable`);
+
+  applySmithersCompatibilityPatches(project);
+
+  const after = inspectSmithersInstallation(project).compatibility_patches;
+  for (const id of releasedIds) {
+    const described = sources.find(({ patch }) => patch.id === id);
+    const released = releasedById[id];
+    assert.ok(described);
+    assert.ok(released);
+    const contents = fs.readFileSync(described.source, "utf8");
+    assert.equal(contents.includes(described.patch.patched), true, `${id} did not upgrade to the current replacement`);
+    assert.equal(contents.includes(released), false, `${id} retained its v0.0.23 replacement`);
+    assert.equal(after[id], "applied", `${id} was not healthy after its upgrade`);
   }
 });
 
@@ -23472,11 +23604,11 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(processAnchorPatch);
   const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
-  assert.equal(resumeTransferPatch.predecessors?.length, 1);
+  assert.equal(resumeTransferPatch.predecessors?.length, 3);
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
-  assert.equal(processAnchorPatch.predecessors?.length, 2);
+  assert.equal(processAnchorPatch.predecessors?.length, 4);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
   assert.ok(newlyRequired);
   const engineSequence = String(dependencyMap.packages.length + 1).padStart(6, "0");

@@ -569,8 +569,8 @@ function verifiedCandidateDescriptorPath(descriptor: number, candidates: readonl
 function directoryDescriptorPath(descriptor: number): string | undefined {
   const opened = fs.fstatSync(descriptor);
   return verifiedCandidateDescriptorPath(descriptor, [
-    `/proc/self/fd/${descriptor}`,
-    `/dev/fd/${descriptor}`,
+    `/proc/self/fd/${String(descriptor)}`,
+    `/dev/fd/${String(descriptor)}`,
     `/.vol/${String(opened.dev)}/${String(opened.ino)}`
   ]);
 }
@@ -580,7 +580,7 @@ function controllerDirectoryDescriptorPath(descriptor: number): string | undefin
   // a volfs path is process-independent, so it qualifies on macOS.
   const opened = fs.fstatSync(descriptor);
   return verifiedCandidateDescriptorPath(descriptor, [
-    `/proc/${process.pid}/fd/${descriptor}`,
+    `/proc/${String(process.pid)}/fd/${String(descriptor)}`,
     `/.vol/${String(opened.dev)}/${String(opened.ino)}`
   ]);
 }
