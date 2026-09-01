@@ -93,7 +93,7 @@ test("verified output readers reject authenticated historical publications conta
   // A positively identified vendor-format credential: the publication gate
   // scans positive-only (#819), so a bare `token=` keyword assignment is a
   // display-redaction heuristic and no longer fails publication.
-  issue.description = "Executor leaked ghp_AbCdEf1234567890AbCdEf1234567890AbCd";
+  issue.description = "Executor leaked ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
   const fixture = createVerifiedReportFixture("verified-report-secret-contamination", {
     report: currentReport("verified-report-secret-contamination", [issue])
   });

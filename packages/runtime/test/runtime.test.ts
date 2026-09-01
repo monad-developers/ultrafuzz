@@ -6464,7 +6464,7 @@ bunAdapterTest(
       {
         ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
           "AWS_ACCESS_KEY_ID,AWS_CUSTOM_TOKEN,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_AUTH,CUSTOM_SHARED_TOKEN,DATABASE_PASSWD,FOUNDRY_PROFILE,MAINNET_RPC_URL,SSH_PRIVATE_KEY",
-        AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+        AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF", // gitleaks:allow -- fake credential fixture for the redaction tests
         AWS_CUSTOM_TOKEN: "configured-for-codex",
         AWS_SESSION_TOKEN: "claude-route-token",
         aws_case_token: "case-variant-claude-token",
@@ -6499,7 +6499,7 @@ bunAdapterTest(
         agent: "ClaudeAgent"
       })
     };
-    assert.equal(claudeAllowlisted.AWS_ACCESS_KEY_ID, "AKIA0123456789ABCDEF");
+    assert.equal(claudeAllowlisted.AWS_ACCESS_KEY_ID, "AKIA0123456789ABCDEF"); // gitleaks:allow -- fake credential fixture for the redaction tests
     assert.equal(claudeAllowlisted.AWS_CUSTOM_TOKEN, "");
     assert.equal(claudeAllowlisted.AWS_SESSION_TOKEN, "claude-route-token");
     assert.equal(claudeAllowlisted.aws_case_token, "case-variant-claude-token");
@@ -10773,7 +10773,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
       "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
     CLAUDE_CODE_USE_BEDROCK: "1",
-    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF",
+    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF", // gitleaks:allow -- fake credential fixture for the redaction tests
     AWS_REGION: "us-east-1",
     AWS_SESSION_TOKEN: "secret",
     aws_case_token: "case-variant-claude-token",

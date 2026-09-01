@@ -31,18 +31,18 @@ test("sensitive environment names cover the provider credential vocabulary", () 
 test("redaction recognizes maintained key, token, mnemonic, URL, and entropy patterns", () => {
   const fixtures = [
     `private key 0x${"1a".repeat(32)}`,
-    `signing key: ${"2b".repeat(32)}`,
-    "google AIzaSyB7w_ThisIsAFakeGoogleApiKey1234",
+    `signing key: ${"2b".repeat(32)}`, // gitleaks:allow -- fake credential fixture for the redaction tests
+    "google AIzaSyB7w_ThisIsAFakeGoogleApiKey1234", // gitleaks:allow -- fake credential fixture for the redaction tests
     // Real npm tokens are npm_ plus exactly 36 characters; secretlint encodes
     // the true vendor format, so the fixture uses it.
-    "npm npm_0123456789abcdefghijklmnopqrstuvwxyz",
-    "modal ak-0123456789abcdefghijklmnop",
+    "npm npm_0123456789abcdefghijklmnopqrstuvwxyz", // gitleaks:allow -- fake credential fixture for the redaction tests
+    "modal ak-0123456789abcdefghijklmnop", // gitleaks:allow -- fake credential fixture for the redaction tests
     "modal as-0123456789abcdefghijklmnop",
-    "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop",
+    "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop", // gitleaks:allow -- fake credential fixture for the redaction tests
     "rpc https://eth-mainnet.g.alchemy.com/v2/0123456789abcdefghijklmnopqrstuv",
-    "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv",
+    "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv", // gitleaks:allow -- fake credential fixture for the redaction tests
     'api_key: "an-otherwise-low-entropy-value"',
-    "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq",
+    "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abcdefghijkl.zyxwvutsrq", // gitleaks:allow -- fake credential fixture for the redaction tests
     `wallet words ${mnemonic}`,
     "opaque aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wXyZ1_cD3eF5gH7jK9mP2q"
   ];
@@ -154,16 +154,16 @@ test("sensitive environment collection combines configured names and conventiona
 
 test("secretlint library findings cover vendor formats the hand-rolled patterns used to own", () => {
   const fixtures = [
-    "ghp_AbCdEf1234567890AbCdEf1234567890AbCd",
-    "gho_AbCdEf1234567890AbCdEf1234567890AbCd",
-    `github_pat_${"A1".repeat(41)}`,
-    "glpat-a1B2c3D4e5F6g7H8i9J0",
+    "ghp_AbCdEf1234567890AbCdEf1234567890AbCd", // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
+    "gho_AbCdEf1234567890AbCdEf1234567890AbCd", // gitleaks:allow -- fake credential fixture for the redaction tests
+    `github_pat_${"A1".repeat(41)}`, // gitleaks:allow -- fake credential fixture for the redaction tests
+    "glpat-a1B2c3D4e5F6g7H8i9J0", // gitleaks:allow -- fake credential fixture for the redaction tests
     `hf_${"a".repeat(34)}`,
-    "npm_AbCdEf1234567890AbCdEf1234567890AbCd",
-    "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt",
+    "npm_AbCdEf1234567890AbCdEf1234567890AbCd", // gitleaks:allow -- fake credential fixture for the redaction tests
+    "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt", // gitleaks:allow -- fake credential fixture for the redaction tests
     "https://hooks.slack.com/services/T12345/B98765/abcdefghijklmnop",
-    "https://admin:hunter2hunter2@example.com/x",
-    "postgres://svc:passw0rdpass@db.internal:5432/main",
+    "https://admin:hunter2hunter2@example.com/x", // gitleaks:allow -- fake credential fixture for the redaction tests
+    "postgres://svc:passw0rdpass@db.internal:5432/main", // gitleaks:allow -- fake credential fixture for the redaction tests
     `-----BEGIN RSA PRIVATE KEY-----\nMIIEow${"A".repeat(120)}\n-----END RSA PRIVATE KEY-----`
   ];
   for (const fixture of fixtures) {
@@ -217,7 +217,7 @@ test("the English word bearer does not redact following prose while Bearer token
   const prose = "grant it to the role bearer (i.e. `account`) explicitly";
   assert.equal(redactSecretsInText(prose), prose);
   assert.equal(
-    redactSecretsInText("Authorization: Bearer AbCdEf1234567890AbCdEf1234567890", undefined, [], "positive-only"),
+    redactSecretsInText("Authorization: Bearer AbCdEf1234567890AbCdEf1234567890", undefined, [], "positive-only"), // gitleaks:allow -- fake credential fixture for the redaction tests
     "Authorization: Bearer <redacted>"
   );
 });
@@ -225,7 +225,7 @@ test("the English word bearer does not redact following prose while Bearer token
 test("in-content secretlint-disable comments cannot suppress detection", () => {
   // Scanned content is agent-controlled; the filter-comments rule is disabled
   // so contaminated output cannot exempt itself from the fail-closed gate.
-  const fixture = "// secretlint-disable\nghp_AbCdEf1234567890AbCdEf1234567890AbCd";
+  const fixture = "// secretlint-disable\nghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
   assert.equal(containsSensitiveSecrets(fixture, [], "positive-only"), true);
 });
 

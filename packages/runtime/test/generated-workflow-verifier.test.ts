@@ -8080,7 +8080,7 @@ test("final-report repository normalization strips private URL suffixes and reje
 
   for (const remote of [
     "https://credential@github.com/example/project.git?session=private-id",
-    "https://credential:secret@github.com/example/project.git",
+    "https://credential:secret@github.com/example/project.git", // gitleaks:allow -- fake credential fixture for the redaction tests
     "ssh://other-user@github.com/example/project.git",
     "https://github.com:443/example/project.git",
     "https://github.com/example/project.git/private-id",
