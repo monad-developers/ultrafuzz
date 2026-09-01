@@ -23587,6 +23587,21 @@ test("controller refresh authenticates newly required sealed runner patches and 
     dependencyMap.packages.some((entry) => entry.name === "@smthrs/engine"),
     false
   );
+  const sealedRuntimeManifest = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "modules/@ultrafuzz/runtime/package.json"
+  );
+  const sealedRuntimeIssuer = dependencyMap.issuers.find((entry) => entry.id === "module:@ultrafuzz/runtime");
+  const sealedDriverPackage = dependencyMap.packages.find((entry) => entry.name === "@smthrs/driver");
+  assert.ok(sealedRuntimeManifest);
+  assert.ok(sealedRuntimeIssuer);
+  assert.ok(sealedDriverPackage);
+  assert.equal(
+    (JSON.parse(sealedRuntimeManifest.contents.toString("utf8")) as { dependencies?: Record<string, string> })
+      .dependencies?.["@smthrs/driver"],
+    SMITHERS_VERSION
+  );
+  assert.equal(sealedRuntimeIssuer.dependencies["@smthrs/driver"], sealedDriverPackage.id);
+  assert.doesNotMatch(evidence.verifiedControl.contents.workflow.toString("utf8"), /@smthrs\/driver/u);
 
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const enginePatches = SMITHERS_COMPATIBILITY_PATCHES.filter(
@@ -23609,7 +23624,11 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(nestedProcessAnchorPatch);
   assert.equal(processAnchorPatch.predecessors?.length, 2);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
+  const mainInvocation = enginePatches.find((candidate) => candidate.id === "engine_main_usage_invocation");
   assert.ok(newlyRequired);
+  assert.ok(mainInvocation);
+  const [predecessorMainInvocation] = mainInvocation.predecessors ?? [];
+  assert.ok(predecessorMainInvocation);
   const engineSequence = String(dependencyMap.packages.length + 1).padStart(6, "0");
   const enginePackageId = `package:${engineSequence}`;
   const enginePackageSnapshotPath = `dependencies/packages/${engineSequence}`;
@@ -23664,13 +23683,19 @@ test("controller refresh authenticates newly required sealed runner patches and 
       sourceRelativePath,
       enginePatches
         .filter((candidate) => candidate.sourceRelativePath === sourceRelativePath)
-        .map((candidate) => (candidate.id === newlyRequired.id ? candidate.patchable : candidate.patched))
+        .map((candidate) => {
+          if (candidate.id === newlyRequired.id) return candidate.patchable;
+          if (candidate.id === mainInvocation.id) return predecessorMainInvocation;
+          return candidate.patched;
+        })
         .join("\n")
     );
   }
   const preFixEngineSource = engineSources.get(newlyRequired.sourceRelativePath)!;
   assert.equal(preFixEngineSource.includes(newlyRequired.patchable), true);
   assert.equal(preFixEngineSource.includes(newlyRequired.patched), false);
+  assert.equal(preFixEngineSource.includes(predecessorMainInvocation), true);
+  assert.equal(preFixEngineSource.includes(mainInvocation.patched), false);
   const cliSources = new Map<string, string>();
   for (const sourceRelativePath of new Set(cliPatches.map((candidate) => candidate.sourceRelativePath))) {
     cliSources.set(
@@ -23730,6 +23755,8 @@ test("controller refresh authenticates newly required sealed runner patches and 
   assert.ok(refreshedEngine);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patched), true);
   assert.equal(refreshedEngine.contents.toString("utf8").includes(newlyRequired.patchable), false);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(mainInvocation.patched), true);
+  assert.equal(refreshedEngine.contents.toString("utf8").includes(predecessorMainInvocation), false);
   const refreshedCliResume = rebuilt.snapshot.executionFiles.find((file) => file.snapshotPath === cliResumeSourcePath);
   assert.ok(refreshedCliResume);
   assert.equal(refreshedCliResume.contents.toString("utf8").includes(resumeTransferPatch.patched), true);
