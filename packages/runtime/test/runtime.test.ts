@@ -19004,6 +19004,7 @@ test("syncRun records unavailable spend when workflow token events are unpriced"
         extra: {
           iteration: 0,
           inputTokens: 10,
+          freshInputTokens: undefined,
           outputTokens: 20,
           costUsd: undefined,
           model: "gpt-test",
