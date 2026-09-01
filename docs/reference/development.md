@@ -78,8 +78,9 @@ dependencies first because package exports point at `dist/**`.
 pnpm -w docs:check
 ```
 
-The docs check verifies that required documentation entrypoints exist. It does
-not build a static site.
+The docs check verifies required documentation entrypoints and rejects drift in
+the generated audit-profile and prompt-catalog references. It does not build a
+static site.
 
 ## Modal Integration Checks
 

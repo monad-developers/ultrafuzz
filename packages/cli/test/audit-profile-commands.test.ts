@@ -15,7 +15,7 @@ interface Capture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-profile-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-profile-"));
 }
 
 async function cli(project: string, argv: string[]): Promise<Capture> {

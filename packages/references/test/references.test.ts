@@ -34,7 +34,7 @@ const PRIVATE_REFERENCE_REPO = "example/private-reference";
 const PRIVATE_REFERENCE_COMMIT = "cccccccccccccccccccccccccccccccccccccccc";
 
 function tempDir(prefix: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), prefix));
 }
 
 function fixtureReference(): ReferenceEntry {

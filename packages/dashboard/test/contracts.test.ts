@@ -205,7 +205,7 @@ test("dashboard HTTP and SSE serializers validate the exact bytes they return", 
 });
 
 test("dashboard audit journals reject malformed history without changing its bytes", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-contracts-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-dashboard-contracts-"));
   const auditPath = path.join(root, "dashboard-audit.jsonl");
   appendDashboardAuditRecord(
     auditPath,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -40,7 +40,7 @@ test("Bun does not execute off-shard runtime test bodies", () => {
   const assignedShards = new Set(testNames.map((name) => runtimeTestShardForName(name, 3)));
   const selectedShard = [1, 2, 3].find((candidate) => !assignedShards.has(candidate));
   assert.notEqual(selectedShard, undefined);
-  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-bun-runtime-shard-"));
+  const fixtureRoot = temporaryRoot("ultrafuzz-bun-runtime-shard-");
   const fixturePath = path.join(fixtureRoot, "off-shard.test.mjs");
   const shardModuleUrl = pathToFileURL(path.resolve("dist-test/test/runtime-test-shard.js")).href;
 

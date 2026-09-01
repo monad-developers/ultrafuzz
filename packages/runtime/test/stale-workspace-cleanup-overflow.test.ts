@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -133,7 +133,7 @@ function paddedRelativePath(root: string, index: number, pathBytes: number): str
 }
 
 function gitWorkspace(): string {
-  const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-stale-cleanup-")));
+  const workspace = fs.realpathSync(temporaryRoot("ultrafuzz-stale-cleanup-"));
   execFileSync("git", ["init", "--quiet", workspace]);
   return workspace;
 }
@@ -244,7 +244,7 @@ test("#691 the exclusion is component-exact: runtime-root files survive, near-na
 test("#949 stale cleanup unlinks an ignored leaf symlink without following its target", () => {
   const cleanup = loadStaleCleanup();
   const workspace = gitWorkspace();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-stale-target-")));
+  const outside = fs.realpathSync(temporaryRoot("ultrafuzz-stale-target-"));
   try {
     writeWorkspaceFile(workspace, ".gitignore", ".poc-scratch/node_modules/\n");
     writeWorkspaceFile(workspace, "src/Kept.sol", "contract Kept {}\n");
@@ -268,7 +268,7 @@ test("#949 stale cleanup unlinks an ignored leaf symlink without following its t
 test("#949 stale cleanup still identifies a symlinked parent component", () => {
   const cleanup = loadStaleCleanup();
   const workspace = gitWorkspace();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-stale-parent-")));
+  const outside = fs.realpathSync(temporaryRoot("ultrafuzz-stale-parent-"));
   try {
     const linkedParent = path.join(workspace, "redirect");
     fs.symlinkSync(outside, linkedParent, "dir");

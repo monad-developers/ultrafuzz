@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { descriptorPathsAvailable } from "./descriptor-paths.js";
@@ -18,8 +18,8 @@ function snapshotFixture(fileCount: number): {
   identity: WorkflowExecutionSnapshotIdentity;
   files: string[];
 } {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-attestation-"));
-  const snapshotsRoot = path.join(temporaryRoot, "snapshots");
+  const fixtureRoot = temporaryRoot("ufz-snapshot-attestation-");
+  const snapshotsRoot = path.join(fixtureRoot, "snapshots");
   const root = path.join(snapshotsRoot, "generation");
   fs.mkdirSync(root, { recursive: true });
   const files = Array.from({ length: fileCount }, (_, index) => path.join(root, `protected-${index}.txt`));

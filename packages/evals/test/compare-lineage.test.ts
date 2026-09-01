@@ -123,7 +123,7 @@ function writeSummary(
 
 describe("longitudinal eval comparison", () => {
   it("compares matching cohort/scorer identities and rejects mismatches without a waiver", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-compare-lineage-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-compare-lineage-"));
     const shared = provenance("cohort-1", "policy-1", "scoring-1");
     writeSummary(projectRoot, "baseline", 0.5, shared);
     writeSummary(projectRoot, "candidate", 0.75, {
@@ -164,7 +164,7 @@ describe("longitudinal eval comparison", () => {
   });
 
   it("requires a waiver when longitudinal variant scope differs", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-compare-variant-scope-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-compare-variant-scope-"));
     const shared = provenance("cohort-1", "policy-1", "scoring-1");
     writeSummary(projectRoot, "baseline", 0.5, shared, ["default", "hard"]);
     writeSummary(projectRoot, "candidate", 0.75, shared, ["default", "new"]);
@@ -188,7 +188,7 @@ describe("longitudinal eval comparison", () => {
   });
 
   it("rejects historical summaries without current lineage", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-compare-historical-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-compare-historical-"));
     writeSummary(projectRoot, "baseline", 0.5, provenance("cohort-1", "policy-1", "scoring-1"));
     const historicalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", "historical");
     fs.mkdirSync(historicalRoot, { recursive: true });

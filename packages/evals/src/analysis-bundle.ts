@@ -251,11 +251,13 @@ function readAccountingSummary(runRoot: string): StoredAccountingSummary {
     const accounting = recordField(metadata, "accounting");
     const summary = recordField(accounting, "cumulative");
     if (summary === undefined) throw new Error("accounting.cumulative is required");
-    const inputTokens = requiredNonNegativeIntegerField(summary, "input_tokens");
-    const outputTokens = requiredNonNegativeIntegerField(summary, "output_tokens");
+    const uncachedInputTokens = requiredNonNegativeIntegerField(summary, "uncached_input_tokens");
+    const providerInputTokens = requiredNonNegativeIntegerField(summary, "input_tokens");
+    const providerOutputTokens = requiredNonNegativeIntegerField(summary, "output_tokens");
     const cacheReadTokens = requiredNonNegativeIntegerField(summary, "cache_read_tokens");
     const cacheWriteTokens = requiredNonNegativeIntegerField(summary, "cache_write_tokens");
     const reasoningTokens = requiredNonNegativeIntegerField(summary, "reasoning_tokens");
+    const inclusiveTokenTotal = requiredNonNegativeIntegerField(summary, "inclusive_token_total");
     const totalTokens = requiredNonNegativeIntegerField(summary, "total_tokens");
     const eventCount = requiredNonNegativeIntegerField(summary, "event_count");
     const pricedEventCount = requiredNonNegativeIntegerField(summary, "priced_event_count");
@@ -266,17 +268,39 @@ function readAccountingSummary(runRoot: string): StoredAccountingSummary {
     if (eventCount !== pricedEventCount + unpricedEventCount) {
       throw new Error("event_count must equal priced_event_count plus unpriced_event_count");
     }
-    if (pricingComplete === partialPricing) throw new Error("partial_pricing must be the inverse of pricing_complete");
     const estimatedSpendUsd = nonNegativeNumberField(summary, "estimated_spend_usd");
-    if (pricingComplete && estimatedSpendUsd === undefined) {
-      throw new Error("complete pricing requires estimated_spend_usd");
+    if (!partialPricing && estimatedSpendUsd === undefined) {
+      throw new Error("complete cost evidence requires estimated_spend_usd");
+    }
+    const providerTotal = safeTokenSum("provider-inclusive token total", providerInputTokens, providerOutputTokens);
+    if (inclusiveTokenTotal !== providerTotal || totalTokens !== providerTotal) {
+      throw new Error("source token totals must equal provider-inclusive input_tokens plus output_tokens");
+    }
+    const components = boundedIndependentUsageComponents({
+      uncachedInputTokens,
+      providerInputTokens,
+      providerOutputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      reasoningTokens
+    });
+    const independentTotal = safeTokenSum(
+      "analysis bundle independent token total",
+      components.inputTokens,
+      components.outputTokens,
+      components.cacheReadTokens,
+      components.cacheWriteTokens,
+      components.reasoningTokens
+    );
+    if (independentTotal !== totalTokens) {
+      throw new Error("analysis bundle token components do not reconcile to the source total_tokens");
     }
     return {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cache_read_tokens: cacheReadTokens,
-      cache_write_tokens: cacheWriteTokens,
-      reasoning_tokens: reasoningTokens,
+      input_tokens: components.inputTokens,
+      output_tokens: components.outputTokens,
+      cache_read_tokens: components.cacheReadTokens,
+      cache_write_tokens: components.cacheWriteTokens,
+      reasoning_tokens: components.reasoningTokens,
       total_tokens: totalTokens,
       ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
       partial_pricing: partialPricing,
@@ -292,6 +316,37 @@ function readAccountingSummary(runRoot: string): StoredAccountingSummary {
       reason: error instanceof Error ? error.message : String(error)
     });
   }
+}
+
+function boundedIndependentUsageComponents(input: {
+  uncachedInputTokens: number;
+  providerInputTokens: number;
+  providerOutputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+}): {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+} {
+  let inputTokens = Math.min(input.uncachedInputTokens, input.providerInputTokens);
+  let remainingInputTokens = input.providerInputTokens - inputTokens;
+  const cacheReadTokens = Math.min(input.cacheReadTokens, remainingInputTokens);
+  remainingInputTokens -= cacheReadTokens;
+  const cacheWriteTokens = Math.min(input.cacheWriteTokens, remainingInputTokens);
+  remainingInputTokens -= cacheWriteTokens;
+  inputTokens += remainingInputTokens;
+  const reasoningTokens = Math.min(input.reasoningTokens, input.providerOutputTokens);
+  return {
+    inputTokens,
+    outputTokens: input.providerOutputTokens - reasoningTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens
+  };
 }
 
 function workflowObservationsForRecords(records: EvalRunRecordSource[]): Map<EvalRunRecordSource, WorkflowObservation> {
@@ -417,7 +472,7 @@ function recordField(value: unknown, key: string): Record<string, unknown> | und
 
 function nonNegativeIntegerField(value: Record<string, unknown> | undefined, key: string): number | undefined {
   const candidate = value?.[key];
-  return typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 ? candidate : undefined;
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0 ? candidate : undefined;
 }
 
 function requiredNonNegativeIntegerField(value: Record<string, unknown>, key: string): number {
@@ -430,6 +485,12 @@ function requiredBooleanField(value: Record<string, unknown>, key: string): bool
   const candidate = value[key];
   if (typeof candidate !== "boolean") throw new Error(`${key} must be a Boolean`);
   return candidate;
+}
+
+function safeTokenSum(label: string, ...values: number[]): number {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (!Number.isSafeInteger(total)) throw new Error(`${label} exceeds the safe integer range`);
+  return total;
 }
 
 function nonNegativeNumberField(value: Record<string, unknown> | undefined, key: string): number | undefined {

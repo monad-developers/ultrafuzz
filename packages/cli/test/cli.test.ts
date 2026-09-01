@@ -47,7 +47,7 @@ interface Capture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-"));
 }
 
 function shellQuote(value: string): string {
@@ -117,6 +117,7 @@ function fakeSmithersEnv(
   const inspectStatePath = path.join(project, "fake-smithers-inspect-state");
   fs.writeFileSync(inspectStatePath, "running\n", "utf8");
   const commandLog = path.join(project, "smithers-commands.log");
+  const psOverridePath = path.join(project, "fake-smithers-ps-override.json");
   const statusOverridePath = path.join(project, "fake-smithers-status-override.json");
   const invalidEventStreamPath = path.join(project, "fake-smithers-invalid-event-stream");
   const smithers = path.join(binDir, "smithers");
@@ -191,7 +192,10 @@ function fakeSmithersEnv(
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
       "  ps)",
-      `    printf '%s\\n' ${shellQuote(
+      `    if [ -f ${shellQuote(psOverridePath)} ]; then`,
+      `      cat ${shellQuote(psOverridePath)}`,
+      "    else",
+      `      printf '%s\\n' ${shellQuote(
         JSON.stringify({
           ok: true,
           data: {
@@ -210,6 +214,7 @@ function fakeSmithersEnv(
           meta: { command: "ps", duration: "1ms" }
         })
       )}`,
+      "    fi",
       "    ;;",
       "  inspect)",
       `    inspect_state=$(tr -d '\\n' < ${shellQuote(inspectStatePath)})`,
@@ -279,6 +284,10 @@ function fakeSmithersEnv(
 
 function setFakeSmithersStatus(project: string, value: unknown): void {
   fs.writeFileSync(path.join(project, "fake-smithers-status-override.json"), `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function setFakeSmithersPs(project: string, value: unknown): void {
+  fs.writeFileSync(path.join(project, "fake-smithers-ps-override.json"), `${JSON.stringify(value)}\n`, "utf8");
 }
 
 function setFakeSmithersInvalidEventStream(project: string, stream: "events" | "token-events"): void {
@@ -483,7 +492,7 @@ async function withInjectedBundleCollectionRead<T>(
   injectedBytes: Buffer,
   operation: () => Promise<T>
 ): Promise<T> {
-  const injectionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-bundle-read-injection-"));
+  const injectionRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-bundle-read-injection-"));
   const injectionPath = path.join(injectionRoot, "injected-bytes");
   fs.writeFileSync(injectionPath, injectedBytes);
   const target = path.resolve(targetPath);
@@ -624,7 +633,7 @@ function writeRunAccounting(
   writeRunMetadataDocument(runMetadataPath, {
     ...runMetadata,
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: workflowRunId,
       current,
@@ -1667,6 +1676,49 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   assert.equal(body.ok, false);
   assert.equal(body.command, "status");
   assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+});
+
+test("ps text prefers linked workflow terminal status over a stale local running projection", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const run = await cli(project, ["run", "--run-id", "ps-stale-local-status", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runData = parseJson(run).data as { workflow_ids: string[] };
+  const workflowRunId = runData.workflow_ids[0];
+  assert.ok(workflowRunId);
+  setFakeSmithersPs(project, {
+    ok: true,
+    data: {
+      runs: [
+        {
+          id: workflowRunId,
+          workflow: workflowRunId,
+          status: "failed",
+          dbStatus: "failed",
+          state: "failed",
+          step: "project-discovery",
+          started: "2026-08-09T00:00:00Z"
+        }
+      ]
+    },
+    meta: { command: "ps", duration: "1ms" }
+  });
+
+  const textPs = await cli(project, ["ps"], env);
+
+  assert.equal(textPs.code, 0, textPs.stderr);
+  const fields = textPs.stdout.trim().split("\t");
+  assert.deepEqual(fields.slice(0, 3), ["ps-stale-local-status", workflowRunId, "failed"]);
+
+  const jsonPs = await cli(project, ["ps", "--json"], env);
+  assert.equal(jsonPs.code, 0, jsonPs.stderr);
+  const jsonData = parseJson(jsonPs).data as {
+    runs: Array<{ ultrafuzz_status?: string; workflow_status?: string }>;
+  };
+  assert.equal(jsonData.runs[0]?.ultrafuzz_status, "running");
+  assert.equal(jsonData.runs[0]?.workflow_status, "failed");
 });
 
 test("status surfaces a terminal product and live workflow lifecycle divergence", async () => {
@@ -3289,7 +3341,7 @@ function writeStatsFixture(
   };
   const summary = {
     uncached_input_tokens: 10,
-    input_tokens: 10,
+    input_tokens: 15,
     output_tokens: 2,
     cache_read_tokens: 5,
     cache_write_tokens: 0,
@@ -3430,7 +3482,7 @@ function writeStatsFixture(
               task_node_ids: [workflowTaskId]
             },
             accounting: {
-              schema_version: "ultrafuzz.accounting.v3" as const,
+              schema_version: "ultrafuzz.accounting.v4" as const,
               source: "usage-ledger" as const,
               workflow_run_id: workflowRunId,
               current: currentAccounting,
@@ -3498,7 +3550,8 @@ function writeStatsFixture(
         iteration: 0,
         attempt: 1,
         usage: {
-          input_tokens: 10,
+          input_tokens: 15,
+          fresh_input_tokens: 10,
           cache_read_tokens: 5,
           cache_write_tokens: 0,
           output_tokens: 2,

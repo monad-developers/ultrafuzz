@@ -27,7 +27,7 @@ interface BenchmarkTarget {
 describe("public Modal benchmark configuration", () => {
   it("creates the exact three-target OpenAI smoke benchmark with bounded row and control budgets", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-ci-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-ci-"));
     execFileSync(
       process.execPath,
       [
@@ -132,7 +132,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates the complete four-provider EVMBench full mode from the checked-in cohort", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-full-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-full-"));
     execFileSync(
       process.execPath,
       [
@@ -331,7 +331,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("accepts safe per-provider full model overrides and derives deterministic unique slugs", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-overrides-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-overrides-"));
     execFileSync(
       process.execPath,
       [
@@ -379,7 +379,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("accepts a safe OpenAI smoke model override while keeping high strategy reasoning fixed", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-smoke-override-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-smoke-override-"));
     execFileSync(
       process.execPath,
       [
@@ -427,7 +427,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates an explicit DeepSeek V4 smoke benchmark with max reasoning", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-deepseek-smoke-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-deepseek-smoke-"));
     execFileSync(
       process.execPath,
       [
@@ -473,7 +473,7 @@ describe("public Modal benchmark configuration", () => {
 
   it("creates an OpenRouter smoke benchmark and preserves a punctuation-rich catalogue ID", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-openrouter-smoke-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-openrouter-smoke-"));
     const model = "~anthropic/claude-sonnet-latest:free+preview@2026";
     execFileSync(
       process.execPath,
@@ -557,7 +557,7 @@ describe("public Modal benchmark configuration", () => {
       }
     ];
     for (const [index, testCase] of cases.entries()) {
-      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-"));
+      const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-"));
       const result = spawnSync(
         process.execPath,
         [
@@ -589,7 +589,7 @@ describe("public Modal benchmark configuration", () => {
         message: /duplicate/iu
       }
     ].entries()) {
-      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-json-"));
+      const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-json-"));
       const result = spawnSync(
         process.execPath,
         [
@@ -905,7 +905,11 @@ describe("public Modal benchmark configuration", () => {
     // reported `skipping` on pull requests, so resume-path regressions merged
     // with all checks green.
     expect(releaseValidation?.if, "release validation must not be gated off pull requests").toBeUndefined();
-    expect(releaseValidation?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes"]);
+    expect(releaseValidation?.needs).toEqual([
+      "draft-and-build-gates",
+      "external-static-analysis",
+      "release-validation-lanes"
+    ]);
     expect(releaseValidation?.strategy).toEqual({
       "fail-fast": false,
       "max-parallel": 8,
@@ -945,7 +949,12 @@ describe("public Modal benchmark configuration", () => {
     expect(pushLanes.map((entry) => entry.lane)).toContain("package-gates");
     expect(releaseValidation?.steps.find((step) => step.name === "Validate benchmark history charts")).toBeUndefined();
     const releaseGates = workflow.jobs["release-gates"];
-    expect(releaseGates?.needs).toEqual(["draft-and-build-gates", "release-validation-lanes", "release-validation"]);
+    expect(releaseGates?.needs).toEqual([
+      "draft-and-build-gates",
+      "external-static-analysis",
+      "release-validation-lanes",
+      "release-validation"
+    ]);
     expect(releaseGates?.steps.find((step) => step.name === "Require the release validation lane selection")?.if).toBe(
       "needs.release-validation-lanes.result != 'success'"
     );
@@ -1306,6 +1315,12 @@ describe("public Modal benchmark configuration", () => {
     expect(qualification).toContain('"$GITHUB_EVENT_PATH"');
     expect(qualification).toContain('"$artifacts_path"');
     expect(qualification).toContain('"$GITHUB_OUTPUT"');
+    const unqualifiedAttribution = qualifier.steps.find(
+      (step) => step.name === "Attribute an unqualified producer attempt"
+    );
+    expect(unqualifiedAttribution?.if).toBe("always() && steps.qualify.outputs.eligible != 'true'");
+    expect(unqualifiedAttribution?.run).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(unqualifiedAttribution?.run).not.toMatch(/(^|\s)exit(\s|$)/u);
 
     const automatic = publication.jobs.publish_modal_benchmark!;
     expect(automatic.needs).toBe("qualify_modal_benchmark");
@@ -1359,6 +1374,24 @@ describe("public Modal benchmark configuration", () => {
         "steps.publication-readiness.outputs.ready == 'true'"
       );
     }
+    // A refused publication and a failed classification are both green-output
+    // no-ops for this job's summary, so only these exact conditions keep the
+    // deliberate-refusal wording off a run that actually failed to classify.
+    const refusedAttribution = automatic.steps.find((step) => step.name === "Attribute a refused publication");
+    expect(refusedAttribution?.if).toBe(
+      "always() && steps.publication-readiness.outcome == 'success' && steps.publication-readiness.outputs.ready != 'true'"
+    );
+    expect(refusedAttribution?.run).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(refusedAttribution?.run).toContain("Refusing an incomplete generation is deliberate");
+    expect(refusedAttribution?.run).not.toMatch(/(^|\s)exit(\s|$)/u);
+    const unreachedAttribution = automatic.steps.find(
+      (step) => step.name === "Attribute an unreached publication readiness verdict"
+    );
+    expect(unreachedAttribution?.if).toBe("always() && steps.publication-readiness.outcome != 'success'");
+    expect(unreachedAttribution?.run).toContain('>> "$GITHUB_STEP_SUMMARY"');
+    expect(unreachedAttribution?.run).toContain("This is not the deliberate green no-op");
+    expect(unreachedAttribution?.run).not.toContain("Refusing an incomplete generation is deliberate");
+    expect(unreachedAttribution?.run).not.toMatch(/(^|\s)exit(\s|$)/u);
     const reachability = automatic.steps.find(
       (step) => step.name === "Verify the candidate remains reachable from main"
     )?.run;
@@ -1614,9 +1647,7 @@ describe("public Modal benchmark configuration", () => {
   it("hydrates pinned target submodules before initializing a public benchmark", () => {
     const workspace = path.resolve("../..");
     const worker = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
-    const clone = worker.indexOf(
-      "await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true"
-    );
+    const clone = worker.indexOf("await cloneAtCommit(target.repo, target.ref, destination, logPath, {");
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
     const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
     const laneProfile = worker.indexOf(
@@ -1629,6 +1660,7 @@ describe("public Modal benchmark configuration", () => {
 
     expect(clone).toBeGreaterThan(-1);
     expect(init).toBeGreaterThan(clone);
+    expect(worker.slice(clone, init)).toContain("initializeSubmodules: true");
     expect(smithersSeed).toBeGreaterThan(init);
     expect(laneProfile).toBeGreaterThan(smithersSeed);
     expect(referenceSync).toBeGreaterThan(laneProfile);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
+import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -50,7 +50,7 @@ const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
   });
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-inspect-"));
+  return temporaryRoot("ufz-inspect-");
 }
 
 function shellQuote(value: string): string {
@@ -187,6 +187,7 @@ function smithersEventLine(input: {
 function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
+  registerTemporaryPath(binDir);
   const files = {
     why: path.join(project, "fake-why.json"),
     timeline: path.join(project, "fake-timeline.json"),

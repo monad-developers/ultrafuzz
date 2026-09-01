@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -121,7 +121,7 @@ function paddedRelativePath(root: string, index: number, pathBytes: number): str
 
 /** A git workspace holding `counts` untracked sources per root, each path padded to `pathBytes`. */
 function workspaceWithSources(counts: Record<string, number>, pathBytes: number): string {
-  const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-enumeration-")));
+  const workspace = fs.realpathSync(temporaryRoot("ultrafuzz-enumeration-"));
   execFileSync("git", ["init", "--quiet", workspace]);
   for (const [root, count] of Object.entries(counts)) {
     // Every path under a root shares one directory chain, so the fixture costs `count` file writes and
@@ -207,7 +207,7 @@ test("#323 the multi-megabyte capture is stripped off the cause instead of being
 
 test("#323 a git failure that is not an overflow is rethrown untouched", () => {
   const enumeration = loadEnumeration(8192);
-  const outsideAnyRepository = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-enumeration-")));
+  const outsideAnyRepository = fs.realpathSync(temporaryRoot("ultrafuzz-enumeration-"));
   try {
     assert.throws(
       () => enumeration.invariantSuiteGitPaths(outsideAnyRepository, ["ls-files", "--cached", "--", "src"]),

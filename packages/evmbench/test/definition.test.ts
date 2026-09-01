@@ -152,7 +152,7 @@ describe("EVMBench definition", () => {
 });
 
 function createHarnessFixture(): { harnessRoot: string; benchmarkDir: string; auditDir: string } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-evmbench-definition-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-evmbench-definition-"));
   temporaryDirectories.push(root);
   const harnessRoot = path.join(root, "harness");
   const frontierRoot = path.join(harnessRoot, "frontier-evals");

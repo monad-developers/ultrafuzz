@@ -7,6 +7,7 @@ import {
   readRegularFileSnapshot,
   readRunMetadataDocument,
   readRunState,
+  type RunAccountingSummary,
   type RunMetadataDocument,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -449,18 +450,50 @@ function aggregateCounts(nodes: RunState["nodes"]): AggregateCounts {
 function aggregateUsage(metadata: RunMetadataDocument | undefined): AggregateUsage | null {
   const summary = metadata?.accounting?.cumulative;
   if (summary === undefined) return null;
+  const components = boundedIndependentUsageComponents(summary);
+  const projectedTotal =
+    components.input_tokens +
+    components.output_tokens +
+    components.cache_read_tokens +
+    components.cache_write_tokens +
+    components.reasoning_tokens;
+  if (!Number.isSafeInteger(projectedTotal) || projectedTotal !== summary.total_tokens) {
+    throw new Error("run accounting token components do not match the provider-inclusive total");
+  }
   return {
-    input_tokens: summary.input_tokens,
-    output_tokens: summary.output_tokens,
-    cache_read_tokens: summary.cache_read_tokens,
-    cache_write_tokens: summary.cache_write_tokens,
-    reasoning_tokens: summary.reasoning_tokens,
+    ...components,
     total_tokens: summary.total_tokens,
     estimated_cost_usd: summary.estimated_spend_usd ?? null,
     partial_pricing: summary.partial_pricing,
     event_count: summary.event_count,
     priced_event_count: summary.priced_event_count,
     unpriced_event_count: summary.unpriced_event_count
+  };
+}
+
+function boundedIndependentUsageComponents(
+  summary: RunAccountingSummary
+): Pick<
+  AggregateUsage,
+  "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens" | "reasoning_tokens"
+> {
+  let inputTokens = Math.min(summary.uncached_input_tokens, summary.input_tokens);
+  let remainingInputTokens = summary.input_tokens - inputTokens;
+  const cacheReadTokens = Math.min(summary.cache_read_tokens, remainingInputTokens);
+  remainingInputTokens -= cacheReadTokens;
+  const cacheWriteTokens = Math.min(summary.cache_write_tokens, remainingInputTokens);
+  remainingInputTokens -= cacheWriteTokens;
+  // accounting.v4 retains contradictory provider breakdowns as incomplete
+  // evidence. Attribute any unclassified provider input to the independent
+  // input bucket so legacy Modal output stays bounded without changing totals.
+  inputTokens += remainingInputTokens;
+  const reasoningTokens = Math.min(summary.reasoning_tokens, summary.output_tokens);
+  return {
+    input_tokens: inputTokens,
+    output_tokens: summary.output_tokens - reasoningTokens,
+    cache_read_tokens: cacheReadTokens,
+    cache_write_tokens: cacheWriteTokens,
+    reasoning_tokens: reasoningTokens
   };
 }
 

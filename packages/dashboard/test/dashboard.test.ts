@@ -346,7 +346,7 @@ test("dashboard stops reading an oversized unfinished chunked body", async () =>
 test("dashboard audit append refuses a final-component symlink", async () => {
   const projectRoot = makeProject();
   const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
-  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-audit-"));
+  const outsideDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-dashboard-audit-"));
   const outsidePath = path.join(outsideDir, "outside.log");
   fs.writeFileSync(outsidePath, "sentinel\n", "utf8");
   fs.symlinkSync(outsidePath, auditPath, "file");
@@ -1099,7 +1099,7 @@ async function compileDashboardFixtureWorkflow(input: unknown): Promise<Dashboar
 }
 
 function makeProject(): string {
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-"));
+  const projectRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-dashboard-"));
   const result = initProject({ projectRoot, force: true });
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
   return projectRoot;

@@ -7,7 +7,7 @@ import test from "node:test";
 import { readJsonFile } from "../src/index.js";
 
 test("generic artifact JSON reads use one strict no-follow byte snapshot", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-strict-json-reader-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-strict-json-reader-"));
   const validPath = path.join(root, "valid.json");
   fs.writeFileSync(validPath, '{"schema_version":"current","items":[]}\n');
   assert.deepEqual(readJsonFile(validPath), { schema_version: "current", items: [] });

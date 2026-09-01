@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -186,7 +186,7 @@ function loadMaterializer(root: string, captured: { patch: string; manifest: unk
  * depend on the artifacts being tracked.
  */
 function withFixture(body: (fixture: { root: string; workspaceRoot: string; head: string }) => void): void {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "uf357-"));
+  const base = temporaryRoot("uf357-");
   try {
     const workspaceRoot = fs.realpathSync(fs.mkdtempSync(path.join(base, "ws-")));
     const root = fs.realpathSync(fs.mkdtempSync(path.join(base, "artifacts-")));

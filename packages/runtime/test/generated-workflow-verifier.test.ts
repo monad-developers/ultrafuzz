@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
@@ -408,6 +408,7 @@ function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
 function loadFinalReportAgentExecutionAuthority(
   options: {
     smithersDetail?: unknown;
+    smithersFailure?: unknown;
     chainIndex?: number;
     execution?: unknown;
   } = {}
@@ -415,6 +416,8 @@ function loadFinalReportAgentExecutionAuthority(
   remember(task: unknown, execution: unknown): void;
   read(task: unknown): unknown;
   smithersReads(): number;
+  smithersTimeoutMs(): number | undefined;
+  budgetMs: number;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
@@ -424,6 +427,7 @@ function loadFinalReportAgentExecutionAuthority(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   let reads = 0;
+  let observedTimeout: number | undefined;
   const loaded = new Function(
     "declaredFinalReportOutputPair",
     "execFileSync",
@@ -433,12 +437,15 @@ function loadFinalReportAgentExecutionAuthority(
     "finalReportAgentExecution",
     `${helper}; return {
       remember: rememberFinalReportAgentExecutionAuthority,
-      read: authoritativeFinalReportAgentExecution
+      read: authoritativeFinalReportAgentExecution,
+      budgetMs: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS
     };`
   )(
     () => ({}),
-    () => {
+    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
       reads += 1;
+      observedTimeout = spawnOptions.timeout;
+      if (options.smithersFailure !== undefined) throw options.smithersFailure;
       if (options.smithersDetail === undefined) {
         throw new Error("Smithers fallback should not be needed");
       }
@@ -448,8 +455,49 @@ function loadFinalReportAgentExecutionAuthority(
     (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
     () => ({ chainIndex: options.chainIndex ?? 0 }),
     () => options.execution ?? {}
-  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown };
-  return { ...loaded, smithersReads: () => reads };
+  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown; budgetMs: number };
+  return { ...loaded, smithersReads: () => reads, smithersTimeoutMs: () => observedTimeout };
+}
+
+function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
+  preflight(): void;
+  observedTimeoutMs(): number | undefined;
+  budgetMs: number;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS");
+  const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  let observedTimeout: number | undefined;
+  const loaded = new Function(
+    "artifactSchemaRegistry",
+    "artifactValidatorSmokeFixturePath",
+    "execFileSync",
+    "parseJsonValidatorPreflightSuccessEnvelope",
+    "path",
+    `${helper}; return {
+      preflight: preflightJsonValidator,
+      budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
+    };`
+  )(
+    () => [{ filename: "findings.schema.json" }],
+    () => path.join(path.sep, "fixture", "findings.json"),
+    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+      observedTimeout = spawnOptions.timeout;
+      if (options.failure !== undefined) throw options.failure;
+      return options.stdout ?? "{}";
+    },
+    () => undefined,
+    path
+  ) as { preflight(schemaDirectory: string): void; budgetMs: number };
+  return {
+    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas")),
+    observedTimeoutMs: () => observedTimeout,
+    budgetMs: loaded.budgetMs
+  };
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -541,11 +589,19 @@ function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 
 }
 
 function loadFinalReportRunMetadataAuthorityHarness(
-  remote = "https://github.com/example/project.git?session=private-id\n"
+  remote = "https://github.com/example/project.git?session=private-id\n",
+  workflowMetrics?: {
+    elapsed_through?: string;
+    models_used: string[];
+    tokens_used?: string;
+    estimated_spend?: string;
+    partial_pricing: boolean;
+  }
 ): {
   normalize(remoteValue: string): string;
+  latestElapsedThrough(...values: unknown[]): string | undefined;
   derive(task: unknown): unknown;
-  materialize(task: unknown): void;
+  materialize(task: unknown): Promise<void>;
   assertUnchanged(task: unknown): void;
   authoritative(task: unknown): unknown;
   relativePath(task: unknown): string;
@@ -592,6 +648,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "execFileSync",
     "readBoundedRegularArtifactSnapshot",
     "parseStrictJsonSnapshot",
+    "parseStrictJsonBytes",
     "isPlainJsonRecord",
     "assertRunMetadataDocument",
     "RUN_METADATA_SCHEMA_VERSION",
@@ -605,8 +662,10 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "Buffer",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     "untrustedContentBoundary",
+    "deriveCurrentTaskWorkflowMetrics",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
+      latestElapsedThrough: finalReportLatestElapsedThrough,
       derive: deriveAuthoritativeFinalReportRunMetadata,
       materialize: materializeFinalReportRunMetadataAuthority,
       assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
@@ -620,6 +679,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     () => remote,
     readSnapshot,
     (snapshot: { bytes: Buffer }) => parseStrictJsonBytes(snapshot.bytes),
+    parseStrictJsonBytes,
     (value: unknown) => value !== null && typeof value === "object" && !Array.isArray(value),
     assertRunMetadataDocument,
     RUN_METADATA_SCHEMA_VERSION,
@@ -642,7 +702,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     sameIdentity,
     Buffer,
     ".ultrafuzz/authorities",
-    "UNTRUSTED CONTENT BOUNDARY"
+    "UNTRUSTED CONTENT BOUNDARY",
+    async () => workflowMetrics
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -1353,7 +1414,7 @@ function invariantLedgerProbeFixture(probes: readonly Record<string, string>[]):
     { artifactRoot: string; file: { path: string; bytes: Buffer }; contents: string; value: unknown }
   >;
 } {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-ledger-probe-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-ledger-probe-"));
   const workspacePath = path.join(root, "workspace");
   const artifactDir = path.join(root, "run", "artifacts", "project-discovery");
   fs.mkdirSync(workspacePath, { recursive: true });
@@ -1520,7 +1581,7 @@ test("generated Smithers invariant ledger still snapshots a symlinked-directory 
 });
 
 test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
+  const root = temporaryRoot("ultrafuzz-invariant-directory-");
   const realRoot = path.join(root, "files");
   const rootAlias = path.join(root, "files-alias");
   fs.mkdirSync(realRoot);
@@ -1623,7 +1684,7 @@ test("generated Smithers authenticates the final generated-test publication snap
     createHash
   ) as (artifactDir: string, value: unknown) => Array<{ path: string; contents: Buffer }>;
 
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-final-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-final-snapshot-"));
   try {
     const relativePath = "generated-tests/Replay.t.sol";
     const contents = "contract Replay {}\n";
@@ -2432,7 +2493,7 @@ function generatedCampaignVerificationFixture(
 }
 
 test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys from captured bytes", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-output-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-output-snapshot-"));
   try {
     const outputPath = path.join(root, "result.json");
     const invalidUtf8Harness = loadVerifyArtifactsHarness();
@@ -2454,13 +2515,14 @@ test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys 
 });
 
 test("generated Smithers verifier rejects secret-bearing captured bytes before publication", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-secret-output-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-secret-output-"));
   try {
     const outputPath = path.join(root, "result.json");
     // A positively identified vendor-format credential: the publication gate
     // scans positive-only (#819), so a bare `token=` keyword assignment is a
     // display-redaction heuristic and no longer fails publication.
-    const contaminated = Buffer.from("analysis ghp_AbCdEf1234567890AbCdEf1234567890AbCd\n", "utf8"); // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
+    const syntheticGithubToken = ["gh", "p_AbCdEf1234567890AbCdEf1234567890AbCd"].join("");
+    const contaminated = Buffer.from(`analysis ${syntheticGithubToken}\n`, "utf8");
     fs.writeFileSync(outputPath, contaminated);
     const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
     const harness = loadVerifyArtifactsHarness();
@@ -2476,7 +2538,7 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
 });
 
 test("generated Smithers hashes and publishes the captured output after its path changes", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-output-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-output-snapshot-"));
   try {
     const outputPath = path.join(root, "result.json");
     const original = Buffer.from("captured bytes\n", "utf8");
@@ -2498,7 +2560,7 @@ test("generated Smithers hashes and publishes the captured output after its path
 });
 
 test("generated verifier returns the exact durable verification-marker byte authority", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-marker-authority-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-marker-authority-"));
   try {
     const writeMarker = loadArtifactVerificationMarkerWriter(root);
     const alpha = Buffer.from("alpha publication\n", "utf8");
@@ -2549,7 +2611,7 @@ test("generated verifier returns the exact durable verification-marker byte auth
 });
 
 test("generated Smithers fails closed on schema-valid document semantic violations", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-output-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-output-"));
   try {
     const document = {
       schema_version: "ultrafuzz.generated-tests.v3",
@@ -2579,7 +2641,7 @@ test("generated Smithers fails closed on schema-valid document semantic violatio
 });
 
 test("generated Smithers rejects non-UTF-8 generated-test support companions", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-support-utf8-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-support-utf8-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     const replayContents = "contract Replay {}\n";
@@ -2628,7 +2690,7 @@ test("generated Smithers rejects hard-linked generated-test manifests and compan
   assert.match(generatedVerifier, /readBoundedRegularArtifactSnapshot\([\s\S]*true\s*\)/u);
 
   await t.test("manifest", () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-manifest-link-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-manifest-link-"));
     try {
       const manifestPath = path.join(root, "result.json");
       fs.writeFileSync(
@@ -2658,7 +2720,7 @@ test("generated Smithers rejects hard-linked generated-test manifests and compan
   });
 
   await t.test("companion", () => {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-companion-link-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-companion-link-"));
     try {
       const generatedTestsDirectory = path.join(root, "generated-tests");
       fs.mkdirSync(generatedTestsDirectory);
@@ -2701,7 +2763,7 @@ test("generated Smithers binds generated-test manifests to the current run and l
     ["node_id", "node-foreign"],
     ["provenance", { producer_node_id: "node-one-attempt-1" }]
   ] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-identity-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-identity-"));
     try {
       const document = {
         schema_version: "ultrafuzz.generated-tests.v3",
@@ -2734,7 +2796,7 @@ test("generated Smithers binds generated-test manifests to the current run and l
 });
 
 test("generated Smithers verifies a v3 property campaign against authenticated semantic context", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-siblings-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const harness = loadVerifyArtifactsHarness({
@@ -2769,9 +2831,7 @@ test("generated Smithers requires exactly one declaration for every current camp
   ] as const;
   for (const [label, contract] of tupleMembers) {
     for (const count of [0, 2] as const) {
-      const root = fs.realpathSync(
-        fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-tuple-${label}-${count}-`))
-      );
+      const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-tuple-${label}-${count}-`));
       try {
         const fixture = generatedCampaignVerificationFixture(root);
         const output = fixture.task.outputs.find((candidate) => candidate.contract === contract);
@@ -2816,7 +2876,7 @@ test("generated Smithers fails closed on missing or duplicate selected-strategie
     "ultrafuzz/dynamic-strategy-provenance@1"
   ] as const;
   for (const count of [0, 2] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-dynamic-selected-tuple-${count}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-dynamic-selected-tuple-${count}-`));
     try {
       const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
       task.outputs = tupleContracts
@@ -2906,9 +2966,7 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
   ];
 
   for (const { label, mutate, alsoMatches } of cases) {
-    const root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`))
-    );
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-forged-timeout-${label.replaceAll(" ", "-")}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const plan = generatedCampaignPlanFixture();
@@ -2948,7 +3006,7 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
 });
 
 test("generated Smithers fails closed without sealed campaign timeout expectations", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-missing-timeout-authority-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-missing-timeout-authority-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     fixture.task.campaignTimeoutExpectations = null;
@@ -2969,7 +3027,7 @@ test("generated Smithers fails closed without sealed campaign timeout expectatio
 });
 
 test("generated Smithers rejects mixed implementation and campaign producers", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-mixed-property-role-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-mixed-property-role-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const implementationOutput = fixture.implementationProducer.outputs[0]!;
@@ -2992,7 +3050,7 @@ test("generated Smithers rejects mixed implementation and campaign producers", (
 
 test("generated Smithers fails closed when declared campaign evidence is missing or digest-mismatched", () => {
   for (const mode of ["missing", "mismatched"] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-evidence-${mode}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const harness = loadVerifyArtifactsHarness({
@@ -3038,7 +3096,7 @@ test("generated Smithers fails closed when declared campaign evidence is missing
 
 test("generated Smithers rejects symlinked and hard-linked campaign evidence", () => {
   for (const mode of ["symlink", "hardlink"] as const) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `ultrafuzz-campaign-evidence-${mode}-`)));
+    const root = fs.realpathSync(temporaryRoot(`ultrafuzz-campaign-evidence-${mode}-`));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const harness = loadVerifyArtifactsHarness({
@@ -3238,7 +3296,7 @@ test("generated Smithers diagnoses the node-dir campaign path base across all fi
   ];
 
   for (const { label, options, verify } of phases) {
-    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-path-base-")));
+    const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-path-base-"));
     try {
       const fixture = generatedCampaignVerificationFixture(root);
       const documents = incidentDocuments(options);
@@ -3274,7 +3332,7 @@ test("generated Smithers diagnoses the node-dir campaign path base across all fi
 });
 
 test("generated Smithers publishes the one immutable campaign evidence snapshot used for verification", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-evidence-snapshot-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-evidence-snapshot-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const evidencePath = path.join(fixture.task.metadata.artifacts.dir, generatedCampaignPaths.raw_results);
@@ -3303,7 +3361,7 @@ test("generated Smithers publishes the one immutable campaign evidence snapshot 
 });
 
 test("generated Smithers rejects a dependency epoch swap after publication construction and before success", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dependency-final-recheck-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-dependency-final-recheck-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root);
     const dependencyPath = path.join(fixture.implementationArtifactDir, "implemented-properties.json");
@@ -3338,7 +3396,7 @@ test("generated Smithers rejects a dependency epoch swap after publication const
 });
 
 test("generated Smithers fails closed when v3 campaign sibling semantic counts disagree", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-siblings-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-siblings-"));
   try {
     const fixture = generatedCampaignVerificationFixture(root, {
       includeNonPropertyFinding: true,
@@ -3364,7 +3422,7 @@ test("generated Smithers fails closed when v3 campaign sibling semantic counts d
 });
 
 test("generated Smithers rejects property-campaign v2 bytes without converting them", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-campaign-v2-rejection-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-campaign-v2-rejection-"));
   try {
     const artifactPath = path.join(root, "result.json");
     const legacyBytes = Buffer.from(
@@ -3391,7 +3449,7 @@ test("generated Smithers rejects property-campaign v2 bytes without converting t
 });
 
 test("generated Smithers fails closed when a contextual gate lacks verified ancestors", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-context-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-semantic-context-"));
   try {
     const contents = `${JSON.stringify({ schema_version: "ultrafuzz.properties.v2", properties: [] })}\n`;
     assert.equal(validateArtifactContract("ultrafuzz/properties@2", contents).ok, true);
@@ -5724,7 +5782,7 @@ test("generated optional admission rejects a present malformed marker before pub
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
 
-  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-optional-admission-")));
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-optional-admission-"));
   try {
     const producerAttemptId = "optional-producer";
     const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
@@ -5852,7 +5910,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
 
-  const runRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-rerender-admission-")));
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-rerender-admission-"));
   try {
     const producerAttemptId = "dependency-producer";
     const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
@@ -6339,6 +6397,35 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   );
 });
 
+test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
+  const timedOut = Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" });
+  const harness = loadJsonValidatorPreflight({ failure: timedOut });
+
+  // #1026: `"ultrafuzz"` is the trusted launcher, whose own cold start measured 33.8-35.6 s at the
+  // CPU oversubscription a full public lane runs at, so any budget near the CLI's idle cost dies on
+  // contention alone. It must also stay a minority of that lane's 1800 s `node_timeout_seconds`,
+  // since a preflight that outlives the attempt cannot report anything.
+  assert.ok(harness.budgetMs >= 120_000, String(harness.budgetMs));
+  assert.ok(harness.budgetMs <= 600_000, String(harness.budgetMs));
+
+  assert.throws(
+    () => harness.preflight(),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(harness.observedTimeoutMs(), harness.budgetMs);
+      assert.equal(error.cause, timedOut);
+      // `ETIMEDOUT` alone proves only that the budget was passed, never by how much. The elapsed
+      // reading has to survive the ledger's 1000-byte cap to be readable in the published row.
+      assert.match(error.message, /^artifact-contract failure: JSON validator preflight failed after \d+ms /u);
+      assert.match(error.message, new RegExp(`against a ${harness.budgetMs}ms budget`, "u"));
+      assert.ok(error.message.endsWith(": spawnSync ultrafuzz ETIMEDOUT"), error.message);
+      const reported = `prepare:audit-final-report failed at step preflight-json-validator: ${error.message}`;
+      assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
+      return true;
+    }
+  );
+});
+
 test("generated Smithers workflow does not precreate runtime-owned workspace patch outputs", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function prepareArtifactMirror");
@@ -6440,7 +6527,7 @@ test("runtime workspace patch publication replaces empty placeholders but reject
     writeFileDurable
   ) as (root: string, relativePath: string, contents: string, replaceSuperseded?: boolean) => void;
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-patch-publication-"));
+  const root = temporaryRoot("ultrafuzz-workspace-patch-publication-");
   try {
     const patchPath = path.join(root, "workspace.patch");
     fs.writeFileSync(patchPath, "\n");
@@ -6601,7 +6688,7 @@ test("generated prompt authority is derived from sealed controls immediately bef
 
   assert.match(
     reset,
-    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
+    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*return materializeFinalReportRunMetadataAuthority\(task\);\s*\}/u
   );
   assert.ok(
     agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
@@ -6657,7 +6744,7 @@ test("generated immutable file identities preserve bigint device, inode, size, a
 });
 
 test("generated task-local prompt authority is minimized, tamper-evident, and restored for retries", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-prompt-authority-"));
+  const root = temporaryRoot("ultrafuzz-generated-prompt-authority-");
   try {
     const controllerRunRoot = path.join(root, "controller-host-private", ".ultrafuzz", "runs", "run-1");
     const relocatedRunRoot = path.join(root, "execution-b", ".ultrafuzz", "runs", "run-1");
@@ -6890,7 +6977,7 @@ test(
 
     const { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath } =
       loadWorkflowControlPathResolvers();
-    const snapshotsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-detached-task-paths-"));
+    const snapshotsRoot = temporaryRoot("ultrafuzz-detached-task-paths-");
     const generationRoot = path.join(snapshotsRoot, "a".repeat(64));
     const workflowRelativePath = path.join(".smithers", "workflows", "detached-paths.tsx");
     const persistedWorkflowPath = path.join(generationRoot, workflowRelativePath);
@@ -6964,7 +7051,7 @@ test(
 
 test("generated workflow controls admit the same persisted native workflow outside a snapshot", () => {
   const { admitWorkflowControls, taskWorkflowControlPaths } = loadWorkflowControlPathResolvers();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-native-workflow-controls-"));
+  const root = temporaryRoot("ultrafuzz-native-workflow-controls-");
   const workflowPath = path.join(root, ".smithers", "continuations", "current", "workflows", "workflow.tsx");
   const differentWorkflowPath = path.join(root, ".smithers", "workflows", "different.tsx");
   const snapshotRoot = path.join(root, "snapshots", "a".repeat(64));
@@ -7035,7 +7122,7 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
 // gate, so `ultrafuzz validate` and the run enforced different things. The template must now delegate
 // to the shared validator in @ultrafuzz/artifacts, which is the only place the rule lives.
 test("generated Smithers invariant snapshot delegates the pin check to the shared validator", () => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-template-pin-")));
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-template-pin-"));
   fs.writeFileSync(path.join(root, "Counter.sol"), "contract Counter {}\n");
   const calls: InvariantSourcePinCall[] = [];
   try {
@@ -7221,7 +7308,7 @@ test("recorded source identity, not later ref creation, selects pinned worktree 
 
 test("generated Smithers cloud source proof records the sealed submodule expectation", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-cloud-source-proof-"));
+  const root = temporaryRoot("ultrafuzz-cloud-source-proof-");
   const workspace = path.join(root, "workspace");
   const artifactDir = path.join(root, "artifacts", "cloud-attempt");
   const proofPath = path.join(root, "source-proofs", "cloud-attempt.json");
@@ -7275,7 +7362,7 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
   assert.equal(typeof command, "string");
   assert.doesNotMatch(command, /--batch-all-objects/u);
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-hidden-commit-"));
+  const root = temporaryRoot("ultrafuzz-hidden-commit-");
   const git = (args: string[]): string =>
     execFileSync("git", args, {
       cwd: root,
@@ -7312,7 +7399,7 @@ test("generated Smithers pinned source proof counts hidden unreachable commits w
 
 test("generated Smithers pinned source proof rejects any previously published byte drift", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-source-proof-"));
+  const root = temporaryRoot("ultrafuzz-source-proof-");
   const workspace = path.join(root, "workspace");
   const artifactDir = path.join(root, "artifacts", "property-specification-certora");
   const proofPath = path.join(root, "source-proofs", "property-specification-certora.json");
@@ -7905,7 +7992,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(coverageSource, /verifiedSingletonAncestorJsonArtifact/u);
   assert.match(coverageSource, /verifiedCanonicalPropertyCatalog/u);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-prompt-authority-"));
+  const root = temporaryRoot("ultrafuzz-final-report-prompt-authority-");
   try {
     const workspacePath = path.join(root, "workspaces", "final-report");
     fs.mkdirSync(workspacePath, { recursive: true });
@@ -8003,8 +8090,8 @@ test("final-report repository normalization strips private URL suffixes and reje
   }
 });
 
-test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-run-summary-"));
+test("final-report Run summary authority is allowlisted, path-injected, tamper-evident, and retry-restored", async () => {
+  const root = temporaryRoot("ultrafuzz-final-report-run-summary-");
   try {
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
     const workspacePath = path.join(runRoot, "workspaces", "final-report");
@@ -8053,7 +8140,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       ]
     };
     const authority = loadFinalReportRunMetadataAuthorityHarness();
-    authority.materialize(task);
+    await authority.materialize(task);
 
     const relativePath = ".ultrafuzz/authorities/final-report.final-report-run-metadata.json";
     const authorityPath = path.join(workspacePath, ...relativePath.split("/"));
@@ -8093,7 +8180,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 
     fs.writeFileSync(authorityPath, `${JSON.stringify({ ...projection, repository: "tampered" })}\n`, "utf8");
     assert.throws(() => authority.assertUnchanged(task), /run metadata authority was modified/u);
-    authority.materialize(task);
+    await authority.materialize(task);
     assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
     assert.doesNotThrow(() => authority.assertUnchanged(task));
 
@@ -8105,7 +8192,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
         fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
         fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
       }
-      authority.materialize(task);
+      await authority.materialize(task);
       assert.equal(fs.lstatSync(authorityPath).isFile(), true);
       assert.deepEqual(JSON.parse(fs.readFileSync(authorityPath, "utf8")), projection);
       assert.doesNotThrow(() => authority.assertUnchanged(task));
@@ -8138,6 +8225,108 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 
     const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
     assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata has the wrong run ID/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("final-report Run summary uses full, partial, and unavailable workflow metrics without undercounting lineage", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-final-report-workflow-metrics-"));
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(runRoot, "workspaces", "final-report");
+    fs.mkdirSync(workspacePath, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z" })}\n`,
+      "utf8"
+    );
+    const task = {
+      attemptId: "final-report",
+      runRoot,
+      workspacePath,
+      metadata: { run: { ultrafuzzRunId: "run-1" } },
+      outputs: [
+        { path: "report.json", contract: "ultrafuzz/report@3" },
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+      ]
+    };
+    const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["model-a", "model-b"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
+    });
+    assert.equal(
+      full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
+      "2026-08-20T01:00:00.000Z",
+      "the final-report start must supersede a stale accounting checkpoint"
+    );
+    assert.throws(
+      () => full.latestElapsedThrough("2026-08-20T01:00:00.000Z", "not-a-timestamp"),
+      /elapsed-time metadata is malformed/u
+    );
+    await full.materialize(task);
+    const authorityPath = path.join(
+      workspacePath,
+      ".ultrafuzz",
+      "authorities",
+      "final-report.final-report-run-metadata.json"
+    );
+    const fullProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(fullProjection.elapsed_time, "1h 00m");
+    assert.deepEqual(fullProjection.models_used, ["model-a", "model-b"]);
+    assert.equal(fullProjection.tokens_used, "1,234");
+    assert.equal(fullProjection.estimated_spend, "$0.46");
+    assert.equal(fullProjection.partial_pricing, false);
+
+    const partial = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T00:01:30.000Z",
+      models_used: ["model-priced", "model-unpriced"],
+      tokens_used: "300",
+      estimated_spend: "$0.05+",
+      partial_pricing: true
+    });
+    await partial.materialize(task);
+    const partialProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(partialProjection.elapsed_time, "1m 30s");
+    assert.deepEqual(partialProjection.models_used, ["model-priced", "model-unpriced"]);
+    assert.equal(partialProjection.tokens_used, "300");
+    assert.equal(partialProjection.estimated_spend, "$0.05+");
+    assert.equal(partialProjection.partial_pricing, true);
+
+    const unavailable = loadFinalReportRunMetadataAuthorityHarness();
+    await unavailable.materialize(task);
+    const unavailableProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(unavailableProjection.elapsed_time, "unavailable");
+    assert.deepEqual(unavailableProjection.models_used, []);
+    assert.equal(unavailableProjection.tokens_used, "unavailable");
+    assert.equal(unavailableProjection.estimated_spend, "unavailable");
+    assert.equal(unavailableProjection.partial_pricing, false);
+
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({
+        run_id: "run-1",
+        source_run_id: "source-run",
+        created_at: "2026-08-20T00:00:00.000Z"
+      })}\n`,
+      "utf8"
+    );
+    const lineage = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T01:00:00.000Z",
+      models_used: ["current-run-model"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
+    });
+    await lineage.materialize(task);
+    const lineageProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    assert.equal(lineageProjection.elapsed_time, "1h 00m");
+    assert.deepEqual(lineageProjection.models_used, []);
+    assert.equal(lineageProjection.tokens_used, "unavailable");
+    assert.equal(lineageProjection.estimated_spend, "unavailable");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -8286,7 +8475,7 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
 });
 
 test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-forged-producer-"));
+  const root = temporaryRoot("ultrafuzz-forged-producer-");
   try {
     const task = {
       id: "node:final-report",
@@ -8356,6 +8545,43 @@ test("single-rung final-report authority survives a worker restart without a run
   assert.equal(authority.smithersReads(), 0);
 });
 
+test("multi-rung report-producer authority budgets a contended Smithers read and reports its wall time", () => {
+  const timedOut = Object.assign(new Error("spawnSync smithers ETIMEDOUT"), { code: "ETIMEDOUT" });
+  const authority = loadFinalReportAgentExecutionAuthority({ smithersFailure: timedOut });
+  const task = {
+    attemptId: "final-report",
+    id: "final-report",
+    smithersRunId: "run-1",
+    agentChain: [{ profileId: "primary" }, { profileId: "fallback" }]
+  };
+
+  // #1026: this read shares the finalizer with every other agent's build work, and it serializes the
+  // node's whole attempt history on top of a CLI start, so it needs the same order of budget as the
+  // validator preflight while staying a minority of the lane's 1800 s `node_timeout_seconds`.
+  assert.ok(authority.budgetMs >= 120_000, String(authority.budgetMs));
+  assert.ok(authority.budgetMs <= 600_000, String(authority.budgetMs));
+
+  assert.throws(
+    () => authority.read(task),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(authority.smithersTimeoutMs(), authority.budgetMs);
+      assert.equal(error.cause, timedOut);
+      // `--full-output` can return up to 64 MiB, so the failing command's own text stays behind
+      // `cause` as the neighbouring authority failures keep it; only the timing is published.
+      assert.match(
+        error.message,
+        new RegExp(
+          `^artifact-contract failure: Smithers report-producer authority is unavailable after \\d+ms against a ${authority.budgetMs}ms budget$`,
+          "u"
+        )
+      );
+      return true;
+    }
+  );
+  assert.equal(authority.smithersReads(), 1);
+});
+
 test("generated retries do not inspect or inject previous failure text", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agent = source.slice(
@@ -8383,7 +8609,7 @@ test("generated retries do not inspect or inject previous failure text", () => {
 });
 
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-retry-prompt-"));
+  const root = temporaryRoot("ultrafuzz-retry-prompt-");
   try {
     const artifactDir = path.join(root, "run", "artifacts", "final-report");
     const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
@@ -8568,7 +8794,7 @@ test("generated Smithers workflow contains no output repair or legacy normalizat
 });
 
 test("durable writer replaces a destination symlink without overwriting its target", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-durable-writer-"));
+  const root = temporaryRoot("ultrafuzz-durable-writer-");
   try {
     const symlinkTarget = path.join(root, "target.txt");
     const output = path.join(root, "output.txt");
@@ -9037,7 +9263,7 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
 });
 
 test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-discovery-"));
+  const workspace = temporaryRoot("ultrafuzz-git-discovery-");
   try {
     execFileSync("git", ["init", "--quiet", workspace]);
     for (const relativePath of [
@@ -9085,7 +9311,7 @@ test("generated Smithers invariant provenance accepts only supported source root
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-verifier-"));
+  const root = temporaryRoot("ultrafuzz-generated-verifier-");
   const realDirectory = path.join(root, "real");
   fs.mkdirSync(realDirectory);
   const realFile = path.join(realDirectory, "Test.t.sol");
@@ -9274,7 +9500,7 @@ test("generated Smithers dependency verification fails closed before descendant 
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
+  const runRoot = temporaryRoot("ultrafuzz-verification-gate-");
   const dependency = path.join(runRoot, "property-specification-fanin");
   const generatedDependency = path.join(runRoot, "generated-tests-fanin");
   const invariantDependency = path.join(runRoot, "stateful-invariant-setup");
@@ -9691,7 +9917,7 @@ test("generated Smithers verification marker root must be a canonical directory"
     createRoot: boolean
   ) => { root: string; path: string; relativePath: string };
 
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-root-"));
+  const runRoot = temporaryRoot("ultrafuzz-verification-root-");
   try {
     const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
     const realMarkerRoot = path.join(runRoot, "real-markers");

@@ -37,6 +37,11 @@ import {
   type ModalWorkerStatus
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
+import {
+  workerDiagnosticLogPayload,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE
+} from "../src/worker-diagnostics.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
@@ -514,7 +519,7 @@ describe("Modal image source staging", () => {
   });
 
   it("archives tracked files only", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-archive-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-archive-"));
     execFileSync("git", ["init", "--quiet"], { cwd: root });
     fs.writeFileSync(path.join(root, ".gitignore"), ".private/\n", "utf8");
     fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n", "utf8");
@@ -533,7 +538,7 @@ describe("Modal image source staging", () => {
   });
 
   it("bakes a clean shallow Git checkout at the exact candidate commit", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-candidate-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-candidate-"));
     execFileSync("git", ["init", "--quiet"], { cwd: root });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
     execFileSync("git", ["config", "user.email", "ultrafuzz@example.invalid"], { cwd: root });
@@ -588,7 +593,7 @@ describe("Modal image source staging", () => {
   });
 
   it("rejects a public configuration for a different candidate before contacting Modal", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-candidate-mismatch-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-candidate-mismatch-"));
     const configPath = path.join(root, "benchmark.json");
     fs.writeFileSync(configPath, `${JSON.stringify(publicCollectionLineage().config)}\n`);
 
@@ -598,7 +603,7 @@ describe("Modal image source staging", () => {
   });
 
   it("rejects private launch and recovery before Modal or local state mutation", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-private-modal-governance-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-private-modal-governance-"));
     const configPath = path.join(root, "benchmark.json"),
       statePath = path.join(root, "launch-state.json"),
       recoveryStatePath = path.join(root, "recovery-state.json");
@@ -840,6 +845,57 @@ describe("Modal result collection", () => {
         context
       )
     ).toThrow(/unsanitized Modal worker log/u);
+  });
+
+  it("collects every line the workers can emit, including the bounds they emit at", () => {
+    const context = { generation: 1, attempt: 2 };
+    const workerLog = (payload: string): Record<string, string> => ({
+      "worker.log": `2026-01-01T00:00:00.000Z worker-started\n2026-01-01T00:00:01.000Z operation-started\n2026-01-01T00:00:02.000Z eval-failure-diagnostics ${payload}\n2026-01-01T00:00:02.000Z operation-failed\n`
+    });
+
+    // The pre-model reason the smoke lane spent nineteen days not reporting.
+    const submoduleFailure = workerDiagnosticLogPayload([
+      {
+        code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+        message:
+          "target very-liquid-vaults-foundry submodule update exited 1: fatal: Authentication failed for" +
+          " 'https://github.com/aviggiano/console3/'"
+      }
+    ]);
+    if (submoduleFailure === undefined) throw new Error("the submodule authentication failure emitted no line");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(submoduleFailure), context)).not.toThrow();
+
+    // A byte-cut sanitizer that lands inside a multi-byte sequence decodes each orphaned byte to U+FFFD,
+    // three bytes for one, so the emitted message could exceed the bound this predicate enforces -- and one
+    // rejected line discards status.json, result.json and the recovery lifecycle along with the log.
+    for (const message of ["€".repeat(400), `${"ก".repeat(400)} tail`, "\u{1f600}".repeat(300)]) {
+      const payload = workerDiagnosticLogPayload([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message }]);
+      // Dropped rather than emitted means the bound above no longer holds on the decoded string.
+      if (payload === undefined) throw new Error("a bounded multi-byte message emitted no diagnostics line");
+      expect(() => assertSanitizedModalCollectedFiles(workerLog(payload), context)).not.toThrow();
+    }
+    const oneByteOver = Buffer.from(
+      JSON.stringify([
+        {
+          code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+          message: "a".repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES + 1)
+        }
+      ]),
+      "utf8"
+    ).toString("base64url");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(oneByteOver), context)).toThrow(
+      /unsanitized Modal worker log/u
+    );
+
+    // Three bounded messages overrun the payload bound once JSON escaping doubles them.
+    const escaped = workerDiagnosticLogPayload(
+      Array.from({ length: 3 }, () => ({
+        code: `${WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE}_WITH_A_LONG_CODE`,
+        message: '"'.repeat(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES)
+      }))
+    );
+    if (escaped === undefined) throw new Error("entries go before the line does, so a line is still emitted");
+    expect(() => assertSanitizedModalCollectedFiles(workerLog(escaped), context)).not.toThrow();
   });
 
   it("rejects the removed worker-status shape without retrying", async () => {
@@ -1274,7 +1330,7 @@ describe("Modal result collection", () => {
   });
 
   it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-collect-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-collect-"));
     const output = path.join(root, "model-one");
     fs.mkdirSync(output, { mode: 0o755 });
     fs.writeFileSync(path.join(output, "result.json"), '{"legacy":true}\n', { mode: 0o644 });
@@ -1309,7 +1365,7 @@ describe("Modal result collection", () => {
 });
 
 function kimiSubscriptionAuthFixture(accessToken: string, refreshToken: string): string {
-  const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-collection-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-collection-"));
   fs.mkdirSync(path.join(root, "credentials"), { recursive: true });
   fs.writeFileSync(
     path.join(root, "config.toml"),
@@ -1502,7 +1558,7 @@ describe("Modal canonical recovery probe", () => {
   });
 
   it("reads durable transitions and completions independently of a stale mirrored status", () => {
-    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-"));
+    const mount = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-recovery-probe-"));
     const remoteRoot = "/data/logical-run/model-one";
     const dataRoot = path.join(mount, "logical-run", "model-one");
     const runRoot = path.join(dataRoot, "workspace", "target", ".ultrafuzz", "runs", "durable-run");
@@ -1556,7 +1612,7 @@ describe("Modal canonical recovery probe", () => {
   });
 
   it("rejects malformed present durable state instead of reporting unavailable canonical progress", () => {
-    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-partial-"));
+    const mount = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-recovery-probe-partial-"));
     const remoteRoot = "/data/logical-run/model-one";
     const runRoot = path.join(
       mount,
@@ -1577,7 +1633,7 @@ describe("Modal canonical recovery probe", () => {
   });
 
   it("rejects malformed present durable plan instead of reporting unavailable canonical progress", () => {
-    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-plan-"));
+    const mount = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-recovery-probe-plan-"));
     const remoteRoot = "/data/logical-run/model-one";
     const runRoot = path.join(
       mount,
@@ -1601,7 +1657,7 @@ describe("Modal canonical recovery probe", () => {
   });
 
   it("reports unavailable canonical progress only when the durable run directory is absent", () => {
-    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-absent-"));
+    const mount = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-recovery-probe-absent-"));
     const command = modalCanonicalRecoveryProbeCommand(
       "/data/logical-run/model-one",
       mount,
@@ -1612,7 +1668,7 @@ describe("Modal canonical recovery probe", () => {
   });
 
   it("rejects non-ENOENT durable run discovery errors", () => {
-    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-discovery-"));
+    const mount = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-recovery-probe-discovery-"));
     const remoteRoot = "/data/logical-run/model-one";
     const runsRoot = path.join(mount, "logical-run", "model-one", "workspace", "target", ".ultrafuzz", "runs");
     fs.mkdirSync(path.dirname(runsRoot), { recursive: true });
@@ -1730,7 +1786,7 @@ describe("Modal worker identity", () => {
   });
 
   it("preserves Kimi refresh tokens and refuses to replace newer shared Modal auth state", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
@@ -1788,7 +1844,7 @@ describe("Modal worker identity", () => {
   ] as const)(
     "rejects %s Kimi credential evidence without replacing or normalizing either file",
     (_name, target, bytes) => {
-      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-invalid-"));
+      const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-invalid-"));
       const pending = path.join(root, "kimi-code.json.pending");
       const destination = path.join(root, "kimi-code.json");
       const validPending =
@@ -1809,7 +1865,7 @@ describe("Modal worker identity", () => {
   );
 
   it("moves a strict new Kimi provider envelope byte-for-byte without normalizing it", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-new-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-new-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const bytes = Buffer.from(
@@ -1825,7 +1881,7 @@ describe("Modal worker identity", () => {
   });
 
   it("rejects symlinked Kimi credential evidence without following or replacing it", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-symlink-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-symlink-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const outside = path.join(root, "outside.json");
@@ -1849,7 +1905,7 @@ describe("Modal worker identity", () => {
   });
 
   it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
@@ -1887,7 +1943,7 @@ describe("Modal worker identity", () => {
   });
 
   it("replaces stale shared Modal Kimi credentials on fresh host-token rotation", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
@@ -1928,7 +1984,7 @@ describe("Modal worker identity", () => {
 
   it("refuses fresh Kimi shared credential replacement without valid lineage", () => {
     for (const lineageCase of ["missing", "corrupt", "unreadable"] as const) {
-      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
+      const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-"));
       const pending = path.join(root, "kimi-code.json.pending");
       const destination = path.join(root, "kimi-code.json");
       const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
@@ -1967,7 +2023,7 @@ describe("Modal worker identity", () => {
   });
 
   it("stages a lineage sidecar when Kimi shared Modal auth is replaced", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-kimi-stage-"));
     const pending = path.join(root, "kimi-code.json.pending");
     const destination = path.join(root, "kimi-code.json");
     const lineage = `${destination}.ultrafuzz-source-refresh-token.sha256`;
@@ -2002,7 +2058,7 @@ describe("Modal worker identity", () => {
   });
 
   it("publishes worker readiness only after launch state and all staged inputs are durable", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-staging-"));
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-staging-"));
     const configPath = path.join(root, "benchmark.json");
     const statePath = path.join(root, "launch-state.json");
     const kimiAuthRoot = path.join(root, "kimi-code");

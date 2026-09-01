@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -10,7 +10,7 @@ const ACCEPTED_OPENROUTER_MODEL = "~vendor/model.latest:free+preview@2026";
 const BELL = String.fromCodePoint(7);
 
 function tempProject(): string {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-model-override-"));
+  const project = temporaryRoot("ufz-model-override-");
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
   return project;

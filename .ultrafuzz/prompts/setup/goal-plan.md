@@ -20,8 +20,6 @@ download content, or replace the curated catalog with invented classes.
 
 ## Selection policy
 
-The v0.1.0 default is additive:
-
 1. Create exactly one threat goal for every modeled threat.
 2. Create exactly one class goal for every applicable database class.
 3. Record the fixed `goal-roaming` goal, which runs independently.

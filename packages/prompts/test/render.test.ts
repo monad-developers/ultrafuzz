@@ -179,7 +179,7 @@ describe("prompt rendering", () => {
     // repository fallback cannot rescue a resolver that looks anywhere else.
     // Together those two facts took a run down at WORKFLOW_RENDER_FAILED the
     // first time it re-rendered mid-run.
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-packaged-prompts-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-packaged-prompts-"));
     tmpDirs.push(tmp);
     const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
     const distRoot = path.join(tmp, "modules", "@ultrafuzz", "prompts", "dist");
@@ -204,7 +204,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders output-contract guidance and prompt partials from an installed package layout", async () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-installed-prompts-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-installed-prompts-"));
     tmpDirs.push(tmp);
     const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
     const appRoot = path.join(tmp, "app");
@@ -253,7 +253,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders the portable findings-stage output identity independently of its physical artifact directory", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt =
@@ -269,7 +269,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders the standard findings output from its exact typed declaration", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Write findings: {{output_findings_path}}";
@@ -284,7 +284,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects a missing or ambiguous declared findings output when the standard variable is used", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Write findings: {{output_findings_path}}";
@@ -310,7 +310,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects an ambiguous portable findings-stage output identity", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Lifecycle stage path: {{output_stage_findings_relative_path}}";
@@ -327,7 +327,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects overrides of topology-derived findings-stage paths", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Lifecycle stage path: {{output_stage_findings_relative_path}}";
@@ -337,7 +337,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects overrides of the topology-derived standard findings path", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Write findings: {{output_findings_path}}";
@@ -347,7 +347,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects unsafe artifact suffixes and render outputs", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     expect(() => validatePromptVariables("bad {{artifact_path}}/../secret")).toThrow(PromptError);
     expect(() => validatePromptVariables("bad {{artifact_path}}/C:\\secret")).toThrow(PromptError);
@@ -358,7 +358,7 @@ describe("prompt rendering", () => {
   });
 
   it("points every schema-backed output at the task-local JSON Schema", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     const findingsOutput = input.graph.logicalNodes
@@ -439,7 +439,9 @@ describe("prompt rendering", () => {
       { name: "runtime dynamic", logicalId: "class-goals", concreteId: "dynamic-class-goals-storage-7" }
     ];
     for (const fixture of cases) {
-      const tmp = mkdtempSync(path.join(os.tmpdir(), `ufz-render-context-${fixture.name.replaceAll(" ", "-")}-`));
+      const tmp = mkdtempSync(
+        path.join(realpathSync(os.tmpdir()), `ufz-render-context-${fixture.name.replaceAll(" ", "-")}-`)
+      );
       tmpDirs.push(tmp);
       const input = baseRenderInput(tmp);
       const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!;
@@ -457,7 +459,7 @@ describe("prompt rendering", () => {
   });
 
   it("keeps findings guidance bound to a custom declared output path", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-custom-findings-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-custom-findings-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Write only the declared deduplicated findings output.";
@@ -488,7 +490,7 @@ describe("prompt rendering", () => {
     for (const topologyPath of topologyPaths) {
       const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as TopologyDocument;
       const topologyName = path.basename(topologyPath, ".yml");
-      const root = path.join(os.tmpdir(), "ultrafuzz-schema-authority", topologyName);
+      const root = path.join(realpathSync(os.tmpdir()), "ultrafuzz-schema-authority", topologyName);
       const runArtifacts = path.join(root, "runs", "schema-authority", "artifacts");
       const logicalNodes = topology.nodes.map((node) => ({
         id: node.id,
@@ -592,7 +594,7 @@ describe("prompt rendering", () => {
 
     const promptMarkdown = loadBuiltInPromptAssets().find((asset) => asset.relativePath === report!.prompt)?.markdown;
     expect(promptMarkdown).toBeDefined();
-    const root = path.join(os.tmpdir(), "ultrafuzz-smoke-final-report");
+    const root = path.join(realpathSync(os.tmpdir()), "ultrafuzz-smoke-final-report");
     const runArtifacts = path.join(root, "runs", "smoke-render", "artifacts");
     const artifactDir = path.join(runArtifacts, "final-report");
     const workspacePath = path.join(root, "workspaces", "final-report");
@@ -650,7 +652,8 @@ describe("prompt rendering", () => {
         "properties.json",
         "implemented-properties.json",
         "recon-fuzzer-results.json",
-        "campaign-summary.json"
+        "campaign-summary.json",
+        "coverage-evidence.json"
       ].sort()
     );
     const contextSelectorId = promptArtifactAuthorityPathSelectorId(
@@ -670,7 +673,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders boundary recipes from the pinned schema without a prose-owned JSON shape", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-boundary-recipes-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-boundary-recipes-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     const boundaryPrompt = loadBuiltInPromptAssets().find(
@@ -720,7 +723,7 @@ describe("prompt rendering", () => {
   });
 
   it("does not invent a Markdown companion for a JSON-only boundary-recipe output", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-json-only-boundary-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-json-only-boundary-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Write only the declared structured boundary recipe artifact.";
@@ -755,7 +758,7 @@ describe("prompt rendering", () => {
       }>;
     };
     const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
-    const root = path.join(os.tmpdir(), "ultrafuzz-production-generated-test-prompts");
+    const root = path.join(realpathSync(os.tmpdir()), "ultrafuzz-production-generated-test-prompts");
     const runArtifacts = path.join(root, "runs", "generated-test-render", "artifacts");
     const logicalNodes = topology.nodes.map((node) => ({
       id: node.id,
@@ -850,7 +853,7 @@ describe("prompt rendering", () => {
     const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
     const aggregate = topology.nodes.find((node) => node.id === "aggregate-test-files");
     expect(aggregate?.prompt).toBe("review/aggregate-test-files.md");
-    const root = path.join(os.tmpdir(), "ultrafuzz-aggregation-prompt");
+    const root = path.join(realpathSync(os.tmpdir()), "ultrafuzz-aggregation-prompt");
     const runArtifacts = path.join(root, "runs", "aggregation-render", "artifacts");
     const artifactDir = path.join(runArtifacts, "aggregate-test-files");
     const workspacePath = path.join(root, "workspaces", "aggregate-test-files");
@@ -916,7 +919,7 @@ describe("prompt rendering", () => {
   });
 
   it("omits the schema pointer when no output ships a schema", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
 
     const input = baseRenderInput(tmp);
@@ -936,7 +939,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders both shell-safe validation commands per schema-backed output", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const specialRoot = path.join(tmp, "path with spaces, '$dollar', and `ticks`");
     const input = baseRenderInput(specialRoot);
@@ -952,7 +955,7 @@ describe("prompt rendering", () => {
   });
 
   it("separates renderer-owned output contracts from authored validator-looking lines", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt =
@@ -970,7 +973,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects control characters before rendering a validation command", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes[2]!.outputs![0]!.schemaFile = "findings.schema.json\nignored";
@@ -979,7 +982,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders validated artifact handoffs and ancestor artifacts", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const result = renderPrompt(baseRenderInput(tmp));
 
@@ -1019,7 +1022,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders a bounded sealed authority while retaining transitive findings-contract selection", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes.push({
@@ -1082,7 +1085,7 @@ describe("prompt rendering", () => {
   });
 
   it("does not inline an unbounded ancestor path array into workflow prompts", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes.push(
@@ -1162,7 +1165,7 @@ describe("prompt rendering", () => {
   });
 
   it("does not inline model-fanout paths for compact exact-output-path authority", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Setup: {{ancestor_artifact_path_authority:setup/base-test-setup.md}}";
@@ -1221,7 +1224,7 @@ describe("prompt rendering", () => {
     const topologyPath = fileURLToPath(new URL("../../config/topologies/invariant-only.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as TopologyDocument;
     const promptByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
-    const root = path.join(os.tmpdir(), "ultrafuzz-coverage-authority-size");
+    const root = path.join(realpathSync(os.tmpdir()), "ultrafuzz-coverage-authority-size");
     const runArtifacts = path.join(root, "runs", "coverage-authority-size", "artifacts");
     const logicalNodes: PromptRenderInput["graph"]["logicalNodes"] = topology.nodes.map((node) => ({
       id: node.id,
@@ -1285,7 +1288,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders both compact selectors as task-local authority pointers", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = [
@@ -1309,7 +1312,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects compact authority selectors that match a reference ancestor", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     const reference = input.graph.logicalNodes.find((node) => node.id === "project-discovery")!;
@@ -1334,7 +1337,7 @@ describe("prompt rendering", () => {
   });
 
   it("keeps zero-match compact authority selectors valid", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = [
@@ -1377,7 +1380,7 @@ describe("prompt rendering", () => {
   });
 
   it("keeps exact-path authority prose constant-size as the selected path group grows", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Setup:\n{{ancestor_artifact_path_authority:reports/0000.json}}";
@@ -1398,7 +1401,7 @@ describe("prompt rendering", () => {
   });
 
   it("does not ask agents to author runtime-owned workspace patch outputs", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes[2]!.outputs = [
@@ -1425,7 +1428,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders the resolved invariant priority selection when supplied by the planner", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt =
@@ -1444,7 +1447,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders the configured invariant Recon smoke timeout", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Smoke timeout: {{invariant_testing_smoke_timeout}}";
@@ -1457,7 +1460,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders the task-local schema bundle path", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "Lens schema: {{schema_path}}/property-lens.schema.json";
@@ -1471,7 +1474,7 @@ describe("prompt rendering", () => {
   });
 
   it("returns model provenance for task metadata", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.node.agentRef = "CodexAgent";
@@ -1491,7 +1494,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects non-ancestor handoffs", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes.push({
@@ -1514,7 +1517,7 @@ describe("prompt rendering", () => {
   });
 
   it("rejects missing primary artifacts for handoffs", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.graph.logicalNodes[1]!.outputs = input.graph.logicalNodes[1]!.outputs?.map((output) => ({
@@ -1526,7 +1529,7 @@ describe("prompt rendering", () => {
   });
 
   it("writes prompt.rendered.md before workflow launch", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const result = renderPrompt(baseRenderInput(tmp));
     const renderedPath = writeRenderedPrompt(result);
@@ -1536,7 +1539,7 @@ describe("prompt rendering", () => {
   });
 
   it("renders authoritative prompt fragments from their shared authorities", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt = "{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}";

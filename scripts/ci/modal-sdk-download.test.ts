@@ -19,7 +19,7 @@ const FILTERED_PARENT_ENV = {
 describe("Modal SDK downloads under Bun", () => {
   it("delegates copyToLocal transfers larger than pipe buffers to Node", async () => {
     expect(process.versions.bun).toBeDefined();
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-bun-download-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-bun-download-"));
     const destination = path.join(root, "result.tgz");
     let calledDirectly = false;
     try {
@@ -51,7 +51,7 @@ describe("Modal SDK downloads under Bun", () => {
   });
 
   it("bounds helper stderr and leaves an existing destination untouched on failure", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-bun-download-failure-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-bun-download-failure-"));
     const destination = path.join(root, "result.tgz");
     const prior = Buffer.from("trusted prior publication\n", "utf8");
     fs.writeFileSync(destination, prior);

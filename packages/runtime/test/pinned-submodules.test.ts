@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -754,7 +754,7 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
 });
 
 test("ordinary repositories do not gain a worktree configuration prerequisite", (context) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-ordinary-repository-"));
+  const root = temporaryRoot("ultrafuzz-ordinary-repository-");
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   initRepository(root);
   fs.writeFileSync(path.join(root, "source.txt"), "ordinary source\n");
@@ -771,7 +771,7 @@ function nestedSubmoduleFixture(): {
   dependencyCommit: string;
   nestedCommit: string;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-submodules-"));
+  const root = temporaryRoot("ultrafuzz-pinned-submodules-");
   const nested = path.join(root, "nested");
   initRepository(nested);
   fs.writeFileSync(path.join(nested, "child.txt"), "nested dependency\n");
@@ -817,7 +817,7 @@ function aaveShapedSubmoduleFixture(): {
   source: string;
   expectedPins: Map<string, string>;
 } {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aave-pinned-submodules-"));
+  const root = temporaryRoot("ultrafuzz-aave-pinned-submodules-");
 
   const dsTest = path.join(root, "ds-test");
   initRepository(dsTest);

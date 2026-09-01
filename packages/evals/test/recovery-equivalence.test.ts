@@ -70,7 +70,7 @@ function workflowLinkId(index: number): string {
 }
 
 function evidenceRoot(input: { controllers: string[]; attempts?: AttemptFixture[] }): string {
-  const root = mkdtempSync(path.join(tmpdir(), "ufz-recovery-equivalence-"));
+  const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-recovery-equivalence-"));
   const attemptedNodeIds = new Set((input.attempts ?? []).map((attempt) => attempt.nodeId));
   const graph = currentPlannedGraph(["model-a", "model-b", "metadata"], undefined);
   graph.nodes[2]!.kind = "reference";

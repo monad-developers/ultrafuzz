@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -1154,7 +1154,7 @@ function dispatchedInput(fixture: CloudFixture, concreteNodeId: string): Record<
  * the real dispatched sandbox inputs instead of hand-written ones.
  */
 async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFixture> {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cloud-worker-"));
+  const project = temporaryRoot("ufz-cloud-worker-");
   initProject({ projectRoot: project, force: true });
   writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
   writePrompt(
@@ -1261,7 +1261,7 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
  * `smithers/tasks.json`, expansion manifests, or prompt-template snapshots.
  */
 function relocateWorker(fixture: CloudFixture): string {
-  const worker = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cloud-relocated-"));
+  const worker = temporaryRoot("ufz-cloud-relocated-");
   fs.cpSync(fixture.project, worker, { recursive: true });
   const workerRunRoot = path.join(worker, path.relative(fixture.project, fixture.runRoot));
   for (const relativePath of CONTROLLER_ONLY_RUN_PATHS) {
@@ -1327,7 +1327,7 @@ nodes:
 `;
 
 test("compiled threat-model and goal-plan cloud tasks hand off and relocate the reference tree and planner catalog", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cloud-database-"));
+  const project = temporaryRoot("ufz-cloud-database-");
   initProject({ projectRoot: project, force: true });
   writePrompt(
     project,

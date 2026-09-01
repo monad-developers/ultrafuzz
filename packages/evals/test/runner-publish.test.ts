@@ -233,7 +233,7 @@ function initializationFixture(prefix: string): {
   groundTruthRoot: string;
   suitePath: string;
 } {
-  const base = mkdtempSync(path.join(tmpdir(), prefix));
+  const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), prefix));
   const project = path.join(base, "project");
   const groundTruthRoot = path.join(base, "gt");
   fs.mkdirSync(project, { recursive: true });
@@ -359,7 +359,7 @@ describe("runner", () => {
   });
 
   it("rejects unbound private ground truth before launching any model work", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-private-binding-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-private-binding-"));
     const project = path.join(base, "project");
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
@@ -401,7 +401,7 @@ describe("runner", () => {
   });
 
   it("generates stable distinct bounded child run IDs for rows with the same long prefix", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-ids-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-runner-ids-"));
     const suite = testSuite(path.join(base, "gt"));
     const commonRunIdPrefix = `benchmark-${"r".repeat(108)}`;
     const rowA = testRow(suite, { run_id: `${commonRunIdPrefix}-a` });
@@ -433,7 +433,7 @@ describe("runner", () => {
   });
 
   it("hands every launched row the caller's Ultrafuzz CLI entrypoint", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-trusted-cli-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-runner-trusted-cli-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const entrypoints: (string | undefined)[] = [];
@@ -467,7 +467,7 @@ describe("runner", () => {
   });
 
   it("records failed launches in runs.jsonl with diagnostics", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-runner-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     fs.mkdirSync(path.join(base, "eval-run"), { recursive: true });
@@ -493,7 +493,7 @@ describe("runner", () => {
   it.each(["state.json", "graph.json"] as const)(
     "preserves one successful launch record when %s enrichment is invalid",
     async (invalidDocument) => {
-      const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-launch-enrichment-"));
+      const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-launch-enrichment-"));
       const suite = testSuite(path.join(base, "gt"));
       const row = testRow(suite);
       const evalRunRoot = path.join(base, "eval-run");
@@ -539,7 +539,7 @@ describe("runner", () => {
   );
 
   it("records the actual post-launch run-plan audit policy and topology origin", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-policy-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-policy-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const evalRunRoot = path.join(base, "eval-run");
@@ -580,7 +580,7 @@ describe("runner", () => {
   });
 
   it("records a present dangling state enrichment as invalid instead of absent", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-launch-dangling-state-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-launch-dangling-state-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const evalRunRoot = path.join(base, "eval-run");
@@ -626,7 +626,7 @@ describe("runner", () => {
   it.each(["state.json", "plan.json"] as const)(
     "rejects schema-valid %s enrichment from another run without borrowing its authority",
     async (foreignDocument) => {
-      const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-foreign-run-enrichment-"));
+      const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-foreign-run-enrichment-"));
       const suite = testSuite(path.join(base, "gt"));
       const row = testRow(suite);
       const evalRunRoot = path.join(base, "eval-run");
@@ -691,7 +691,7 @@ describe("runner", () => {
   );
 
   it("rejects a complete launcher-returned run that does not use the row-owned requested ID", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-foreign-launch-run-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-foreign-launch-run-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const evalRunId = "eval-launch-binding";
@@ -749,7 +749,7 @@ describe("runner", () => {
   });
 
   it("rejects a row missing its topology backend before creating an Ultrafuzz run", async () => {
-    const project = mkdtempSync(path.join(tmpdir(), "ufz-evals-required-command-"));
+    const project = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-required-command-"));
     initProject({ projectRoot: project, force: true });
     const configPath = path.join(project, "ultrafuzz.toml");
     fs.writeFileSync(
@@ -793,7 +793,7 @@ describe("runner", () => {
   }, 20_000);
 
   it("keeps a detached workflow nonterminal after its launcher exits", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-detached-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-detached-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runId = expectedRowRunId("eval-detached", row);
@@ -829,7 +829,7 @@ describe("runner", () => {
   });
 
   it("publishes a detached launch summary whose counts match its own records", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-detached-summary-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-detached-summary-"));
     const project = path.join(base, "project");
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
@@ -879,7 +879,7 @@ describe("runner", () => {
   });
 
   it("watches terminal rows by default even when provider reporting is disabled", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-watch-default-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-watch-default-"));
     const project = path.join(base, "project");
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
@@ -924,7 +924,7 @@ describe("runner", () => {
   });
 
   it("counts a watched row as incomplete when it misses the watch deadline", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-watch-timeout-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-watch-timeout-"));
     const project = path.join(base, "project");
     const groundTruthRoot = path.join(base, "gt");
     fs.mkdirSync(project, { recursive: true });
@@ -979,7 +979,7 @@ describe("runner", () => {
 
   it("counts terminal timeout and cancellation outcomes as incomplete", async () => {
     for (const status of ["timed-out", "canceled"] as const) {
-      const base = mkdtempSync(path.join(tmpdir(), `ufz-evals-run-${status}-`));
+      const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), `ufz-evals-run-${status}-`));
       const project = path.join(base, "project");
       const groundTruthRoot = path.join(base, "gt");
       fs.mkdirSync(project, { recursive: true });
@@ -1024,7 +1024,7 @@ describe("runner", () => {
   });
 
   it("propagates candidate graph, config, and execution artifact identities into row records", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-lineage-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-runner-lineage-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runId = expectedRowRunId("eval-1", row);
@@ -1064,7 +1064,7 @@ describe("runner", () => {
   });
 
   it("watches a row to terminal state, draining telemetry after each sync tick", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1107,7 +1107,7 @@ describe("runner", () => {
   });
 
   it("rejects a present graph that would require telemetry repair", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-invalid-graph-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-invalid-graph-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1133,7 +1133,7 @@ describe("runner", () => {
   });
 
   it("rejects a graph that disappears after the initial existence inspection", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-graph-race-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-graph-race-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1172,7 +1172,7 @@ describe("runner", () => {
   });
 
   it("rejects a present dangling run state instead of treating the row as merely launched", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-dangling-state-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-dangling-state-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1200,7 +1200,7 @@ describe("runner", () => {
   });
 
   it("rejects a schema-valid foreign run state swapped in while watching", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-foreign-state-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-foreign-state-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1245,7 +1245,7 @@ describe("runner", () => {
   });
 
   it("binds the initial watched state read to the journaled run ID", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-initial-foreign-state-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-initial-foreign-state-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1283,7 +1283,7 @@ describe("runner", () => {
   });
 
   it("defers onRowStart until the detached subprocess writes graph.json", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-race-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-race-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1336,7 +1336,7 @@ describe("runner", () => {
   });
 
   it("records a typed incomplete outcome when the watch deadline expires", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-timeout-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-timeout-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1374,7 +1374,7 @@ describe("runner", () => {
   });
 
   it("coalesces and persists workflow synchronization failures", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-sync-failure-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-sync-failure-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
@@ -1431,7 +1431,7 @@ describe("eval publish (post-hoc replay)", () => {
     projectRoot: string;
     evalRunRoot: string;
   } {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-publish-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-publish-"));
     const projectRoot = path.join(base, "project");
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
@@ -1494,7 +1494,7 @@ describe("eval publish (post-hoc replay)", () => {
   }
 
   it("rejects a present dangling eval-run root instead of classifying it as absent", async () => {
-    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-publish-dangling-root-"));
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-publish-dangling-root-"));
     const projectRoot = path.join(base, "project");
     const evalRunsRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs");
     fs.mkdirSync(evalRunsRoot, { recursive: true });

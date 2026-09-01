@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,7 +15,7 @@ const PARALLEL_LANES = 6;
 // facts the fix relies on: simultaneous worktree preparations all succeed, and a preparation
 // retry budget of one is honored inside <Worktree> so a single transient hit is absorbed.
 test("simultaneously dispatched worktree preparations all succeed under a real Smithers run", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-prep-race-"));
+  const root = temporaryRoot("ultrafuzz-smithers-prep-race-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "preparation-race.tsx");
   const evidenceRoot = path.join(root, ".ultrafuzz", "preparation-race");
@@ -55,7 +55,7 @@ test("simultaneously dispatched worktree preparations all succeed under a real S
 });
 
 test("a worktree preparation that fails once is retried and the node succeeds", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-prep-retry-"));
+  const root = temporaryRoot("ultrafuzz-smithers-prep-retry-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "preparation-retry.tsx");
   const evidenceRoot = path.join(root, ".ultrafuzz", "preparation-retry");
@@ -96,7 +96,7 @@ test("a worktree preparation that fails once is retried and the node succeeds", 
 });
 
 test("native continuation keeps a finished producer and runs only a newly rendered downstream task", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-smithers-continuation-"));
+  const root = temporaryRoot("ultrafuzz-smithers-continuation-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "native-continuation.tsx");
   const runId = `native-continuation-${process.pid}-${Date.now()}`;

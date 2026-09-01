@@ -440,7 +440,7 @@ describe("longitudinal eval history", () => {
   });
 
   it("treats only a directly absent history file as empty", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-eval-history-"));
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-eval-history-"));
     const historyPath = path.join(directory, "history.json");
     try {
       expect(readEvalHistory(historyPath)).toEqual(emptyEvalHistory());

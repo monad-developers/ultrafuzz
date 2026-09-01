@@ -1781,7 +1781,7 @@ test("report campaign outcome authority distinguishes absent campaigns from untr
 });
 
 test("generated-test filesystem gate rejects cumulative actual bytes before reading companions", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-bounds-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-generated-test-bounds-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     const generated_tests = Array.from({ length: 5 }, (_, index) => {
@@ -1811,7 +1811,7 @@ test("generated-test filesystem gate rejects cumulative actual bytes before read
 });
 
 test("generated-test filesystem gate rejects hard-linked companions", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-test-hardlinks-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-generated-test-hardlinks-"));
   try {
     const generatedTestsDir = path.join(root, "generated-tests");
     fs.mkdirSync(generatedTestsDir);
@@ -1866,7 +1866,7 @@ test("generated-test filesystem gate rejects hard-linked companions", () => {
 });
 
 test("aggregation schema gates exactly reconcile authenticated atomic bundles and destinations", () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-gates-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-aggregation-gates-"));
   const workspaceRoot = path.join(temporary, "workspace");
   fs.mkdirSync(workspaceRoot);
 
@@ -2424,7 +2424,7 @@ test("aggregation schema gates exactly reconcile authenticated atomic bundles an
 });
 
 test("every contextual registration executes real positive and negative checks", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-semantic-gates-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-semantic-gates-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
     fs.writeFileSync(path.join(root, "artifact.json"), "artifact\n");
@@ -3442,7 +3442,14 @@ test("every contextual registration executes real positive and negative checks",
           node_id: "node:a",
           iteration: 0,
           attempt: 1,
-          usage: { model: "model", agent: "agent", input_tokens: 1, output_tokens: 2 }
+          usage: {
+            model: "model",
+            agent: "agent",
+            input_tokens: 1,
+            fresh_input_tokens: 1,
+            output_tokens: 2,
+            recorded_cost_usd: 0.000_1
+          }
         },
         negative: { workflow_run_id: "workflow-a", source_event_sequence: 3 },
         context: {
@@ -3460,7 +3467,9 @@ test("every contextual registration executes real positive and negative checks",
                   model: "model",
                   agent: "agent",
                   inputTokens: 1,
-                  outputTokens: 2
+                  freshInputTokens: 1,
+                  outputTokens: 2,
+                  costUsd: 0.000_1
                 }
               }
             ]
@@ -3950,6 +3959,47 @@ test("bounded final reports close over every authenticated deduped finding", () 
   assert.ok(
     promotedTampered.status === "failed" &&
       promotedTampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
+  );
+
+  // The disposition follows the row's own enriched classification, so a
+  // finding that must stay out of the production list is reclassified rather
+  // than demoted while still labelled `true-positive`. Only `issues` is
+  // scored, so admitting that pairing would let a report assert a credible
+  // production bug from an unscored array (#1026).
+  const reclassifiedRow = {
+    ...finding,
+    triage_classification: "defensive-hardening",
+    lifecycle: {
+      ...lifecycle,
+      triage_classification: "defensive-hardening",
+      triage_reason: "The path requires an administrator mistake first.",
+      demotion_reason: "Hardening only; no production path reaches the state.",
+      final_disposition: "non-production"
+    }
+  };
+  assert.equal(
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [reclassifiedRow] },
+      context
+    }).status,
+    "passed"
+  );
+
+  const demotedTruePositive = structuredClone(reclassifiedRow);
+  demotedTruePositive.triage_classification = "true-positive";
+  demotedTruePositive.lifecycle.triage_classification = "true-positive";
+  const demoted = executeSemanticGate("report-severity-classification-preservation", {
+    document: { issues: [], non_production_outcomes: [demotedTruePositive] },
+    context
+  });
+  assert.equal(demoted.status, "failed");
+  assert.ok(
+    demoted.status === "failed" &&
+      demoted.issues.some(
+        (entry) =>
+          entry.path === "$.non_production_outcomes[0].lifecycle.final_disposition" &&
+          /Bounded lifecycle disposition must be promoted/u.test(entry.message)
+      )
   );
 });
 

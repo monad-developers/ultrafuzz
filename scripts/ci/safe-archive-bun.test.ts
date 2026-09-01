@@ -9,7 +9,7 @@ import { expect, it } from "bun:test";
 import { extractSafeTarArchive } from "../../packages/modal/src/safe-archive.js";
 
 it("repeatedly extracts a synthetic archive without stalling Bun callbacks", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-safe-archive-repeat-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-safe-archive-repeat-"));
   const source = path.join(root, "source");
   const archive = path.join(root, "synthetic.tar");
   try {
@@ -42,7 +42,7 @@ it("repeatedly extracts a synthetic archive without stalling Bun callbacks", asy
 }, 15_000);
 
 it("rejects a synthetic archive stream that stops making progress", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-safe-archive-stall-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-safe-archive-stall-"));
   const source = path.join(root, "source");
   const completeArchive = path.join(root, "complete.tar");
   const stalledArchive = path.join(root, "stalled.tar");
@@ -79,7 +79,7 @@ it("rejects a synthetic archive stream that stops making progress", async () => 
 }, 5_000);
 
 it("rejects when an asynchronous destination write stops making progress", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-safe-archive-write-stall-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-safe-archive-write-stall-"));
   const source = path.join(root, "source");
   const archive = path.join(root, "synthetic.tar");
   const destination = path.join(root, "destination");
@@ -119,7 +119,7 @@ it("rejects when an asynchronous destination write stops making progress", async
 }, 5_000);
 
 it("closes an exclusive destination handle that opens after the deadline", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-safe-archive-late-open-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-safe-archive-late-open-"));
   const source = path.join(root, "source");
   const archive = path.join(root, "synthetic.tar");
   const destination = path.join(root, "destination");

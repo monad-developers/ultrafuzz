@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,19 +40,111 @@ describe("Modal benchmark publication readiness", () => {
 
     expect(classifyModalBenchmarkPublication(fixture.control, fixture.results, "smoke", "push")).toEqual({
       ready: false,
-      reason: expect.stringContaining(fixture.pair)
+      reason: expect.stringContaining(fixture.pair),
+      incompletePairs: [
+        {
+          pair: fixture.pair,
+          terminal_status: "failed",
+          category: "resume-required",
+          diagnostic_collection_status: "succeeded"
+        }
+      ]
     });
 
-    const outputPath = path.join(fixture.root, "github-output");
-    execFileSync(process.execPath, [
-      path.resolve("scripts/ci/classify-modal-benchmark-publication.mjs"),
-      fixture.control,
-      fixture.results,
-      "smoke",
-      "push",
-      outputPath
-    ]);
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("ready=false\n");
+    const run = classify(fixture);
+    expect(run.status).toBe(0);
+    expect(run.output).toBe(
+      `ready=false\nskip_reason=automatic smoke publication skipped after operational soft-fail: ${fixture.pair}\n`
+    );
+  });
+
+  // A pre-model `unreachable` exit records two different categories over the
+  // life of one incident. `workerResultCategory` in packages/modal/src/launch-state.ts
+  // resolves `exit_category: "unreachable"` with `model_work_started: false` to
+  // `transient-operational-failure`, and the runner rewrites that to
+  // `permanent-operational-failure` once the pre-model retry budget is spent.
+  // The control artifact this classifier reads can hold either one.
+  it("annotates and summarizes both recorded categories of the unreachable-dependency incident it refused to publish", () => {
+    for (const category of ["transient-operational-failure", "permanent-operational-failure"]) {
+      const fixture = setup();
+      writeOutcome(fixture, { ...incomplete(category), pair: fixture.pair });
+
+      const run = classify(fixture, { summary: true });
+      expect(run.status, category).toBe(0);
+      expect(run.output, category).toContain("ready=false\n");
+      expect(run.stdout, category).toContain(
+        `::warning::automatic smoke publication skipped after operational soft-fail: ${fixture.pair}`
+      );
+      expect(run.stdout, category).toContain(
+        `incomplete pairs: ${fixture.pair} (terminal_status=failed, category=${category}, diagnostic_collection_status=succeeded)`
+      );
+      expect(run.stdout, category).toContain(
+        "Published eval history does not advance until one complete Modal benchmark generation exists."
+      );
+      expect(run.stdout.split("\n").filter((line) => line.startsWith("::")).length, category).toBe(1);
+      expect(run.summary, category).toContain("## Eval history publication skipped (incomplete benchmark generation)");
+      expect(run.summary, category).toContain(
+        `- Refusal: automatic smoke publication skipped after operational soft-fail: ${fixture.pair}`
+      );
+      expect(run.summary, category).toContain(
+        `- Incomplete pair: ${fixture.pair} (terminal_status=failed, category=${category},`
+      );
+      expect(run.summary, category).toContain(
+        "Published eval history does not advance until one complete Modal benchmark generation exists."
+      );
+    }
+  });
+
+  it("leaves a published generation unannotated and writes no job summary", () => {
+    const fixture = setup();
+    writeOutcome(fixture, {
+      pair: fixture.pair,
+      terminal_status: "succeeded",
+      category: "succeeded",
+      collection_status: "succeeded"
+    });
+    writeBundle(fixture);
+
+    const run = classify(fixture, { summary: true });
+    expect(run.status).toBe(0);
+    expect(run.output).toBe("ready=true\n");
+    expect(run.stdout).not.toContain("::");
+    expect(run.summary).toBeUndefined();
+  });
+
+  it("still annotates a refusal outside GitHub Actions", () => {
+    const fixture = setup();
+    writeOutcome(fixture, { ...incomplete("resume-required"), pair: fixture.pair });
+
+    const run = classify(fixture);
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toContain("::warning::");
+    expect(run.summary).toBeUndefined();
+  });
+
+  it("pins the refusal verdict for every automatic smoke soft-fail category", () => {
+    for (const category of [
+      "resume-required",
+      "transient-operational-failure",
+      "permanent-operational-failure",
+      "collection-failed",
+      "collection-timeout"
+    ]) {
+      const collectionFailed = category === "collection-failed" || category === "collection-timeout";
+      const fixture = setup();
+      writeOutcome(fixture, {
+        ...incomplete(category),
+        pair: fixture.pair,
+        ...(collectionFailed ? { collection_status: "failed" } : {})
+      });
+
+      const verdict = classifyModalBenchmarkPublication(fixture.control, fixture.results, "smoke", "push");
+      expect(verdict.ready, category).toBe(false);
+      expect(verdict.incompletePairs, category).toEqual([
+        { pair: fixture.pair, terminal_status: "failed", category, diagnostic_collection_status: "succeeded" }
+      ]);
+    }
   });
 
   it("keeps manual, full, genuine, and malformed failures strict", () => {
@@ -102,6 +194,34 @@ describe("Modal benchmark publication readiness", () => {
   });
 });
 
+function classify(fixture: ReturnType<typeof setup>, options: { summary?: boolean } = {}) {
+  const outputPath = path.join(fixture.root, "github-output");
+  const summaryPath = path.join(fixture.root, "github-step-summary");
+  const env = { ...process.env };
+  delete env.GITHUB_STEP_SUMMARY;
+  if (options.summary === true) env.GITHUB_STEP_SUMMARY = summaryPath;
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.resolve("scripts/ci/classify-modal-benchmark-publication.mjs"),
+      fixture.control,
+      fixture.results,
+      "smoke",
+      "push",
+      outputPath
+    ],
+    { cwd: path.resolve("."), encoding: "utf8", env }
+  );
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    output: fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : undefined,
+    summary: fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, "utf8") : undefined
+  };
+}
+
 function incomplete(category: string) {
   return {
     terminal_status: "failed",
@@ -111,7 +231,7 @@ function incomplete(category: string) {
 }
 
 function setup() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "modal-publication-readiness-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "modal-publication-readiness-"));
   roots.push(root);
   const control = path.join(root, "control");
   const results = path.join(root, "results");

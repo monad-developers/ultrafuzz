@@ -463,7 +463,7 @@ describe("public benchmark manifests", () => {
       { workflow_input: variant.workflow_input },
       runnerProfile
     ).runtimeOverrides;
-    const project = mkdtempSync(path.join(tmpdir(), "ultrafuzz-full-policy-"));
+    const project = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-full-policy-"));
     const row = testRow(suite, {
       target: { ...suite.targets[0]!, path: project, ground_truth_path: path.join(project, "ground-truth.yml") },
       variant: { ...variant },
@@ -606,7 +606,7 @@ describe("public benchmark manifests", () => {
   });
 
   it("requires authored benchmark trial counts and preserves explicit multi-trial experiments", () => {
-    const directory = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-trials-"));
+    const directory = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-benchmark-trials-"));
     const lanesPath = path.join(directory, "lanes.json");
     const omitted = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
       smoke: { trials_per_variant?: number };
@@ -668,7 +668,7 @@ describe("public benchmark manifests", () => {
 
   it("accepts only the current lanes v2 document and never converts v1", () => {
     expect(loadBenchmarkLanesManifest(LANES_PATH).schema_version).toBe(BENCHMARK_LANES_SCHEMA_VERSION);
-    const directory = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-lanes-version-"));
+    const directory = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-benchmark-lanes-version-"));
     const lanesPath = path.join(directory, "lanes.json");
     fs.writeFileSync(
       lanesPath,
@@ -680,7 +680,7 @@ describe("public benchmark manifests", () => {
   });
 
   it("rejects mutable revisions, mutable models, and noncanonical lane topology", () => {
-    const directory = mkdtempSync(path.join(tmpdir(), "ultrafuzz-benchmark-manifest-"));
+    const directory = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-benchmark-manifest-"));
     const cohortPath = path.join(directory, "cohort.json");
     fs.writeFileSync(
       cohortPath,

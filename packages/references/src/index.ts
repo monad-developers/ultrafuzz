@@ -855,7 +855,7 @@ function resolveGithubDefaultBranchSha(repo: string): string {
   const { owner, repo: repoName } = githubRepoParts(reference, "update-latest");
   const remote = `https://github.com/${owner}/${repoName}.git`;
   const credential = referenceGitCredential();
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-reference-ls-remote-"));
+  const tempRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-reference-ls-remote-"));
   const gitEnv = {
     ...referenceGitCredentialEnv(credential, repo, remote),
     GIT_CEILING_DIRECTORIES: tempRoot

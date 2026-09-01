@@ -108,7 +108,7 @@ function runMetadata(runId: string, totalTokens: number): Record<string, unknown
       task_node_ids: ["synthetic-strategy"]
     },
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: workflowRunId,
       current: structuredClone(segment),
@@ -369,7 +369,7 @@ async function cli(cwd: string, argv: string[]): Promise<Capture> {
 }
 
 test("eval analyze all generates reports from finalized handoff data", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-test-"));
   const project = path.join(root, "project");
   const privateData = path.join(root, "private-data");
   const input = path.join(privateData, "synthetic-handoff.zip");
@@ -485,7 +485,7 @@ test("eval analyze all generates reports from finalized handoff data", async () 
 });
 
 test("eval analyze refuses private input or output inside the project repository", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-guard-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-guard-"));
   const project = path.join(root, "project");
   const input = path.join(project, "private-handoff.zip");
   const output = path.join(root, "reports");
@@ -601,7 +601,7 @@ test("eval analyze rejects legacy aliases, rewritten paths, malformed typed rows
 
   for (const item of cases) {
     await t.test(item.name, async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-strict-rejection-"));
+      const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-analysis-strict-rejection-"));
       const project = path.join(root, "project");
       const input = path.join(root, "private-data", "synthetic-handoff.zip");
       const output = path.join(root, "private-data", "reports");
@@ -631,7 +631,7 @@ test("eval analyze rejects legacy aliases, rewritten paths, malformed typed rows
 });
 
 test("eval analyze all generates cross-row comparison outputs for independently configured models", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-model-analysis-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-model-analysis-test-"));
   const project = path.join(root, "project");
   const privateData = path.join(root, "private-data");
   const input = path.join(privateData, "synthetic-model-handoff.zip");
@@ -668,7 +668,7 @@ test("eval analyze all generates cross-row comparison outputs for independently 
 });
 
 test("eval analyze all preserves paired detail and every row in mixed comparisons", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-mixed-analysis-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-mixed-analysis-test-"));
   const project = path.join(root, "project");
   const privateData = path.join(root, "private-data");
   const input = path.join(privateData, "synthetic-mixed-handoff.zip");
@@ -707,7 +707,7 @@ test("eval analyze all preserves paired detail and every row in mixed comparison
 });
 
 test("unresolved duplicates do not lower row or condition precision", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-unresolved-duplicate-test-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-unresolved-duplicate-test-"));
   const project = path.join(root, "project");
   const privateData = path.join(root, "private-data");
   const input = path.join(privateData, "synthetic-unresolved-duplicate-handoff.zip");

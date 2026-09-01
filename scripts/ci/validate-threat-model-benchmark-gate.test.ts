@@ -51,7 +51,7 @@ describe("threat-model benchmark structural gate", () => {
 
   it("reads the exact collected bundle path named by the launch manifest", () => {
     const fixture = gateFixture();
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-threat-model-gate-"));
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-threat-model-gate-"));
     roots.push(root);
     const manifestPath = path.join(root, "control", "manifest.json");
     const resultsRoot = path.join(root, "results");

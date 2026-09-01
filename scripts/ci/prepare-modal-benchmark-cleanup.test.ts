@@ -195,7 +195,7 @@ interface CleanupConfig {
 }
 
 function cleanupFixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-cleanup-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-cleanup-"));
   roots.push(root);
   const manifestPath = path.join(root, "manifest.json");
   const outputPath = path.join(root, "pairs.tsv");

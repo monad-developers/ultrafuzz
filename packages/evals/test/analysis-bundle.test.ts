@@ -44,11 +44,13 @@ function syntheticWorkflowRun(root: string, status: "succeeded" | "failed", toke
   writeJson(path.join(root, "run.json"), {
     accounting: {
       cumulative: {
-        input_tokens: tokens,
-        output_tokens: 2,
+        uncached_input_tokens: tokens,
+        input_tokens: tokens + 1,
+        output_tokens: 5,
         cache_read_tokens: 1,
         cache_write_tokens: 0,
         reasoning_tokens: 3,
+        inclusive_token_total: tokens + 6,
         total_tokens: tokens + 6,
         estimated_spend_usd: cost,
         usage_complete: true,
@@ -118,7 +120,7 @@ function writeSingleEvalSources(
 
 describe("privacy-safe eval analysis bundles", () => {
   it("derives portable aggregates and remains valid after source evidence is removed", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-"));
     const evalRunId = "eval-synthetic-analysis";
     const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
     const firstRun = path.join(projectRoot, "synthetic-runs", "run-one");
@@ -260,6 +262,11 @@ describe("privacy-safe eval analysis bundles", () => {
       accounted_run_count: 2,
       runtime_observed_run_count: 2,
       runtime_seconds: 150,
+      input_tokens: 300,
+      output_tokens: 4,
+      cache_read_tokens: 2,
+      cache_write_tokens: 0,
+      reasoning_tokens: 6,
       total_tokens: 312,
       estimated_spend_usd: 0.03,
       partial_pricing: false
@@ -289,7 +296,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects missing required current analysis sources", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-omissions-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-omissions-"));
     const evalRunId = "eval-synthetic-omissions";
     const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
     fs.mkdirSync(evalRoot, { recursive: true });
@@ -300,7 +307,7 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects score summaries that do not exactly join current run records", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-empty-score-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-empty-score-"));
     const evalRunId = "eval-synthetic-empty-score";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const summary = JSON.parse(fs.readFileSync(fixture.summaryPath, "utf8")) as Record<string, unknown> & {
@@ -329,14 +336,14 @@ describe("privacy-safe eval analysis bundles", () => {
   });
 
   it("rejects incomplete accounting instead of defaulting missing fields", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-score-accounting-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-score-accounting-"));
     const evalRunId = "eval-synthetic-score-accounting";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const runPath = path.join(fixture.runRoot, "run.json");
     const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
       accounting: { cumulative: Record<string, unknown> };
     };
-    delete metadata.accounting.cumulative.input_tokens;
+    delete metadata.accounting.cumulative.uncached_input_tokens;
     writeJson(runPath, metadata);
 
     const output = path.join(projectRoot, "bundle");
@@ -345,8 +352,106 @@ describe("privacy-safe eval analysis bundles", () => {
     );
   });
 
+  it("accepts complete rates with partial cost evidence", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-partial-cost-"));
+    const evalRunId = "eval-synthetic-partial-cost";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const runPath = path.join(fixture.runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+      accounting: { cumulative: Record<string, unknown> };
+    };
+    delete metadata.accounting.cumulative.estimated_spend_usd;
+    metadata.accounting.cumulative.usage_complete = false;
+    metadata.accounting.cumulative.pricing_complete = true;
+    metadata.accounting.cumulative.partial_pricing = true;
+    metadata.accounting.cumulative.priced_event_count = 0;
+    metadata.accounting.cumulative.unpriced_event_count = 1;
+    writeJson(runPath, metadata);
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8")) as {
+      estimated_spend_usd: number | null;
+      partial_pricing: boolean;
+    };
+    expect(accounting.estimated_spend_usd).toBeNull();
+    expect(accounting.partial_pricing).toBe(true);
+  });
+
+  it("bounds contradictory provider breakdowns while preserving the source total", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-contradictory-breakdown-"));
+    const evalRunId = "eval-synthetic-contradictory-breakdown";
+    const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+    const runPath = path.join(fixture.runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+      accounting: { cumulative: Record<string, unknown> };
+    };
+    Object.assign(metadata.accounting.cumulative, {
+      uncached_input_tokens: 6,
+      input_tokens: 5,
+      output_tokens: 1,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 2,
+      inclusive_token_total: 6,
+      total_tokens: 6,
+      usage_complete: false
+    });
+    writeJson(runPath, metadata);
+
+    const output = path.join(projectRoot, "bundle");
+    collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8"));
+    expect(accounting).toMatchObject({
+      input_tokens: 5,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 1,
+      total_tokens: 6
+    });
+  });
+
+  it("rejects provider-inclusive accounting whose source total does not reconcile", () => {
+    const mutations: Array<{
+      name: string;
+      mutate: (summary: Record<string, unknown>) => void;
+      reason: string;
+    }> = [
+      {
+        name: "source-total",
+        mutate: (summary) => {
+          summary.total_tokens = 105;
+        },
+        reason: "source token totals must equal"
+      }
+    ];
+
+    for (const mutation of mutations) {
+      const projectRoot = mkdtempSync(path.join(tmpdir(), `ufz-eval-analysis-${mutation.name}-`));
+      const evalRunId = `eval-synthetic-${mutation.name}`;
+      const fixture = writeSingleEvalSources(projectRoot, evalRunId);
+      const runPath = path.join(fixture.runRoot, "run.json");
+      const metadata = JSON.parse(fs.readFileSync(runPath, "utf8")) as {
+        accounting: { cumulative: Record<string, unknown> };
+      };
+      mutation.mutate(metadata.accounting.cumulative);
+      writeJson(runPath, metadata);
+
+      try {
+        collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: path.join(projectRoot, "bundle") });
+        expect.fail("expected inconsistent accounting to be rejected");
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "EVAL_ANALYSIS_ACCOUNTING_INVALID",
+          details: { reason: expect.stringContaining(mutation.reason) }
+        });
+      }
+    }
+  });
+
   it("preserves valid source timestamps and rejects reversed launcher evidence without repair", () => {
-    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-timestamps-"));
+    const projectRoot = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-eval-analysis-timestamps-"));
     const evalRunId = "eval-synthetic-timestamps";
     const fixture = writeSingleEvalSources(projectRoot, evalRunId);
     const statePath = path.join(fixture.runRoot, "state.json");

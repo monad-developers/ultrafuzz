@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { loadTopology, TopologyError } from "../src/index.js";
 
 describe("loadTopology", () => {
   it("fails closed for missing topology", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "ufz-topology-"));
+    const dir = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-topology-"));
     try {
       expect(() => loadTopology(dir)).toThrowError(TopologyError);
       expect(() => loadTopology(dir)).toThrow(expect.objectContaining({ code: "MISSING_TOPOLOGY" }));
@@ -64,7 +64,7 @@ describe("loadTopology", () => {
 });
 
 function mkProject(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ufz-topology-"));
+  const dir = mkdtempSync(path.join(realpathSync(tmpdir()), "ufz-topology-"));
   mkdirSync(path.join(dir, ".ultrafuzz"), { recursive: true });
   return dir;
 }

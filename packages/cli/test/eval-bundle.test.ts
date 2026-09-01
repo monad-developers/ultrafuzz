@@ -7,7 +7,7 @@ import test from "node:test";
 import { runCli } from "../src/index.js";
 
 test("eval bundle rejects an eval run without canonical terminal and scoring evidence", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-analysis-"));
+  const project = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-analysis-"));
   const evalRunId = "eval-cli-analysis";
   fs.mkdirSync(path.join(project, ".ultrafuzz", "evals", "runs", evalRunId), { recursive: true });
   let stdout = "";

@@ -1,4 +1,4 @@
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -198,7 +198,7 @@ function writeUnlinkedEvalJournal(value: ReturnType<typeof fixture>): void {
 }
 
 function fixture() {
-  const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-"));
+  const workRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-resume-"));
   const target = path.join(workRoot, "target");
   const control = path.join(workRoot, "control");
   const evalRunId = "evaluation-one";
@@ -257,7 +257,7 @@ describe("Modal durable evaluation resume", () => {
   });
 
   it("treats only an absent durable run state as unavailable", async () => {
-    const target = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-durable-state-"));
+    const target = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-durable-state-"));
     await expect(readModalDurableRunState(target, "run-one")).resolves.toBeUndefined();
 
     const runsRoot = path.join(target, ".ultrafuzz", "runs");
@@ -478,7 +478,7 @@ describe("Modal durable evaluation resume", () => {
   });
 
   it("reports a workspace with no eval run directory at all as not started", async () => {
-    const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-fresh-"));
+    const workRoot = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-resume-fresh-"));
     // A fresh sandbox must not be mistaken for a corrupt one.
     const found = await findModalResumeWorkspace(workRoot);
     expect(found.kind).toBe("not-started");
@@ -487,7 +487,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("still refuses a symlinked control even when it holds no evaluation run", async () => {
     const value = fixture();
-    const elsewhere = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-elsewhere-"));
+    const elsewhere = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-resume-elsewhere-"));
     fs.rmSync(value.control, { recursive: true });
     fs.symlinkSync(elsewhere, value.control);
     // readdir follows symlinks, so without an explicit shape assertion this would read as "not started"

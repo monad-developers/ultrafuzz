@@ -243,7 +243,7 @@ test("threat model validates evidence-backed capability states and renders canon
 });
 
 test("runtime materialization replaces agent Markdown with the exact canonical threat-model rendering", () => {
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-model-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-threat-model-"));
   fs.writeFileSync(path.join(artifactDir, "threat-model.json"), JSON.stringify(threatModelFixture()));
   fs.writeFileSync(path.join(artifactDir, "THREAT_MODEL.md"), "# Agent rendering that may drift\n");
 
@@ -349,7 +349,7 @@ test("goal-plan applicability evidence uses the strict repository-path contract"
 });
 
 test("threat model evidence publication requires regular files inside the exact workspace", () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-evidence-workspace-"));
+  const workspace = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-threat-evidence-workspace-"));
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "src", "Pool.sol"), "contract Pool {}\n", "utf8");
   const model = validateThreatModel(threatModelFixture()).value!;
@@ -358,7 +358,7 @@ test("threat model evidence publication requires regular files inside the exact 
   fs.unlinkSync(path.join(workspace, "src", "Pool.sol"));
   assert.throws(() => verifyThreatModelEvidenceFiles(model, workspace), /does not exist/u);
 
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-evidence-outside-"));
+  const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-threat-evidence-outside-"));
   fs.writeFileSync(path.join(outside, "Pool.sol"), "contract Outside {}\n", "utf8");
   fs.symlinkSync(path.join(outside, "Pool.sol"), path.join(workspace, "src", "Pool.sol"));
   assert.throws(() => verifyThreatModelEvidenceFiles(model, workspace), /cannot be a symlink/u);
@@ -725,7 +725,7 @@ test("an applicable class remains planned when no explicit threat maps to it", (
 });
 
 test("initial finding normalization ignores agent provenance and seeds the runtime-controlled producer", () => {
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-goal-provenance-"));
   fs.writeFileSync(
     path.join(artifactDir, "findings.json"),
     JSON.stringify([
@@ -753,7 +753,7 @@ test("initial finding normalization ignores agent provenance and seeds the runti
 });
 
 test("downstream normalization preserves discovery sources without treating the transformer as a discoverer", () => {
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-transform-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-goal-provenance-transform-"));
   fs.writeFileSync(
     path.join(artifactDir, "deduped-findings.json"),
     JSON.stringify([
@@ -783,7 +783,7 @@ test("downstream normalization preserves discovery sources without treating the 
     "dynamic:class:liquidation:fixed-term-before-overdue"
   ]);
 
-  const tamperedDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-tamper-"));
+  const tamperedDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-goal-provenance-tamper-"));
   fs.writeFileSync(
     path.join(tamperedDir, "deduped-findings.json"),
     JSON.stringify([
@@ -857,7 +857,7 @@ test("dedupe provenance rejects dropped corroborating sources and incomplete lif
     lifecycleLedger,
     requireLifecycleCoverage: true
   });
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-drop-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-goal-provenance-drop-"));
   fs.writeFileSync(
     path.join(artifactDir, "deduped-findings.json"),
     JSON.stringify([
@@ -977,7 +977,7 @@ test("generic finding ID collisions cannot union unrelated discovery lanes", () 
     lifecycleLedger,
     requireLifecycleCoverage: true
   });
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-provenance-id-collision-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-provenance-id-collision-"));
   const finding = {
     id: "finding-1",
     dedupe_key: "root:rounding",
@@ -1102,7 +1102,7 @@ test("generic finding ID collisions cannot union unrelated discovery lanes", () 
 });
 
 test("selected vulnerability-class snapshots are manifest-backed exact artifacts", () => {
-  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-selected-classes-"));
+  const artifactDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-selected-classes-"));
   const contents = Buffer.from("# Share inflation\n\nFocused hunter instructions.\n");
   const selectedPath = "vulnerability-db/selected/accounting/share-inflation.md";
   const classId = "accounting:share-inflation";

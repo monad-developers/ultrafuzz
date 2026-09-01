@@ -32,7 +32,7 @@ const DIGEST_B = "b".repeat(64);
 const CREATED_AT = "2026-08-09T12:00:00.000Z";
 
 function temporaryDirectory(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-run-documents-"));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-run-documents-"));
 }
 
 function canonicalSourceRun(overrides: Partial<SourceRunDocument> = {}): SourceRunDocument {
@@ -212,7 +212,7 @@ function canonicalRunMetadata(): RunMetadataDocument {
       task_node_ids: ["node-a-0"]
     },
     accounting: {
-      schema_version: "ultrafuzz.accounting.v3",
+      schema_version: "ultrafuzz.accounting.v4",
       source: "usage-ledger",
       workflow_run_id: "workflow-current",
       current: structuredClone(segment),

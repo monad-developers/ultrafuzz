@@ -76,14 +76,11 @@ For Vyper targets, record a concrete bytecode path for downstream tests:
   contracts need the deployment helper or an explicit initializer/manual setup
   after etching.
 
-Make sure Foundry compilation is passing.
+When Foundry is available, make Foundry compilation pass.
 
-Check Foundry availability only with `forge --version`. If it reports command
-not found, record that `forge` is not available in PATH and continue by writing
-the minimal Foundry scaffold and a clear validation note. Do not inspect host
-install directories or shell environment variables. Wrong: `echo "$PATH"`.
-Wrong: `ls -la ~/.foundry/bin`. Wrong:
-`ls -la /home/ubuntu/.foundry/bin`.
+Use `forge --version` to determine whether Foundry is available on `PATH`. When
+it is unavailable, record validation as blocked and continue by writing the
+minimal Foundry scaffold and a clear validation note.
 
 For Vyper targets, also record blocked validation clearly when `vyper`,
 `vyper-json`, a required project script, Python environment, or project-local

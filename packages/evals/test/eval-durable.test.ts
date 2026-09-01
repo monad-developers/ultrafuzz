@@ -65,7 +65,7 @@ import {
 const timestamp = "2026-07-09T00:00:00.000Z";
 
 function fixtureRoot(name: string): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), `${name}-`));
 }
 
 function judgeResult(overrides: Partial<FindingJudgeResult> = {}): FindingJudgeResult {

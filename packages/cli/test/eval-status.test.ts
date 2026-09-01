@@ -12,7 +12,7 @@ import { runCli } from "../src/index.js";
 const DIGEST = "a".repeat(64);
 
 test("eval status renders disclosure-safe table and JSON snapshots without mutating run state", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-"));
+  const project = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-eval-status-"));
   const evalRunId = "synthetic-eval";
   const evalRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
   const runRoot = path.join(project, "private-target-checkout", ".ultrafuzz", "runs", "synthetic-run");
@@ -141,7 +141,7 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
 });
 
 test("eval status watch exits when remaining rows cannot progress", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-invalid-"));
+  const project = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-eval-status-invalid-"));
   const evalRunId = "synthetic-invalid-eval";
   const evalRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
   const runRoot = path.join(project, "private-invalid-target", ".ultrafuzz", "runs", "synthetic-invalid-run");
@@ -196,7 +196,7 @@ test("eval status watch exits when remaining rows cannot progress", async () => 
 });
 
 test("eval status watch keeps JSON failures on one line", async () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-error-"));
+  const project = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-eval-status-error-"));
 
   const result = await invoke(project, [
     "eval",

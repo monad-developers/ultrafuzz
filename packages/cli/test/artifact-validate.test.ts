@@ -62,7 +62,7 @@ const validCoverageEvidence = {
 };
 
 test("artifact validate executes document-local coverage evidence gates", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-artifact-validate-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-artifact-validate-"));
   try {
     fs.writeFileSync(path.join(temporary, validCoverageEvidence.lcov.path), coverageInputBytes);
     fs.writeFileSync(path.join(temporary, validCoverageEvidence.recon_selection.path), reconSelectionBytes);
@@ -208,7 +208,7 @@ test("artifact validate executes document-local coverage evidence gates", async 
 });
 
 test("artifact validate exposes generated-test task authority before producer completion", async () => {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-artifact-context-"));
+  const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-artifact-context-"));
   try {
     const artifactRoot = path.join(temporary, "artifacts", "dynamic-class-goals-storage-7");
     const companionPath = path.join(artifactRoot, "generated-tests", "Dynamic.t.sol");

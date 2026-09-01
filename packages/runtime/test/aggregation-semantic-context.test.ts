@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -383,7 +383,7 @@ function createNoGeneratedProducerFixture(runId: string): {
   layout: RunLayout;
   aggregationNode: PlannedGraphNodeDocument;
 } {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-empty-aggregation-authority-"));
+  const outputRoot = temporaryRoot("ultrafuzz-empty-aggregation-authority-");
   const seedNode = plannedNode("seed", [], boundOutput("seed.md", "ultrafuzz/nonempty-markdown@1"));
   const aggregationNode = plannedNode(
     "aggregate-test-files",
@@ -453,7 +453,7 @@ function resealProducerPrerequisiteDigests(fixture: AggregationAuthorityFixture)
 }
 
 function createAggregationAuthorityFixture(runId: string): AggregationAuthorityFixture {
-  const outputRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-aggregation-authority-"));
+  const outputRoot = temporaryRoot("ultrafuzz-aggregation-authority-");
   const originOutput = boundOutput("origin.md", "ultrafuzz/nonempty-markdown@1");
   const seedOutput = boundOutput("seed.md", "ultrafuzz/nonempty-markdown@1");
   const generatedOutput = boundOutput("generated-tests.json", "ultrafuzz/generated-tests@3");

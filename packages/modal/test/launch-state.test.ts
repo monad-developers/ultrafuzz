@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -116,7 +116,7 @@ function workerResult(overrides: Partial<WorkerResultContract> = {}): WorkerResu
 
 describe("Modal launch ownership", () => {
   it("serializes concurrent reservations and writes state by atomic replacement", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-lock-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-lock-"));
     const statePath = path.join(root, "launch-state.json");
     await writeModalLaunchState(statePath, launchState());
 
@@ -166,7 +166,7 @@ describe("Modal launch ownership", () => {
   it.each(["", " padded-token ", "x".repeat(257)])(
     "rejects an invalid explicit launch lock token before creating evidence",
     async (token) => {
-      const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-invalid-lock-token-"));
+      const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-invalid-lock-token-"));
       const statePath = path.join(root, "launch-state.json");
 
       await expect(withModalLaunchStateLock(statePath, async () => undefined, { token })).rejects.toThrow(
@@ -178,7 +178,7 @@ describe("Modal launch ownership", () => {
   );
 
   it("reclaims a crashed owner before admitting the restarted process", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-crashed-lock-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-crashed-lock-"));
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(
       `${statePath}.lock`,
@@ -192,7 +192,7 @@ describe("Modal launch ownership", () => {
   });
 
   it("reclaims a stale lock when its PID has been reused by another process", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-reused-pid-lock-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-reused-pid-lock-"));
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(
       `${statePath}.lock`,
@@ -215,7 +215,7 @@ describe("Modal launch ownership", () => {
       ["duplicate", '{"token":"owner","token":"shadow","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z"}\n'],
       ["underspecified", '{"token":"owner","pid":2147483647,"created_at":"2026-01-01T00:00:00.000Z","extra":true}\n']
     ] as const) {
-      const root = mkdtempSync(path.join(tmpdir(), `ultrafuzz-modal-${name}-lock-`));
+      const root = mkdtempSync(path.join(realpathSync(tmpdir()), `ultrafuzz-modal-${name}-lock-`));
       const statePath = path.join(root, "launch-state.json");
       const lockPath = `${statePath}.lock`;
       fs.writeFileSync(lockPath, contents, { mode: 0o600 });
@@ -235,7 +235,7 @@ describe("Modal launch ownership", () => {
   });
 
   it("does not unlink lock metadata that becomes malformed while the owner is running", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-mutated-lock-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-mutated-lock-"));
     const statePath = path.join(root, "launch-state.json");
     const lockPath = `${statePath}.lock`;
     const malformed = '{"token":"truncated"';
@@ -434,7 +434,7 @@ describe("Modal lineage", () => {
         }
       ]
     };
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-legacy-state-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-legacy-state-"));
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
 
@@ -448,7 +448,7 @@ describe("Modal lineage", () => {
     const field = `"logical_run_id":"${state.logical_run_id}"`;
     const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
     expect(duplicate).not.toBe(serialized);
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-duplicate-state-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-duplicate-state-"));
     const statePath = path.join(root, "launch-state.json");
     fs.writeFileSync(statePath, duplicate, { mode: 0o600 });
 
@@ -499,7 +499,7 @@ describe("Modal lineage", () => {
     expect(fingerprintModalImage("image-placeholder", "id-one")).not.toBe(
       fingerprintModalImage("image-placeholder", "id-two")
     );
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-source-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-source-"));
     execFileSync("git", ["init", "--quiet"], { cwd: root });
     fs.writeFileSync(path.join(root, "source.txt"), "one\n");
     execFileSync("git", ["add", "source.txt"], { cwd: root });

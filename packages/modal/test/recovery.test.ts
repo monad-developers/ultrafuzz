@@ -1,4 +1,4 @@
-import fs, { mkdtempSync } from "node:fs";
+import fs, { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -34,7 +34,7 @@ const IMAGE_TWO = "recovery-image-two";
 
 describe("Modal durable recovery policy", () => {
   it("round-trips current recovery state through the canonical registered contract", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-state-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-recovery-state-"));
     const statePath = path.join(root, "nested", "recovery-state.json");
     const current = state();
 
@@ -50,7 +50,7 @@ describe("Modal durable recovery policy", () => {
   });
 
   it("returns absence only when the recovery state file is missing", async () => {
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-missing-recovery-state-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-missing-recovery-state-"));
 
     await expect(readModalRecoveryState(path.join(root, "missing.json"))).resolves.toBeUndefined();
   });
@@ -61,7 +61,7 @@ describe("Modal durable recovery policy", () => {
     const field = `"logical_run_id":"${current.logical_run_id}"`;
     const duplicate = serialized.replace(field, `${field},"logical_run_id":"shadow-run"`);
     expect(duplicate).not.toBe(serialized);
-    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-duplicate-recovery-state-"));
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-duplicate-recovery-state-"));
     const statePath = path.join(root, "recovery-state.json");
     fs.writeFileSync(statePath, duplicate, { mode: 0o600 });
 

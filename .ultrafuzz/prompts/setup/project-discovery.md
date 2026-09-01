@@ -9,16 +9,14 @@ You are a Lead Security Researcher.
 
 Your job is to investigate the repository before any fuzz test is authored.
 
-
 ## 1. Development framework
 
 Look into contracts, tests, docs, deployment scripts, existing Foundry tests, existing Hardhat tests, and any reference implementation or specification files to derive the project surfaces that can support fuzzing.
 
 When inventorying repository files, use a single simple command. Prefer
 `rg --files contracts`, `rg --files test`, or `rg --files` for file lists. Do
-not pipe `find` output into `sort` or any other command. Wrong:
-`find contracts -type f | sort`. If `rg` is unavailable, run
-`find contracts -type f` by itself and leave ordering unsorted.
+not pipe file-list output through additional commands. If `rg` is unavailable,
+run a workspace-scoped `find` command by itself and leave ordering unsorted.
 
 When searching for optional Foundry fuzzing or invariant config signals, keep
 each probe separate and simple. Use
@@ -63,16 +61,14 @@ For projects with Vyper signals, record only project-local compiler evidence:
 the exact Vyper command, script, or dependency pin the repository provides,
 normally `vyper`, `vyper-json`, a package script, or a Python environment file.
 If `vyper --version` or `vyper-json --version` is directly available in PATH you
-may record it, but do not search global install directories and do not install or
-vendor untracked compiler dependencies during discovery.
+may record it. Keep tooling discovery to those project-local files and direct
+version checks; do not install or vendor compiler dependencies during discovery.
 
 If a tool version command returns `command not found`, record that the tool is
-not available in PATH and continue. Do not inspect host or global installation
-directories such as `$HOME/.foundry/bin`, `/home/ubuntu/.foundry/bin`,
-`/usr/local/bin`, or `/usr/bin`.
+not available on `PATH` and continue.
 
 Do not require Echidna, Medusa, or Halmos availability during project
-discovery; they are not Ultrafuzz beta execution dependencies.
+discovery; they are not required by this workflow.
 
 ## Invariant and equation inventory
 
