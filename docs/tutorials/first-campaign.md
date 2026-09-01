@@ -13,6 +13,13 @@ You need:
 - Any agent credentials required by the generated project agent registry.
 - Foundry or a target-project layout your prompts can use for fuzz tests.
 
+> **Security note:** run this tutorial on an ephemeral, isolated virtual machine
+> you can discard afterwards. Agents run in an unrestricted, skip-permissions
+> workflow and may install or access dangerous tooling or sensitive credentials
+> present on the host. Do not run it on a developer workstation, a persistent
+> environment, or any machine holding valuable data or credentials. See
+> [Security](../security.md).
+
 From the Ultrafuzz repository, install dependencies and build the CLI:
 
 ```bash
