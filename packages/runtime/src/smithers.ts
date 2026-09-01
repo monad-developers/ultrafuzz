@@ -201,7 +201,7 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
           cliPath,
           ...childArgs,
         ]);
-        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
+        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(childSnapshotTransfer.root)), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
           detached: true,
           stdio:
             childSnapshotTransfer === undefined
@@ -231,7 +231,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         const supervisorFd = openSync(logFile, "a");
         let supervisor;
         try {
-          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
+          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(supervisorSnapshotTransfer.root)), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
             detached: true,
             stdio:
               supervisorSnapshotTransfer === undefined
@@ -253,6 +253,11 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
 // throws `detached log is unavailable` instead of falling back to `"ignore"`.
 // The replacement still overrides all three, and still supplies the fd-3
 // execution-snapshot descriptor upstream has no equivalent of.
+// The bun startup arguments 0.35.0 leaves inline in the resume patch. The
+// darwin-capable patch swaps the whole expression for a descriptor-rooted
+// helper call, so it is named here to keep that substitution checkable.
+const RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS =
+  '[...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]';
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const runtime = options.executable ? { command: options.executable, args } : smithersRuntimeSpawn(args);
     const child = spawn(runtime.command, runtime.args, {
       cwd,
@@ -278,7 +283,8 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH = `    const snaps
         ? parsedSnapshotDescriptor
         : undefined;
     if (snapshotTransferDeclared) {
-      const expectedProcessRoot = "/proc/" + process.pid + "/fd/" + snapshotDescriptor;
+      const expectedProcessRoot =
+        snapshotDescriptor === undefined ? undefined : ultrafuzzDescriptorRootPath(snapshotDescriptor);
       const processStat =
         snapshotDescriptor === undefined || !snapshotProcessRoot
           ? undefined
@@ -311,11 +317,13 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH = `    const snaps
     const snapshotRoots = [snapshotSourceRoot, snapshotProcessRoot, snapshotPersistedRoot].filter(
       (value) => value !== undefined && value.length > 1,
     );
+    const snapshotChildRoot =
+      snapshotDescriptor === undefined ? "/proc/self/fd/3" : ultrafuzzChildRootPath(snapshotDescriptor);
     const rewriteSnapshotArgument = (value) => {
       if (snapshotDescriptor === undefined) return value;
       for (const root of snapshotRoots) {
         if (value === root || value.startsWith(root + "/")) {
-          return "/proc/self/fd/3" + value.slice(root.length);
+          return snapshotChildRoot + value.slice(root.length);
         }
       }
       return value;
@@ -339,10 +347,20 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH = `    const snaps
       },
       detached: true,
     });`;
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH.replace(
-  '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
-  '"--no-addons", "--preserve-symlinks-main"'
-);
+// The form Ultrafuzz wrote before 0.35.0 dropped `--preserve-symlinks`.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH =
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH.replace(
+    '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
+    '"--no-addons", "--preserve-symlinks-main"'
+  );
+// The form Ultrafuzz wrote while the child root was the /proc literal. An
+// installation patched by that release is still recognized through the
+// predecessor list below rather than being rewritten in place.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH =
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
+    RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
+    "[...ultrafuzzBunStartupArgsFor(snapshotChildRoot), ...args.map(rewriteSnapshotArgument)]"
+  );
 // 0.35.0 reflowed this import across multiple lines and added `watch`;
 // `realpathSync` is still absent, so the CLI still cannot compare a workflow
 // path against its persisted generation without this patch.
@@ -359,6 +377,7 @@ const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE = `import {
 } from "node:fs";`;
 const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH = `import {
   closeSync,
+  fstatSync,
   readFileSync,
   existsSync,
   mkdirSync,
@@ -391,9 +410,32 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE =
 // literal 0.34.0 shape. The replacement declares its own `relaunchArgs` and
 // never reads `runtime`, so it substitutes cleanly and keeps the fd-3 transfer.
 const SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE = `  if (typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);\n    process.execve(runtime.command, [runtime.command, ...runtime.args], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);\n  const child = spawn(runtime.command, runtime.args, {\n    env: childEnv,\n    stdio: "inherit",\n  });`;
-const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgs), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
+const SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH = `  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];\n  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);\n  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {\n    process.chdir(cliPackageDir);\n    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);\n  }\n  process.chdir(cliPackageDir);\n  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(relaunchSnapshotTransfer.root)), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {\n    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },\n    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],\n  });`;
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH = `process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
-const ultrafuzzBunStartupArgs = process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : [];
+// Linux addresses an open directory descriptor as /proc/<pid>/fd/<n>. macOS has
+// no /proc, and its /dev/fd/<n> entry for a directory cannot be traversed, so it
+// uses volfs instead: /.vol/<dev>/<ino> is rooted at an inode rather than a name,
+// which is the same swap-immunity /proc/self/fd provides here. A volfs path is
+// process-independent, so the same string is valid in the child; the descriptor
+// is still inherited as fd 3 and still pins the inode against reuse.
+const ultrafuzzVolfsRoot = (descriptor) => {
+  const opened = fstatSync(descriptor);
+  return "/.vol/" + opened.dev + "/" + opened.ino;
+};
+const ultrafuzzDescriptorRootPath = (descriptor) =>
+  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
+const ultrafuzzInheritedRootPath = (descriptor) =>
+  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/" + descriptor;
+// The path the child will use for the directory it receives as fd 3.
+const ultrafuzzChildRootPath = (descriptor) =>
+  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";
+// volfs paths have no realpath(3) resolution, so identity is compared by inode.
+const ultrafuzzSameDirectory = (left, right) => {
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+};
+const ultrafuzzBunStartupArgsFor = (root) => process.versions.bun ? ["--config=" + root + "/controls/bunfig.toml", "--env-file=" + root + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks", "--preserve-symlinks-main", "--preload=" + root + "/controls/bun-module-confinement.js"] : [];
 
 // Ultrafuzz invokes this process through a descriptor held by its controller.
 // Each detached descendant receives that directory atomically as fd 3, opens a
@@ -466,20 +508,22 @@ function ultrafuzzExecutionSnapshotChildTransfer(args) {
     throw new Error("process execution snapshot transfer capability is incomplete or invalid");
   }
 
-  const expectedProcessRoot = "/proc/" + process.pid + "/fd/" + descriptor;
+  const expectedProcessRoot = ultrafuzzDescriptorRootPath(descriptor);
+  const childRoot = ultrafuzzChildRootPath(descriptor);
   if (
     processRoot !== expectedProcessRoot ||
     !statSync(sourceRoot).isDirectory() ||
     !statSync(processRoot).isDirectory() ||
-    realpathSync(sourceRoot) !== realpathSync(persistedRoot) ||
-    realpathSync(processRoot) !== realpathSync(persistedRoot)
+    !ultrafuzzSameDirectory(sourceRoot, persistedRoot) ||
+    !ultrafuzzSameDirectory(processRoot, persistedRoot)
   ) {
     throw new Error("process execution snapshot transfer capability is no longer current");
   }
   return {
     descriptor,
+    root: childRoot,
     args: args.map((value) =>
-      rewriteUltrafuzzExecutionSnapshotValue(value, [sourceRoot, processRoot, persistedRoot], "/proc/self/fd/3")
+      rewriteUltrafuzzExecutionSnapshotValue(value, [sourceRoot, processRoot, persistedRoot], childRoot)
     ),
     env: { [ultrafuzzInheritedSnapshotDescriptorEnv]: "3" },
   };
@@ -516,21 +560,19 @@ function anchorUltrafuzzExecutionSnapshotForProcess() {
     throw new Error("inherited execution snapshot descriptor must be fixed fd 3");
   }
   const inheritedDescriptor = inheritedDescriptorValue === undefined ? undefined : 3;
-  if (inheritedDescriptor === undefined && !/^\\/proc\\/[0-9]+\\/fd\\/[0-9]+$/u.test(configuredSourceRoot)) return;
+  if (inheritedDescriptor === undefined && !/^(?:\\/proc\\/[0-9]+\\/fd\\/[0-9]+|\\/\\.vol\\/[0-9]+\\/[0-9]+)$/u.test(configuredSourceRoot)) return;
 
   const { persistedWorkflowPath, persistedRoot } =
     ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue);
-  const sourceRoot = inheritedDescriptor === undefined ? configuredSourceRoot : "/proc/self/fd/" + inheritedDescriptor;
+  const sourceRoot =
+    inheritedDescriptor === undefined ? configuredSourceRoot : ultrafuzzInheritedRootPath(inheritedDescriptor);
   const acquisitionRoot = sourceRoot;
   let descriptor;
   try {
     descriptor = inheritedDescriptor ?? openSync(acquisitionRoot, "r");
-    const processRoot = "/proc/" + process.pid + "/fd/" + descriptor;
+    const processRoot = ultrafuzzDescriptorRootPath(descriptor);
     const processStat = statSync(processRoot);
-    if (
-      !processStat.isDirectory() ||
-      realpathSync(processRoot) !== realpathSync(persistedRoot)
-    ) {
+    if (!processStat.isDirectory() || !ultrafuzzSameDirectory(processRoot, persistedRoot)) {
       throw new Error("process execution snapshot descriptor changed during acquisition");
     }
 
@@ -2409,7 +2451,10 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/resume-detached.js",
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
-    predecessors: [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+    predecessors: [
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH
+    ],
     patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },

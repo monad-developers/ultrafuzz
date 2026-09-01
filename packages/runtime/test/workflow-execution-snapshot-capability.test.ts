@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { descriptorPathsAvailable } from "./descriptor-paths.js";
 
 import {
   acquireWorkflowExecutionSnapshotAnchor,
@@ -11,8 +12,6 @@ import {
   type WorkflowExecutionSnapshotIdentity,
   type WorkflowExecutionSnapshotProtectedEntry
 } from "../src/workflow-execution-snapshot-capability.js";
-
-const descriptorPathsAvailable = process.platform !== "win32" && fs.existsSync("/proc/self/fd");
 
 function snapshotFixture(fileCount: number): {
   env: Record<string, string | undefined>;

@@ -51,7 +51,7 @@ const BUN_EMPTY_ENVIRONMENT_PATH = "controls/bun-empty.env";
 // keep their imports in Bun's native file namespace so package and CommonJS
 // semantics remain intact. Dependency symlinks are intentionally canonicalized
 // by every launch site before the outside-root loader guard sees them.
-export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"), descriptorAlias = new RegExp("^/proc/(?:(?:" + process.pid + ")|self)/fd/[0-9]+(?:/|$)"), loader = (value) => ({ ".jsx": "jsx", ".ts": "ts", ".mts": "ts", ".cts": "ts", ".tsx": "tsx", ".json": "json", ".toml": "toml" })[path.extname(value).toLowerCase()] || "js", current = () => { if (fs.realpathSync(sourceRoot) !== physicalRoot || fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); }, rejected = (value) => new Error("workflow controller module resolved outside its sealed snapshot: " + value + " (sealed snapshot: " + physicalRoot + ")"), resolveSealed = (value) => { current(); let resolved; try { resolved = fs.realpathSync(value); } catch { throw rejected(value); } if (resolved !== physicalRoot && !resolved.startsWith(physicalRoot + path.sep)) throw rejected(value); return resolved; }; plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: descriptorAlias, namespace: "file" }, (args) => { const resolved = resolveSealed(args.path); return { contents: fs.readFileSync(resolved), loader: loader(resolved), resolveDir: path.dirname(resolved) }; }); build.onLoad({ filter: outside, namespace: "file" }, (args) => { current(); throw rejected(args.path); }); } });\n`;
+export const BUN_MODULE_CONFINEMENT_SOURCE = `import fs from "node:fs"; import path from "node:path"; import { fileURLToPath } from "node:url"; import { plugin } from "bun"; const sourceRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url))), physicalRoot = fs.realpathSync(sourceRoot), descriptor = fs.openSync(sourceRoot, "r"), descriptorRoot = "/proc/" + process.pid + "/fd/" + descriptor, descriptorRooted = fs.existsSync(descriptorRoot), escape = (value) => [...value].map((character) => "^$.*+?()[]{}|\\\\".includes(character) ? "\\\\" + character : character).join(""), allowed = [sourceRoot, physicalRoot].map(escape).join("|"), outside = new RegExp("^(?!(?:" + allowed + ")(?:/|$)).+"), descriptorAlias = new RegExp("^/proc/(?:(?:" + process.pid + ")|self)/fd/[0-9]+(?:/|$)"), loader = (value) => ({ ".jsx": "jsx", ".ts": "ts", ".mts": "ts", ".cts": "ts", ".tsx": "tsx", ".json": "json", ".toml": "toml" })[path.extname(value).toLowerCase()] || "js", current = () => { if (fs.realpathSync(sourceRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); if (descriptorRooted) { if (fs.realpathSync(descriptorRoot) !== physicalRoot) throw new Error("workflow controller snapshot changed during sealed resolution"); } else { const opened = fs.fstatSync(descriptor), physical = fs.statSync(physicalRoot); if (opened.dev !== physical.dev || opened.ino !== physical.ino) throw new Error("workflow controller snapshot changed during sealed resolution"); } }, rejected = (value) => new Error("workflow controller module resolved outside its sealed snapshot: " + value + " (sealed snapshot: " + physicalRoot + ")"), resolveSealed = (value) => { current(); let resolved; try { resolved = fs.realpathSync(value); } catch { throw rejected(value); } if (resolved !== physicalRoot && !resolved.startsWith(physicalRoot + path.sep)) throw rejected(value); return resolved; }; plugin({ name: "ultrafuzz-sealed-modules", setup(build) { build.onLoad({ filter: descriptorAlias, namespace: "file" }, (args) => { const resolved = resolveSealed(args.path); return { contents: fs.readFileSync(resolved), loader: loader(resolved), resolveDir: path.dirname(resolved) }; }); build.onLoad({ filter: outside, namespace: "file" }, (args) => { current(); throw rejected(args.path); }); } });\n`;
 const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
   [BUN_MODULE_CONFINEMENT_PATH]: Buffer.from(BUN_MODULE_CONFINEMENT_SOURCE),
   [BUN_EMPTY_ENVIRONMENT_PATH]: Buffer.from("\n"),
@@ -858,7 +858,7 @@ function openWorkflowExecutionSnapshotsDirectory(
         descriptor === undefined
           ? undefined
           : verifiedSnapshotDescriptorPath(descriptor, opened.dev, opened.ino, "workflow execution snapshots");
-      const realPath = fs.realpathSync(snapshotsAccess);
+      const realPath = canonicalSnapshotPath(snapshotsAccess, snapshotsRoot);
       if (realPath !== snapshotsRoot) throw new Error("workflow execution snapshots root is not canonical");
       return {
         lexicalPath: snapshotsRoot,
@@ -890,7 +890,17 @@ function verifiedSnapshotDescriptorPath(
   inode: number,
   label: string
 ): string | undefined {
-  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`]) {
+  // Linux exposes an open directory as a traversable path under /proc/self/fd.
+  // macOS has no /proc, and its fdesc /dev/fd/<n> entry reports devfs's own
+  // st_dev and cannot be traversed at all (/dev/fd/<n>/child is ENOENT), so it
+  // never satisfies the identity check below. macOS instead exposes volfs,
+  // where /.vol/<dev>/<ino> names a path rooted at an inode rather than at a
+  // name. That is the same property /proc/self/fd provides here: renaming or
+  // symlink-swapping any component cannot redirect resolution. The descriptor
+  // stays open for as long as the path is used, which pins the inode number
+  // against reuse, so the volfs path resolves to exactly this directory. The
+  // identity check below is applied to it unchanged.
+  for (const candidate of [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`, `/.vol/${device}/${inode}`]) {
     try {
       const stat = fs.statSync(candidate);
       if (stat.isDirectory() && stat.dev === device && stat.ino === inode) return candidate;
@@ -902,6 +912,27 @@ function verifiedSnapshotDescriptorPath(
     throw new Error(`${label} has no verifiable directory descriptor path`);
   }
   return undefined;
+}
+
+const VOLFS_ROOT = "/.vol";
+
+function isVolfsPath(value: string): boolean {
+  return value === VOLFS_ROOT || value.startsWith(`${VOLFS_ROOT}/`);
+}
+
+/**
+ * Canonicalize a snapshot path for comparison.
+ *
+ * On Linux the access path is a /proc/self/fd path, which realpath(3) resolves
+ * to the physical path, so the access path is used directly and behavior is
+ * unchanged. macOS volfs paths deliberately have no realpath(3) resolution
+ * (/.vol/<dev>/<ino> is ENOENT to realpath), so canonicalization goes through
+ * the lexical path instead. Every caller has already asserted that its access
+ * and lexical paths name the same device and inode, so the two resolve to the
+ * same directory entry; only the spelling used to reach it differs.
+ */
+function canonicalSnapshotPath(accessPath: string, lexicalPath: string): string {
+  return fs.realpathSync(isVolfsPath(accessPath) ? lexicalPath : accessPath);
 }
 
 function assertExactDirectoryIdentity(directory: string, device: number, inode: number, label: string): void {
@@ -1429,7 +1460,8 @@ function writeSnapshotLink(
       throw new Error(`workflow dependency link was not stable: ${relativePath}`);
     }
     const target = snapshotPath(boundary.accessRoot, targetRelativePath, "workflow dependency target");
-    if (fs.realpathSync(destination) !== fs.realpathSync(target)) {
+    const lexicalTarget = snapshotPath(boundary.lexicalRoot, targetRelativePath, "workflow dependency target");
+    if (canonicalSnapshotPath(destination, lexicalDestination) !== canonicalSnapshotPath(target, lexicalTarget)) {
       throw new Error(`workflow dependency link resolved to the wrong target: ${relativePath}`);
     }
     assertOpenedPublicationDirectoryCurrent(parent, "workflow dependency link directory");
@@ -1613,7 +1645,13 @@ function verifyPublishedWorkflowExecutionSnapshot(
         ) {
           throw new Error(`workflow execution snapshot has an unexpected link: ${relative}`);
         }
-        if (fs.realpathSync(absolute) !== fs.realpathSync(snapshotPath(root, target, "workflow dependency target"))) {
+        if (
+          canonicalSnapshotPath(absolute, lexicalAbsolute) !==
+          canonicalSnapshotPath(
+            snapshotPath(root, target, "workflow dependency target"),
+            snapshotPath(lexicalRoot, target, "workflow dependency target")
+          )
+        ) {
           throw new Error(`workflow execution snapshot link escapes or changed target: ${relative}`);
         }
         protectedEntries.push({
