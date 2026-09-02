@@ -24840,13 +24840,16 @@ test("unverified dependency detection reads a dependent prepare failure off the 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeOutOfOrderTopology(project);
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId: "ultrafuzz-reset-lifecycle-run",
       status: "failed",
       state: "failed",
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "failed", attempt: 1 }
+      ]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
@@ -24859,16 +24862,20 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
       rendered_prompt_snapshot_path: string;
     }>;
   };
-  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows")!;
+  const priorPlannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
   const snapshotPath = path.join(run.value!.run_root, plannedPrompt.rendered_prompt_snapshot_path);
+  const priorSnapshotPath = path.join(run.value!.run_root, priorPlannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
+  const expectedPriorPrompt = fs.readFileSync(priorSnapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const detached = await resumeRun({
     projectRoot: project,
     runId: "reset-lifecycle-run",
-    resetNode: "node:project-discovery",
+    resetNode: "node:actors-flows",
     env: { ...env, SMITHERS_FAKE_FAIL_UP: "1" }
   });
 
@@ -24881,16 +24888,22 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
     expectedPrompt,
     "reset continuation must restore the authenticated presentation prompt"
   );
+  assert.deepEqual(
+    fs.readFileSync(priorPlannedPrompt.rendered_prompt_path),
+    expectedPriorPrompt,
+    "reset continuation must restore a presentation prompt removed by an earlier reset"
+  );
   const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
-  fs.writeFileSync(snapshotPath, "mismatched retained prompt\n", "utf8");
+  fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(priorSnapshotPath, "mismatched retained prompt\n", "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const rejected = await resumeRun({
     projectRoot: project,
     runId: "reset-lifecycle-run",
-    resetNode: "node:project-discovery",
+    resetNode: "node:actors-flows",
     env
   });
 
@@ -24898,15 +24911,19 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match reset task/u);
   const rejectedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(rejectedCommands, /^inspect /mu);
-  assert.doesNotMatch(rejectedCommands, /^(?:timetravel|up) /mu, "invalid snapshot must fail before mutation or launch");
+  assert.doesNotMatch(
+    rejectedCommands,
+    /^(?:timetravel|up) /mu,
+    "invalid snapshot must fail before mutation or launch"
+  );
   assert.equal(fs.existsSync(markerPath), true, "rejected recovery must retain the reset marker");
-  fs.writeFileSync(snapshotPath, expectedPrompt);
+  fs.writeFileSync(priorSnapshotPath, expectedPriorPrompt);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const retried = await resumeRun({
     projectRoot: project,
     runId: "reset-lifecycle-run",
-    resetNode: "node:project-discovery",
+    resetNode: "node:actors-flows",
     env
   });
 
@@ -24914,6 +24931,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
+  assert.deepEqual(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path), expectedPriorPrompt);
   const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(

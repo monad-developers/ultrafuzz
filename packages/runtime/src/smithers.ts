@@ -5065,51 +5065,40 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
 }
 
 /**
- * Restore the reset task's presentation prompt from the immutable plan snapshot before Smithers
- * renders the continuation. `timetravel` owns the task artifact directory and can remove this
- * launch-time copy even though a persisted frame still refers to it. Only an explicitly selected,
- * static agent task has a plan row here; dynamic tasks keep their runtime materialization path.
+ * Restore missing presentation prompts from immutable plan snapshots before Smithers renders a
+ * reset continuation. `timetravel` owns task artifact directories and can remove these launch-time
+ * copies even though persisted frames still refer to them. A later reset renders the whole graph,
+ * so a prompt removed by any earlier reset must be available too. Only static agent tasks have plan
+ * rows here; dynamic tasks keep their runtime materialization path.
  */
-function restoreResetNodeRenderedPrompt(input: { projectRoot: string; runRoot: string; nodeId: string }): void {
-  if (!input.nodeId.startsWith("node:")) return;
+function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
   const runRoot = path.resolve(input.runRoot);
   const plan = readRunPlanDocument(path.join(runRoot, "plan.json"), path.basename(runRoot));
-  const attemptId = input.nodeId.slice("node:".length);
-  const matches = plan.rendered_prompts.filter((prompt) => prompt.attempt_id === attemptId);
-  if (matches.length === 0) return;
-  if (matches.length !== 1) {
-    throw new Error(`persisted prompt plan has multiple rows for reset task ${input.nodeId}`);
+  for (const planned of plan.rendered_prompts) {
+    const nodeId = `node:${planned.attempt_id}`;
+    const promptPath = path.isAbsolute(planned.rendered_prompt_path)
+      ? path.resolve(planned.rendered_prompt_path)
+      : path.resolve(input.projectRoot, planned.rendered_prompt_path);
+    const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
+    if (promptPath !== expectedPromptPath) {
+      throw new Error(`persisted rendered prompt path does not match reset task ${nodeId}`);
+    }
+    assertPathInside(runRoot, promptPath, `rendered prompt for reset task ${nodeId}`);
+    if (fs.existsSync(promptPath)) continue;
+    const snapshotPath = safeResolveInside(
+      runRoot,
+      planned.rendered_prompt_snapshot_path,
+      `retained rendered prompt snapshot for reset task ${nodeId}`
+    );
+    assertRegularFileInside(runRoot, snapshotPath, `retained rendered prompt snapshot for reset task ${nodeId}`);
+    assertNoSymlinkComponents(runRoot, snapshotPath, `retained rendered prompt snapshot for reset task ${nodeId}`);
+    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
+      throw new Error(`retained rendered prompt snapshot does not match reset task ${nodeId}`);
+    }
+    const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
+    publishFileDurableExclusive(runRoot, relativePromptPath, contents);
   }
-  const planned = matches[0]!;
-  const promptPath = path.isAbsolute(planned.rendered_prompt_path)
-    ? path.resolve(planned.rendered_prompt_path)
-    : path.resolve(input.projectRoot, planned.rendered_prompt_path);
-  const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
-  if (promptPath !== expectedPromptPath) {
-    throw new Error(`persisted rendered prompt path does not match reset task ${input.nodeId}`);
-  }
-  assertPathInside(runRoot, promptPath, `rendered prompt for reset task ${input.nodeId}`);
-  const snapshotPath = safeResolveInside(
-    runRoot,
-    planned.rendered_prompt_snapshot_path,
-    `retained rendered prompt snapshot for reset task ${input.nodeId}`
-  );
-  assertRegularFileInside(
-    runRoot,
-    snapshotPath,
-    `retained rendered prompt snapshot for reset task ${input.nodeId}`
-  );
-  assertNoSymlinkComponents(
-    runRoot,
-    snapshotPath,
-    `retained rendered prompt snapshot for reset task ${input.nodeId}`
-  );
-  const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
-  if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
-    throw new Error(`retained rendered prompt snapshot does not match reset task ${input.nodeId}`);
-  }
-  const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
-  publishFileDurableExclusive(runRoot, relativePromptPath, contents);
 }
 
 export async function runSmithersLifecycleCommand(input: {
@@ -5320,10 +5309,9 @@ export async function runSmithersLifecycleCommand(input: {
       }
     }
     if (input.relaunchPaths !== undefined) {
-      restoreResetNodeRenderedPrompt({
+      restoreMissingRenderedPrompts({
         projectRoot: input.projectRoot,
-        runRoot: input.relaunchPaths.runRoot,
-        nodeId: input.resetNode
+        runRoot: input.relaunchPaths.runRoot
       });
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
