@@ -312,7 +312,8 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
 
 test("stats accepts additive workflow tasks introduced by dynamic graph expansion", () => {
   const baselineGraph = graphDocument("baseline", ["node:baseline"]);
-  const dynamicNode = graphDocument("dynamic", ["node:dynamic"]).nodes[0]!;
+  const dynamicNode = graphDocument("dynamic", ["node:dynamic"]).nodes[0];
+  assert.ok(dynamicNode);
   const graph = { ...baselineGraph, nodes: [...baselineGraph.nodes, dynamicNode] };
   const metadata = runMetadata(["node:baseline"], undefined);
   const state = runState([terminalNodeState("baseline", "baseline"), terminalNodeState("dynamic", "dynamic")]);
