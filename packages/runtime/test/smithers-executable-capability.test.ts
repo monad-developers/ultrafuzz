@@ -320,6 +320,33 @@ test("streaming Smithers commands keep the executable anchor through child close
   );
 });
 
+test("streaming Smithers commands drain a final stdout burst after child close", async () => {
+  const root = temporaryDirectory("ufz-runner-stream-burst-");
+  const records = 4_000;
+  const runner = nodeRunner(
+    root,
+    `for (let sequence = 0; sequence < ${records}; sequence += 1) process.stdout.write(JSON.stringify({ sequence, payload: "x".repeat(1024) }) + "\\n");\n`
+  );
+  const sequences: number[] = [];
+
+  const result = await streamSmithersCommand({
+    args: ["events", "fixture"],
+    projectRoot: root,
+    env: bindSmithersExecutableCapability({}, runner),
+    maxLines: records + 1,
+    onLine: (line) => {
+      sequences.push((JSON.parse(line) as { sequence: number }).sequence);
+    }
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.truncated, false);
+  assert.equal(result.stoppedByCaller, false);
+  assert.equal(result.lines, records);
+  assert.equal(sequences.length, records);
+  assert.equal(sequences.at(-1), records - 1);
+});
+
 test(
   "runner and interpreter anchors close after an asynchronous spawn failure",
   { skip: process.platform === "win32" || !fs.existsSync("/proc/self/fd") },

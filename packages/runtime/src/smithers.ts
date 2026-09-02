@@ -4875,10 +4875,19 @@ export async function streamSmithersCommand(input: {
   try {
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       let settled = false;
+      let childExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+      let readerClosed = false;
       const settle = (action: () => void): void => {
         if (settled) return;
         settled = true;
         action();
+      };
+      const resolveWhenDrained = (): void => {
+        if (childExit === undefined || !readerClosed) return;
+        const drainedExit = childExit;
+        settle(() => {
+          resolve(drainedExit);
+        });
       };
       child.once("error", (error) => {
         settle(() => {
@@ -4886,9 +4895,12 @@ export async function streamSmithersCommand(input: {
         });
       });
       child.once("close", (code, signal) => {
-        settle(() => {
-          resolve({ code, signal });
-        });
+        childExit = { code, signal };
+        resolveWhenDrained();
+      });
+      reader.once("close", () => {
+        readerClosed = true;
+        resolveWhenDrained();
       });
       reader.on("line", (line) => {
         if (truncated) {
